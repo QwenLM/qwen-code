@@ -70,7 +70,11 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { sanitizeHookName, redactErrorText } from '../sanitize.js';
+import {
+  sanitizeHookName,
+  redactErrorText,
+  registerKnownSecretValues,
+} from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -126,12 +130,28 @@ function redactErrorTextFields(event: RumEvent): void {
   if (properties === undefined) {
     return;
   }
-  for (const key of ['error_message', 'error_excerpt'] as const) {
+  for (const key of ['error', 'error_message', 'error_excerpt'] as const) {
     const value = properties[key];
     if (typeof value === 'string') {
       properties[key] = redactErrorText(value);
     }
   }
+}
+
+// Secrets the process holds at runtime — masked by exact value wherever
+// they appear in queued error text (closed by construction, unlike the
+// spelling-based patterns). Re-registered on every event so credential
+// refreshes mid-session are covered.
+function registerProcessSecrets(config: Config | undefined): void {
+  const secrets: Array<string | undefined> = [
+    config?.getContentGeneratorConfig().apiKey,
+  ];
+  for (const server of Object.values(config?.getMcpServers() ?? {})) {
+    for (const value of Object.values(server.headers ?? {})) {
+      secrets.push(value);
+    }
+  }
+  registerKnownSecretValues(secrets);
 }
 
 // Singleton class for batch posting log events to RUM. When a new event comes in, the elapsed time
@@ -208,6 +228,7 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      registerProcessSecrets(this.config);
       redactErrorTextFields(event);
 
       // Manually handle overflow for FixedDeque, which throws when full.

@@ -23,23 +23,48 @@ sink ships raw error text through `api_error` (`message` +
   for the conversation flow is untouched; only the RUM payload is sanitized.
 - Re-sizing what telemetry is collected — same events, same fields, redacted
   values.
+- Exhaustive coverage of every secret _spelling_. Pattern masking is
+  best-effort by construction: the entrances of free-form text cannot be
+  enumerated (quoted/lowercase env keys, URL query parameters, JSON/YAML
+  bodies, tool-specific syntax such as `curl -u` or `docker login -p`,
+  secrets echoed in command _output_, …). The spelling-based patterns mask
+  the shapes observed in this repo's error text; the exact-value mask (below)
+  is the half that is closed by construction. This residual gap is why the
+  triage's fingerprinting option remains the fail-closed alternative if
+  maintainers later want a provable bound, and the triage's middle ground
+  (mask known shapes on the first line, drop everything after it) is a
+  possible follow-up.
 
-## Chosen policy: pattern-masked error text, applied at the sink
+## Chosen policy: pattern-masked error text + exact-value masking for
+
+process-held secrets, applied at the sink
 
 The triage on #11198 names two candidate strategies — shape-based masking
 (keep error text debuggable, never provably complete) and fingerprinting
 (reduce to tool name + exit code + hash, cannot leak by construction, loses
-diagnostic value). We choose masking, for three reasons:
+diagnostic value). We choose masking, complemented by exact-value masking
+for the secrets the process itself holds, for three reasons:
 
 1. The RUM feed's value is debugging aggregate failure patterns; a
    fingerprinted feed cannot answer "what were these API failures actually
    saying?".
 2. The mask runs at the single choke point every event already passes
-   through, so future call sites inherit it — closing the class, which is the
-   issue's actual ask. Per-call-site redaction is how the gap kept reopening
-   (#10916's `error_excerpt` was caught in review for the same reason).
+   through, so future call sites inherit it, which is the issue's actual
+   ask. Per-call-site redaction is how the gap kept reopening (#10916's
+   `error_excerpt` was caught in review for the same reason). Note this
+   closes the _entrance_ problem (new fields at the sink), not the _shape_
+   problem — see the Non-goal above.
 3. Masking composes with the existing truncation bound: errors are also
    capped in length, which bounds how much of a missed shape can leave.
+
+Secrets the process holds at runtime (the content-generator API key, MCP
+server header values) are additionally masked **by exact value** wherever
+they appear in queued error text. Value matching is closed by construction
+— it does not depend on spelling — so a process-held credential reaches
+the RUM payload in no shape at all. The values are re-registered on every
+`enqueueLogEvent` so mid-session credential refreshes are covered, and
+values shorter than a trivial floor are skipped so a placeholder cannot
+censor ordinary text.
 
 The mask set (each proven pattern already has precedent in this repo or is a
 direct generalization of one):
@@ -67,6 +92,9 @@ All ~50 `log*Event` methods funnel through `enqueueLogEvent`
 error-text fields of the `RumEvent`:
 
 - `message` (top level, `RumExceptionEvent`/`RumResourceEvent`)
+- `properties.error` (hook error text — `logHookCallEvent` embeds the full
+  hook command line / URL here when prompt logging is on, which is the
+  default)
 - `properties.error_message`
 - `properties.error_excerpt` (pre-empting #10916's re-introduction)
 - `stack` (defensive: nothing populates it today, but it is a free-text
@@ -79,11 +107,17 @@ the retry path's re-queue only re-adds events that already passed through
 
 ## Normalisation and the shared truncation bound
 
-Control characters are stripped before masking (LF/CR preserved) so a C0/C1
-character cannot sit between a secret key and its separator and split the
-mask's match. Unlike the OTel path's `stripAnsiAndControl`, newlines
-survive: the RUM feed's diagnostic value is the shape of the multi-line
-error block, which flattening would destroy.
+ANSI/VT escape sequences are removed first (`stripVTControlCharacters`,
+newlines preserved), then every remaining C0/C1 control character (except
+LF/CR) is replaced with a **space** — not deleted — so a control character
+cannot sit between a secret key and its separator and split the mask's
+match, and cannot fuse a key and value into one token (`--token<TAB>value`)
+or glue a word character onto a key and defeat the mask either. Unlike the
+OTel path's `stripAnsiAndControl`, newlines survive: the RUM feed's
+diagnostic value is the shape of the multi-line error block, which
+flattening would destroy. A shell line-continuation marker before a value
+(`--token=\<newline> value`) is skipped by the value group so the mask
+binds to the credential on the continuation line.
 
 The truncation bound and its surrogate-pair guard are shared with the OTel
 span path through `truncateErrorText` (exported from `session-tracing.ts`,
@@ -121,4 +155,6 @@ that a non-error field passes through unchanged. Existing
 `enqueueLogEvent` is private to `QwenLogger`; its only consumer is the
 internal flush path building the RUM payload. No public API change. The
 shell tool, `ToolCallEvent`, and `normalizeToolCallEvent` are deliberately
-not modified — the sink is the single enforcement point.
+not modified — the sink is the single enforcement point for error-text
+_fields_; `createRumPayload`'s payload-level `base_url` is the one
+free-form surface assembled outside it (recorded as a known limit above).

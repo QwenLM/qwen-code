@@ -5,7 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { sanitizeHookName, redactErrorText } from './sanitize.js';
+import {
+  sanitizeHookName,
+  redactErrorText,
+  registerKnownSecretValues,
+  clearKnownSecretValuesForTest,
+} from './sanitize.js';
 import { truncateErrorText } from './session-tracing.js';
 
 describe('sanitizeHookName', () => {
@@ -76,6 +81,26 @@ describe('sanitizeHookName', () => {
 });
 
 describe('redactErrorText', () => {
+  it('should mask registered secret values wherever they appear', () => {
+    // A process-held secret in a shape no spelling-based pattern covers
+    // (lowercase env key, quoted value) is still masked by exact value.
+    registerKnownSecretValues(['sk-live-PROCESSHELD']);
+    try {
+      expect(
+        redactErrorText('api_key="sk-live-PROCESSHELD" npm run deploy'),
+      ).not.toContain('sk-live-PROCESSHELD');
+      expect(
+        redactErrorText('Output: token sk-live-PROCESSHELD expired'),
+      ).not.toContain('sk-live-PROCESSHELD');
+    } finally {
+      clearKnownSecretValuesForTest();
+    }
+    // Registration cleared: ordinary text is untouched afterwards.
+    expect(redactErrorText('nothing registered here')).toBe(
+      'nothing registered here',
+    );
+  });
+
   it('should redact URL userinfo credentials', () => {
     expect(
       redactErrorText(
@@ -141,24 +166,154 @@ describe('redactErrorText', () => {
     expect(redactErrorText(text)).toBe(text);
   });
 
-  it('should preserve newlines while stripping other control characters', () => {
+  it('should preserve newlines while neutralising other control characters', () => {
     // A control char between the key and its separator must not defeat
-    // the mask, and the multi-line error block shape must survive.
+    // the mask, and the multi-line error block shape must survive. Each
+    // control char becomes a space (not deleted): deleting would fuse key
+    // and value into one token and let the credential slip through.
     const noisy = 'git push --token\u0007=ghs_abcdef\nError: fatal\u0000';
-    expect(redactErrorText(noisy)).toBe('git push --token=***\nError: fatal');
+    expect(redactErrorText(noisy)).toBe('git push --token ***\nError: fatal ');
     expect(redactErrorText('Command: x\nError: y')).toBe(
       'Command: x\nError: y',
     );
+    // Tab/VT/FF are \s-class separators: neutralising (not deleting) keeps
+    // the mask firing instead of fusing `--token` + value into one token.
+    // The tab becomes a space — the credential must not survive.
+    expect(redactErrorText('git push --token\tghs_abc123')).toBe(
+      'git push --token ***',
+    );
+    expect(redactErrorText('git push --token\u000bghs_abc123')).not.toContain(
+      'ghs_abc123',
+    );
+    // A word char glued onto the key by a control char must not defeat
+    // the env mask (no \b anchor on the key class).
+    expect(redactErrorText('err\u0007AWS_SECRET_ACCESS_KEY=AKIAsecret')).toBe(
+      'err AWS_SECRET_ACCESS_KEY=***',
+    );
+  });
+
+  it('should strip ANSI sequences before masking so wrapped credentials do not slip through', () => {
+    expect(
+      redactErrorText(
+        'npm ERR! \u001b[1m\u001b[31mhttps://user:ghp_Secret123@registry.example.com/pkg\u001b[0m',
+      ),
+    ).toBe('npm ERR! https://***REDACTED***@registry.example.com/pkg');
+    expect(
+      redactErrorText('\u001b[31mAWS_SECRET_ACCESS_KEY=xyz\u001b[0m'),
+    ).toBe('AWS_SECRET_ACCESS_KEY=***');
+    // No \b anchor: a preceding word character must not disable the mask.
+    expect(redactErrorText('prefix_mAWS_SECRET_ACCESS_KEY=x')).toBe(
+      'prefix_mAWS_SECRET_ACCESS_KEY=***',
+    );
+  });
+
+  it('should not let an empty flag value eat the next flag name as its value', () => {
+    expect(
+      redactErrorText('mytool --password= --token ghp_REALTOKEN'),
+    ).not.toContain('ghp_REALTOKEN');
+    expect(redactErrorText('mytool --password= --token ghp_REALTOKEN')).toBe(
+      'mytool --password= --token ***',
+    );
+    expect(redactErrorText('tool --auth --password hunter2')).toBe(
+      'tool --auth --password ***',
+    );
+    // No inline value at all: masking nothing is correct, the neighbour
+    // flag name must survive.
+    expect(
+      redactErrorText('docker login --password-stdin --username admin'),
+    ).toBe('docker login --password-stdin --username admin');
+  });
+
+  it('should mask values that open with a never-closed quote', () => {
+    expect(redactErrorText('curl --token "ghp_REALTOKEN')).toBe(
+      'curl --token ***',
+    );
+    expect(redactErrorText('mytool --api-key="sk_REALTOKEN')).toBe(
+      'mytool --api-key=***',
+    );
+    expect(redactErrorText("mytool --password 'hunter2")).toBe(
+      'mytool --password ***',
+    );
+    expect(redactErrorText('request rejected for bearer "eyJhbGciOi')).toBe(
+      'request rejected for bearer ***',
+    );
+    // The env pattern too, and the run-on after the unclosed quote stays
+    // (quoted runs are whitespace-bounded).
+    expect(redactErrorText('API_KEY="sk-abc cmd failed')).toBe(
+      'API_KEY=*** cmd failed',
+    );
+    expect(
+      redactErrorText('mytool --token "ghp_REAL then the loader reported'),
+    ).toBe('mytool --token *** then the loader reported');
+  });
+
+  it('should mask the credential after an auth scheme word, not the scheme word', () => {
+    expect(redactErrorText('Authorization: token ghp_ABCDEF0123456789')).toBe(
+      'Authorization: ***',
+    );
+    expect(redactErrorText('Authorization: Basic Zm9vOmJhcg==')).toBe(
+      'Authorization: ***',
+    );
+    expect(redactErrorText('Authorization: ApiKey sk-live-51H8')).toBe(
+      'Authorization: ***',
+    );
+    expect(redactErrorText('Authorization: Digest nonce=abc123')).toBe(
+      'Authorization: ***',
+    );
+    expect(redactErrorText('invalid bearer token: eyJhbGciSECRET999')).toBe(
+      'invalid bearer token: ***',
+    );
+    expect(
+      redactErrorText('Authorization: Bearer\nX-Api-Key: sk-live-abc123DEF'),
+    ).toBe('Authorization: ***\nX-Api-Key: ***');
+  });
+
+  it('should mask values on a shell continuation line', () => {
+    expect(redactErrorText('curl --token=\\\n ghs_abcdef')).not.toContain(
+      'ghs_abcdef',
+    );
+    expect(
+      redactErrorText('run.sh API_KEY=\\\nsk-live-REALSECRET'),
+    ).not.toContain('sk-live-REALSECRET');
+    expect(
+      redactErrorText('request rejected for bearer \\\n eyJREALSECRET'),
+    ).not.toContain('eyJREALSECRET');
+    expect(
+      redactErrorText('-H "Authorization: Bearer \\\n eyJREALSECRET"'),
+    ).not.toContain('eyJREALSECRET');
+  });
+
+  it('should leave prose containing secret-like words intact', () => {
+    expect(redactErrorText('the auth-token is expired')).toBe(
+      'the auth-token is expired',
+    );
+    expect(redactErrorText('deploy --auth=abc --verbose')).toBe(
+      'deploy --auth=*** --verbose',
+    );
+  });
+
+  it('should stay linear on dash-dense adversarial input', () => {
+    const start = performance.now();
+    redactErrorText('--token'.repeat(1000));
+    const elapsed = performance.now() - start;
+    // Unbounded key runs cost ~11.5s (cubic backtracking); the bounded
+    // runs finish in tens of milliseconds. Generous CI budget.
+    expect(elapsed).toBeLessThan(5000);
+    // The retained head of a masked, over-long input is still masked.
+    const masked = redactErrorText('--token=ghs_abcdef '.repeat(200));
+    expect(masked.length).toBe(1024 + '…[truncated]'.length);
+    expect(masked).not.toContain('ghs_abcdef');
   });
 
   it('should share the truncation bound and surrogate guard with the OTel span path', () => {
-    // CJK-heavy text cut at the bound can split a surrogate pair; the
-    // shared helper backs off one code unit so no lone surrogate is emitted.
-    const cjk = '证'.repeat(2000);
-    const result = redactErrorText(cjk);
-    expect(result).toBe(truncateErrorText(cjk));
+    // An astral character straddling the bound would emit a lone high
+    // surrogate into the JSON payload; the shared helper backs off one
+    // code unit so no lone surrogate is emitted.
+    const oversized = 'a'.repeat(1023) + '🚀'.repeat(500);
+    const result = redactErrorText(oversized);
+    expect(result).toBe(truncateErrorText(oversized));
     expect(result.endsWith('…[truncated]')).toBe(true);
-    expect(result.includes('\ud83d')).toBe(false);
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(result)).toBe(false);
   });
 
   it('should truncate over-long error text', () => {

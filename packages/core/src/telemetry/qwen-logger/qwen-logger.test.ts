@@ -336,6 +336,33 @@ describe('QwenLogger', () => {
       });
     });
 
+    it('should redact hook error text in properties.error before queueing', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'hook',
+        name: 'hook_call',
+        properties: {
+          hook_name: 'cleanup.bat',
+          error:
+            'Hook execution failed (hook: curl -H "Authorization: Bearer abc123" https://user:tok@hooks.internal/run)',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      const error = queued[queued.length - 1]?.properties?.['error'];
+      expect(typeof error).toBe('string');
+      expect(error).not.toContain('abc123');
+      expect(error).not.toContain('user:tok@');
+      expect(error).toContain('Authorization: ***');
+      expect(error).toContain('https://***REDACTED***@hooks.internal/run');
+      // Short non-matching text must stay byte-identical (pinned by the
+      // existing hook tests: `error: 'Command failed'`).
+    });
+
     it('should handle enqueue errors gracefully', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
 
