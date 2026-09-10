@@ -2349,6 +2349,8 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
+    conversationStoreMocks.getAllConversations.mockReset();
+    conversationStoreMocks.getAllConversations.mockResolvedValue([]);
     mockConfigGet.mockImplementation(
       (_key: string, defaultValue: unknown) => defaultValue,
     );
@@ -2394,6 +2396,77 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         }),
       );
     });
+  });
+
+  it('ships restorable legacy conversation ids in the bootstrap payload', async () => {
+    // Pre-cutover conversations whose prompts reached the daemon were renamed
+    // to the ACP session id; entries that never left the panel keep their
+    // conv_*/temp* id and have no daemon transcript to restore.
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440201',
+        title: 'Pre-upgrade chat',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      {
+        id: 'temp-scratch',
+        title: 'Scratch',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          legacyConversationIds: ['550e8400-e29b-41d4-a716-446655440201'],
+        }),
+      }),
+    );
+    // The legacy store doubles as the downgrade/recovery path; the bootstrap
+    // must stay read-only against it.
+    expect(conversationStoreMocks.getAllConversations).toHaveBeenCalled();
+  });
+
+  it('omits the legacy allowlist when no restorable conversation exists', async () => {
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const bootstrap = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as {
+            type?: string;
+            data?: { legacyConversationIds?: string[] };
+          },
+      )
+      .find((message) => message.type === 'webShellBootstrap');
+    expect(bootstrap).toBeDefined();
+    expect(bootstrap?.data?.legacyConversationIds).toBeUndefined();
   });
 
   it('restores a session id persisted under the pre-canonicalization key', async () => {

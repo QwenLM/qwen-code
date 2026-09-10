@@ -14,10 +14,12 @@ interface SessionHistoryDropdownProps {
   sessions: readonly DaemonSessionSummary[];
   currentSessionId?: string;
   searchQuery: string;
+  source: 'vscode' | 'default';
   loading: boolean;
   hasMore: boolean;
   error?: string;
   onSearchChange: (query: string) => void;
+  onSourceChange: (source: 'vscode' | 'default') => void;
   onSelect: (session: DaemonSessionSummary) => void;
   onRename: (session: DaemonSessionSummary, title: string) => Promise<void>;
   onDelete: (session: DaemonSessionSummary) => Promise<void>;
@@ -105,10 +107,12 @@ export function SessionHistoryDropdown({
   sessions,
   currentSessionId,
   searchQuery,
+  source,
   loading,
   hasMore,
   error,
   onSearchChange,
+  onSourceChange,
   onSelect,
   onRename,
   onDelete,
@@ -263,6 +267,44 @@ export function SessionHistoryDropdown({
         }}
       >
         <style>{DROPDOWN_CSS}</style>
+        <div
+          role="group"
+          aria-label={t('session.sourceLabel')}
+          style={{
+            display: 'flex',
+            gap: 4,
+            padding: '8px 10px 0',
+          }}
+        >
+          {(['vscode', 'default'] as const).map((value) => {
+            const active = source === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={active}
+                data-session-source={value}
+                onClick={() => onSourceChange(value)}
+                style={{
+                  flex: 1,
+                  padding: '4px 8px',
+                  border: 0,
+                  borderRadius: 4,
+                  background: active
+                    ? 'var(--vscode-list-activeSelectionBackground)'
+                    : 'transparent',
+                  color: active
+                    ? 'var(--vscode-list-activeSelectionForeground)'
+                    : 'inherit',
+                  font: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                {t(`session.source.${value}`)}
+              </button>
+            );
+          })}
+        </div>
         <div
           style={{
             display: 'flex',
