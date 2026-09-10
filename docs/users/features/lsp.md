@@ -366,7 +366,7 @@ When folder trust is enabled, use `/trust` to mark a workspace as trusted.
 1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
 3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
-4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
+4. **Check workspace trust**: If folder trust is enabled, use `/trust`; if your IDE reports the workspace as untrusted, trust it in the IDE
 5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
@@ -435,7 +435,7 @@ Common error messages to look for:
 ```text
 command path is unsafe        -> relative path escapes workspace, use absolute path or add to PATH
 command not found             -> server binary not installed or not in PATH
-requires trusted workspace    -> run /trust first
+requires trusted workspace    -> use /trust when folder trust is enabled, or trust the workspace in your IDE
 LSP connection closed         -> server started but exited or closed stdio before replying to initialize
 ```
 
