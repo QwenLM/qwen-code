@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" class="theme-dark dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Session overview shadow portal harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { WebShellWithProviders } from '../index.tsx';
+      import '../styles/standalone.css';
+
+      createRoot(document.getElementById('root')).render(
+        React.createElement(WebShellWithProviders, {
+          baseUrl: window.location.origin,
+          language: 'en',
+          theme: 'dark',
+          sidebar: { enabled: true },
+          shadowDom: true,
+        }),
+      );
+    </script>
+  </body>
+</html>
