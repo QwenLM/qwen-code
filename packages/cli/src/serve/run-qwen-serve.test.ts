@@ -929,6 +929,48 @@ describe('workspace skill settings persistence', () => {
       settingsChanges: [{ key: 'skills.enabled', value: ['inherited-opt-in'] }],
     });
 
+    // A grant a standing entry still forbids is refused, not reported as a
+    // success the merged config then denies: the bare user entry blocks the
+    // qualified name under either spelling, the workspace entry the same,
+    // and a bare defaultDisabled entry is not cancelled by a qualified
+    // grant.
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:locked-skill', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'locked-skill',
+        scope: 'User',
+      },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:review', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'review',
+        scope: 'Workspace',
+      },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'demo:opt-in-skill', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+      block: {
+        reason: 'default',
+        list: 'defaultDisabled',
+        entry: 'opt-in-skill',
+        scope: 'User',
+      },
+    });
+
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({
@@ -986,21 +1028,20 @@ describe('workspace skill settings persistence', () => {
         },
       ],
     });
+    // The user-scope entry still blocks the grant under either spelling, so
+    // the write is refused and named instead of reported as a success the
+    // merged config then denies.
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
     ).resolves.toEqual({
-      changed: true,
-      disabled: ['orphan', 'alpha', 'beta'],
-      settingsChanges: [
-        {
-          key: 'skills.disabled',
-          value: ['orphan', 'alpha', 'beta'],
-        },
-        {
-          key: 'skills.enabled',
-          value: ['inherited-opt-in', 'review', 'opt-in-skill', 'locked-skill'],
-        },
-      ],
+      changed: false,
+      disabled: ['orphan', 'alpha', 'beta', 'locked-skill'],
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'locked-skill',
+        scope: 'User',
+      },
     });
     const savedUser = JSON.parse(
       fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),

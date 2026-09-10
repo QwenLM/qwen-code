@@ -7,10 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
+  buildHigherDisabled,
   computeWorkspaceSkillListUpdates,
   lookupSkillDisablement,
   resolveSkillSettings,
   type SkillDisablement,
+  skillToggleBlockForName,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
 
@@ -20,12 +22,14 @@ function fakeSettings({
   systemDefaults = {},
   user = {},
   workspace = {},
+  trusted = true,
 }: {
   merged: Record<string, unknown>;
   system?: Record<string, unknown>;
   systemDefaults?: Record<string, unknown>;
   user?: Record<string, unknown>;
   workspace?: Record<string, unknown>;
+  trusted?: boolean;
 }) {
   const byScope = {
     [SettingScope.System]: system,
@@ -35,6 +39,7 @@ function fakeSettings({
   };
   return {
     merged: { skills: merged },
+    isTrusted: trusted,
     forScope: (scope: SettingScope) => ({
       settings: { skills: byScope[scope] },
     }),
@@ -318,5 +323,128 @@ describe('lookupSkillDisablement', () => {
     expect(
       lookupSkillDisablement(byAuthored, { name: 'review', authoredName: '' }),
     ).toBeUndefined();
+  });
+});
+
+describe('buildHigherDisabled', () => {
+  const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
+
+  it('blocks a qualified grant on the legacy bare workspace entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf' (Workspace)");
+  });
+
+  it('lets the toggle remove an exact-spelling workspace entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['demo:pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('blames the higher scope holding the entry over the workspace one', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        user: { disabled: ['pdf'] },
+        workspace: { disabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'User',
+    });
+    expect(higher.lockedIn(prefixed)).toBe('User');
+  });
+
+  it('blocks a grant a bare defaultDisabled entry keeps gating', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { defaultDisabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+  });
+
+  it('lets an identical-spelling grant cancel the defaultDisabled entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { defaultDisabled: ['pdf'], enabled: ['pdf'] },
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+
+  it('ignores workspace entries while the workspace is untrusted', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        merged: {},
+        workspace: { disabled: ['pdf'] },
+        trusted: false,
+      }),
+    );
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+});
+
+describe('skillToggleBlockForName', () => {
+  it('derives the authored spelling from a qualified request name', () => {
+    expect(
+      skillToggleBlockForName(
+        fakeSettings({
+          merged: {},
+          workspace: { disabled: ['pdf'] },
+        }),
+        'demo:pdf',
+      ),
+    ).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'Workspace',
+    });
+  });
+
+  it('reads a bare request name as its single spelling', () => {
+    // A qualified entry blocks only its own registry identity; a bare
+    // request must not inherit aliases it cannot name.
+    expect(
+      skillToggleBlockForName(
+        fakeSettings({
+          merged: {},
+          workspace: { disabled: ['demo:pdf'] },
+        }),
+        'pdf',
+      ),
+    ).toBeNull();
   });
 });

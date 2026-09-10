@@ -32,12 +32,12 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
-import { skillRestrictionNames } from '@qwen-code/qwen-code-core';
 import {
+  buildHigherDisabled,
   computeWorkspaceSkillListUpdates,
-  lookupSkillSetting,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
+
 import { t } from '../../../i18n/index.js';
 import { MAX_EXTENSION_OWNER_LABEL_WIDTH } from '../../../services/commandMetadata.js';
 import { skillOriginLabel } from '../../utils/skill-level-label.js';
@@ -47,6 +47,10 @@ import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import { MessageType } from '../../types.js';
 import { MultiSelect, type MultiSelectItem } from '../shared/MultiSelect.js';
+
+// The daemon's toggle routes consult the same lock decision through
+// `skillToggleBlockForName`; the picker's tests pin the labels here.
+export { buildHigherDisabled };
 
 interface SkillsManagerDialogProps {
   settings: LoadedSettings;
@@ -124,131 +128,18 @@ export function skillRowLabel(skill: SkillConfig): string {
   )}  ${truncateToWidth(skillOriginLabel(skill), LOCKED_ORIGIN_COLUMN)}`;
 }
 
-function lower(name: string): string {
-  return name.trim().toLowerCase();
-}
-
-function normalizeNames(list: readonly string[]): string[] {
-  return list
-    .filter((n): n is string => typeof n === 'string')
-    .map(lower)
-    .filter(Boolean);
-}
-
 function namesFromScope(
   settings: LoadedSettings,
   scope: SettingScope,
 ): string[] {
   // settings.json is user-editable: `disabled` could be a non-array
   // (e.g. `"disabled": "all"`) OR contain non-strings. Guard with
-  // `Array.isArray` BEFORE returning so downstream `.map(lower)` /
-  // `normalizeNames` never see a non-iterable. The element-level
-  // string filter still happens in `normalizeNames`. Mirrors the same
-  // defense in `buildDisabledSkillNamesProvider` (config.ts).
+  // `Array.isArray` BEFORE returning so downstream never sees a
+  // non-iterable; the element-level string filter stays with the
+  // caller. Mirrors the same defense in
+  // `buildDisabledSkillNamesProvider` (config.ts).
   const raw = settings.forScope(scope).settings.skills?.disabled;
   return Array.isArray(raw) ? raw : [];
-}
-
-export function buildHigherDisabled(settings: LoadedSettings): {
-  /**
-   * The scope or settings entry that blocks this skill, or null when the
-   * dialog's toggle can change its state. A skill's registry identity carries
-   * its extension prefix while an entry written before that prefix existed
-   * holds the authored spelling, so both are checked — a miss here renders a
-   * locked skill as a toggleable row and the label loses the scope the user
-   * has to edit. Entries the toggle cannot cancel lock the row the same way
-   * a higher scope does: a bare disablement keeps gating under either
-   * spelling, and any `enabled` entry identical to a `defaultDisabled` one
-   * cancels it at resolve time. Naming the entry and its scope tells the
-   * user which list in which file to edit. Workspace entries join the lock
-   * inputs only while the workspace is trusted — the merge drops it
-   * otherwise, so an untrusted repo's stale entries disable nothing.
-   */
-  lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
-} {
-  const scopeOfEntry = new Map<string, string>();
-  // Inserted lowest-precedence first so the highest scope that names an entry
-  // wins the label. System > User > SystemDefaults matches the merge order in
-  // `settings.ts`.
-  const scopes = [
-    [SettingScope.SystemDefaults, 'SystemDefaults'],
-    [SettingScope.User, 'User'],
-    [SettingScope.System, 'System'],
-  ] as const;
-  for (const [scope, label] of scopes) {
-    for (const name of normalizeNames(namesFromScope(settings, scope))) {
-      scopeOfEntry.set(name, label);
-    }
-  }
-  // Workspace settings join the lock inputs only when the merge honors them:
-  // an untrusted workspace is dropped from `settings.merged` wholesale, so
-  // locking on its entries would dim rows for skills that are live.
-  const allScopes = [
-    ...scopes.map(([scope]) => scope),
-    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
-  ];
-  // name -> highest scope holding the entry, inserted in true merge
-  // precedence order (SystemDefaults < User < Workspace < System) so the
-  // highest scope that names an entry wins the label and the user is
-  // pointed at the one file whose edit can unlock.
-  const hardEntries = new Map<string, string>();
-  const defaultEntries = new Map<string, string>();
-  for (const [scope, label] of [
-    [SettingScope.SystemDefaults, 'SystemDefaults'],
-    [SettingScope.User, 'User'],
-    [SettingScope.Workspace, 'Workspace'],
-    [SettingScope.System, 'System'],
-  ] as const) {
-    if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
-    for (const name of normalizeNames(
-      skillSettingStrings(settings, scope, 'disabled'),
-    )) {
-      hardEntries.set(name, label);
-    }
-    for (const name of normalizeNames(
-      skillSettingStrings(settings, scope, 'defaultDisabled'),
-    )) {
-      defaultEntries.set(name, label);
-    }
-  }
-  // Identical-spelling cancellation mirrors resolveSkillSettings: a grant
-  // equal to a defaultDisabled entry keeps the skill live, so the row is
-  // not locked.
-  const enabledEntries = new Set(
-    allScopes.flatMap((scope) =>
-      normalizeNames(skillSettingStrings(settings, scope, 'enabled')),
-    ),
-  );
-  const workspaceDisabled = new Set(
-    settings.isTrusted
-      ? normalizeNames(
-          skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
-        )
-      : [],
-  );
-  return {
-    lockedIn: (skill) => {
-      const higherScope = lookupSkillSetting(scopeOfEntry, skill);
-      if (higherScope) return higherScope;
-      const registry = skill.name.trim().toLowerCase();
-      for (const spelling of skillRestrictionNames(skill)) {
-        if (hardEntries.has(spelling)) {
-          // The toggle removes an exact-spelling workspace entry itself.
-          if (spelling === registry && workspaceDisabled.has(spelling)) {
-            continue;
-          }
-          return `skills.disabled '${spelling}' (${hardEntries.get(spelling)})`;
-        }
-        if (defaultEntries.has(spelling)) {
-          // A grant identical to the entry cancels it at resolve time — the
-          // persisted qualified one, or any identical-spelling bare one.
-          if (spelling === registry || enabledEntries.has(spelling)) continue;
-          return `skills.defaultDisabled '${spelling}' (${defaultEntries.get(spelling)})`;
-        }
-      }
-      return null;
-    },
-  };
 }
 
 function sortSkills(skills: SkillConfig[]): SkillConfig[] {

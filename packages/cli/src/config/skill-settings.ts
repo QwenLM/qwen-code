@@ -141,6 +141,167 @@ export function lookupSkillDisablement(
   return hard ?? fallback;
 }
 
+export interface SkillToggleBlock {
+  reason: 'hard' | 'default';
+  list: 'disabled' | 'defaultDisabled';
+  entry: string;
+  scope: 'SystemDefaults' | 'User' | 'Workspace' | 'System';
+}
+
+/**
+ * Decides whether a workspace toggle can change a skill's state at all, and
+ * names the entry that forbids it when it cannot.
+ *
+ * A skill's registry identity carries its extension prefix while an entry
+ * written before that prefix existed holds the authored spelling, so both
+ * are checked — a miss here renders a locked skill as a toggleable row, or
+ * lets a surface that writes settings report an enable the config still
+ * forbids. Entries the toggle cannot cancel lock the row the same way a
+ * higher scope does: a bare disablement keeps gating under either spelling,
+ * and only an `enabled` entry identical to a `defaultDisabled` one cancels
+ * it at resolve time. `lockedIn` labels the block for the picker row;
+ * `blockIn` returns the same decision structured, for callers that persist
+ * settings and must answer with more than a label. Workspace entries join
+ * the inputs only while the workspace is trusted — the merge drops it
+ * otherwise, so an untrusted repo's stale entries disable nothing.
+ */
+export function buildHigherDisabled(settings: LoadedSettings): {
+  lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
+  blockIn: (skill: {
+    name: string;
+    authoredName?: string;
+  }) => SkillToggleBlock | null;
+} {
+  // Inserted lowest-precedence first so the highest scope that names an
+  // entry wins. SystemDefaults < User < Workspace < System matches the
+  // merge order in `settings.ts`.
+  const scopeOfEntry = new Map<string, SkillToggleBlock['scope']>();
+  for (const [scope, label] of [
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
+    [SettingScope.System, 'System'],
+  ] as const) {
+    for (const name of normalizeSkillNames(
+      skillSettingStrings(settings, scope, 'disabled'),
+    )) {
+      scopeOfEntry.set(name, label);
+    }
+  }
+  const hardEntries = new Map<string, SkillToggleBlock['scope']>();
+  const defaultEntries = new Map<string, SkillToggleBlock['scope']>();
+  for (const [scope, label] of [
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
+    [SettingScope.Workspace, 'Workspace'],
+    [SettingScope.System, 'System'],
+  ] as const) {
+    if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
+    for (const name of normalizeSkillNames(
+      skillSettingStrings(settings, scope, 'disabled'),
+    )) {
+      hardEntries.set(name, label);
+    }
+    for (const name of normalizeSkillNames(
+      skillSettingStrings(settings, scope, 'defaultDisabled'),
+    )) {
+      defaultEntries.set(name, label);
+    }
+  }
+  const enabledEntries = new Set(
+    (
+      [
+        SettingScope.SystemDefaults,
+        SettingScope.User,
+        SettingScope.System,
+        ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+      ] as SettingScope[]
+    ).flatMap((scope) => [
+      ...normalizeSkillNames(skillSettingStrings(settings, scope, 'enabled')),
+    ]),
+  );
+  const workspaceDisabled = new Set(
+    settings.isTrusted
+      ? normalizeSkillNames(
+          skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
+        )
+      : [],
+  );
+  const blockIn = (skill: {
+    name: string;
+    authoredName?: string;
+  }): SkillToggleBlock | null => {
+    const registry = skill.name.trim().toLowerCase();
+    const spellings = skillRestrictionNames(skill);
+    // A higher-scope hard entry wins the blame before any nearer one:
+    // deleting the workspace file's copy cannot unlock while it stands.
+    for (const spelling of spellings) {
+      const scope = scopeOfEntry.get(spelling);
+      if (scope) {
+        return { reason: 'hard', list: 'disabled', entry: spelling, scope };
+      }
+    }
+    for (const spelling of spellings) {
+      const hard = hardEntries.get(spelling);
+      if (hard) {
+        // The toggle removes an exact-spelling workspace entry itself.
+        if (spelling === registry && workspaceDisabled.has(spelling)) {
+          continue;
+        }
+        return {
+          reason: 'hard',
+          list: 'disabled',
+          entry: spelling,
+          scope: hard,
+        };
+      }
+      const def = defaultEntries.get(spelling);
+      if (def) {
+        // A grant identical to the entry cancels it at resolve time — the
+        // persisted qualified one, or any identical-spelling bare one.
+        if (spelling === registry || enabledEntries.has(spelling)) continue;
+        return {
+          reason: 'default',
+          list: 'defaultDisabled',
+          entry: spelling,
+          scope: def,
+        };
+      }
+    }
+    return null;
+  };
+  return {
+    blockIn,
+    lockedIn: (skill) => {
+      const block = blockIn(skill);
+      if (!block) return null;
+      // A higher-scope hard block labels as the scope alone: the entry
+      // name adds nothing the user can act on in another file's list.
+      if (block.reason === 'hard' && block.scope !== 'Workspace') {
+        return block.scope;
+      }
+      return `skills.${block.list} '${block.entry}' (${block.scope})`;
+    },
+  };
+}
+
+/**
+ * The block decision for a toggle request that arrives as a bare settings
+ * string rather than a skill object: the daemon's skill routes persist the
+ * name a client sent verbatim. A qualified name carries its authored
+ * spelling after the prefix, which is the spelling a legacy entry holds;
+ * a name without a prefix has one spelling and no legacy alias.
+ */
+export function skillToggleBlockForName(
+  settings: LoadedSettings,
+  skillName: string,
+): SkillToggleBlock | null {
+  const prefixEnd = skillName.indexOf(':');
+  return buildHigherDisabled(settings).blockIn({
+    name: skillName,
+    ...(prefixEnd > 0 ? { authoredName: skillName.slice(prefixEnd + 1) } : {}),
+  });
+}
+
 function updateTarget(
   names: string[],
   skillName: string,
