@@ -682,6 +682,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'extension_batch_activation_v2',
   'extension_activation_explicit_refresh',
   'workspace_skill_manage',
+  'web_shell_brand',
   'workspace_permissions',
   'workspace_trust',
   'workspace_init',
@@ -753,7 +754,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence'];
+      return [feature, 'session_artifacts_persistence', 'session_sources'];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -2492,6 +2493,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
     },
+    async getSessionSources() {
+      return { revision: 0, sources: [] };
+    },
+    async upsertSessionSource(_sessionId, input) {
+      return {
+        revision: 1,
+        source: {
+          ...input,
+          id: 'source-1',
+          kind: input.locator.type === 'url' ? 'link' : 'file',
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+        change: 'created',
+      };
+    },
+    async removeSessionSource() {
+      return { revision: 1, removed: false };
+    },
     async getSessionArtifacts(sessionId, context) {
       sessionArtifactsCalls.push({
         sessionId,
@@ -3365,7 +3385,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'session_artifacts_persistence') {
+        if (
+          feature === 'session_artifacts_persistence' ||
+          feature === 'session_sources'
+        ) {
           expect(
             predicate({ sessionArtifactsPersistenceAvailable: true }),
           ).toBe(true);
@@ -4485,6 +4508,206 @@ describe('createServeApp', () => {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
         else process.env['QWEN_HOME'] = previousQwenHome;
         await fsp.rm(qwenHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('GET /brand', () => {
+    // `createServeApp` only mounts the SPA fallback when given a webShellDir,
+    // and `bearerAuth` only enforces when a token is configured — a fixture
+    // without both cannot observe either leg of the published ordering
+    // ("after bearerAuth and the rate limiter, before the SPA fallback").
+    // The System settings layer is pinned to empty files too: the route reads
+    // the ambient machine's settings, and a maintainer dogfooding a
+    // system-wide brand would otherwise watch this routing test fail on the
+    // body they configured deliberately.
+    let brandWebShellDir: string;
+    let brandSystemSettingsDir: string;
+    let previousSystemSettingsPath: string | undefined;
+    let previousSystemDefaultsPath: string | undefined;
+    const BRAND_INDEX_HTML =
+      '<!doctype html><html><head><title>Qwen Code Web terminal</title>' +
+      '</head><body><div id="root"></div></body></html>';
+
+    beforeEach(async () => {
+      previousSystemSettingsPath =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      previousSystemDefaultsPath =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+      brandWebShellDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-webshell-brand-'),
+      );
+      await fsp.writeFile(
+        path.join(brandWebShellDir, 'index.html'),
+        BRAND_INDEX_HTML,
+      );
+      brandSystemSettingsDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-brand-system-'),
+      );
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{}',
+      );
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings-defaults.json'),
+        '{}',
+      );
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+        brandSystemSettingsDir,
+        'settings.json',
+      );
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+        brandSystemSettingsDir,
+        'settings-defaults.json',
+      );
+    });
+
+    afterEach(async () => {
+      if (previousSystemSettingsPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] =
+          previousSystemSettingsPath;
+      }
+      if (previousSystemDefaultsPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] =
+          previousSystemDefaultsPath;
+      }
+      await fsp.rm(brandWebShellDir, { recursive: true, force: true });
+      await fsp.rm(brandSystemSettingsDir, { recursive: true, force: true });
+    });
+
+    it('answers JSON on the real app, ahead of the SPA fallback', async () => {
+      // A fixture brand in the pinned System layer makes the body assertion
+      // discriminating: `{}` is also what the route's own catch produces, so
+      // an empty-body expectation cannot tell a resolved brand from a total
+      // resolution failure.
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{"ui":{"brand":{"name":"Fixture Brand"}}}',
+      );
+      const app = createServeApp(baseOpts, undefined, {
+        webShellDir: brandWebShellDir,
+      });
+
+      // The route is registered unconditionally: no settings needed, and an
+      // empty brand is a valid answer. A browser-like Accept must still get
+      // JSON — registered ahead of the Web Shell SPA fallback, per the
+      // ordering claim in docs/developers/qwen-serve-protocol.md. Only the
+      // text/html leg can witness that ordering: the fallback claims a
+      // request only for document-like Accepts, so under it a mis-ordered
+      // route would answer the HTML shell instead.
+      for (const accept of ['*/*', 'application/json', 'text/html']) {
+        const response = await request(app)
+          .get('/brand')
+          .set('Accept', accept)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.headers['content-type']).toContain('application/json');
+        expect(response.body).toEqual({ name: 'Fixture Brand' });
+        expect(response.text).not.toContain('<div id="root">');
+      }
+    });
+
+    it('is assembled behind bearer authentication', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir: brandWebShellDir,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      const unauthenticated = await request(app)
+        .get('/brand')
+        .set('Host', host);
+      const authenticated = await request(app)
+        .get('/brand')
+        .set('Host', host)
+        .set('Authorization', 'Bearer secret');
+
+      // Registered after bearerAuth: a pre-auth registration would leak the
+      // operator's product name and up to 32 KiB of inlined logo bytes to any
+      // unauthenticated caller on a --require-auth non-loopback bind.
+      expect(unauthenticated.status).toBe(401);
+      expect(authenticated.status).toBe(200);
+      expect(authenticated.body).toEqual({});
+    });
+
+    it('answers 429 when the read tier is exhausted', async () => {
+      // The published transport states include the optional rate limiter:
+      // registered after it, the route shares the read-tier bucket, so a
+      // reconnect storm can 429 the shell's one brand fetch.
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          rateLimit: true,
+          rateLimitRead: 1,
+          rateLimitWindowMs: 60_000,
+        },
+        undefined,
+        { webShellDir: brandWebShellDir },
+      );
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      const first = await request(app).get('/brand').set('Host', host);
+      const limited = await request(app).get('/brand').set('Host', host);
+
+      expect(first.status).toBe(200);
+      expect(limited.status).toBe(429);
+      expect(limited.body).toMatchObject({ tier: 'read' });
+    });
+
+    it('does not reject while draining', async () => {
+      // The protocol reference publishes this guarantee: the rate limiter is
+      // permissive while draining, so the handler keeps answering 200. A
+      // pre-route drain gate would instead 503 the one brand fetch the shell
+      // issues, and the provider treats 503 as retryable-never-settled.
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          rateLimit: true,
+          rateLimitRead: 1,
+          rateLimitWindowMs: 60_000,
+        },
+        undefined,
+        { webShellDir: brandWebShellDir },
+      );
+      getRateLimiter(app)!.setDraining(true);
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      // read.max is 1: without the drain-permissive short-circuit the second
+      // request would 429 (the case above), so three 200s witness the gate.
+      for (let i = 0; i < 3; i++) {
+        const response = await request(app).get('/brand').set('Host', host);
+        expect(response.status).toBe(200);
+      }
+    });
+
+    it('refuses a resolvable brand placeholder through the real loader', async () => {
+      // The placeholder guard reads the pre-substitution snapshot
+      // (`originalSettings`), which the real loadSettings clones before
+      // substituting. Only this boundary can witness that — the resolver's
+      // own tests hand-build the field. A placeholder that WOULD resolve
+      // (BRAND_PROBE is set, as a workspace's .env would arrange) must still
+      // not reach the response.
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{"ui":{"brand":{"name":"${BRAND_PROBE}"}}}',
+      );
+      const previous = process.env['BRAND_PROBE'];
+      process.env['BRAND_PROBE'] = 'Repo Supplied Name';
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          webShellDir: brandWebShellDir,
+        });
+        const response = await request(app)
+          .get('/brand')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({});
+      } finally {
+        if (previous === undefined) delete process.env['BRAND_PROBE'];
+        else process.env['BRAND_PROBE'] = previous;
       }
     });
   });
@@ -24225,6 +24448,78 @@ describe('createServeApp', () => {
       expect(bridge.addSessionArtifactCalls).toHaveLength(0);
     });
 
+    it('session sources route reads and mutations to the owner with client identity', async () => {
+      const bridge = fakeBridge();
+      const list = vi.spyOn(bridge, 'getSessionSources');
+      const upsert = vi.spyOn(bridge, 'upsertSessionSource');
+      const remove = vi.spyOn(bridge, 'removeSessionSource');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const input = {
+        title: 'Requirements',
+        locator: { type: 'url', url: 'https://example.com/#part' },
+      };
+      const get = await auth(request(app).get('/session/session-A/sources'));
+      expect(get.status).toBe(200);
+      expect(get.body).toEqual({ revision: 0, sources: [] });
+      expect(list).toHaveBeenCalledWith('session-A', undefined);
+      const post = await auth(request(app).post('/session/session-A/sources'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(input);
+      expect(post.status).toBe(200);
+      expect(upsert).toHaveBeenCalledWith('session-A', input, {
+        clientId: 'client-1',
+      });
+      const deleted = await auth(
+        request(app).delete('/session/session-A/sources/source-1'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+      expect(deleted.body).toEqual({ revision: 1, removed: false });
+      expect(remove).toHaveBeenCalledWith('session-A', 'source-1', {
+        clientId: 'client-1',
+      });
+    });
+
+    it('session sources mutations require a bound client before forwarding', async () => {
+      const bridge = fakeBridge();
+      const upsert = vi.spyOn(bridge, 'upsertSessionSource');
+      const remove = vi.spyOn(bridge, 'removeSessionSource');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const post = await auth(
+        request(app).post('/session/session-A/sources'),
+      ).send({ title: 'Test' });
+      const deleted = await auth(
+        request(app).delete('/session/session-A/sources/source-1'),
+      );
+      expect(post.status).toBe(403);
+      expect(deleted.status).toBe(403);
+      expect(upsert).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['invalid_source', 400],
+      ['source_limit_reached', 409],
+      ['source_persistence_unavailable', 503],
+      ['source_attachment_not_found', 404],
+    ])(
+      'session sources maps %s without acknowledging a mutation',
+      async (errorKind, status) => {
+        const bridge = fakeBridge();
+        vi.spyOn(bridge, 'upsertSessionSource').mockRejectedValue(
+          Object.assign(new Error('Source operation failed'), {
+            data: { errorKind },
+          }),
+        );
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const result = await auth(
+          request(app).post('/session/session-A/sources'),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ title: 'Test' });
+        expect(result.status).toBe(status);
+        expect(result.body.code).toBe(errorKind);
+      },
+    );
+
     it('POST /session/:id/artifacts requires a client id', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -35984,7 +36279,10 @@ describe('GET /session/:id/events (SSE)', () => {
       .get('/session/sess-%E2%80%A8A/events?connectReason=resume')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('X-Qwen-Client-Id', 'client-1')
-      .then((response) => response);
+      .then(
+        (response) => response,
+        (error: Error) => error,
+      );
 
     await vi.waitFor(() => {
       expect(subscribeOptions?.onSubscriberDiagnostic).toBeTypeOf('function');
@@ -36049,8 +36347,13 @@ describe('GET /session/:id/events (SSE)', () => {
 
     release.resolve();
     const res = await responsePromise;
-    expect(res.headers['x-qwen-sse-stream-id']).toBe(streamId);
-    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(res).toBeInstanceOf(Error);
+    // `res.destroy()` tears the client socket down before the server-side
+    // 'close' listener runs, so the active-stream counter settles a tick
+    // after the request promise rejects.
+    await vi.waitFor(() => {
+      expect(getActiveSseCount()).toBe(beforeActive);
+    });
   });
 
   it('starts live lag measurement only after replay_complete settles', async () => {

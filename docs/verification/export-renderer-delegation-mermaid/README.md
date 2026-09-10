@@ -100,11 +100,14 @@ closed on. That was observed, not predicted: `web-shell E2E Smoke` failed with
 `expected 'error' to be 'true'` on two cases while the incompatible-envelope case
 kept passing.
 
-To use it by hand:
+The recorded `0.23.1-preview.0` target predates the stylesheet split, so its old
+two-variable recipe no longer works. Use a version that publishes both assets
+and set all three values:
 
 ```bash
-QWEN_EXPORT_RENDERER_IDENTITY='0.23.1-preview.0+d7962879afdccd34' \
-QWEN_EXPORT_RENDERER_INTEGRITY='sha384-CVacTzaM6pEzmp3UrBJQ/WMSVZfvRxbrNJtCf1c03j4Gox5y9dqndkBoTQ3ktzzh' \
+QWEN_EXPORT_RENDERER_IDENTITY='<version>+<build-id>' \
+QWEN_EXPORT_RENDERER_INTEGRITY='sha384-<renderer-js-digest>' \
+QWEN_EXPORT_RENDERER_CSS_INTEGRITY='sha384-<renderer-css-digest>' \
   node packages/web-templates/src/export-html/build.mjs
 ```
 
@@ -115,12 +118,12 @@ Measured here (2026-09-06, against live unpkg, no build):
 - the same URL at `@0.23.0` (npm `latest`) → HTTP 404
 
 **Worth verifying on a machine with a browser:** export an HTML file from a build
-with those two set and open it with network access. Expected: the transcript
-renders through the published preview renderer. An "incompatible renderer
+with those three set and open it with network access. Expected: the transcript
+renders through the selected published renderer. An "incompatible renderer
 version" page means identity and asset disagree; a fail-closed load error means
-the SRI or the URL does. Also confirm the negative: a build with neither variable
-set derives the URL from the root `package.json` version, and `build.mjs` throws
-if exactly one of the two is set.
+an SRI value or URL does. Also confirm the negative: a build with none of the
+variables set derives the URL from the root `package.json` version, and
+`build.mjs` throws if only some of the three are set.
 
 Note the intended consequence of using it: the preview renderer predates #11038
 and still contains mermaid, so an export produced that way may render a diagram

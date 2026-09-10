@@ -18,6 +18,10 @@ import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import {
+  convertResponsesEventToGemini,
+  ResponsesStreamState,
+} from '../openaiResponsesContentGenerator/responses-converter.js';
+import {
   logApiRequest,
   logApiResponse,
   logApiError,
@@ -2343,6 +2347,73 @@ describe('LoggingContentGenerator', () => {
       outputTokens: 3,
     });
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('reports nested Responses stream errors with provider details', async () => {
+    const message =
+      'Your requests to gpt-6-astra in eastus have exceeded rate limit.';
+    const expectedMessage = `Responses API error: rate_limit_exceeded: ${message}`;
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          const chunk = convertResponsesEventToGemini(
+            {
+              event: 'error',
+              data: {
+                type: 'error',
+                error: {
+                  message,
+                  type: 'too_many_requests',
+                  code: 'rate_limit_exceeded',
+                },
+              },
+            },
+            'gpt-6-astra',
+            new ResponsesStreamState(),
+          );
+          if (chunk) yield chunk;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'gpt-6-astra',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      enableOpenAILogging: true,
+    });
+    const stream = await generator.generateContentStream(
+      { model: 'gpt-6-astra', contents: 'Hello' },
+      'prompt-responses-error',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume the stream to reach the provider error.
+      }
+    }).rejects.toThrow(expectedMessage);
+
+    expect(logApiResponse).not.toHaveBeenCalled();
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const [, errorEvent] = vi.mocked(logApiError).mock.calls[0];
+    expect(errorEvent).toMatchObject({
+      error_message: expectedMessage,
+      error_type: 'too_many_requests',
+      status_code: 429,
+      auth_type: AuthType.USE_OPENAI_RESPONSES,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
+    expect(loggedError).toMatchObject({
+      message: expectedMessage,
+      code: 'rate_limit_exceeded',
+      type: 'too_many_requests',
+      status: 429,
+    });
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      errorType: 'too_many_requests',
+      errorStatusCode: 429,
+    });
   });
 
   it('keeps a real partial-stream failure as an error when it races an abort', async () => {
