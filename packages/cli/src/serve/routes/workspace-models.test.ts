@@ -421,6 +421,51 @@ describe('DELETE /workspace/models', () => {
     });
   });
 
+  it.each([undefined, 'invalid-protocol', 'qwen-oauth', 'openai'])(
+    'only preserves deleted bare references for a routable provider alias (%s)',
+    async (protocol) => {
+      const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
+      writeUserSettings({
+        ...(protocol ? { providerProtocol: { alternate: protocol } } : {}),
+        modelProviders: {
+          openai: [model, { id: 'other' }],
+          alternate: [model],
+        },
+        advisorModel: model.id,
+        imageModel: model.id,
+        voiceModel: model.id,
+        modelFallbacks: 'shared,other',
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      expect(listed.status).toBe(200);
+      const target = listed.body.models[0];
+      expect(target.modelId).toBe(model.id);
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(target);
+      expect(deleted.status).toBe(200);
+      const stillConfigured = protocol === 'openai';
+      expect(readUserSettings()).toMatchObject({
+        modelProviders: {
+          openai: [{ id: 'other' }],
+          alternate: [model],
+        },
+        advisorModel: stillConfigured ? model.id : '',
+        imageModel: stillConfigured ? model.id : '',
+        voiceModel: stillConfigured ? model.id : '',
+        modelFallbacks: stillConfigured ? 'shared,other' : 'other',
+      });
+      const remaining = await request(app).get('/workspace/models');
+      expect(remaining.status).toBe(200);
+      expect(
+        remaining.body.models.map(
+          (entry: { modelId: string }) => entry.modelId,
+        ),
+      ).toEqual(stillConfigured ? ['other', 'shared'] : ['other']);
+    },
+  );
+
   it('does not expose or edit untrusted workspace model settings', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'user' }] } });
     writeWorkspaceSettings({

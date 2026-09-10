@@ -68,6 +68,7 @@ import {
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -3342,12 +3343,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'first',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(
         config.setPendingGoalProposal({
           objective: 'second',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(false);
       expect(config.hasPendingGoalProposal()).toBe(true);
@@ -3356,6 +3359,8 @@ describe('Server Config (config.ts)', () => {
       expect(config.takePendingGoalProposal('turn-1')).toEqual({
         objective: 'first',
         turnKey: 'turn-1',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
@@ -3364,11 +3369,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'explicitly cleared',
           turnKey: 'turn-3',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(config.takePendingGoalProposal()).toEqual({
         objective: 'explicitly cleared',
         turnKey: 'turn-3',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
     });
@@ -3378,6 +3386,7 @@ describe('Server Config (config.ts)', () => {
       config.setPendingGoalProposal({
         objective: 'stale approval',
         turnKey: 'turn-1',
+        reviewedGoal: null,
       });
 
       config.startNewSession('replacement-session');
@@ -5677,6 +5686,24 @@ describe('Server Config (config.ts)', () => {
         expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
       },
     );
+    it.each(['alwaysAsk', 'disabled'] as const)(
+      'honors %s for an ACP host with explicit Goal proposal support',
+      async (modelProposedGoals) => {
+        const config = new Config({
+          ...baseParams,
+          experimentalZedIntegration: true,
+          modelProposedGoals,
+        });
+        config.setGoalProposalHostSupported(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.PROPOSE_GOAL)).toBe(
+          modelProposedGoals === 'alwaysAsk',
+        );
+      },
+    );
     it('does not register propose_goal when goals.modelProposed is disabled', async () => {
       const config = new Config({
         ...baseParams,
@@ -6165,6 +6192,143 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    describe('bundled review workflow activation', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it.each([undefined, false, true])(
+        'preserves the configured workflow preference %s on review activation',
+        async (workflowsEnabled) => {
+          const config = new Config({ ...baseParams, workflowsEnabled });
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+            ToolNames.WORKFLOW,
+          ]);
+          const getRegistry = vi.spyOn(config, 'getToolRegistry');
+          const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(workflowsEnabled !== false);
+          expect(getRegistry).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+          expect(refresh).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+        },
+      );
+
+      it('restores review auto-activation when an explicit opt-out is removed', async () => {
+        const config = new Config({ ...baseParams, workflowsEnabled: false });
+        await config.initialize();
+        vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        config.setWorkflowsEnabled(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it.each(['registered', 'deferred', 'disabled'] as const)(
+        'uses the existing registry with %s permissions',
+        async (status) => {
+          const config = new Config(baseParams);
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          const names = new Set<string>();
+          vi.spyOn(registry, 'getAllToolNames').mockImplementation(() => [
+            ...names,
+          ]);
+          const eager = vi
+            .spyOn(registry, 'registerFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          const deferred = vi
+            .spyOn(registry, 'registerPermissionDeferredFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          eager.mockClear();
+          deferred.mockClear();
+          vi.spyOn(
+            config.getPermissionManager()!,
+            'getToolRegistrationStatus',
+          ).mockResolvedValue(status);
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          await config.enableReviewWorkflow();
+          expect(config.getToolRegistry()).toBe(registry);
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+          expect(config.isWorkflowsEnabled()).toBe(status !== 'disabled');
+          await config.enableReviewWorkflow();
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+        },
+      );
+
+      it('waits for the live chat tool declarations to refresh', async () => {
+        const config = new Config(baseParams);
+        await config.initialize();
+        const registry = config.getToolRegistry();
+        vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        let release!: () => void;
+        const refresh = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const setTools = vi
+          .spyOn(config.getLlmClient(), 'setTools')
+          .mockReturnValue(refresh);
+        let completed = false;
+        const activation = config.enableReviewWorkflow().then(() => {
+          completed = true;
+        });
+        await vi.waitFor(() => expect(setTools).toHaveBeenCalledOnce());
+        expect(completed).toBe(false);
+        release();
+        await activation;
+        expect(completed).toBe(true);
+      });
+
+      it.each([{ bareMode: true }, { provisionalWorkspace: true }])(
+        'keeps restricted sessions disabled: %j',
+        async (restriction) => {
+          const config = new Config({ ...baseParams, ...restriction });
+          const registration = vi.spyOn(config, 'getPermissionManager');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          expect(registration).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not activate workflows or refresh the parent chat from a subagent', async () => {
+        const config = new Config(baseParams);
+        const registry = vi.spyOn(config, 'getToolRegistry');
+        const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+        await runWithAgentContext('review-child', () =>
+          config.enableReviewWorkflow(),
+        );
+        expect(registry).not.toHaveBeenCalled();
+        expect(refresh).not.toHaveBeenCalled();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('honors the explicit workflow kill switch before registering', async () => {
+        const config = new Config(baseParams);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+        const registration = vi.spyOn(config, 'getPermissionManager');
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        expect(registration).not.toHaveBeenCalled();
+      });
     });
 
     it('binds record_source only for a supported top-level session and refreshes it after session rotation', async () => {

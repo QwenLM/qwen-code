@@ -320,18 +320,21 @@ export function registerWorkspaceModelsRoutes(
         ]!.filter((_, index) => index !== configuration.index);
         const removedModelId = configuration.model.id;
         const remaining = Object.entries(remainingProviders).flatMap(
-          ([provider, models]) =>
-            Array.isArray(models)
-              ? models
-                  .filter((model) => model?.id === removedModelId)
-                  .map((model) => ({
-                    model,
-                    authType: resolveProviderProtocol(
-                      provider,
-                      loaded.merged.providerProtocol,
-                    ),
-                  }))
-              : [],
+          ([provider, models]) => {
+            const authType = resolveProviderProtocol(
+              provider,
+              loaded.merged.providerProtocol,
+            );
+            if (
+              !authType ||
+              authType === 'qwen-oauth' ||
+              !Array.isArray(models)
+            )
+              return [];
+            return models
+              .filter((model) => model?.id === removedModelId)
+              .map((model) => ({ model, authType }));
+          },
         );
 
         writes = [{ scope, key: 'modelProviders', value: next }];
