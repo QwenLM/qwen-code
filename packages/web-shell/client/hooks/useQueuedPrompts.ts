@@ -615,6 +615,13 @@ export function useQueuedPrompts({
    * message from the transcript.
    */
   const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
+  /**
+   * Prompts whose submit body returned with the row still unbound because no
+   * confirmation snapshot ever landed. From that return on, no in-flight
+   * admission will echo the message, so the settle-time last-chance echo must
+   * not defer to a row that merely renders the same text.
+   */
+  const returnedUnboundPromptIdsRef = useRef<Set<string>>(new Set());
 
   const rememberCompletedPromptId = useCallback((promptId: string) => {
     if (completedPromptIdsRef.current.has(promptId)) return;
@@ -779,12 +786,18 @@ export function useQueuedPrompts({
             ).length === 1;
           if (serverSideUnique) {
             const submittingIndex = next.indexOf(submittingRow);
-            // An attachment row matched to a prompt already displayed is left
-            // unbound: claiming or content-binding it would misattribute a
-            // deliberate re-send of identical bytes — and the payload would be
-            // unrecoverable. Its own body binds it to the id the daemon
-            // returned for it.
-            if (hasDisplayedPrompt && rowHasAttachments) continue;
+            // A payload-bearing row matched to a prompt already displayed is
+            // left unbound: claiming or content-binding it would
+            // misattribute a deliberate re-send of identical bytes — and the
+            // payload (attachments, or the reference chips the rendered text
+            // drops) would be unrecoverable. Its own body binds it to the id
+            // the daemon returned for it.
+            if (
+              hasDisplayedPrompt &&
+              (rowHasAttachments ||
+                (submittingRow.inputAnnotations?.length ?? 0) > 0)
+            )
+              continue;
             if (hasDisplayedPrompt) {
               // Remember the claim: a submit body that later finds this row
               // gone must not read the splice as a user cancellation. Both
@@ -907,7 +920,8 @@ export function useQueuedPrompts({
       // started" marker late admissions dedupe against, a second terminal
       // event for the same prompt must not re-append it, and a matching
       // unbound submission means this prompt's own admission is still in
-      // flight — its body will echo the full payload when it lands.
+      // flight — its body will echo the full payload when it lands, unless
+      // that body already returned without binding.
       const parked = pendingStartedByPromptIdRef.current.get(promptId);
       const parkedText = parked?.text;
       // A row already bound to this id proves the park is not the in-flight
@@ -919,6 +933,7 @@ export function useQueuedPrompts({
       );
       const pendingOwnSubmission =
         parked !== undefined &&
+        !returnedUnboundPromptIdsRef.current.has(promptId) &&
         queuedPromptsRef.current.some(
           (item) =>
             !item.serverPromptId &&
@@ -962,6 +977,7 @@ export function useQueuedPrompts({
       if (!startedDuringRemovalRef.current.has(promptId)) {
         pendingEchoByPromptIdRef.current.delete(promptId);
       }
+      returnedUnboundPromptIdsRef.current.delete(promptId);
       settledServerPromptIdsRef.current.add(promptId);
       while (
         settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
@@ -1590,6 +1606,7 @@ export function useQueuedPrompts({
     pendingEchoByPromptIdRef.current = new Map();
     clearedUnconfirmedPromptIdsRef.current = new Set();
     startedDuringRemovalRef.current = new Map();
+    returnedUnboundPromptIdsRef.current = new Set();
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
@@ -2166,11 +2183,21 @@ export function useQueuedPrompts({
                 if (prompt.onComplete) {
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
-              } else if (prompt.onComplete) {
-                // The row stays submitting for a later sync to bind; the
-                // daemon already holds the prompt, so its callback must be
-                // registered now or no terminal event will ever fire it.
-                settleCompletionCallback(result.promptId, prompt.onComplete);
+              } else {
+                returnedUnboundPromptIdsRef.current.add(result.promptId);
+                while (returnedUnboundPromptIdsRef.current.size > 200) {
+                  const oldestReturned = returnedUnboundPromptIdsRef.current
+                    .values()
+                    .next().value;
+                  if (typeof oldestReturned !== 'string') break;
+                  returnedUnboundPromptIdsRef.current.delete(oldestReturned);
+                }
+                if (prompt.onComplete) {
+                  // The row stays submitting for a later sync to bind; the
+                  // daemon already holds the prompt, so its callback must be
+                  // registered now or no terminal event will ever fire it.
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
               }
               return;
             }
