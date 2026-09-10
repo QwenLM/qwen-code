@@ -39,6 +39,32 @@ on:
         required: true
         default: false
         type: 'boolean'
+  # Kept callable so a scheduled dry run can exercise the packaging path
+  # itself — building the runtime and the installers is the only thing that
+  # catches a bundled-runtime regression introduced outside this package.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: 'string'
+      qwen_code_ref:
+        required: true
+        type: 'string'
+      electron_bridge:
+        required: true
+        type: 'boolean'
+      dry_run:
+        required: true
+        type: 'boolean'
+      draft:
+        required: true
+        type: 'boolean'
+      prerelease:
+        required: true
+        type: 'boolean'
+      clobber:
+        required: true
+        type: 'boolean'
 
 permissions:
   contents: 'read'
