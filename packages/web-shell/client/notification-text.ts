@@ -32,13 +32,17 @@ export function notificationTextLines(text: string): string[] {
       ? raw
       : raw
           .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+/, '')
-          .split(/(`+[^`]*`+)/g)
+          .split(/(`+[^`]*`+|!?\[[^\u005b\u005d]*\]\([^()]*\))/g)
           .map((part) =>
             part.startsWith('`') && part.endsWith('`')
               ? part.replace(/^`+|`+$/g, '')
               : part
-                  .replace(/!?\[([^\u005b\u005d]*)\]\([^()]*\)/g, '$1')
-                  .replace(/(\*\*|__|~~)(.*?)\1/g, '$2'),
+                  .replace(
+                    /!?\[([^\u005b\u005d]*)\]\([^()]*\)/g,
+                    (_match, label: string) =>
+                      label.replace(/(`+)(.*?)\1/g, '$2'),
+                  )
+                  .replace(/(\*\*|~~)(.*?)\1/g, '$2'),
           )
           .join('');
     const plain = content

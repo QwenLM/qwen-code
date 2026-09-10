@@ -20,6 +20,17 @@ describe('notification text', () => {
       notificationExcerpt('Use `[name](value)` and ```inline```', 120),
     ).toBe('Use [name](value) and inline');
   });
+  it('removes link destinations around inline code and preserves Python identifiers', () => {
+    expect(
+      notificationExcerpt('[Use `Array.from`](https://example.com)', 120),
+    ).toBe('Use Array.from');
+    expect(
+      notificationExcerpt(
+        'why is __init__.py not loading; python -m __main__',
+        120,
+      ),
+    ).toBe('why is __init__.py not loading; python -m __main__');
+  });
   it('reads a bounded prefix even when markup has no closing delimiters', () => {
     for (const prefix of ['<', '[', '`']) {
       expect(

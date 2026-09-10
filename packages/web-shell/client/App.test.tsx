@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+const notificationScrollToBottom = vi.hoisted(() => vi.fn());
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -1126,7 +1127,9 @@ vi.mock('./components/TranscriptViewport', async () => {
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       testState.latestMessageListProps = props;
-      React.useImperativeHandle(ref, () => ({ scrollToBottom: vi.fn() }));
+      React.useImperativeHandle(ref, () => ({
+        scrollToBottom: notificationScrollToBottom,
+      }));
       return React.createElement(
         'div',
         { 'data-testid': 'messages' },
@@ -20061,6 +20064,32 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('loads a different notification session with matching kind and workspace', async () => {
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.status = 'connected';
+    renderApp();
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            sessionContext: { kind: 'workspace', cwd: '/workspace' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'other-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    );
+  });
+
   it('reveals the current notification target without reloading an active session', async () => {
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
     mockConnection.workspaceCwd = '/workspace';
@@ -20077,6 +20106,7 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="settings-message"]'),
     ).not.toBeNull();
+    notificationScrollToBottom.mockClear();
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('qwen:open-session', {
@@ -20087,6 +20117,9 @@ describe('App session callbacks', () => {
         }),
       );
     });
+    await vi.waitFor(() =>
+      expect(notificationScrollToBottom).toHaveBeenCalledWith('auto'),
+    );
     expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
     expect(
       container.querySelector('[data-testid="settings-message"]'),
@@ -30175,6 +30208,35 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('notifies a controlled host when a notification closes split view', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const target = new EventTarget();
+    const { container } = renderApp(
+      { splitSessionIds: ['s1', 's2'], onSplitSessionIdsChange },
+      target,
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    onSplitSessionIdsChange.mockClear();
+    await act(async () => {
+      target.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 's2',
+            sessionContext: { kind: 'workspace', cwd: '/target' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
   it('restores composer focus when revealing the current session from split view', async () => {
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
     mockConnection.workspaceCwd = '/workspace';
@@ -30230,6 +30292,7 @@ describe('App session callbacks', () => {
       expect(
         container.querySelector('[data-testid="split-view-page"]'),
       ).toBeNull();
+      expect(loadSplitSessions()).toEqual([]);
       expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
         's2',
         {

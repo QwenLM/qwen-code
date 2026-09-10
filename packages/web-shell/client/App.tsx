@@ -13203,6 +13203,10 @@ export function App({
     ) => {
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
+      if (mainView === 'split' || splitFoldedByShrinkRef.current) {
+        notifyControlledSplitClose();
+        clearSplitSessions();
+      }
       splitFoldedByShrinkRef.current = false;
       showChat();
       const current = connectionRef.current;
@@ -13222,6 +13226,7 @@ export function App({
           focusComposerAfterSplitCloseRef.current = true;
         closePanel();
         closeMobileDrawer();
+        resumeChatBottomFollow('auto');
         return;
       }
       const currentContext =
@@ -13244,6 +13249,8 @@ export function App({
       closePanel,
       loadSidebarSession,
       mainView,
+      notifyControlledSplitClose,
+      resumeChatBottomFollow,
       reportError,
       showChat,
     ],

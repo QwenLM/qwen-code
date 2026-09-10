@@ -85,7 +85,7 @@ function readStoredPreference(): string | null | undefined {
 function readPreference(defaultEnabled: boolean) {
   const stored = readStoredPreference();
   return {
-    enabled: stored === 'true' || (stored == null && defaultEnabled),
+    enabled: stored === 'true' || (stored === null && defaultEnabled),
     persistent: stored !== undefined,
   };
 }

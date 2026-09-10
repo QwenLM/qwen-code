@@ -75,7 +75,7 @@ async function settle(capture: Capture, promptId = 'prompt') {
   });
 }
 function attach(capture: Capture) {
-  capture.observer!.retain('scope');
+  return capture.observer!.retain('scope');
 }
 
 beforeEach(() => {
@@ -210,7 +210,7 @@ describe('browser task notifications', () => {
     expect(capture.settings!.enabled).toBe(true);
   });
 
-  it('uses the configured default with unavailable storage and still allows turning off', async () => {
+  it('starts off with unreadable storage and allows an explicit temporary choice', async () => {
     vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
       throw new Error('blocked');
     });
@@ -226,8 +226,10 @@ describe('browser task notifications', () => {
         {node}
       </BrowserTurnNotifications>
     ));
-    expect(capture.settings!.enabled).toBe(true);
+    expect(capture.settings!.enabled).toBe(false);
     expect(capture.settings!.persistent).toBe(false);
+    await act(() => capture.settings!.setEnabled(true));
+    expect(capture.settings!.enabled).toBe(true);
     await act(() => capture.settings!.setEnabled(false));
     expect(capture.settings!.enabled).toBe(false);
   });
@@ -357,10 +359,17 @@ describe('browser task notifications', () => {
     window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
     const capture: Capture = {};
     render(capture);
-    attach(capture);
+    const scope = JSON.stringify([
+      'https://daemon.example.com',
+      '',
+      'workspace',
+      '/home/alice/project',
+      'session',
+    ]);
+    capture.observer!.retain(scope);
     await act(async () => {
       capture.observer!.observe(
-        'scope',
+        scope,
         'session',
         {
           type: 'turn_complete',
@@ -372,6 +381,10 @@ describe('browser task notifications', () => {
         },
         false,
         {
+          target: {
+            sessionId: 'session',
+            sessionContext: { kind: 'workspace', cwd: '/home/alice/project' },
+          },
           sessionTitle: '  Fix **notifications**\n in Chrome ',
           promptText: '**Please** fix\n[alerts](https://example.com/private)',
           responseText:
@@ -389,6 +402,11 @@ describe('browser task notifications', () => {
     expect(notifications[0]?.options.body).toBe(
       'This turn has completed.\nPrompt: Please fix alerts\nReply: Result Fixed the notification. Added tests.',
     );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-notification-claims')!,
+      ),
+    ).toEqual([expect.stringMatching(/^qwen-code-turn:[0-9a-f]{64}$/)]);
     expect(
       window.localStorage.getItem('qwen-code-web-shell-notification-claims'),
     ).not.toMatch(/Fix|Result|private|Please|alerts/);
@@ -592,7 +610,7 @@ describe('browser task notifications', () => {
       window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
       const capture: Capture = {};
       render(capture);
-      attach(capture);
+      const releaseScope = attach(capture);
       const target = {
         sessionId: 'session',
         sessionContext: {
@@ -623,7 +641,8 @@ describe('browser task notifications', () => {
           await vi.waitFor(() => expect(notifications).toHaveLength(1));
         });
         expect(open).not.toHaveBeenCalled();
-        capture.observer!.retain('another-scope');
+        releaseScope();
+        await Promise.resolve();
         const focus = vi.spyOn(window, 'focus').mockImplementation(() => {
           if (focusFails) throw new Error('focus denied');
         });
