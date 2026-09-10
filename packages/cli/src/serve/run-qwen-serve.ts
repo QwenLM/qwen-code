@@ -51,6 +51,7 @@ import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
 } from '@qwen-code/acp-bridge/ndJsonStream';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
@@ -4024,7 +4025,9 @@ async function runQwenServeImpl(
   let channelSelectionFromSettings = false;
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
-      error instanceof Error ? error.message : String(error),
+      redactLogCredentials(
+        error instanceof Error ? error.message : String(error),
+      ),
       512,
     );
     const detail = /[.!?]$/.test(message) ? message : `${message}.`;
@@ -9068,16 +9071,23 @@ async function runQwenServeImpl(
             if (!channelSelectionFromSettings || runtimeStartupSettled) {
               throw error;
             }
-            if (manager) {
-              await manager.stopSelection();
-            } else {
-              removeCurrentServePidfile();
-              if (channelPidfileReserved) {
-                throw new Error('Failed to release the channel service lease.');
-              }
-            }
+            closeServerAfterChannelWorkerStartupFailure = false;
             opts.channelSelection = undefined;
             reportConfiguredChannelStartupFailure(error);
+            try {
+              if (manager) {
+                await manager.stopSelection();
+              } else {
+                removeCurrentServePidfile();
+                if (channelPidfileReserved) {
+                  throw new Error(
+                    'Failed to release the channel service lease.',
+                  );
+                }
+              }
+            } catch (cleanupError) {
+              reportConfiguredChannelStartupFailure(cleanupError);
+            }
           }
           if (runtimeStartupSettled) return;
         }

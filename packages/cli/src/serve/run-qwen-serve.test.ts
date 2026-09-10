@@ -14377,8 +14377,9 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
       exitCode: 1,
     });
+    const leakedCredential = 'configured-channel-secret-1234567890';
     failedWorker.start.mockRejectedValueOnce(
-      new Error('worker failed before ready'),
+      new Error(`worker failed before ready: Bearer ${leakedCredential}`),
     );
     const recoveredWorker = makeWorker({
       enabled: true,
@@ -14395,6 +14396,8 @@ describe('runQwenServe channel worker supervisor', () => {
         return recoveredWorker;
       })
       .mockReturnValueOnce(failedWorker);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const logBaseDir = path.join(tmpDir, 'debug');
     const handle = await runQwenServe(
       {
         port: 0,
@@ -14409,11 +14412,23 @@ describe('runQwenServe channel worker supervisor', () => {
         bootSettings: { serve: { channels: ['telegram'] } },
         channelWorkerSupervisorFactory: workerFactory,
         channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
       },
     );
 
     try {
       await handle.runtimeReady;
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('Bearer <redacted>');
+      expect(written).not.toContain(leakedCredential);
+      const logPath = path.join(logBaseDir, 'daemon', 'daemon.log');
+      await vi.waitFor(() => {
+        const logContent = fs.readFileSync(logPath, 'utf8');
+        expect(logContent).toContain('Bearer <redacted>');
+        expect(logContent).not.toContain(leakedCredential);
+      });
       const response = await fetch(`${handle.url}/workspace/channels`, {
         headers: { Authorization: 'Bearer secret' },
       });
@@ -14509,7 +14524,55 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('retains the channel lease when configured startup cleanup is unconfirmed', async () => {
+  it('stays ready when configured startup manager and lease cleanup both fail', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-manager-cleanup-')),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValue({
+      owner: 'serve',
+      pid: process.pid,
+      servePid: process.pid,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    pidfile.removeServeServiceInfo.mockReturnValueOnce(false);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerUrlCertifier: () => {
+          throw new Error('manager construction sentinel');
+        },
+        channelServicePidfile: pidfile,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(handle.server.listening).toBe(true);
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledOnce();
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('manager construction sentinel');
+      expect(written).toContain('Failed to release the channel service lease');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('retains the channel lease and stays ready when configured startup cleanup is unconfirmed', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-cleanup-startup-')),
     );
@@ -14521,6 +14584,7 @@ describe('runQwenServe channel worker supervisor', () => {
     worker.start.mockRejectedValueOnce(new Error('worker start failed'));
     worker.stop.mockRejectedValue(new Error('worker stop failed'));
     const pidfile = makePidfileDeps();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const handle = await runQwenServe(
       {
         port: 0,
@@ -14539,9 +14603,15 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
-      await expect(handle.runtimeReady).rejects.toThrow('worker stop failed');
-      await vi.waitFor(() => expect(handle.server.listening).toBe(false));
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(handle.server.listening).toBe(true);
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('worker start failed');
+      expect(written).toContain('worker stop failed');
     } finally {
       worker.stop.mockResolvedValue(undefined);
       await handle.close();
