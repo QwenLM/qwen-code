@@ -1,17 +1,6 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import {
-  DownloadIcon,
-  FileAudioIcon,
-  FileCode2Icon,
-  FileIcon,
-  FileImageIcon,
-  FileTextIcon,
-  FileVideoIcon,
-  LinkIcon,
-  NotebookTabsIcon,
-  type LucideIcon,
-} from 'lucide-react';
+import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
@@ -26,6 +15,7 @@ import {
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
+import { ArtifactIcon } from './ArtifactIcon';
 import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import styles from './TurnOutputs.module.css';
 
@@ -93,6 +83,7 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       src: string;
       alt?: string;
+      attachmentId?: string;
     }
   | {
       id: string;
@@ -102,6 +93,7 @@ export type TurnOutputOpenRequest = (
       mimeType?: string;
       data?: Blob;
       text?: string;
+      attachmentId?: string;
       workspacePath?: string;
       workspaceCwd?: string;
     }
@@ -438,7 +430,6 @@ function ArtifactCard({
     };
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
-  const FormatIcon = getArtifactFormatIcon(artifact.kind);
   const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
   const downloadName =
     (artifact.workspacePath &&
@@ -464,18 +455,12 @@ function ArtifactCard({
     <div className={styles.card}>
       <div className={styles.summary}>
         <span className={styles.icon} aria-hidden="true">
-          {FormatIcon ? (
-            <FormatIcon className={styles.iconSvg} strokeWidth={1.8} />
-          ) : (
-            <DocumentIcon />
-          )}
+          <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size, blockedReason]
-              .filter(Boolean)
-              .join(' · ')}
+            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>
@@ -491,35 +476,28 @@ function ArtifactCard({
               {t(downloading ? 'common.downloading' : 'common.download')}
             </button>
           )}
-          <button
-            type="button"
-            className={styles.reviewButton}
-            onClick={onOpen}
+          <span
+            className={styles.openButtonWrapper}
             title={blockedReason ?? artifact.title}
-            disabled={!onOpen}
           >
-            {t('common.open')}
-          </button>
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={onOpen}
+              disabled={!onOpen}
+            >
+              <SquareArrowOutUpRightIcon
+                size={16}
+                strokeWidth={1.8}
+                aria-hidden="true"
+              />
+              {t('common.open')}
+            </button>
+          </span>
         </div>
       </div>
     </div>
   );
-}
-
-const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
-  file: FileIcon,
-  link: LinkIcon,
-  html: FileCode2Icon,
-  image: FileImageIcon,
-  video: FileVideoIcon,
-  audio: FileAudioIcon,
-  pdf: FileTextIcon,
-  notebook: NotebookTabsIcon,
-  document: FileTextIcon,
-};
-
-export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
-  return ARTIFACT_FORMAT_ICONS[kind];
 }
 
 function ScheduledTaskCard({
@@ -563,34 +541,6 @@ function ScheduledTaskCard({
         </div>
       </div>
     </div>
-  );
-}
-
-function DocumentIcon() {
-  return (
-    <svg
-      className={styles.iconSvg}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <rect
-        x="6"
-        y="4"
-        width="12"
-        height="16"
-        rx="2"
-        stroke="currentColor"
-        strokeWidth="1.8"
-      />
-      <path
-        d="M9 10h6M9 14h4"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 

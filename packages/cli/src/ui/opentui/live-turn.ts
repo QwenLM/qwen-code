@@ -17,22 +17,21 @@
  * never silently dropped.
  *
  * `@path` mentions are expanded where a prompt enters the stream
- * ({@link livePromptEvents}), never here: an idle submit and queued text that
- * becomes the next turn both reach the model with file content while the
- * transcript keeps what was typed. Text drained as in-flight steering still
- * rides raw — ink expands that hop too (`resolveSteeredMessages`, with a read
- * timeout and a queue restore on cancel) — and the model can resolve the
- * literal mention with a read tool.
+ * ({@link livePromptEvents}), never here: an idle submit, queued text that
+ * becomes the next turn, and text drained as in-flight steering all reach the
+ * model with file content, while the transcript keeps what was typed. A
+ * steering resolution the user interrupts mid-read hands its texts back to this
+ * queue instead of dropping them.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { readFileSync } from 'node:fs';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   collectText,
   normalizeParts,
-  ToolConfirmationOutcome,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   foldLiveEvent,
@@ -105,6 +104,13 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  /**
+   * The transcript already holds the user row for this submit, because the
+   * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
+   * its content is generated, never typed, and ink's `submit_prompt` case
+   * returns before adding a USER history item for it.
+   */
+  invocationEchoed?: boolean;
 }
 
 export interface OpenTuiLiveTurn {
@@ -138,8 +144,8 @@ export interface OpenTuiLiveTurn {
 /** Folds a replay batch into a fresh item list (single commit). */
 export function foldBatch(
   events: readonly OpenTuiStreamEvent[],
-): LiveHistoryItem[] {
-  let items: LiveHistoryItem[] = [];
+): readonly LiveHistoryItem[] {
+  let items: readonly LiveHistoryItem[] = [];
   for (const ev of events) items = foldLiveEvent(items, ev);
   return items;
 }
@@ -188,6 +194,13 @@ export function useOpenTuiLiveTurn(
     return drained;
   }, []);
 
+  const restoreQueue = useCallback((texts: readonly string[]) => {
+    const restored = texts.map((text) => text.trim()).filter(Boolean);
+    if (restored.length === 0) return;
+    queueRef.current = [...restored, ...queueRef.current];
+    setQueueLength(queueRef.current.length);
+  }, []);
+
   const runTurn = useCallback(
     async (
       prompt: PartListUnion,
@@ -205,6 +218,7 @@ export function useOpenTuiLiveTurn(
           submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
+          restoreSteering: restoreQueue,
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
@@ -218,8 +232,12 @@ export function useOpenTuiLiveTurn(
           apply(ev);
         }
         // ink parity (use-llm-stream submitPromptOnCompleteRef): fired once
-        // after the turn completes successfully, never on error/abort.
-        if (seq === turnSeqRef.current) {
+        // after the turn completes successfully, never on error/abort. The
+        // abort paths inside the generator end it with a normal return, so
+        // the seq guard alone cannot tell them apart — gate on the signal
+        // (R6-6). A decline of every confirmation without Esc is a genuinely
+        // completed turn and keeps firing.
+        if (seq === turnSeqRef.current && !abort.signal.aborted) {
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
@@ -257,7 +275,7 @@ export function useOpenTuiLiveTurn(
         }
       }
     },
-    [config, apply, drainQueue, setBusy],
+    [config, apply, drainQueue, restoreQueue, setBusy],
   );
 
   const submit = useCallback(
@@ -288,7 +306,9 @@ export function useOpenTuiLiveTurn(
       const prompt: PartListUnion =
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
-      apply({ type: 'user', text, promptId, sentToModel: true });
+      if (!options?.invocationEchoed) {
+        apply({ type: 'user', text, promptId, sentToModel: true });
+      }
       void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],
@@ -333,7 +353,11 @@ export function useOpenTuiLiveTurn(
 
   const popQueue = useCallback((): string | null => {
     if (queueRef.current.length === 0) return null;
-    return drainQueue().join('\n');
+    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
+    // blank line, not a single newline. ink's peer/slash queue filters have no
+    // counterpart here — this queue only ever holds plain composer text
+    // (slash commands defer in the shell instead of queueing).
+    return drainQueue().join('\n\n');
   }, [drainQueue]);
 
   useEffect(() => () => abortRef.current?.abort(), []);

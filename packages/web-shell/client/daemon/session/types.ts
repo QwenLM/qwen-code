@@ -23,6 +23,7 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
+  DaemonSessionSavedWorkflowDetail,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
   DaemonRewindResult,
@@ -113,6 +114,7 @@ export interface DaemonConnectionState {
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
+  planExecutionMode?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
@@ -143,6 +145,8 @@ export interface DaemonReasoningControls {
   efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
   /** The model default when the daemon advertises one. */
   defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
+  enableValue?: 'default';
+  canEnable?: false;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -258,6 +262,7 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'control_workflow'
   | 'run_saved_workflow'
+  | 'read_saved_workflow'
   | 'load_goal'
   | 'control_goal'
   | 'clear_goal'
@@ -405,7 +410,30 @@ export interface SubmitPromptResult {
   removedAfterAbort?: true;
 }
 
+export interface DaemonActivePromptState {
+  active: boolean | undefined;
+  workspaceCwd: string | undefined;
+  sessionId: string | undefined;
+}
+
 export interface DaemonSessionActions {
+  /**
+   * Publish the daemon's authoritative "this session has a prompt in flight"
+   * state for the identified session, or `undefined` when it cannot be known
+   * (a daemon without `workspace_session_live_state`, or a workspace nothing
+   * polls live state for).
+   *
+   * The event stream alone cannot tell a long silent tool call apart from a
+   * finished turn, so without this the pane settles a still-running turn to
+   * `idle` after a few seconds of silence and the loading indicator drops
+   * mid-turn (#9487). While this reports `true`, silence-based settling is
+   * suppressed. A fresh `false` settles a restored prompt, and losing a known
+   * `true` settles an observed turn when its terminal event never arrives.
+   */
+  setDaemonActivePrompt(
+    active: boolean | undefined,
+    owner?: Pick<DaemonActivePromptState, 'workspaceCwd' | 'sessionId'>,
+  ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
@@ -425,7 +453,7 @@ export interface DaemonSessionActions {
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult>;
   respondToPermission(
     requestId: string,
@@ -498,6 +526,9 @@ export interface DaemonSessionActions {
   getContext(): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
+    /** Rethrow transient failures raw instead of recording a notice; for
+     * surfaces that re-collect automatically and report failures inline. */
+    silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
@@ -519,6 +550,8 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal; sessionId?: string },
   ): Promise<DaemonSessionAttachmentReference>;
   readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  /** List every attachment currently stored for the session, upload order. */
+  listAttachments(): Promise<DaemonSessionAttachmentReference[]>;
   removeAttachment(
     attachmentId: string,
     opts?: { sessionId?: string },
@@ -583,6 +616,13 @@ export interface DaemonSessionActions {
     status?: DaemonSessionWorkflowTaskStatus['status'];
     taskId?: string;
   }>;
+  /**
+   * Read one saved workflow definition (script + parsed meta). Resolves to
+   * null when the name is unknown or Workflow controls are unavailable.
+   */
+  readSavedWorkflow(
+    name: string,
+  ): Promise<DaemonSessionSavedWorkflowDetail | null>;
   getGoal(): Promise<GoalStateResponse>;
   controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   /**

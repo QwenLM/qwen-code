@@ -34,6 +34,7 @@ import { SessionTranscriptIdentityUnavailableError } from './session-writer-leas
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 let tmpRoot: string;
 
@@ -1225,7 +1226,7 @@ describe('SessionService lifecycle maintenance', () => {
         await expect(
           service.getMaintainableSessionLocation(sessionId),
         ).rejects.toBeInstanceOf(SessionStorageEntryError);
-        expect(Date.now() - startedAt).toBeLessThan(400);
+        expectWithinLatencyBudget(Date.now() - startedAt, 400);
       } finally {
         clearTimeout(unblock);
         if (writer !== undefined) fs.closeSync(writer);

@@ -11,12 +11,49 @@ import type { HeldMessage } from '@qwen-code/qwen-code-core';
 // from core, and pulling the barrel in drags the whole module graph
 // behind it. The wording assertions below only depend on these stubs; the
 // stubs mirror the real helpers, whose behavior is pinned by core's own
-// tests (peer-envelope.test.ts, peer-frames.test.ts).
+// tests (peer-envelope.test.ts, peer-frames.test.ts, and for the inbox
+// failure renderer, uds-inbox.test.ts).
+const inboxFailure = vi.hoisted(() => ({
+  current: null as null | {
+    cause: string;
+    socketPath: string;
+    detail: string;
+    hint: string;
+    attempts: number;
+  },
+}));
+
+/**
+ * Stands in for the on-disk controller registry. The file format and its
+ * failure modes are core's business (peer-controllers.test.ts); what this
+ * file checks is what `/peers` renders and revokes.
+ */
+const controllers = vi.hoisted(() => ({
+  records: [] as Array<{
+    id: string;
+    label: string;
+    createdAt: number;
+    tokenHash?: string;
+  }>,
+  listThrows: null as string | null,
+  removeThrows: null as string | null,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  describeHoldCause: (cause: string) =>
-    cause === 'mode-mismatch'
-      ? 'this session can apply some actions without per-action review and the sender does not'
-      : `held (${cause})`,
+  getLastPeerInboxFailure: () => inboxFailure.current,
+  // Mirrors the real renderer's `foreign_owner` branch (uds-inbox.ts).
+  // The previous stub interpolated `failure.cause`, a machine token the
+  // real helper emits for no cause at all, so the assertion below could
+  // not have failed against anything production produces.
+  describePeerInboxFailure: (failure: { socketPath: string; hint: string }) =>
+    // The real branch renders the socket's *directory*, not the socket.
+    `"${failure.socketPath.replace(/\/[^/]*$/, '')}" belongs to another user. ${failure.hint}`,
+  describeHoldCause: (cause: string, scope?: string) =>
+    scope === 'workspace'
+      ? "this repository's settings hold incoming peer messages"
+      : cause === 'mode-mismatch'
+        ? 'this session can apply some actions without per-action review and the sender does not'
+        : `held (${cause})`,
   flattenPeerLabel: (value: string) => {
     const oneLine = value
       .replace(
@@ -28,6 +65,18 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     return oneLine.length > 200 ? `${oneLine.slice(0, 199)}\u2026` : oneLine;
   },
   canonicalizeMsgId: (msgId: string) => msgId.replace(/-/g, '').toLowerCase(),
+  listPeerControllers: async () => {
+    if (controllers.listThrows) throw new Error(controllers.listThrows);
+    return controllers.records;
+  },
+  removePeerController: async (id: string) => {
+    if (controllers.removeThrows) throw new Error(controllers.removeThrows);
+    const index = controllers.records.findIndex(
+      (record) => record.id.toLowerCase() === id.trim().toLowerCase(),
+    );
+    if (index === -1) return null;
+    return controllers.records.splice(index, 1)[0];
+  },
 }));
 
 import {
@@ -43,7 +92,11 @@ function held(over: {
   content?: string;
   fromName?: string;
   cause?: HeldMessage['cause'];
+  policyScope?: HeldMessage['policyScope'];
   heldAt?: number;
+  monotonicAt?: number;
+  selfSent?: true;
+  controller?: HeldMessage['controller'];
 }): HeldMessage {
   return {
     frame: {
@@ -56,13 +109,23 @@ function held(over: {
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
+    ...(over.policyScope !== undefined
+      ? { policyScope: over.policyScope }
+      : {}),
     heldAt: over.heldAt ?? 1_000,
+    ...(over.monotonicAt !== undefined
+      ? { monotonicAt: over.monotonicAt }
+      : {}),
+    ...(over.selfSent ? { selfSent: over.selfSent } : {}),
+    ...(over.controller !== undefined ? { controller: over.controller } : {}),
   };
 }
 
 interface Fake {
   getHeld: () => readonly HeldMessage[];
+  getHeldExpiryMs: () => number | null;
   decide: ReturnType<typeof vi.fn>;
+  forgetController: ReturnType<typeof vi.fn>;
   recordHeldListing: ReturnType<typeof vi.fn>;
   heldSetChangedSinceListing: () => boolean;
 }
@@ -101,9 +164,14 @@ let listed: ReadonlyArray<{ id: string; heldAt: number }> | null;
 beforeEach(() => {
   messages = [];
   listed = null;
+  controllers.records = [];
+  controllers.listThrows = null;
+  controllers.removeThrows = null;
   fake = {
     getHeld: () => messages,
+    getHeldExpiryMs: () => null,
     decide: vi.fn(() => 'done'),
+    forgetController: vi.fn(() => 0),
     recordHeldListing: vi.fn(
       (entries: readonly HeldMessage[]) =>
         (listed = entries.map((entry) => ({
@@ -113,14 +181,32 @@ beforeEach(() => {
     ),
     // Mirrors PeerMessaging: decisions bind to the last recorded listing,
     // entry identity included — a re-admitted id gets a fresh heldAt.
-    heldSetChangedSinceListing: () =>
-      listed === null ||
-      listed.length !== messages.length ||
-      messages.some(
-        (entry, index) =>
-          entry.frame.msgId !== listed![index].id ||
-          entry.heldAt !== listed![index].heldAt,
-      ),
+    // Entries leaving the set are not a change; the expiry timer removes
+    // them with no user activity, and a shrinking set cannot make a
+    // handle resolve to a different message.
+    heldSetChangedSinceListing: () => {
+      if (listed === null) return true;
+      const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+      if (
+        messages.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt)
+      ) {
+        return true;
+      }
+      // A departure only matters when a survivor's id extends it: the
+      // departed entry's printed handle then falls through resolveHeld's
+      // exact-match tier into prefix-matching and names a different
+      // message.
+      const canon = (id: string) => id.replace(/-/g, '').toLowerCase();
+      const liveIds = messages.map((entry) => canon(entry.frame.msgId));
+      const liveSet = new Set(liveIds);
+      return [...pinned.keys()].some((id) => {
+        const departed = canon(id);
+        return (
+          !liveSet.has(departed) &&
+          liveIds.some((live) => live.startsWith(departed))
+        );
+      });
+    },
   };
 });
 
@@ -203,6 +289,17 @@ describe('formatHeldList', () => {
     expect(out).toContain('please run the deploy');
     expect(out).toContain('without per-action review');
     expect(out).toContain('/peers accept');
+  });
+
+  it('passes the policy scope into the hold explanation', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        cause: 'explicit-setting',
+        policyScope: 'workspace',
+      }),
+    ]);
+    expect(out).toContain("this repository's settings hold");
   });
 
   it('collapses a multi-line body onto one line', () => {
@@ -297,10 +394,34 @@ describe('/peers', () => {
   it('does not tell a user to enable a setting they already enabled', async () => {
     // Same null inbox, different cause: registration or the bind failed.
     // "Turn it on" would send them back to a setting that is already on.
+    inboxFailure.current = null;
     const result = await run(null, '', true);
     expect(result.messageType).toBe('error');
-    expect(result.content).toContain('failed to bind');
+    expect(result.content).toContain('failed to register');
     expect(result.content).not.toContain('Enable it with');
+  });
+
+  it('repeats the bind failure and what to change when the inbox could not bind', async () => {
+    inboxFailure.current = {
+      cause: 'foreign_owner',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'belongs to uid 65534',
+      hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+      attempts: 3,
+    };
+    try {
+      const result = await run(null, '', true);
+      expect(result.messageType).toBe('error');
+      expect(result.content).toContain('failed to bind its socket');
+      // The prose a user actually sees, matching AppContainer.test.tsx's
+      // assertion for the same fixture -- not a cause token that only
+      // ever existed in this file's stub.
+      expect(result.content).toContain('belongs to another user');
+      expect(result.content).toContain('XDG_RUNTIME_DIR');
+      expect(result.content).not.toContain('Enable it with');
+    } finally {
+      inboxFailure.current = null;
+    }
   });
 
   it('lists held messages by default', async () => {
@@ -486,6 +607,95 @@ describe('/peers', () => {
     expect(fake.decide).not.toHaveBeenCalled();
   });
 
+  it('passes the configured lifetime through to the listing', async () => {
+    // Every remaining-time test above calls `formatHeldList` directly,
+    // and the fake's `getHeldExpiryMs` returns null -- which is exactly
+    // what omitting the second argument produces. Dropping the argument
+    // at the one production call site would leave all of those green
+    // while the /peers deadline disappeared.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 60_000,
+      }),
+    ];
+    fake.getHeldExpiryMs = () => 5 * 60_000;
+
+    const result = await run(fake, '');
+
+    expect(result.content).toContain('4 minutes left');
+  });
+
+  it('bounces a handle that would reassign after the shorter id expired', async () => {
+    // `msgId` is peer-chosen and only shape-checked, so a peer can park
+    // `abc` beside `abc12345`. While both are held the handles are
+    // distinct and resolveHeld's exact-match tier gives `abc` to the
+    // shorter one. Once `abc` leaves on the expiry timer, that same
+    // handle falls through to prefix-matching and would release
+    // `abc12345` -- a different message than the one the user reviewed --
+    // under the reviewed one's handle, certified "Released to this
+    // session."
+    messages = [
+      held({ msgId: 'abc', heldAt: 1_000 }),
+      held({ msgId: 'abc12345', heldAt: 2_000 }),
+    ];
+    await run(fake, '');
+    // What the expiry timer does to the buffer: the shorter id leaves.
+    messages = [held({ msgId: 'abc12345', heldAt: 2_000 })];
+
+    const result = await run(fake, 'accept abc');
+
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('changed since you listed it');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
+  it('still decides a survivor after the expiry timer removed the other', async () => {
+    // The expiry timer removes entries with no peer or user activity --
+    // a mover the guard's rationale never named. A removal can never make
+    // a printed handle resolve to a different message, so bouncing it
+    // refuses a decision that would have been correct and tells the user
+    // to re-list something they can still uniquely name.
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000', heldAt: 1_000 }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000', heldAt: 2_000 }),
+    ];
+    await run(fake, '');
+    // What `expireOverdue` does to the buffer: the first entry leaves.
+    messages = [
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000', heldAt: 2_000 }),
+    ];
+
+    const result = await run(fake, 'accept bbbbbb');
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).not.toContain('changed since you listed it');
+    expect(fake.decide).toHaveBeenCalledWith(
+      'bbbbbb22-0000-4000-8000-000000000000',
+      'approve',
+    );
+  });
+
+  it('says how many were already gone when a bulk decision sweeps them', async () => {
+    // `getHeld()` does not sweep, so a listing can show entries as
+    // "expiring now" while the first `decide()` sweeps the whole overdue
+    // backlog and every id comes back 'gone'. Counting those as neither
+    // released nor failed leaves the user reading "Released 0 messages."
+    // with no reason, while both senders were receipted `expired`.
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+    await run(fake, '');
+    fake.decide.mockReturnValue('gone');
+
+    const result = await run(fake, 'accept all');
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Released 0 messages.');
+    expect(result.content).toContain('2 had already expired or been decided');
+  });
+
   it('allows consecutive decisions after one listing', async () => {
     messages = [
       held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
@@ -515,5 +725,248 @@ describe("formatHeldList for the session's own process", () => {
     const out = formatHeldList([{ ...entry, frame, selfSent: true }]);
     expect(out).toContain('[own process] this session');
     expect(out).not.toContain('unknown session');
+  });
+});
+
+describe('formatHeldList — remaining time', () => {
+  it('says nothing about expiry when holds do not expire', () => {
+    const out = formatHeldList([held({ msgId: 'a1b2c3' })], null);
+    expect(out).not.toContain('left');
+    expect(out).not.toContain('expiring');
+  });
+
+  it('shows how long a message has left', () => {
+    // The sender stops waiting when this runs out, so a review screen
+    // that hides its own deadline invites decisions made too late.
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 60_000 })],
+      5 * 60_000,
+    );
+    expect(out).toContain('4 minutes left');
+  });
+
+  it('rounds up rather than down', () => {
+    // Deliberately off the 60_000 boundary. At exactly one minute
+    // `Math.ceil` and `Math.floor` agree, so the property this test is
+    // named for would be unpinned -- and the two `Date.now()` reads only
+    // have to straddle a millisecond for the sub-minute branch to fire
+    // and the assertion to flip.
+    //
+    // ~90s remaining: `ceil` says 2 minutes, `floor` says 1, for any
+    // scheduling drift up to 30s.
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 30_000 })],
+      120_000,
+    );
+    expect(out).toContain('2 minutes left');
+  });
+
+  it('ages on the same clock the gate expires on', () => {
+    // The gate takes the larger of the wall-clock and monotonic ages, so
+    // a wall-only reading here promises time it will not grant: after a
+    // backward NTP correction four minutes into a five-minute hold the
+    // message expires in about a minute while the wall clock still shows
+    // an hour left.
+    const perf = vi.spyOn(performance, 'now').mockReturnValue(300_000);
+    try {
+      const out = formatHeldList(
+        [
+          held({
+            msgId: 'a1b2c3',
+            // Wall clock stepped back an hour: this looks like the
+            // future, so the wall age is negative.
+            heldAt: Date.now() + 56 * 60_000,
+            monotonicAt: 0,
+          }),
+        ],
+        5 * 60_000,
+      );
+      expect(out).toContain('expiring now');
+      expect(out).not.toContain('minutes left');
+    } finally {
+      perf.mockRestore();
+    }
+  });
+
+  it('does not count seconds nobody can act on', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 55_000 })],
+      60_000,
+    );
+    expect(out).toContain('less than a minute left');
+  });
+
+  it('says so when the hold has already run out', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 120_000 })],
+      60_000,
+    );
+    expect(out).toContain('expiring now');
+  });
+
+  it('keeps the hold cause alongside the deadline', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() })],
+      5 * 60_000,
+    );
+    expect(out).toContain('held because');
+    expect(out).toContain('5 minutes left');
+  });
+});
+
+describe('controller attribution in the listing', () => {
+  it('names the grant, never the frame', () => {
+    // This is the screen where a message is judged; a sender that could
+    // choose the string shown here could dress itself as a grant.
+    const out = formatHeldList([
+      held({
+        msgId: 'a1b2c3',
+        fromName: 'not the grant',
+        controller: { id: 'c_0123abcd', label: 'voice bridge' },
+      }),
+    ]);
+    expect(out).toContain('[controller] voice bridge');
+    expect(out).not.toContain('not the grant');
+  });
+
+  it('still distinguishes a peer from an own process', () => {
+    const out = formatHeldList([
+      held({ msgId: 'a1b2c3', fromName: 'app-ab' }),
+      held({ msgId: 'd4e5f6', selfSent: true }),
+    ]);
+    expect(out).toContain('[peer] app-ab');
+    // Both fall back to the reply address the frame carries; only the
+    // bracketed origin separates them.
+    expect(out).toContain('[own process] /tmp/peer.sock');
+  });
+
+  it('flattens a label a hand edit put newlines and escapes into', () => {
+    // The registry is a JSON file the user can edit, and this listing is
+    // the screen where untrusted messages are decided: a label that spans
+    // lines or repaints the terminal would spoof the review itself.
+    const out = formatHeldList([
+      held({
+        msgId: 'a1b2c3',
+        controller: { id: 'c_0123abcd', label: 'voice\nbridge' },
+      }),
+      held({
+        msgId: 'd4e5f6',
+        controller: { id: 'c_89abcdef', label: 'dictation\u001b' },
+      }),
+    ]);
+    expect(out).toContain('[controller] voice bridge');
+    expect(out).not.toContain('\u001b');
+  });
+});
+
+describe('/peers controllers', () => {
+  it('says what a grant means when none is held', async () => {
+    const out = await run(fake, 'controllers');
+    expect(out.messageType).toBe('info');
+    expect(out.content).toContain('No trusted controllers');
+    expect(out.content).toContain('process this session started');
+    expect(out.content).toContain('asserts no review class');
+    expect(out.content).toContain('crossSessionInbound to "hold"');
+    expect(out.content).toContain('qwen sessions controllers add');
+  });
+
+  it('lists the grants with their ids', async () => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice bridge', createdAt: 1_700_000_000_000 },
+      {
+        id: 'c_89abcdef',
+        label: 'dictation',
+        createdAt: 1_700_000_000_000,
+        tokenHash: 'f'.repeat(64),
+      },
+    ];
+    const out = await run(fake, 'controllers');
+    expect(out.content).toContain('2 trusted controllers');
+    expect(out.content).toContain('c_0123abcd  voice bridge');
+    expect(out.content).toContain('c_89abcdef  dictation');
+    expect(out.content).toContain('/peers revoke <id>');
+    expect(out.content).toContain('unless crossSessionInbound');
+    expect(out.content).not.toContain('f'.repeat(64));
+  });
+
+  it('renders an out-of-range date as unknown', async () => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice', createdAt: Number.MAX_VALUE },
+    ];
+    const out = await run(fake, 'controllers');
+    expect(out.content).toContain('added unknown');
+  });
+
+  it('works even when cross-session messaging is off', async () => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice', createdAt: 1_700_000_000_000 },
+    ];
+    const out = await run(null, 'controllers', false);
+    expect(out.content).toContain('c_0123abcd');
+    expect(out.content).not.toContain('Cross-session messaging is off');
+  });
+
+  it('reports a registry it cannot read as a line, not a crash', async () => {
+    controllers.listThrows = 'EACCES';
+    const out = await run(fake, 'controllers');
+    expect(out.content).toContain('Could not read the trusted controllers');
+    expect(out.content).toContain('EACCES');
+  });
+});
+
+describe('/peers revoke', () => {
+  beforeEach(() => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice bridge', createdAt: 1_700_000_000_000 },
+    ];
+  });
+
+  it('revokes by id and says when it takes effect', async () => {
+    fake.forgetController.mockReturnValue(1);
+    const out = await run(fake, 'revoke c_0123abcd');
+    expect(out.messageType).toBe('info');
+    expect(out.content).toContain('Revoked the controller "voice bridge"');
+    expect(out.content).toContain(
+      'new connections can no longer use its token',
+    );
+    expect(out.content).toContain(
+      '1 held message from it remains parked for review as an ordinary peer message',
+    );
+    expect(fake.forgetController).toHaveBeenCalledWith('c_0123abcd');
+    expect(controllers.records).toHaveLength(0);
+  });
+
+  it('works even when this session has no peer inbox', async () => {
+    const out = await run(null, 'revoke c_0123abcd', false);
+    expect(out.content).toContain('Revoked the controller');
+    expect(controllers.records).toHaveLength(0);
+  });
+
+  it('asks which one when the id is missing', async () => {
+    const out = await run(fake, 'revoke');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('/peers revoke <id>');
+    expect(controllers.records).toHaveLength(1);
+  });
+
+  it('reports an id nothing holds', async () => {
+    const out = await run(fake, 'revoke c_99999999');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('No controller has the id "c_99999999"');
+    expect(controllers.records).toHaveLength(1);
+  });
+
+  it('reports a failed write as a line', async () => {
+    controllers.removeThrows = 'EROFS';
+    const out = await run(fake, 'revoke c_0123abcd');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('Could not revoke that controller');
+    expect(out.content).toContain('EROFS');
+  });
+
+  it('is listed among the subcommands an unknown verb suggests', async () => {
+    const out = await run(fake, 'wat');
+    expect(out.content).toContain('/peers controllers');
+    expect(out.content).toContain('/peers revoke <id>');
   });
 });

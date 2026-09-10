@@ -60,8 +60,6 @@ if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
 const itWithZip = zipAvailable ? it : it.skip;
 const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
-vi.setConfig({ testTimeout: 30_000 });
-
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
     const script = readScript(
@@ -1814,117 +1812,114 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itWithZip(
-    'packages a win-x64 standalone archive',
-    () => {
-      const createdDist = ensureMinimalDist();
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip('packages a win-x64 standalone archive', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-      try {
-        const outDir = path.join(tmpDir, 'out');
-        execFileSync(
-          'node',
-          [
-            'scripts/create-standalone-package.js',
-            '--target',
-            'win-x64',
-            '--node-archive',
-            createFakeWindowsNodeArchive(tmpDir),
-            '--out-dir',
-            outDir,
-            '--version',
-            '0.0.0-test',
-          ],
-          { stdio: 'pipe' },
-        );
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
 
-        const archive = path.join(outDir, 'qwen-code-win-x64.zip');
-        const extractDir = path.join(tmpDir, 'extract');
-        mkdirSync(extractDir, { recursive: true });
-        extractZipForTest(archive, extractDir);
+      const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(archive, extractDir);
 
-        expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
-        ).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-        ).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
-        ).toBe(true);
-        const shim = readScript(
-          path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
-        );
-        expect(shim).toContain(
-          'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
-        );
-        expect(shim).toContain(
-          '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
-        );
-        expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
-        expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
-          'qwen-code-win-x64.zip',
-        );
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    30_000,
-  );
+      expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
+      ).toBe(true);
+      const shim = readScript(
+        path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
+      );
+      expect(shim).toContain(
+        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
+      );
+      expect(shim).toContain(
+        '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
+      );
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
+      expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
+        'qwen-code-win-x64.zip',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
 
-  itWithZip(
-    'skips npm-only artifacts staged in dist',
-    () => {
-      const createdDist = ensureMinimalDist({
-        includeNpmPackageArtifacts: true,
-      });
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip('skips npm-only artifacts staged in dist', () => {
+    const createdDist = ensureMinimalDist({
+      includeNpmPackageArtifacts: true,
+    });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-      try {
-        const outDir = path.join(tmpDir, 'out');
-        execFileSync(
-          'node',
-          [
-            'scripts/create-standalone-package.js',
-            '--target',
-            'win-x64',
-            '--node-archive',
-            createFakeWindowsNodeArchive(tmpDir),
-            '--out-dir',
-            outDir,
-            '--version',
-            '0.0.0-test',
-          ],
-          { stdio: 'pipe' },
-        );
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
 
-        const extractDir = path.join(tmpDir, 'extract');
-        mkdirSync(extractDir, { recursive: true });
-        extractZipForTest(
-          path.join(outDir, 'qwen-code-win-x64.zip'),
-          extractDir,
-        );
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(path.join(outDir, 'qwen-code-win-x64.zip'), extractDir);
 
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-        ).toBe(true);
-        expect(
-          existsSync(
-            path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js'),
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js')),
+      ).toBe(false);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
+      ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.js',
           ),
-        ).toBe(false);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
-        ).toBe(false);
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    30_000,
-  );
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
 
   it('requires the native audio prebuild when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
@@ -2451,28 +2446,35 @@ describe('standalone release packaging', () => {
 
   it('syncs standalone and hosted installation assets during release', () => {
     const releaseWorkflow = readScript('.github/workflows/release.yml');
+    const releaseStepScript = readScript('.github/scripts/run-release-step.sh');
     const ossWorkflow = readScript('.github/workflows/sync-release-to-oss.yml');
 
-    // release.yml builds standalone archives, verifies them, and creates GitHub Release
-    expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    // The step script builds standalone archives, verifies them, and creates
+    // the GitHub Release; release.yml keeps only the env wiring.
+    expect(releaseStepScript).toContain(
+      'npm run package:standalone:release --',
+    );
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
-    expect(releaseWorkflow).toContain('--include-opentui-preview');
+    // Pin the operator, not just the variable name: these two sites are the
+    // build-time decision, and an assertion that accepts either comparison
+    // lets the flavor's default polarity flip without the suite noticing.
+    expect(releaseWorkflow).toContain(
+      "vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true'",
+    );
+    expect(releaseStepScript).toContain(
+      '[[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]',
+    );
+    expect(releaseStepScript).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
-    const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "- name: 'Create GitHub Release and Tag'",
-    );
-    expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
-    const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
-    expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
-    expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
+    expect(releaseStepScript).toContain('dist/standalone/qwen-code-*');
+    expect(releaseStepScript).toContain('dist/standalone/SHA256SUMS');
     // OSS upload logic must not remain in release.yml
     expect(releaseWorkflow).not.toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(releaseWorkflow).not.toContain(
@@ -2488,7 +2490,14 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(ossWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    // The sync workflow can be re-dispatched for any tag, and its steps come
+    // from the default branch while the checkout and the assets come from that
+    // tag, so it derives the flavor from the archives the release actually
+    // shipped. A repository variable describes the default branch instead, and
+    // asking a pre-flavor tag for preview archives fails the sync.
+    expect(ossWorkflow).not.toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('dist/standalone/*-opentui-preview.*');
+    expect(ossWorkflow).toContain('steps.flavor.outputs.preview_args');
     expect(ossWorkflow).toContain('--include-opentui-preview');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
@@ -2860,10 +2869,7 @@ describe('redactUrlForLog', () => {
   });
 });
 
-// These end-to-end installs spawn child processes via execFileSync;
-// the default 5s vitest timeout is too tight on slow CI runners even
-// without Windows' cmd.exe + node.exe startup overhead.
-describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
+describe('Linux/macOS installer end-to-end', () => {
   itOnUnix(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -4151,9 +4157,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
   });
 });
 
-// Windows runners are slower at spawning cmd.exe, powershell.exe, and
-// node.exe, so the default 5s vitest timeout is too tight for these E2E tests.
-describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
+describe('Windows installer end-to-end', () => {
   itOnWindows(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -4608,6 +4612,10 @@ function ensureMinimalDist({
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
   }
   if (includeNpmPackageArtifacts) {
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.js'),
+      'window.QwenExportRenderer = true;\n',
+    );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
       'console.log("postinstall");\n',

@@ -12,7 +12,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -27,13 +27,16 @@ import {
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
   type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -42,6 +45,7 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
@@ -62,12 +66,17 @@ import {
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
+import {
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
 import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { formatDateTime } from '../utils/formatDateTime';
 import {
   hasMultipleWorkspaces,
   workspaceLabelForCwd,
@@ -85,15 +94,17 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
-import { MessageList } from './MessageList';
+import type { MessageListHandle } from './MessageList';
+import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
+import { parsePlanCommand } from '../utils/planMode';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
@@ -109,6 +120,7 @@ import {
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import { PaneHeaderActions } from './PaneHeaderActions';
+import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
@@ -117,6 +129,7 @@ import accentStyles from './WorkspaceAccent.module.css';
 const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'addMenu',
   'approvalMode',
+  'plan',
   'contextUsage',
   'model',
   'voice',
@@ -159,6 +172,12 @@ interface UnknownPromptAdmission {
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
+  /** Session-list metadata for the shared title details. */
+  sessionSummary?: DaemonSessionSummary;
+  /** Last interacted pane, independent of whether its session is running. */
+  isActive?: boolean;
+  /** Must be referentially stable; reports pending state and unmount cleanup. */
+  onApprovalChange?: (sessionId: string, pending: boolean) => void;
   /**
    * The workspace this pane's session lives in. Passed explicitly by the split
    * view (which knows it per session) and shown as a composer-toolbar chip on a
@@ -219,6 +238,7 @@ export interface ChatPaneProps {
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   /** Enable the app-scoped experimental Session Workflow presentation. */
   sessionWorkflowEnabled?: boolean;
+  planControlVisible?: boolean;
 }
 
 /**
@@ -230,6 +250,9 @@ export interface ChatPaneProps {
  */
 export function ChatPane({
   title,
+  sessionSummary,
+  isActive = false,
+  onApprovalChange,
   workspaceCwd,
   renderHeaderActions,
   onClose,
@@ -251,6 +274,7 @@ export function ChatPane({
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  planControlVisible = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
@@ -265,7 +289,9 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
+  // live prompt state into its own provider (#9487).
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
@@ -274,6 +300,27 @@ export function ChatPane({
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const taskActivityKey = useMemo(
+    () => getTaskActivityKey(messages),
+    [messages],
+  );
+  const workflowsEnabled =
+    connection.supportedCommands?.workflowsEnabled === true;
+  // The activity fact travels beside the key, derived structurally — the
+  // key itself is not parseable back (callId is unconstrained text) — and
+  // gated on the endpoint the hook will actually poll.
+  const taskActivityActive = useMemo(
+    () => hasActiveTaskActivity(messages, { workflowsEnabled }),
+    [messages, workflowsEnabled],
+  );
+  const sessionTasks = useBackgroundTasks(
+    connection.sessionId,
+    taskActivityKey,
+    taskActivityActive,
+    connection.status === 'connected',
+    0,
+    workflowsEnabled,
+  );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
@@ -313,7 +360,12 @@ export function ChatPane({
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
-      if (!connection.sessionId || !onRightPanelOpen) return;
+      if (
+        !connection.sessionId ||
+        !onRightPanelOpen ||
+        getSubagentDetailsUnavailableReason(tool)
+      )
+        return;
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -483,6 +535,7 @@ export function ChatPane({
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
+  const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,
     onAcceptFollowup,
@@ -527,6 +580,12 @@ export function ChatPane({
   pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId || !onApprovalChange) return;
+    onApprovalChange(sessionId, approvalActive);
+    return () => onApprovalChange(sessionId, false);
+  }, [connection.sessionId, approvalActive, onApprovalChange]);
   const paneVoiceCwd =
     connection.sessionId &&
     connection.workspaceCwd &&
@@ -709,6 +768,108 @@ export function ChatPane({
     [controlGoal, reportError, sessionOwnerGuard, t],
   );
 
+  const planPreparationRef = useRef<{ isCurrent: () => boolean } | null>(null);
+  const planMode = connection.currentMode === 'plan';
+  const executionMode = planMode
+    ? (connection.planExecutionMode ?? 'default')
+    : (connection.currentMode ?? 'default');
+  const [modeControlsBusy, setModeControlsBusy] = useState(false);
+  const modeTransitionRef = useRef<{
+    owner: { isCurrent: () => boolean };
+    requestId?: string;
+    initialMode?: string;
+    hadActiveTurn?: boolean;
+  } | null>(null);
+  const releaseModeTransition = useCallback(
+    (transition: typeof modeTransitionRef.current) => {
+      if (modeTransitionRef.current !== transition) return;
+      modeTransitionRef.current = null;
+      setModeControlsBusy(false);
+    },
+    [],
+  );
+  useEffect(() => {
+    const transition = modeTransitionRef.current;
+    if (!transition) return;
+    const activeTurn = streamingState !== 'idle' || sessionHasActivePrompt;
+    if (
+      !transition.owner.isCurrent() ||
+      (transition.requestId &&
+        ((connection.currentMode !== 'plan' &&
+          connection.currentMode !== transition.initialMode) ||
+          (isExitPlanApprovalRequest(pendingToolApproval) &&
+            pendingToolApproval?.id !== transition.requestId) ||
+          (transition.hadActiveTurn && !activeTurn)))
+    ) {
+      releaseModeTransition(transition);
+    } else if (activeTurn) {
+      transition.hadActiveTurn = true;
+    }
+  });
+
+  const setComposerMode = useCallback(
+    async (modeId: string, enabled: boolean): Promise<boolean> => {
+      if (modeTransitionRef.current?.owner.isCurrent()) return false;
+      if (
+        connection.loadingTranscript ||
+        shouldBlockComposerSubmit({
+          connectionStatus: connection.status,
+          hasSession: Boolean(connection.sessionId),
+        })
+      )
+        return false;
+      if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
+        reportError(
+          new Error(`Unsupported execution approval mode: ${modeId}`),
+          'Failed to set approval mode',
+        );
+        return false;
+      }
+      const owner = sessionOwnerGuard.capture();
+      const transition = { owner };
+      modeTransitionRef.current = transition;
+      setModeControlsBusy(true);
+      try {
+        await actions.setApprovalMode(modeId, { planMode: enabled });
+        if (!owner.isCurrent()) return false;
+        const approval = pendingToolApprovalRef.current;
+        if (
+          !enabled &&
+          approval &&
+          !isExitPlanApprovalRequest(approval) &&
+          (modeId === 'yolo' ||
+            (modeId === 'auto-edit' && approval.toolKind === 'edit'))
+        ) {
+          const allowOnce = approval.options.find(
+            (option) => option.kind === 'allow_once',
+          );
+          if (allowOnce)
+            void actions
+              .submitPermission(approval.id, allowOnce.id)
+              .catch((error: unknown) =>
+                reportError(error, 'Failed to auto-approve tool call'),
+              );
+        }
+        return true;
+      } catch (error) {
+        if (owner.isCurrent())
+          reportError(error, 'Failed to set approval mode');
+        return false;
+      } finally {
+        releaseModeTransition(transition);
+      }
+    },
+    [
+      actions,
+      connection.loadingTranscript,
+      connection.status,
+      connection.sessionId,
+      reportError,
+      sessionOwnerGuard,
+      releaseModeTransition,
+    ],
+  );
+
   const handleSubmit = useCallback(
     (
       text: string,
@@ -717,10 +878,12 @@ export function ChatPane({
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
-      const trimmed = text.trim();
+      let trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
-      if (admissionPayloadLocked) return false;
+      if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
+        return false;
+      transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
       // main composer — otherwise an override works on one surface only.
@@ -730,7 +893,38 @@ export function ChatPane({
       ) {
         return true;
       }
-      if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+      const planCommand = trimmed.match(/^\/plan(?:\s+(.*))?$/is);
+      const planOperation = planCommand
+        ? parsePlanCommand(planCommand[1] ?? '', planMode)
+        : undefined;
+      if (planOperation) {
+        if (modeTransitionRef.current?.owner.isCurrent()) {
+          reportError(
+            new Error(t('mode.changePending')),
+            t('local.approvalMode'),
+          );
+          return false;
+        }
+        if (
+          connection.loadingTranscript ||
+          shouldBlockComposerSubmit({
+            connectionStatus: connection.status,
+            hasSession: Boolean(connection.sessionId),
+          })
+        )
+          return false;
+        if (!planOperation.prompt) {
+          void setComposerMode(executionMode, planOperation.enabled);
+          return true;
+        }
+        if (
+          streamingStateRef.current !== 'idle' ||
+          sessionHasActivePromptRef.current
+        )
+          return false;
+        trimmed = planOperation.prompt;
+      }
+      if (!planOperation && /^\/goal(?:\s|$)/i.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
         // that cannot reach the daemon must leave the text in the composer
         // instead of consuming it, appending a transcript entry, and failing
@@ -804,7 +998,7 @@ export function ChatPane({
         }
       };
       const commandBlockedByGoal =
-        trimmed.startsWith('/') &&
+        text.trim().startsWith('/') &&
         isGoalGateBlocked({
           sessionId: connection.sessionId,
           goalState: connection.goalState,
@@ -817,52 +1011,83 @@ export function ChatPane({
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
-        actions
-          .sendPrompt(trimmed, {
-            ...(images && images.length ? { images } : {}),
-            ...(files && files.length ? { files } : {}),
-            ...(inputAnnotations ? { inputAnnotations } : {}),
-            onAdmissionStarted: () => {
-              admissionStarted = true;
-            },
-            onAdmitted: () => {
+        const submit = () =>
+          actions
+            .sendPrompt(trimmed, {
+              ...(images && images.length ? { images } : {}),
+              ...(files && files.length ? { files } : {}),
+              ...(inputAnnotations ? { inputAnnotations } : {}),
+              onAdmissionStarted: () => {
+                admissionStarted = true;
+              },
+              onAdmitted: () => {
+                if (admissionOwnerRef.current !== admissionOwner) return;
+                if (connection.sessionId && catalogOwnerCwd) {
+                  sessionCatalogController.promptAdmitted(
+                    catalogOwnerCwd,
+                    connection.sessionId,
+                  );
+                }
+                admitted = true;
+                notifyFirstPromptAdmitted();
+                clearFollowup();
+                commitAccepted?.();
+              },
+            })
+            .catch((error: unknown) => {
               if (admissionOwnerRef.current !== admissionOwner) return;
-              if (connection.sessionId && catalogOwnerCwd) {
-                sessionCatalogController.promptAdmitted(
+              const definitelyRejected =
+                isDefinitelyRejectedPromptAdmission(error);
+              if (admitted || !admissionStarted || definitelyRejected) {
+                reportError(error, 'Failed to send prompt');
+                return;
+              }
+              if (catalogOwnerCwd) {
+                sessionCatalogController.promptAdmissionUncertain(
                   catalogOwnerCwd,
-                  connection.sessionId,
                 );
               }
-              admitted = true;
-              notifyFirstPromptAdmitted();
-              clearFollowup();
-              commitAccepted?.();
-            },
-          })
-          .catch((error: unknown) => {
-            if (admissionOwnerRef.current !== admissionOwner) return;
-            const definitelyRejected =
-              isDefinitelyRejectedPromptAdmission(error);
-            if (admitted || !admissionStarted || definitelyRejected) {
-              reportError(error, 'Failed to send prompt');
-              return;
-            }
-            if (catalogOwnerCwd) {
-              sessionCatalogController.promptAdmissionUncertain(
-                catalogOwnerCwd,
+              setUnknownPromptAdmission({
+                owner: admissionOwner,
+                commitAccepted,
+                payloadAvailable: true,
+              });
+              onImageIngestionNotice?.('warning', t('queue.admissionUnknown'));
+              console.warn(
+                '[ChatPane] prompt admission outcome is unknown',
+                error,
               );
-            }
-            setUnknownPromptAdmission({
-              owner: admissionOwner,
-              commitAccepted,
-              payloadAvailable: true,
             });
-            onImageIngestionNotice?.('warning', t('queue.admissionUnknown'));
-            console.warn(
-              '[ChatPane] prompt admission outcome is unknown',
-              error,
-            );
-          });
+        if (planOperation) {
+          const owner = sessionOwnerGuard.capture();
+          planPreparationRef.current = owner;
+          void setComposerMode(executionMode, planOperation.enabled).then(
+            (applied) => {
+              if (planPreparationRef.current === owner)
+                planPreparationRef.current = null;
+              const current = connectionRef.current;
+              if (
+                !applied ||
+                !owner.isCurrent() ||
+                current.loadingTranscript ||
+                shouldBlockComposerSubmit({
+                  connectionStatus: current.status,
+                  hasSession: Boolean(current.sessionId),
+                }) ||
+                streamingStateRef.current !== 'idle' ||
+                sessionHasActivePromptRef.current ||
+                isGoalGateBlocked({
+                  sessionId: current.sessionId,
+                  goalState: current.goalState,
+                })
+              )
+                return;
+              void submit();
+            },
+          );
+        } else {
+          void submit();
+        }
         return false;
       }
       const queued =
@@ -883,10 +1108,15 @@ export function ChatPane({
     },
     [
       actions,
+      executionMode,
+      planMode,
+      setComposerMode,
+      sessionOwnerGuard,
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
       connection.goalState,
+      connection.loadingTranscript,
       connection.sessionId,
       connection.status,
       controlGoal,
@@ -902,17 +1132,67 @@ export function ChatPane({
   );
 
   const handleConfirm = useCallback(
-    (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      return actions
-        .submitPermission(id, selectedOption, answers)
-        .then(() => undefined)
-        .catch((error: unknown) => {
+    async (
+      id: string,
+      selectedOption: string,
+      answers?: Record<string, string>,
+    ) => {
+      const request = pendingToolApprovalRef.current;
+      const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
+      if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
+        throw new Error('Approval mode or plan confirmation is still pending');
+      }
+      const owner = sessionOwnerGuard.capture();
+      const option = request?.options.find(
+        (entry) => entry.id === selectedOption,
+      );
+      const approvesPlan =
+        isPlan &&
+        (option?.kind === 'allow_once' || option?.kind === 'allow_always');
+      const transition = isPlan
+        ? {
+            owner,
+            ...(approvesPlan
+              ? {
+                  requestId: id,
+                  initialMode: connectionRef.current.currentMode,
+                  hadActiveTurn:
+                    streamingStateRef.current !== 'idle' ||
+                    sessionHasActivePromptRef.current,
+                }
+              : {}),
+          }
+        : null;
+      if (transition) {
+        modeTransitionRef.current = transition;
+        setModeControlsBusy(true);
+      }
+      try {
+        if (approvesPlan && connection.planExecutionMode !== undefined) {
+          await actions.respondToPermission(id, {
+            outcome: { outcome: 'selected', optionId: selectedOption },
+            expectedPlanExecutionMode: connection.planExecutionMode,
+          });
+        } else {
+          await actions.submitPermission(id, selectedOption, answers);
+        }
+        if (transition && !approvesPlan) releaseModeTransition(transition);
+      } catch (error) {
+        if (transition) releaseModeTransition(transition);
+        if (owner.isCurrent())
           reportError(error, 'Failed to submit permission choice');
-          throw error;
-        });
+        throw error;
+      }
     },
-    [actions, reportError],
+    [
+      actions,
+      reportError,
+      sessionOwnerGuard,
+      releaseModeTransition,
+      connection.planExecutionMode,
+    ],
   );
+
   const handleAskUserConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) =>
       actions.submitPermission(id, selectedOption, answers),
@@ -942,7 +1222,11 @@ export function ChatPane({
   previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
-    (src: string, alt?: string) => {
+    (
+      src: string,
+      alt?: string,
+      source?: { kind: 'attachment'; attachmentId: string },
+    ) => {
       if (!connection.sessionId) return;
       handleRightPanelOpen({
         id: 'image',
@@ -951,6 +1235,7 @@ export function ChatPane({
         turnId: connection.sessionId,
         src,
         ...(alt ? { alt } : {}),
+        ...(source ? { attachmentId: source.attachmentId } : {}),
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
@@ -969,6 +1254,9 @@ export function ChatPane({
           ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
           ...(resolvedFile.text !== undefined
             ? { text: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
             : {}),
           ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
           ...(resolvedFile.workspacePath
@@ -1090,44 +1378,13 @@ export function ChatPane({
   );
   const handleSelectMode = useCallback(
     (modeId: string) => {
-      // Modes always arrive from the toolbar's own picker, but narrow anyway so
-      // the daemon action gets a well-typed value (mirrors App's handleSetMode).
-      if (!isDaemonApprovalMode(modeId)) {
-        reportError(
-          new Error(`Unsupported approval mode: ${modeId}`),
-          'Failed to set approval mode',
-        );
-        return;
-      }
-      actions
-        .setApprovalMode(modeId)
-        .then(() => {
-          // Mirror App's handleSetMode: switching THIS pane to yolo (or
-          // auto-edit for an edit tool) auto-approves a tool call already
-          // awaiting approval in this pane, so the shortcut behaves the same as
-          // in the single-session chat.
-          const approval = pendingToolApprovalRef.current;
-          if (!approval) return;
-          const autoApprove =
-            modeId === 'yolo' ||
-            (modeId === 'auto-edit' && approval.toolKind === 'edit');
-          if (!autoApprove) return;
-          const allowOnce = approval.options.find(
-            (option) => option.kind === 'allow_once',
-          );
-          if (!allowOnce) return;
-          actions
-            .submitPermission(approval.id, allowOnce.id)
-            .catch((error: unknown) =>
-              reportError(error, 'Failed to auto-approve tool call'),
-            );
-        })
-        .catch((error: unknown) =>
-          reportError(error, 'Failed to set approval mode'),
-        );
+      void setComposerMode(modeId, planMode);
     },
-    [actions, reportError],
+    [setComposerMode, planMode],
   );
+  const handleTogglePlan = useCallback(() => {
+    void setComposerMode(executionMode, !planMode);
+  }, [setComposerMode, executionMode, planMode]);
   const handleSelectModel = useCallback(
     (modelId: string) => {
       actions
@@ -1152,6 +1409,7 @@ export function ChatPane({
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
+  const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
   // On a multi-workspace daemon, surface this pane's workspace as a composer-
   // toolbar chip (next to where the git-branch chip sits), so it's clear which
@@ -1163,10 +1421,11 @@ export function ChatPane({
   // `React.memo`, and a fresh `[...]` each render would defeat it.
   const paneToolbarActions = useMemo(
     () =>
-      showWorkspaceChip
+      (showWorkspaceChip
         ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
-        : PANE_TOOLBAR_ACTIONS,
-    [showWorkspaceChip],
+        : PANE_TOOLBAR_ACTIONS
+      ).filter((action) => action !== 'plan' || planControlVisible),
+    [showWorkspaceChip, planControlVisible],
   );
   const headerActions =
     connection.sessionId && renderHeaderActions
@@ -1201,6 +1460,8 @@ export function ChatPane({
     <section
       className={`${styles.pane} ${embedded ? styles.paneEmbedded : ''}`.trim()}
       data-testid="chat-pane"
+      data-pane-active={isActive ? '' : undefined}
+      aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
       {goalEditOpen && connection.goalState?.goal && (
@@ -1235,9 +1496,25 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          <span className={styles.title} title={headerLabel}>
-            {headerLabel}
-          </span>
+          {sessionSummary && !hidden ? (
+            <SessionDetailsTooltip
+              session={{
+                ...sessionSummary,
+                hasActivePrompt: sessionHasActivePrompt,
+              }}
+              label={headerLabel}
+              time={sessionStamp ? formatDateTime(sessionStamp) : ''}
+              completedUnread={false}
+              workspaceLabel={workspaceLabel}
+              side="bottom"
+            >
+              <span className={styles.title}>{headerLabel}</span>
+            </SessionDetailsTooltip>
+          ) : (
+            <span className={styles.title} title={headerLabel}>
+              {headerLabel}
+            </span>
+          )}
           <PaneHeaderActions
             trailing={
               onToggleMaximize || onClose ? (
@@ -1259,11 +1536,10 @@ export function ChatPane({
                           : 'splitView.maximizePane',
                       )}
                     >
-                      {/* Same icon vocabulary as the dialog fullscreen toggle. */}
                       {isMaximized ? (
-                        <Minimize2Icon size={16} aria-hidden />
+                        <ShrinkIcon size={16} aria-hidden />
                       ) : (
-                        <Maximize2Icon size={16} aria-hidden />
+                        <ExpandIcon size={16} aria-hidden />
                       )}
                     </button>
                   )}
@@ -1315,49 +1591,54 @@ export function ChatPane({
           onOpen={openMonitorDetails}
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
-            <MessageList
-              messages={messages}
-              pendingApproval={pendingToolApproval}
-              loadingTranscript={connection.loadingTranscript}
-              catchingUp={connection.catchingUp}
-              hasOlderHistory={transcriptHistory.hasMore}
-              loadingOlderHistory={transcriptHistory.loading}
-              historyCapacityReached={transcriptHistory.capacityReached}
-              historyPaginationError={transcriptHistory.paginationError}
-              onLoadOlderHistory={transcriptHistory.loadMore}
-              transcriptBlockCount={blocks.length}
-              transcriptActivity={store}
-              onReloadTranscript={
-                transcriptReloadSupported ? reloadTranscript : undefined
-              }
-              isResponding={isResponding}
-              workspaceCwd={connection.workspaceCwd || ''}
-              hideSessionTimeline
-              turnFileChanges={
-                visibleTurnOutputKinds.has('file')
-                  ? fileChangesByTurn
-                  : undefined
-              }
-              turnArtifacts={
-                visibleTurnOutputKinds.has('artifact')
-                  ? artifactsByTurn
-                  : undefined
-              }
-              turnScheduledTasks={
-                visibleTurnOutputKinds.has('scheduled_task')
-                  ? scheduledTasksByTurn
-                  : undefined
-              }
-              onTurnOutputOpen={handleRightPanelOpen}
-              onImagePreview={handleImagePreview}
-              onAttachmentPreview={handleAttachmentPreview}
-              onError={reportError}
-              generateContent={
-                connection.capabilities?.features.includes('session_generation')
-                  ? actions.generateSessionContent
-                  : undefined
-              }
-            />
+            <WorkflowDetailsProvider tasks={sessionTasks}>
+              <TranscriptViewport
+                ref={transcriptViewportRef}
+                messages={messages}
+                pendingApproval={pendingToolApproval}
+                loadingTranscript={connection.loadingTranscript}
+                catchingUp={connection.catchingUp}
+                hasOlderHistory={transcriptHistory.hasMore}
+                loadingOlderHistory={transcriptHistory.loading}
+                historyCapacityReached={transcriptHistory.capacityReached}
+                historyPaginationError={transcriptHistory.paginationError}
+                onLoadOlderHistory={transcriptHistory.loadMore}
+                transcriptBlockCount={blocks.length}
+                transcriptActivity={store}
+                onReloadTranscript={
+                  transcriptReloadSupported ? reloadTranscript : undefined
+                }
+                isResponding={isResponding}
+                workspaceCwd={connection.workspaceCwd || ''}
+                hideSessionTimeline
+                turnFileChanges={
+                  visibleTurnOutputKinds.has('file')
+                    ? fileChangesByTurn
+                    : undefined
+                }
+                turnArtifacts={
+                  visibleTurnOutputKinds.has('artifact')
+                    ? artifactsByTurn
+                    : undefined
+                }
+                turnScheduledTasks={
+                  visibleTurnOutputKinds.has('scheduled_task')
+                    ? scheduledTasksByTurn
+                    : undefined
+                }
+                onTurnOutputOpen={handleRightPanelOpen}
+                onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
+                onError={reportError}
+                generateContent={
+                  connection.capabilities?.features.includes(
+                    'session_generation',
+                  )
+                    ? actions.generateSessionContent
+                    : undefined
+                }
+              />
+            </WorkflowDetailsProvider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>
@@ -1366,10 +1647,17 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              disabled={isExitPlanApproval && modeControlsBusy}
+              planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
               planTodos={planTodos}
+              generateContent={
+                connection.capabilities?.features.includes('session_generation')
+                  ? actions.generateSessionContent
+                  : undefined
+              }
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval
@@ -1390,10 +1678,6 @@ export function ChatPane({
             />
           </div>
         )}
-        {/* A pending approval owns the pane footer: the status/queue/editor
-            area below the approval drops out of layout (kept mounted so the
-            draft survives) instead of leaving a live input under the
-            dialog. */}
         <div className={approvalActive ? styles.composerHidden : undefined}>
           {/* Panes keep the composer status compact: spinner + elapsed time +
               token count + cancel hint, but no rotating "witty" loading
@@ -1472,7 +1756,10 @@ export function ChatPane({
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}
-            currentMode={connection.currentMode ?? 'default'}
+            currentMode={executionMode}
+            modeControlsDisabled={modeControlsBusy}
+            planMode={planMode}
+            onTogglePlan={handleTogglePlan}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
             availableModels={availableModels}

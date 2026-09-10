@@ -7,33 +7,51 @@
 /**
  * Live-turn regression tests (R2): the prompt reaches the client as a full
  * PartListUnion (multimodal included) and the per-turn modelOverride travels
- * through SendMessageOptions.
+ * through SendMessageOptions. Plus the two hops Batch 8 added: text drained at
+ * a tool boundary is resolved like an idle submission (`@path` expansion under
+ * a read deadline, with a queue restore when the turn dies mid-read), and an
+ * image reaching the model goes through the prompt-side vision bridge.
  */
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { ApprovalMode, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  getUnsupportedImageFormatWarning,
+  SendMessageType,
+} from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ToolCallConfirmationDetails,
+  VisionBridgeModelSelection,
 } from '@qwen-code/qwen-code-core';
 import {
+  ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
   resetPromptCountForTesting,
   selectAutoApprovals,
+  STARTUP_CHAT_WAIT_MS,
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
-// The steering test drives one full tool round-trip; replace the scheduler
-// with a stub that completes the pending calls immediately.
+// `runVisionBridge` is the one bridge collaborator that would reach a real
+// provider, so it is recorded here; every other core export (including the
+// bridge's gates and formatters) stays real.
+const visionMocks = vi.hoisted(() => ({
+  run: vi.fn(),
+}));
+
+// The round-trip tests also replace the tool scheduler with a stub that
+// completes the pending calls immediately.
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
+    runVisionBridge: (params: unknown) => visionMocks.run(params),
     CoreToolScheduler: class FakeScheduler {
       private readonly opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
@@ -78,6 +96,31 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           await this.opts.onToolCallsUpdate?.(
             waiting('Hook requested confirmation to run'),
           );
+        } else if (
+          calls.some(
+            (c) =>
+              (c.args as { __cancelApproval?: boolean } | undefined)
+                ?.__cancelApproval,
+          )
+        ) {
+          // No/Esc outcome shape: the scheduler cancels the call, so it
+          // leaves awaiting_approval with status 'cancelled'.
+          const cancelled = calls.map((c) => ({
+            status: 'cancelled',
+            request: c,
+          }));
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((c) => ({
+              status: 'awaiting_approval',
+              request: c,
+              confirmationDetails: {
+                type: 'info',
+                title: 'original',
+                onConfirm: async () => {},
+              },
+            })),
+          );
+          await this.opts.onToolCallsUpdate?.(cancelled);
         } else {
           // Emit one awaiting_approval update per call (twice, to prove the
           // live-session dedupe). A call with `__invocationDesc` args also
@@ -115,26 +158,37 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           }
         }
         await this.opts.onAllToolCallsComplete(
-          calls.map((c) => ({
-            request: {
-              callId: c.callId,
-              name: c.name ?? 'test_tool',
-              args: c.args ?? {},
-            },
-            status: 'success',
-            response: {
-              responseParts: [
-                {
-                  functionResponse: {
-                    name: c.name ?? 'test_tool',
-                    id: c.callId,
-                    response: { ok: true },
+          calls.map((c) => {
+            const a = (c.args ?? {}) as {
+              __cancelled?: boolean;
+              __cancelApproval?: boolean;
+            };
+            return {
+              request: {
+                callId: c.callId,
+                name: c.name ?? 'test_tool',
+                args: c.args ?? {},
+              },
+              // A No/Esc cancellation leaves the scheduler with a cancelled
+              // call — the send loop must see it as terminal to stop.
+              status:
+                a.__cancelled === true || a.__cancelApproval === true
+                  ? 'cancelled'
+                  : 'success',
+              response: {
+                responseParts: [
+                  {
+                    functionResponse: {
+                      name: c.name ?? 'test_tool',
+                      id: c.callId,
+                      response: { ok: true },
+                    },
                   },
-                },
-              ],
-              resultDisplay: 'done',
-            },
-          })),
+                ],
+                resultDisplay: 'done',
+              },
+            };
+          }),
         );
       }
     },
@@ -151,29 +205,93 @@ const atMocks = vi.hoisted(() => ({
     processedQuery: null,
     shouldProceed: true,
   } as HandleAtCommandResult,
+  /**
+   * Set to hang the expander forever — a read that ignores its signal. The hook
+   * runs first, so a test can abort the turn from inside the read.
+   */
+  hang: null as (() => void) | null,
+  /**
+   * Set to abort the turn inside the read but still resolve it. Queued two
+   * microtasks deep so the abort lands after the race has delivered the read's
+   * result but before the steering hop returns — the "hop resolved cleanly,
+   * abort right behind it" window.
+   */
+  abortAfter: null as (() => void) | null,
 }));
 
 vi.mock('../hooks/atCommandProcessor.js', () => ({
   handleAtCommand: async ({ query }: { query: string }) => {
     atMocks.calls.push(query);
+    if (atMocks.hang) {
+      atMocks.hang();
+      return new Promise<HandleAtCommandResult>(() => {});
+    }
+    if (atMocks.abortAfter) {
+      queueMicrotask(() => queueMicrotask(atMocks.abortAfter!));
+    }
     return atMocks.result;
   },
 }));
 
-function createFakeConfig(sendMessageStream: (...args: unknown[]) => unknown) {
+function createFakeConfig(
+  sendMessageStream: (...args: unknown[]) => unknown,
+  bridgeModel?: VisionBridgeModelSelection,
+  isInitialized: () => boolean = () => true,
+  recorder?: {
+    recordMidTurnUserMessage: (...args: unknown[]) => void;
+  },
+) {
+  // One stable client object: tests spy on its addHistory through
+  // getGeminiClient() (R5-4/R6-5).
+  const client = {
+    sendMessageStream,
+    isInitialized,
+    // R5-4/R6-5: an abort at the sampling boundary still writes the
+    // completed batch's function responses to history before returning.
+    addHistory: vi.fn(async () => {}),
+    // A chat the startup flight has already completed: `setTools()` ran, so
+    // its declarations are in the generation config the send reads.
+    getChat: () => ({
+      getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
+    }),
+  };
   return {
     initialize: vi.fn(async () => {}),
-    getGeminiClient: () => ({ sendMessageStream }),
+    getGeminiClient: () => client,
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
     getContentGeneratorConfig: () => ({ authType: 'qwen-oauth' }),
+    // Pinning a bridge model is what turns `shouldRunVisionBridge` on; every
+    // other test leaves it undefined and the prompt rides through untouched.
+    getDefaultVisionBridgeModel: () => bridgeModel,
+    getChatRecordingService: () => recorder,
     getDebugLogger: () => ({
       debug: () => {},
       warn: () => {},
       error: () => {},
     }),
   } as unknown as Config;
+}
+
+/** One tool batch on call 1, plain finish on the continuation call. */
+function oneToolBatchStream(request: {
+  callId: string;
+  name: string;
+  args?: unknown;
+}) {
+  let calls = 0;
+  return vi.fn(function* (): Generator<{
+    type: string;
+    value?: unknown;
+  }> {
+    calls += 1;
+    if (calls === 1) {
+      yield { type: 'tool_call_request', value: request };
+      return;
+    }
+    yield { type: 'finished', value: {} };
+  });
 }
 
 async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
@@ -196,10 +314,18 @@ describe('livePromptEvents', () => {
     ...overrides,
   });
 
+  /** An attached image, as the composer hands it to the stream. */
+  const imagePart = {
+    inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+  };
+
   beforeEach(() => {
     resetPromptCountForTesting();
     atMocks.calls.length = 0;
     atMocks.result = { processedQuery: null, shouldProceed: true };
+    atMocks.hang = null;
+    atMocks.abortAfter = null;
+    visionMocks.run.mockReset();
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -216,6 +342,315 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
     expect(options).toEqual({ type: SendMessageType.UserQuery });
+  });
+
+  it('shares one initialization promise across callers', async () => {
+    const initialize = vi.fn(async () => {});
+    const config = { initialize } as unknown as Config;
+
+    await Promise.all([
+      ensureConfigInitialized(config),
+      ensureConfigInitialized(config),
+    ]);
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the shared initialization before the first send', async () => {
+    let resolveInitialize!: () => void;
+    const initialize = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInitialize = resolve;
+        }),
+    );
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize,
+    } as unknown as Config;
+
+    const gen = livePromptEvents(config, 'hello');
+    const drained = drain(gen);
+
+    // The registry loader's initialize is still in flight; the turn must not
+    // send while it runs (the pre-fix behavior died with "Chat not
+    // initialized" here).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendMessageStream).not.toHaveBeenCalled();
+
+    resolveInitialize();
+    await drained;
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds when another caller already initialized the config', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+    } as unknown as Config;
+
+    await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a failed initialization instead of "Chat not initialized"', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('auth exploded');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+      }),
+    } as unknown as Config;
+
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+  });
+
+  it('keeps surfacing the real initialization failure on later submits', async () => {
+    // Core never retries a settled initialization, so the rejected shared
+    // promise stays cached: every submit sees "auth exploded", not the
+    // masked re-entry error that degrades into "Chat not initialized".
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('auth exploded');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+      }),
+    } as unknown as Config;
+
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+  });
+
+  it('keeps the rejected initialization cached across direct re-entries', async () => {
+    // Core flips `initialized` before awaiting the flight, so a re-entry after
+    // a settled failure throws the re-entry error, not the real one: only the
+    // cached rejected promise keeps surfacing the real cause. The submit-path
+    // test above cannot see this — its mock rejects identically on every call,
+    // so re-entering after an evicted cache entry looks the same.
+    let calls = 0;
+    const initialize = vi.fn(async () => {
+      calls += 1;
+      throw new Error(
+        calls === 1 ? 'auth exploded' : 'Config was already initialized',
+      );
+    });
+    const config = {
+      initialize,
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'auth exploded',
+    );
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'auth exploded',
+    );
+    expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the chat an in-flight startup initialization creates', async () => {
+    // The boot-time command-registry load owns the initialize() flight, so the
+    // turn's own call throws "already initialized" and its catch proceeds
+    // while startChat() has not run yet. The real client then throws from
+    // getChat(); the stand-in throws the same way, so the wait is what keeps
+    // the turn alive.
+    let chatReady = false;
+    const sendMessageStream = vi.fn(function* () {
+      if (!chatReady) throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream, undefined, () => chatReady),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+    } as unknown as Config;
+    setTimeout(() => {
+      chatReady = true;
+    }, 250);
+
+    await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the first send until the startup chat has tool declarations', async () => {
+    // `startChat()` assigns the chat (client.ts:2261) and only then awaits the
+    // SessionStart hook, the session-start context and `setTools()`. A wait
+    // that releases on chat existence alone sends the first prompt of the
+    // session with no tool declarations at all.
+    let chatExists = false;
+    let tools: unknown[] | undefined;
+    let toolsAtSend: unknown[] | undefined;
+    const sendMessageStream = vi.fn(function* () {
+      toolsAtSend = tools;
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => chatExists,
+        getChat: () => ({ getGenerationConfig: () => ({ tools }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      chatExists = true;
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The chat exists while the startup flight is still inside setTools().
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sendMessageStream).not.toHaveBeenCalled();
+      tools = [{ functionDeclarations: [] }];
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // A literal, not the mutable `tools`, so a send that observed no tools
+    // cannot pass by comparing two undefined values.
+    expect(toolsAtSend).toEqual([{ functionDeclarations: [] }]);
+  });
+
+  it('reports the client error once the startup chat wait is spent', async () => {
+    // The bound is what keeps a config that never finishes initializing from
+    // polling forever: the turn falls through to the send and surfaces the
+    // client's own error instead of hanging the prompt.
+    const sendMessageStream = vi.fn(function* () {
+      throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+        getChat: () => {
+          throw new Error('Chat not initialized');
+        },
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow('Chat not initialized');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles an Esc pressed during the startup wait without sending', async () => {
+    // Releasing the wait is not enough: a text-only prompt has no abort gate
+    // between the loop and `sendMessageStream`, so falling through would fire
+    // the UserPromptSubmit hooks and push history for a cancelled prompt.
+    const controller = new AbortController();
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    // A startup flight that never creates the chat, so the wait is still
+    // running when the abort lands.
+    const config = createFakeConfig(sendMessageStream, undefined, () => false);
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(
+        livePromptEvents(config, 'hello', controller.signal),
+      );
+      let settled = false;
+      const markSettled = () => {
+        settled = true;
+      };
+      void pending.then(markSettled, markSettled);
+      await vi.advanceTimersByTimeAsync(500);
+      controller.abort();
+      // Poll ticks, not the budget: the abort must release the wait at once.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(settled).toBe(true);
+      await expect(pending).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('fails the turn when the startup wait expires on a chat with no tools', async () => {
+    // `startChat()` assigns the chat before the SessionStart hook and
+    // `setTools()`, so a flight still inside that gap — or one that died in
+    // it — leaves a chat that is not ready: a send against it declares zero
+    // tools, silently.
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: undefined }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow(
+        `Timed out after ${STARTUP_CHAT_WAIT_MS}ms`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('uses the ink promptId format and increments promptCount per turn', async () => {
@@ -235,20 +670,10 @@ describe('livePromptEvents', () => {
   });
 
   it('keeps one promptId across the tool-continuation loop of a turn', async () => {
-    let calls = 0;
-    const sendMessageStream = vi.fn(function* (): Generator<{
-      type: string;
-      value?: unknown;
-    }> {
-      calls += 1;
-      if (calls === 1) {
-        yield {
-          type: 'tool_call_request',
-          value: { callId: 't1', name: 'test_tool', args: {} },
-        };
-        return;
-      }
-      yield { type: 'finished', value: {} };
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
     });
     const config = createFakeConfig(sendMessageStream);
 
@@ -316,20 +741,10 @@ describe('livePromptEvents', () => {
   });
 
   it('rides submittedPrompt on the first send and drops it on continuation', async () => {
-    let calls = 0;
-    const sendMessageStream = vi.fn(function* (): Generator<{
-      type: string;
-      value?: unknown;
-    }> {
-      calls += 1;
-      if (calls === 1) {
-        yield {
-          type: 'tool_call_request',
-          value: { callId: 't1', name: 'test_tool', args: {} },
-        };
-        return;
-      }
-      yield { type: 'finished', value: {} };
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
     });
     const config = createFakeConfig(sendMessageStream);
 
@@ -449,20 +864,10 @@ describe('livePromptEvents', () => {
   });
 
   it('appends drained steering texts after tool responses at the boundary', async () => {
-    let calls = 0;
-    const sendMessageStream = vi.fn(function* (): Generator<{
-      type: string;
-      value?: unknown;
-    }> {
-      calls += 1;
-      if (calls === 1) {
-        yield {
-          type: 'tool_call_request',
-          value: { callId: 't1', name: 'test_tool', args: {} },
-        };
-        return;
-      }
-      yield { type: 'finished', value: {} };
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
     });
     const config = createFakeConfig(sendMessageStream);
 
@@ -488,6 +893,256 @@ describe('livePromptEvents', () => {
 
   it('skips steering when the turn is aborted', async () => {
     const drainSteering = vi.fn(() => ['never']);
+    const controller = new AbortController();
+    const batch = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    // Esc reaches the generator mid-turn, not before it: the abort lands on
+    // the tool-response boundary, which is where a real cancel arrives.
+    const sendMessageStream = vi.fn(() => {
+      controller.abort();
+      return batch();
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'start', controller.signal, { drainSteering }),
+    );
+
+    expect(drainSteering).not.toHaveBeenCalled();
+  });
+
+  // --- The steering hop resolves the way an idle submission does (U-21) ----
+
+  const toolResponse = {
+    functionResponse: { name: 'test_tool', id: 't1', response: { ok: true } },
+  };
+
+  it('expands an @-mention in drained steering text before the boundary send', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [
+        { text: 'look @src/a.ts' },
+        { text: '--- Content from src/a.ts ---\nFILE BODY' },
+      ],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['look @src/a.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(atMocks.calls).toEqual(['look @src/a.ts']);
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondPrompt).toEqual([
+      toolResponse,
+      { text: 'look @src/a.ts' },
+      { text: '--- Content from src/a.ts ---\nFILE BODY' },
+    ]);
+    // The read the model received shows up as the settled card ink renders.
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'tool-start',
+          id: 'client-read-1',
+          tool: 'Read File(s)',
+          title: 'src/a.ts',
+        },
+        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
+        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+      ]),
+    );
+  });
+
+  it('joins drained steering texts with a blank line between messages', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    );
+
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondPrompt).toEqual([
+      toolResponse,
+      { text: 'first' },
+      { text: '\n\n' },
+      { text: 'second' },
+    ]);
+    expect(atMocks.calls).toEqual([]);
+  });
+
+  it('restores the whole drained batch when the turn dies inside a steering read', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const controller = new AbortController();
+    const restoreSteering = vi.fn();
+    atMocks.hang = () => controller.abort();
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => ['read @a.ts', 'then @b.ts'],
+        restoreSteering,
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // All-or-nothing: the resolved hop dies with the turn, so every text comes
+    // back instead of a half-built message reaching the model.
+    expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts', 'then @b.ts']);
+    // R6-5: the dead signal never sends the continuation — the completed
+    // batch's responses reach history instead (the R5-4 shape, pinned below).
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // And nothing the restored hop produced reaches the transcript: the echo
+    // belongs to ink's accept step (U-12), which an aborted hop never gets to.
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  // --- U-32: a steer is recorded for /resume (ink accept() :3352-3358) -----
+
+  it('records each surviving steered message with its own parts (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    );
+
+    // Per message, in ink accept() order — each with its own parts, not the
+    // joined hop (a resumed session replays the same shape).
+    expect(recordMidTurnUserMessage.mock.calls).toEqual([
+      [[{ text: 'first' }], 'first'],
+      [[{ text: 'second' }], 'second'],
+    ]);
+  });
+
+  it('records nothing when the steering hop is restored (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const controller = new AbortController();
+    atMocks.hang = () => controller.abort();
+
+    await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => ['read @a.ts'],
+      }),
+    );
+
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    // R6-5: the abort inside the hop is the same dead-signal window as an
+    // abort after the hop — the completed batch's responses still reach
+    // history, and no continuation send rides the aborted signal.
+    const addHistory = vi.mocked(config.getGeminiClient().addHistory);
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 't1')).toBe(
+      true,
+    );
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the steer when the abort lands after the hop resolves (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const addHistory = vi.fn();
+    const config = {
+      ...createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory,
+        isInitialized: () => true,
+        getChat: () => ({
+          getGenerationConfig: () => ({
+            tools: [{ functionDeclarations: [] }],
+          }),
+        }),
+      }),
+    } as unknown as Config;
+    const controller = new AbortController();
+    const restoreSteering = vi.fn();
+    atMocks.abortAfter = () => controller.abort();
+    atMocks.result = {
+      processedQuery: [{ text: 'resolved @a.ts' }],
+      shouldProceed: true,
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => ['read @a.ts'],
+        restoreSteering,
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // The hop resolved cleanly, but the continuation send will never run on
+    // the aborted signal — ink re-checks the signal after accept() and so must
+    // the recording: writing it here would commit a mid-turn user message the
+    // model never saw, and /resume would replay it as the user's words.
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts']);
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+    // The resolved hop does not ride the dead signal: no continuation send.
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // The batch itself completed before the abort, so its responses must
+    // still be paired with their calls (R5-4): without the history write the
+    // next send's orphan repair tells the model the successful tool failed
+    // and invites a retry.
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 't1')).toBe(
+      true,
+    );
+  });
+
+  it('restores the steer and records nothing when the continuation send throws (R6-7)', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
       type: string;
@@ -501,17 +1156,593 @@ describe('livePromptEvents', () => {
         };
         return;
       }
-      yield { type: 'finished', value: {} };
+      throw new Error('429 rate limited');
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const restoreSteering = vi.fn();
+
+    await expect(
+      drain(
+        livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => ['also check the tests'],
+          restoreSteering,
+        }),
+      ),
+    ).rejects.toThrow('429 rate limited');
+
+    // The steer reached the send but the send died before delivering it: no
+    // mid-turn recording for content the model never saw, and the drained
+    // text goes back raw so the retried turn re-expands it.
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(restoreSteering).toHaveBeenCalledWith(['also check the tests']);
+  });
+
+  it('gives up on a hung mid-turn read instead of parking the boundary', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
     });
     const config = createFakeConfig(sendMessageStream);
-    const controller = new AbortController();
-    controller.abort();
+    const restoreSteering = vi.fn();
+    // Empty hook: nothing aborts, so only the read deadline frees the boundary.
+    atMocks.hang = () => {};
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(
+        livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => ['read @hanging.ts'],
+          restoreSteering,
+        }),
+      );
+      // The turn reaches the boundary through several microtask hops; pump
+      // until the read deadline is armed.
+      let armed = false;
+      for (let i = 0; i < 40 && !armed; i++) {
+        await vi.advanceTimersByTimeAsync(1);
+        armed = vi.getTimerCount() > 0;
+      }
+      expect(armed).toBe(true);
+      // ink's MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS is 10 s.
+      await vi.advanceTimersByTimeAsync(10_500);
+      const events = (await pending) as OpenTuiStreamEvent[];
+
+      expect(events.filter((e) => e.type === 'warning')).toEqual([
+        {
+          type: 'warning',
+          text: 'Could not attach file: Mid-turn @ command resolution timed out',
+        },
+      ]);
+      // A timeout is the read's failure, not the turn's: the text is dropped
+      // like any declined expansion rather than requeued forever.
+      expect(restoreSteering).not.toHaveBeenCalled();
+      const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+      expect(secondPrompt).toEqual([toolResponse]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // --- U-12: the steer shows up as an unsent user row (ink accept()) -------
+
+  it('echoes each surviving steered text as an unsent user row', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: 'first', sentToModel: false },
+      { type: 'user', text: 'second', sentToModel: false },
+    ]);
+  });
+
+  it('echoes the steer after the resolved read cards, like ink accept()', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [
+        { text: 'look @src/a.ts' },
+        { text: '--- Content from src/a.ts ---\nFILE BODY' },
+      ],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['look @src/a.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // accept() order: the read cards first, then the USER row at grant.
+    const cardIndex = events.findIndex(
+      (e) => e.type === 'tool-end' && e.id === 'client-read-1',
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'look @src/a.ts',
+    );
+    expect(cardIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(cardIndex);
+    expect(events[echoIndex]).toEqual({
+      type: 'user',
+      text: 'look @src/a.ts',
+      sentToModel: false,
+    });
+  });
+
+  it('renders each steered message with its own cards before its own echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [{ text: 'expanded' }],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['one @src/a.ts', 'two @src/b.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // ink accept() runs each message's side effects and then adds its USER row,
+    // so the pairs interleave rather than grouping all cards before all rows.
+    expect(
+      events
+        .filter(
+          (e) =>
+            e.type === 'user' ||
+            (e.type === 'tool-end' && e.id === 'client-read-1'),
+        )
+        .map((e) => (e.type === 'user' ? `echo:${e.text}` : 'card')),
+    ).toEqual(['card', 'echo:one @src/a.ts', 'card', 'echo:two @src/b.ts']);
+  });
+
+  it('does not echo a steer the expander declined', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = { processedQuery: null, shouldProceed: false };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@declined.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  it('echoes a steer whose expansion resolved to no parts', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    // Proceeded, but nothing came back. The echo is deliberately decoupled from
+    // this message's own parts, which over-shows against ink in the all-empty
+    // hop — its caller drops the whole hop (use-llm-stream.ts:3394), so accept()
+    // never runs there. That is the divergence Decision 4 of the batch-9 design
+    // doc records, not a parity claim.
+    atMocks.result = { processedQuery: [], shouldProceed: true };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@empty.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: '@empty.ts', sentToModel: false },
+    ]);
+  });
+
+  // --- The prompt-side vision bridge (U-25) --------------------------------
+
+  const bridgeModel: VisionBridgeModelSelection = { id: 'qwen3-vl' };
+
+  it('converts a composer image through the bridge and discloses the egress', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream, bridgeModel);
+    visionMocks.run.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'what is this?' }, { text: 'IMAGE TRANSCRIPT' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'qwen3-vl',
+      egressOccurred: true,
+    });
+    const parts = [{ text: 'what is this?' }, imagePart];
+
+    const events = (await drain(
+      livePromptEvents(config, parts, undefined, {
+        submittedPrompt: 'what is this?',
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([
+      { text: 'what is this?' },
+      { text: 'IMAGE TRANSCRIPT' },
+    ]);
+    expect(visionMocks.run).toHaveBeenCalledWith(
+      expect.objectContaining({ config, parts }),
+    );
+    const notice = events.find((e) => e.type === 'info');
+    expect(notice?.text).toContain('Converted 1 image(s) to text via qwen3-vl');
+    expect(notice?.text).toContain('sent to that model');
+  });
+
+  it('drops the image rather than forwarding it when the bridge yields nothing', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream, bridgeModel);
+    visionMocks.run.mockResolvedValue({
+      applied: false,
+      status: 'failed',
+      convertedCount: 0,
+      omittedCount: 1,
+      modelId: 'qwen3-vl',
+      error: 'the vision model request failed',
+    });
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, imagePart]),
+    )) as OpenTuiStreamEvent[];
+
+    // A text-only model must never receive raw inlineData.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }]);
+    expect(events.some((e) => e.type === 'error')).toBe(true);
+  });
+
+  it('routes the whole turn onto an agent-capable vision model without bridging', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream, {
+      id: 'qwen3-vl',
+      agentCapable: true,
+    });
+    atMocks.result = {
+      processedQuery: [{ text: 'read @shot.png' }, imagePart],
+      shouldProceed: true,
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, imagePart], undefined, {
+        drainSteering: () => ['read @shot.png'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(visionMocks.run).not.toHaveBeenCalled();
+    // The images stay: the model reading them can see them.
+    const [firstPrompt, secondPrompt] = sendMessageStream.mock.calls.map(
+      (call) => (call as unknown[])[0],
+    );
+    expect(firstPrompt).toEqual([{ text: 'look' }, imagePart]);
+    expect(secondPrompt).toEqual([
+      toolResponse,
+      { text: 'read @shot.png' },
+      imagePart,
+    ]);
+    // The pick is a trailing-NUL selector, and it holds for the continuation.
+    const overrides = sendMessageStream.mock.calls.map(
+      (call) =>
+        (call as unknown[])[3] as { modelOverride?: string } | undefined,
+    );
+    expect(overrides.map((o) => o?.modelOverride)).toEqual([
+      'qwen3-vl\0',
+      'qwen3-vl\0',
+    ]);
+    expect(events.filter((e) => e.type === 'info').map((e) => e.text)).toEqual([
+      'Routing this image turn to qwen3-vl; retries and tool continuations will stay on that model until the turn ends.',
+    ]);
+  });
+
+  it('carries a full-turn pick made mid-turn into the rest of the turn', async () => {
+    // Here the image arrives only through the steered `@` mention, so the pick
+    // happens at the boundary — after the first send already went out on the
+    // primary model. A per-turn override read once would leave both the
+    // continuation call and the model named in its own notice on the old one.
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'chat_compressed', value: {} };
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream, {
+      id: 'qwen3-vl',
+      agentCapable: true,
+    });
+    atMocks.result = {
+      processedQuery: [{ text: 'read @shot.png' }, imagePart],
+      shouldProceed: true,
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['read @shot.png'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const readOptions = (call: unknown[]) =>
+      call[3] as { modelOverride?: string } | undefined;
+    expect(readOptions(sendMessageStream.mock.calls[0])).toEqual({
+      type: SendMessageType.UserQuery,
+    });
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondPrompt).toEqual([
+      toolResponse,
+      { text: 'read @shot.png' },
+      imagePart,
+    ]);
+    expect(readOptions(sendMessageStream.mock.calls[1])?.modelOverride).toBe(
+      'qwen3-vl\0',
+    );
+    expect(events.filter((e) => e.type === 'info').map((e) => e.text)).toEqual([
+      'Routing this image turn to qwen3-vl; retries and tool continuations will stay on that model until the turn ends.',
+      expect.stringContaining('input token limit for qwen3-vl'),
+    ]);
+  });
+
+  it('leaves an inline submit_prompt override off the bridge', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream, bridgeModel);
+    const parts = [{ text: 'look' }, imagePart];
+
+    const events = (await drain(
+      livePromptEvents(config, parts, undefined, {
+        modelOverride: 'fast-x',
+        submittedPrompt: 'look',
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(visionMocks.run).not.toHaveBeenCalled();
+    const [prompt, , , options] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toBe(parts);
+    expect(options).toEqual({
+      type: SendMessageType.UserQuery,
+      modelOverride: 'fast-x',
+      submittedPrompt: 'look',
+    });
+    expect(events.filter((e) => e.type === 'info')).toEqual([]);
+  });
+
+  it('converts an image a steered @-mention pulled into the message', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream, bridgeModel);
+    atMocks.result = {
+      processedQuery: [{ text: 'read @shot.png' }, imagePart],
+      shouldProceed: true,
+    };
+    visionMocks.run.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'read @shot.png' }, { text: 'BRIDGE TRANSCRIPT' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'qwen3-vl',
+      egressOccurred: true,
+    });
 
     await drain(
-      livePromptEvents(config, 'start', controller.signal, { drainSteering }),
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['read @shot.png'],
+      }),
     );
 
-    expect(drainSteering).not.toHaveBeenCalled();
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondPrompt).toEqual([
+      toolResponse,
+      { text: 'read @shot.png' },
+      { text: 'BRIDGE TRANSCRIPT' },
+    ]);
+  });
+
+  it('discloses the egress when the bridge is cancelled after sending', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream, bridgeModel);
+    const controller = new AbortController();
+    visionMocks.run.mockImplementation(async () => {
+      controller.abort();
+      return {
+        applied: false,
+        status: 'skipped',
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'qwen3-vl',
+        egressOccurred: true,
+      };
+    });
+
+    const events = (await drain(
+      livePromptEvents(
+        config,
+        [{ text: 'look' }, imagePart],
+        controller.signal,
+      ),
+    )) as OpenTuiStreamEvent[];
+
+    // Esc stops the send, but the images already left: the notice survives.
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    const notice = events.find((e) => e.type === 'info');
+    expect(notice?.text).toContain('Vision bridge cancelled.');
+    expect(notice?.text).toContain('were sent to qwen3-vl');
+  });
+
+  // --- U-27: unsupported image formats are disclosed on both hops ----------
+
+  it('discloses an unsupported image format once before the first send', async () => {
+    const yielded: OpenTuiStreamEvent[] = [];
+    let disclosedAtSend: boolean | undefined;
+    // Captured in the call body, not in a generator body: the request goes out
+    // when the client is called, and a generator's body would only run at the
+    // first `next()`. A check moved after the send leaves `yielded` empty here.
+    const sendMessageStream = vi.fn(() => {
+      disclosedAtSend = yielded.some(
+        (e) =>
+          e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+      );
+      return (function* () {})();
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+
+    for await (const ev of livePromptEvents(config, [{ text: 'look' }, avif])) {
+      yielded.push(ev);
+    }
+
+    expect(disclosedAtSend).toBe(true);
+    // Exactly one notice, with ink's own text naming the supported set.
+    expect(yielded.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the image anyway; only the disclosure is added.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
+  it('does not disclose an accepted format (png rides through silently)', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, imagePart]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([]);
+  });
+
+  it('discloses an unsupported format carried as fileData', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const avif = {
+      fileData: { mimeType: 'image/avif', fileUri: 'gs://bucket/shot.avif' },
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, avif]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the part anyway — the disclosure is the only addition.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
+  it('discloses the format warning on the steering hop before the echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const warnIndex = events.findIndex(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+    expect(warnIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(warnIndex);
+  });
+
+  it('attributes the steering disclosure to the message that carries the image', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['plain steer', 'see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const indexOf = (match: (e: OpenTuiStreamEvent) => boolean): number =>
+      events.findIndex(match);
+    const firstEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'plain steer',
+    );
+    const warn = indexOf(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const secondEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+
+    // One warning for the drain, and it sits inside the second message's
+    // window: a check hoisted above the loop lands after both echoes.
+    expect(events.filter((e) => e.type === 'info')).toHaveLength(1);
+    expect(firstEcho).toBeGreaterThan(-1);
+    expect(warn).toBeGreaterThan(firstEcho);
+    expect(secondEcho).toBeGreaterThan(warn);
   });
 
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {
@@ -581,6 +1812,95 @@ describe('livePromptEvents', () => {
     });
   });
 
+  it('yields a confirm event per awaiting_approval entrance (transcript pending marker)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'b2',
+            name: 'run_shell_command',
+            args: { __bounceApproval: true },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // One event per entrance: the initial parking and the PreToolUse 'ask'
+    // bounce back under the same callId, with the pending marker released
+    // in between (the executing update drops the call from awaiting).
+    const confirms = events.filter(
+      (e) => e.type === 'confirm' || e.type === 'confirm-resolved',
+    );
+    expect(confirms).toEqual([
+      {
+        type: 'confirm',
+        id: 'b2',
+        tool: 'run_shell_command',
+        title: 'original',
+      },
+      { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
+      {
+        type: 'confirm',
+        id: 'b2',
+        tool: 'run_shell_command',
+        title: 'Hook requested confirmation to run',
+      },
+    ]);
+  });
+
+  it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // coreToolScheduler sets status 'cancelled' when the user picks
+    // No/Esc — the resolved event must carry 'rejected', not blanket
+    // 'approved', or the transcript mislabels a declined tool.
+    const resolved = events.find((e) => e.type === 'confirm-resolved');
+    expect(resolved).toEqual({
+      type: 'confirm-resolved',
+      id: 'c9',
+      outcome: 'rejected',
+    });
+  });
+
   it('pushes the real invocation description once per callId (R1-104)', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -645,27 +1965,40 @@ describe('livePromptEvents', () => {
     expect(events.some((e) => e.type === 'tool-description')).toBe(false);
   });
 
-  describe('tool execution live output (outputUpdateHandler)', () => {
-    /** One tool batch on call 1, plain finish on the continuation call. */
-    function oneToolBatchStream(request: {
-      callId: string;
-      name: string;
-      args?: unknown;
-    }) {
-      let calls = 0;
-      return vi.fn(function* (): Generator<{
-        type: string;
-        value?: unknown;
-      }> {
-        calls += 1;
-        if (calls === 1) {
-          yield { type: 'tool_call_request', value: request };
-          return;
-        }
-        yield { type: 'finished', value: {} };
-      });
-    }
+  it('ends the turn without a follow-up request when the whole batch was cancelled', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'c1',
+      name: 'test_tool',
+      args: { __cancelled: true },
+    });
+    const addHistory = vi.fn();
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory,
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
 
+    await drain(livePromptEvents(config, 'run'));
+
+    // ink use-llm-stream parity: cancelled responses go to history only,
+    // so the model is never asked to continue the turn.
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 'c1')).toBe(
+      true,
+    );
+  });
+
+  describe('tool execution live output (outputUpdateHandler)', () => {
     it('streams tool-output events while the tool executes', async () => {
       const sendMessageStream = oneToolBatchStream({
         callId: 't1',

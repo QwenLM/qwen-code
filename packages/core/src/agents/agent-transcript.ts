@@ -27,6 +27,7 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
+  type AgentToolOutputUpdateEvent,
   type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
   type AgentStreamTextEvent,
@@ -36,6 +37,7 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -171,6 +173,173 @@ export interface AgentMeta {
   recentActivities?: BackgroundActivity[];
 }
 
+export interface AgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: AgentMeta['status'];
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface AgentTrace {
+  nodes: AgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
+}
+
+const TRACE_WARNING_LIMIT = 20;
+export const MAX_AGENT_TRACE_NODES = 2_000;
+const TRACE_READ_CONCURRENCY = 8;
+
+export async function readAgentTrace(
+  projectDir: string,
+  sessionId: string,
+  rootAgentId?: string,
+): Promise<AgentTrace> {
+  const dir = getSubagentSessionDir(projectDir, sessionId);
+  const warnings: string[] = [];
+  let discovered: string[];
+  try {
+    discovered = (await fs.promises.readdir(dir))
+      .filter((name) => name.endsWith('.meta.json'))
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { nodes: [], rootAgentIds: [], warnings: [] };
+    }
+    throw error;
+  }
+
+  const fileNames = discovered.slice(0, MAX_AGENT_TRACE_NODES);
+  if (discovered.length > MAX_AGENT_TRACE_NODES) {
+    warnings.push(
+      `Trace contains more than ${MAX_AGENT_TRACE_NODES} metadata files; results were truncated`,
+    );
+  }
+
+  const metas = new Map<string, AgentMeta>();
+  for (
+    let offset = 0;
+    offset < fileNames.length;
+    offset += TRACE_READ_CONCURRENCY
+  ) {
+    const batch = fileNames.slice(offset, offset + TRACE_READ_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (fileName) => {
+        try {
+          const parsed = JSON.parse(
+            await fs.promises.readFile(path.join(dir, fileName), 'utf8'),
+          ) as AgentMeta;
+          if (
+            typeof parsed.agentId !== 'string' ||
+            parsed.agentId.length === 0 ||
+            typeof parsed.agentType !== 'string' ||
+            typeof parsed.description !== 'string' ||
+            typeof parsed.createdAt !== 'string' ||
+            !Number.isFinite(Date.parse(parsed.createdAt)) ||
+            (parsed.parentAgentId !== null &&
+              typeof parsed.parentAgentId !== 'string') ||
+            (parsed.toolUseId !== undefined &&
+              typeof parsed.toolUseId !== 'string') ||
+            (parsed.depth !== undefined && !Number.isFinite(parsed.depth)) ||
+            (parsed.status !== undefined &&
+              ![
+                'running',
+                'paused',
+                'completed',
+                'failed',
+                'cancelled',
+              ].includes(parsed.status)) ||
+            (parsed.lastUpdatedAt !== undefined &&
+              (typeof parsed.lastUpdatedAt !== 'string' ||
+                !Number.isFinite(Date.parse(parsed.lastUpdatedAt)))) ||
+            (parsed.lastError !== undefined &&
+              typeof parsed.lastError !== 'string') ||
+            parsed.parentSessionId !== sessionId ||
+            path.basename(
+              getAgentMetaPath(projectDir, sessionId, parsed.agentId),
+            ) !== fileName
+          ) {
+            throw new Error('invalid agent metadata identity');
+          }
+          metas.set(parsed.agentId, parsed);
+        } catch (error) {
+          if (warnings.length < TRACE_WARNING_LIMIT) {
+            warnings.push(
+              `${fileName}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }),
+    );
+  }
+
+  const nodes = [...metas.values()]
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .map((meta): AgentTraceNode => {
+      let cursor = meta;
+      const lineage: string[] = [];
+      const positions = new Map<string, number>();
+      let lineageState: AgentTraceNode['lineageState'] = 'complete';
+      let cycleRoot: string | undefined;
+      while (cursor.parentAgentId !== null) {
+        const previousPosition = positions.get(cursor.agentId);
+        if (previousPosition !== undefined) {
+          lineageState = 'cycle';
+          cycleRoot = [...lineage.slice(previousPosition)].sort()[0];
+          break;
+        }
+        positions.set(cursor.agentId, lineage.length);
+        lineage.push(cursor.agentId);
+        const parent = metas.get(cursor.parentAgentId);
+        if (!parent) {
+          lineageState = 'orphaned';
+          break;
+        }
+        cursor = parent;
+      }
+      const resolvedRoot =
+        lineageState === 'cycle'
+          ? (cycleRoot ?? cursor.agentId)
+          : cursor.agentId;
+      return {
+        agentId: meta.agentId,
+        agentType: meta.agentType,
+        description: meta.description,
+        parentSessionId: meta.parentSessionId,
+        parentAgentId: meta.parentAgentId,
+        rootAgentId: resolvedRoot,
+        ...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+        ...(meta.depth !== undefined ? { depth: meta.depth } : {}),
+        ...(meta.status ? { status: meta.status } : {}),
+        createdAt: meta.createdAt,
+        ...(meta.lastUpdatedAt ? { lastUpdatedAt: meta.lastUpdatedAt } : {}),
+        ...(meta.lastError ? { lastError: meta.lastError } : {}),
+        lineageState,
+      };
+    });
+  const filtered = rootAgentId
+    ? nodes.filter((node) => node.rootAgentId === rootAgentId)
+    : nodes;
+  return {
+    nodes: filtered,
+    rootAgentIds: [...new Set(filtered.map((node) => node.rootAgentId))].sort(),
+    warnings,
+  };
+}
+
 export interface AgentPersistedCliFlags {
   /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
   approvalMode?: string;
@@ -223,10 +392,17 @@ export function normalizeResumedAgentDepth(
  * Best-effort — a failed sidecar write must not break the agent launch path.
  */
 export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
+  const tempPath = `${metaPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(metaPath), { recursive: true });
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.writeFileSync(tempPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.renameSync(tempPath, metaPath);
   } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup after the write failed.
+    }
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
     return;
   }
@@ -248,6 +424,28 @@ export function readAgentMeta(metaPath: string): AgentMeta | undefined {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
     }
+    return undefined;
+  }
+}
+
+export async function readAgentMetaAsync(
+  metaPath: string,
+  options?: { throwOnReadError?: boolean },
+): Promise<AgentMeta | undefined> {
+  let contents: string;
+  try {
+    contents = await fs.promises.readFile(metaPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+      if (options?.throwOnReadError) throw error;
+    }
+    return undefined;
+  }
+  try {
+    return JSON.parse(contents) as AgentMeta;
+  } catch (error) {
+    debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
     return undefined;
   }
 }
@@ -581,6 +779,28 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const sessionReadiness = new Map<string, boolean>();
+  const recordSessionReadiness = (callId: string, ready: boolean) => {
+    if (sessionReadiness.get(callId) === ready) return;
+    sessionReadiness.set(callId, ready);
+    recordSystem('agent_session_ready', {
+      callId,
+      subagentSessionReady: ready,
+    });
+  };
+
+  const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
+    const output = event.outputChunk;
+    if (
+      typeof output === 'object' &&
+      output !== null &&
+      'subagentSessionReady' in output &&
+      typeof output.subagentSessionReady === 'boolean'
+    ) {
+      recordSessionReadiness(event.callId, output.subagentSessionReady);
+    }
+  };
+
   const onToolCall = (event: AgentToolCallEvent) => {
     append({
       ...baseFields('assistant'),
@@ -597,6 +817,9 @@ export function attachJsonlTranscriptWriter(
         ],
       },
     });
+    if (event.name === ToolNames.AGENT) {
+      recordSessionReadiness(event.callId, false);
+    }
   };
 
   const onToolResponsesFinalized = (
@@ -608,6 +831,12 @@ export function attachJsonlTranscriptWriter(
         message: { role: 'user', parts: response.responseParts },
         toolCallResult: {
           callId: response.callId,
+          ...(sessionReadiness.has(response.callId) &&
+          response.responseParts.some(
+            (part) => part.functionResponse?.response?.['error'],
+          )
+            ? { status: 'error' as const }
+            : {}),
           ...(response.durationMs !== undefined
             ? { durationMs: response.durationMs }
             : {}),
@@ -668,6 +897,7 @@ export function attachJsonlTranscriptWriter(
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
@@ -675,6 +905,7 @@ export function attachJsonlTranscriptWriter(
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
     emitter.off(
       AgentEventType.TOOL_RESPONSES_FINALIZED,
       onToolResponsesFinalized,

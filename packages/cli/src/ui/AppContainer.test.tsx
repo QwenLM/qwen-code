@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 const {
   writeTerminalTitleSpy,
@@ -59,8 +60,12 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
@@ -68,6 +73,7 @@ import {
   AppContainer,
   countActiveScheduledTasks,
   dedupeNewestFirst,
+  buildSpeculativeToolDisplays,
   getSpeculativeToolResult,
   getNextRenderMode,
   getScheduledTasksStartupWarning,
@@ -92,6 +98,9 @@ import {
   type LlmClient,
   type GoalTurnHost,
   describeDeliveryStatus,
+  describeDropReason,
+  PEER_ADMISSION_LIMITS,
+  type DropNotice,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
@@ -101,7 +110,7 @@ import type {
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
@@ -192,6 +201,7 @@ async function flushConfigInitialization() {
 // value swappable without wrapping every render in a provider.
 const peerMessagingHolder = vi.hoisted(() => ({
   current: null as unknown,
+  failure: null as unknown,
 }));
 vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   const actual =
@@ -201,6 +211,7 @@ vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   return {
     ...actual,
     usePeerMessaging: () => peerMessagingHolder.current,
+    usePeerInboxFailure: () => peerMessagingHolder.failure,
   };
 });
 
@@ -302,6 +313,25 @@ describe('AppContainer State Management', () => {
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
+  // runners — including the review-address verification gate's clean child —
+  // inherit a HOME the test process cannot write to. Ordinary CI already
+  // overrides HOME, so point it at a scratch directory for this suite, and
+  // leave that directory alone: the mount effect's initialize() is un-awaited,
+  // so store work can still be in flight at afterAll, and deleting the tree
+  // there fails it with ENOENT — an unhandled rejection that fails the run.
+  const savedHome = process.env['HOME'];
+  const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['HOME'] = suiteHome;
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+  });
 
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
@@ -631,6 +661,33 @@ describe('AppContainer State Management', () => {
         text: 'done',
         status: ToolCallStatus.Success,
       });
+    });
+
+    it('carries the functionCall args onto the display object', () => {
+      // The fourth builder of IndividualToolCallDisplay. Without the args the
+      // setting half-applies: an accepted speculation falls back to the
+      // compact summary while live and resumed turns of the same shape show
+      // their arguments.
+      const args = { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' };
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'replace', args } }],
+        [{ functionResponse: { response: { output: 'done' } } }],
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0]!.args).toEqual(args);
+      expect(tools[0]!.name).toBe('replace');
+      expect(tools[0]!.status).toBe(ToolCallStatus.Success);
+    });
+
+    it('falls back to an empty args object when the call carries none', () => {
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'ls' } }],
+        [],
+      );
+      // formatInlineToolArgs skips empty objects, so this renders no args row.
+      expect(tools[0]!.args).toEqual({});
+      expect(tools[0]!.description).toBe('ls');
     });
   });
 
@@ -1430,6 +1487,43 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
+    it('keeps input inactive until config initialization completes', async () => {
+      // Pins the wiring hop itself: AppContainer feeding its own
+      // isConfigInitialized into isInputActive. The predicate has unit tests
+      // and Composer covers isInputActive:false, but nothing asserted that this
+      // call site passes that particular boolean — any other in-scope boolean
+      // type-checks and reopens the `Chat not initialized` race with the suite
+      // still green.
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // First synchronous render: initialization has not flipped yet.
+      expect(capturedUIState.isConfigInitialized).toBe(false);
+      expect(capturedUIState.isInputActive).toBe(false);
+
+      await flushConfigInitialization();
+
+      expect(capturedUIState.isInputActive).toBe(true);
+    });
+
     it('keeps non-TTY output on the Static path', () => {
       Object.defineProperty(process.stdout, 'isTTY', {
         value: false,
@@ -1777,6 +1871,7 @@ describe('AppContainer State Management', () => {
     it('keeps input active while compression is processing', () => {
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
           hasPendingCompression: true,
@@ -1786,8 +1881,21 @@ describe('AppContainer State Management', () => {
 
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps input inactive until chat initialization completes', () => {
+      expect(
+        isInputActiveForState({
+          isConfigInitialized: false,
+          initError: null,
+          isProcessing: false,
           hasPendingCompression: false,
           streamingState: StreamingState.Idle,
         }),
@@ -7625,6 +7733,7 @@ describe('AppContainer State Management', () => {
       ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
       emitReceipt: (receipt: PeerReceipt) => void;
+      emitDropped: (notice: DropNotice) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7650,6 +7759,7 @@ describe('AppContainer State Management', () => {
         | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
       let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
+      let dropListener: ((notice: DropNotice) => void) | null = null;
       const value = {
         setSubmitFn: (
           fn: (
@@ -7669,6 +7779,10 @@ describe('AppContainer State Management', () => {
           receiptListener = fn;
           return () => {};
         },
+        onDropped: (fn: (notice: DropNotice) => void) => {
+          dropListener = fn;
+          return () => {};
+        },
         getHeld: () => [],
         decide: vi.fn(),
         reevaluate: vi.fn(),
@@ -7685,6 +7799,10 @@ describe('AppContainer State Management', () => {
           if (!receiptListener) throw new Error('no receipt listener wired');
           receiptListener(receipt);
         },
+        emitDropped: (notice) => {
+          if (!dropListener) throw new Error('no drop listener wired');
+          dropListener(notice);
+        },
       };
     };
 
@@ -7699,6 +7817,188 @@ describe('AppContainer State Management', () => {
         />,
       );
     };
+
+    it('re-runs the gate when the held-expiry lifetime changes', () => {
+      // Both peer settings reload live, and both change what the gate
+      // would decide for messages already parked. Parking under `never`
+      // arms no timer at all, so without this trigger an edit to `1m`
+      // leaves the backlog held until session exit -- no expired receipt
+      // for the sender -- while `/peers` counts down from the new value.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionHeldExpiry: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('never')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('1m')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when the inbound policy changes', () => {
+      // The effect keys on the parsed lifetime AND the policy. The policy
+      // half is referenced nowhere in the effect body, so dropping it from
+      // the deps array flags nothing -- and a user live-editing
+      // `crossSessionInbound` from `hold` to `refuse` would never have the
+      // parked backlog settled as `denied`, leaving senders with no
+      // receipt for messages the new policy is supposed to have handled.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionInbound: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound,
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: () => ({ settings: {} }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('hold')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when policy ownership changes without changing its value', () => {
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (owner: 'user' | 'workspace') =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound: 'hold',
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: (scope: SettingScope) => ({
+            settings:
+              (owner === 'user' && scope === SettingScope.User) ||
+              (owner === 'workspace' && scope === SettingScope.Workspace)
+                ? { agents: { crossSessionInbound: 'hold' } }
+                : {},
+          }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('user')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('workspace')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('does not re-run the gate when an unrelated setting changes', () => {
+      // `reevaluate` also settles a parked backlog as `denied` under a
+      // refuse policy, so it must key on the parsed lifetime and the
+      // policy -- not on any settings-file edit, which would discard the
+      // user's backlog on an unrelated key.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (version: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '1m',
+            },
+            ui: { ...mockSettings.merged.ui, customWittyPhrases: [version] },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('a')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('b')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).not.toHaveBeenCalledWith('held-expiry-changed');
+    });
 
     it('queues the envelope on the peer path, never as typed user input', () => {
       // The peer path marks the entry so the drain submits it on the
@@ -7803,6 +8103,48 @@ describe('AppContainer State Management', () => {
       expect(addPeerMessage).not.toHaveBeenCalled();
     });
 
+    it('announces once, with the cause, when the inbox could not bind', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const failure = {
+        cause: 'foreign_owner',
+        socketPath: '/run/user/1000/qwen-socks/1.sock',
+        detail: 'belongs to uid 65534, not 1000',
+        hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+        attempts: 3,
+      };
+      peerMessagingHolder.failure = failure;
+      try {
+        const { rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        peerMessagingHolder.failure = { ...failure };
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const notices = addItem.mock.calls
+          .map((call) => call[0] as { type?: string; text?: string })
+          .filter((item) =>
+            item.text?.includes('Cross-session messaging is OFF'),
+          );
+        expect(notices).toHaveLength(1);
+        expect(notices[0]?.type).toBe(MessageType.ERROR);
+        expect(notices[0]?.text).toContain('belongs to another user');
+        expect(notices[0]?.text).toContain('XDG_RUNTIME_DIR');
+      } finally {
+        peerMessagingHolder.failure = null;
+      }
+    });
+
     it('announces held and denied receipts, and delivery only after a hold', () => {
       const addItem = mockedUseHistory().addItem as Mock;
       const peer = makePeerMessaging();
@@ -7861,6 +8203,24 @@ describe('AppContainer State Management', () => {
         `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
       );
 
+      // Refused is not declined: nobody looked at this one, the setting
+      // turned it away at admission. This transcript line is the only
+      // place that distinction reaches a person, so it is what makes the
+      // two answers different rather than two words for the same thing.
+      act(() => {
+        peer.emitReceipt({
+          status: 'refused',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3b',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('refused')}`,
+      );
+      expect(notices()[3]).not.toContain('declined');
+
       // A stale address is named as such, never as a human's decision.
       act(() => {
         peer.emitReceipt({
@@ -7870,9 +8230,9 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(4);
-      expect(notices()[3]).toContain('different session');
-      expect(notices()[3]).not.toContain('declined');
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('different session');
+      expect(notices()[4]).not.toContain('declined');
 
       // An accepted message that expired was never held: the wire text
       // for 'expired' speaks of a held message and must not be reused.
@@ -7884,9 +8244,9 @@ describe('AppContainer State Management', () => {
           previous: 'delivered',
         });
       });
-      expect(notices()).toHaveLength(5);
-      expect(notices()[4]).toContain('exited before it read');
-      expect(notices()[4]).not.toContain('held');
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain('exited before it read');
+      expect(notices()[5]).not.toContain('held');
 
       act(() => {
         peer.emitReceipt({
@@ -7896,11 +8256,12 @@ describe('AppContainer State Management', () => {
           previous: 'held',
         });
       });
-      expect(notices()).toHaveLength(6);
-      expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
 
-      // Expired with no delivery at all: the gate could not queue it
-      // (accept backlog full) — the peer may be alive, so no exit claim.
+      // Expired with no delivery at all now means only that the message
+      // arrived as that session was shutting down: a full queue is a drop
+      // with a reason of its own.
       act(() => {
         peer.emitReceipt({
           status: 'expired',
@@ -7909,9 +8270,181 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(7);
-      expect(notices()[6]).not.toContain('exited before');
-      expect(notices()[6]).toContain('too busy');
+      expect(notices()).toHaveLength(8);
+      expect(notices()[7]).not.toContain('exited before');
+      // Disjunctive: `previous` records what this sender heard, and a
+      // `held` receipt can be lost to the outbound ceiling under exactly
+      // the flood this feature is about, so a live peer can land here.
+      expect(notices()[7]).toContain('shutting down, or could not keep it');
+      expect(notices()[7]).toContain('Retry once it is idle');
+    });
+
+    it('says what became of messages the far inbox turned away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+          dropReason: 'duplicate',
+          dropped: 1,
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        "Message to docs-cd: it was dropped at that session's inbox — " +
+          `${describeDropReason('duplicate')}. The identical message was ` +
+          `accepted there within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, ` +
+          'so there is nothing to re-send.',
+      );
+      // A repeat means the text is already over there, so advising a fold
+      // would have the model reword it and deliver the instruction twice.
+      expect(notices()[0]).not.toContain('Treat it as unsent');
+
+      // One receipt can stand for a burst, so the line counts rather than
+      // repeating itself.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+          dropReason: 'rate-limited',
+          dropped: 7,
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toBe(
+        "Messages to docs-cd: 7 were dropped at that session's inbox — " +
+          `${describeDropReason('rate-limited')}. Treat them as unsent; fold ` +
+          'what still matters into one later message.',
+      );
+
+      // A receipt from a build that named no reason still says enough.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('it was dropped');
+      expect(notices()[2]).not.toContain('—');
+    });
+
+    it('says when this session is turning a peer away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Dropped a message'));
+
+      const frame = {
+        msgV: 1,
+        msgId: 'm1',
+        type: 'user' as const,
+        from: '/tmp/peer.sock',
+        fromName: 'docs-cd',
+        priority: 'next' as const,
+        message: { role: 'user' as const, content: 'do a thing' },
+      };
+
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[0]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'this session is taking peer messages faster than it accepts them.',
+      );
+      // The trust category leads, as it does on both sibling lines: a
+      // peer-chosen name alone could read as the user's own session.
+      expect(notices()[0]).toContain('another session');
+
+      // The count of what one line stands for, so a flood stays one line.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'duplicate',
+          suppressed: 12,
+        });
+      });
+      expect(notices()[1]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'it repeated its previous message within ' +
+          `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s. ` +
+          '(+12 more dropped during this notice window)',
+      );
+      // The count is a session-wide total once the notice budget is
+      // spent, so it must not be labelled as this sender's own.
+      expect(notices()[1]).not.toContain('similar');
+
+      // A controller is named by the label its user gave it, never by
+      // anything the sender wrote.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: {
+            selfSent: false,
+            controller: { id: 'c_1234abcd', label: 'voice' },
+          },
+          reason: 'queue-full',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[2]).toBe(
+        "Dropped a message from a trusted controller (voice): this session's " +
+          'queue of undelivered peer messages is full.',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[3]).toContain('a process this session started');
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[4]).toContain(
+        'a process this session started (/tmp/peer.sock)',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[5]).toContain('from another session');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {
@@ -7943,6 +8476,27 @@ describe('AppContainer State Management', () => {
       expect(noticeCount()).toBe(2);
     });
 
+    it('passes the policy scope into a held-message announcement', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            cause: 'explicit-setting',
+            policyScope: 'workspace',
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain("this repository's settings hold");
+    });
+
     it("identifies a held message from the session's own process", () => {
       const addItem = mockedUseHistory().addItem as Mock;
       const peer = makePeerMessaging();
@@ -7957,6 +8511,29 @@ describe('AppContainer State Management', () => {
       );
       expect(notice).toContain(
         'Held a message from a process this session started',
+      );
+      expect(notice).not.toContain('another session');
+    });
+
+    it('names the grant when a controller message is held', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            controller: { id: 'c_0123abcd', label: 'voice bridge' },
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a trusted controller (voice bridge)',
       );
       expect(notice).not.toContain('another session');
     });

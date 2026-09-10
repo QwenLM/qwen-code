@@ -705,12 +705,16 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The task for the agent to perform',
         },
-        todo_id: {
-          type: 'string',
-          maxLength: 500,
-          description:
-            'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
-        },
+        ...(config.isTodoWriteEnabled()
+          ? {
+              todo_id: {
+                type: 'string',
+                maxLength: 500,
+                description:
+                  'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
+              },
+            }
+          : {}),
         subagent_type: {
           type: 'string',
           description:
@@ -840,6 +844,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teamGuidance = this.config.isAgentTeamEnabled()
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Named teammates always run concurrently and report through team messaging; omit \`run_in_background\` when spawning one — an explicit \`run_in_background: false\` is rejected, so for an inline blocking result omit \`name\` and use a regular agent instead. Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
+    const todoGuidance = this.config.isTodoWriteEnabled()
+      ? '- When a user-visible todo plan exists, set `todo_id` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit `todo_id` for work that is not represented by the current plan.\n'
+      : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -858,8 +865,7 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
-- When a user-visible todo plan exists, set \`todo_id\` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit \`todo_id\` for work that is not represented by the current plan.
-- Delegate only concrete, bounded tasks that can run independently.
+${todoGuidance}- Delegate only concrete, bounded tasks that can run independently.
 - Keep immediate critical-path work local when your next action depends on it.
 - Do not duplicate work between the parent and subagents.
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
@@ -874,6 +880,15 @@ Usage notes:
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
 - Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
+
+## Working with background agents
+
+**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
+
+**Don't race.** After launching a background agent, you know nothing about what it found. Never fabricate or predict its results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the agent is still running — give status, not a guess.
+
+**Don't relaunch.** A notification that has not arrived means the agent is still running, not that it was lost. Do not start a replacement agent for the same task; the result arrives under the original task_id. Use ${ToolNames.LIST_AGENTS} to check the roster and ${ToolNames.SEND_MESSAGE} to redirect a running agent.
+
 ## When to fork
 
 A fork (\`subagent_type: "fork"\`) inherits your full context by default. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. A background fork reports its result through a completion notification; set \`run_in_background: true\` in interactive sessions when you need that result. Headless forks always use this background path. Omitting \`subagent_type\` does NOT fork.
@@ -882,9 +897,7 @@ Choose a fork when the task needs substantial context from the parent conversati
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
 
-**Don't peek.** For a background fork, do not read or tail its output unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
-
-**Don't race.** After launching a background fork, you know nothing about what it found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
+The background-agent rules above apply to background forks unchanged.
 
 **Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
 
@@ -2699,6 +2712,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         taskDescription: this.params.description,
         taskPrompt: this.params.prompt,
         executionMode: shouldRunInBackground ? 'background' : 'foreground',
+        subagentSessionReady: false,
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
@@ -3305,6 +3319,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           model: subagentModelId,
         });
 
+        this.updateDisplay({ subagentSessionReady: true }, updateOutput);
+
         // Subscribe to the subagent's tool-call event stream so the
         // detail dialog's Progress section reflects live activity. We
         // capture the unsubscribe fn and call it when the agent
@@ -3852,11 +3868,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           llmContent:
             `Background agent launched successfully.\n` +
             `task_id: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
-            `The agent is working in the background. You will be notified automatically when it completes.\n` +
+            `The agent is working in the background. Its result arrives as a <task-notification> for this task_id in a later turn; you will not see it in this turn.\n` +
+            `Do not treat the agent as cancelled or relaunch it because the notification has not arrived yet — the result comes under the original task_id.\n` +
             `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
-            `output_file: ${jsonlPath}\n` +
-            `If asked, you can check progress before completion by using ${ToolNames.READ_FILE}\n` +
-            `  or ${ToolNames.SHELL} tail on the output file.`,
+            `Do not read or tail its output file while it runs, and never predict its findings. If the user asks about progress before the notification lands, say the agent is still running and report only the status you know.\n` +
+            `output_file: ${jsonlPath} (for review after the completion notification, not for polling)`,
           returnDisplay: this.currentDisplay!,
         };
       }
@@ -4150,6 +4166,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // childLaunchDepth() for the rationale.
           depth: launchDepth,
         });
+
+        this.updateDisplay({ subagentSessionReady: true }, updateOutput);
 
         const stopHookWarning = await runFramed();
         const terminateMode = subagent.getTerminateMode();

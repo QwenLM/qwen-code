@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { getSubagentDetailsUnavailableReason } from '../messages/toolFormatting';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
   buildSessionWorkflowProjection,
@@ -46,7 +47,7 @@ export function SessionWorkflowInspector({
   onOpenArtifact,
   canvasMode = false,
 }: SessionWorkflowInspectorProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const projection = useMemo(
     () => buildSessionWorkflowProjection(todos, tools, tasks),
     [tasks, todos, tools],
@@ -62,6 +63,10 @@ export function SessionWorkflowInspector({
       onSelectedTodoIdChange(effectiveSelectedTodoId);
     }
   }, [effectiveSelectedTodoId, onSelectedTodoIdChange, selectedTodoId]);
+
+  const openSubagentDetails = (tool: ACPToolCall) => {
+    if (!getSubagentDetailsUnavailableReason(tool)) onOpenSubagent(tool);
+  };
 
   if (todos.length === 0) {
     return (
@@ -82,8 +87,12 @@ export function SessionWorkflowInspector({
   const upstream = selectedTodo?.blockedBy?.filter((id) =>
     projection.todosById.has(id),
   );
+  // The projection already derives this for the graph's edges; recomputing it
+  // here rescanned every todo's `blockedBy` for the same answer. It also drops
+  // a todo that lists itself in `blockedBy`, which the previous filter kept as
+  // its own downstream step.
   const downstream = selectedTodo
-    ? todos.filter((todo) => todo.blockedBy?.includes(selectedTodo.id))
+    ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
     : [];
 
   const detail = selectedTodo && selectedState && (
@@ -139,7 +148,14 @@ export function SessionWorkflowInspector({
             return (
               <button
                 key={tool.callId}
-                onClick={() => onOpenSubagent(tool)}
+                aria-disabled={
+                  !!getSubagentDetailsUnavailableReason(tool) || undefined
+                }
+                title={t(
+                  getSubagentDetailsUnavailableReason(tool) ??
+                    'planExecution.openDetails',
+                )}
+                onClick={() => openSubagentDetails(tool)}
                 type="button"
               >
                 <span className={styles.itemText}>
@@ -304,7 +320,7 @@ export function SessionWorkflowInspector({
             const content = (
               <>
                 <time dateTime={at ? new Date(at).toISOString() : undefined}>
-                  {workflowClock(at)}
+                  {workflowClock(at, language)}
                 </time>
                 <span className={styles.activityAvatar}>
                   {workflowInitials(task.subagentType || task.label)}
@@ -324,7 +340,14 @@ export function SessionWorkflowInspector({
             return tool ? (
               <button
                 key={task.id}
-                onClick={() => onOpenSubagent(tool)}
+                aria-disabled={
+                  !!getSubagentDetailsUnavailableReason(tool) || undefined
+                }
+                title={t(
+                  getSubagentDetailsUnavailableReason(tool) ??
+                    'planExecution.openDetails',
+                )}
+                onClick={() => openSubagentDetails(tool)}
                 type="button"
               >
                 {content}

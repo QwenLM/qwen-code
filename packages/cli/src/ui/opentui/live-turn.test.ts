@@ -3,12 +3,14 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Pure-logic coverage for the live-turn driver: composer attachment folding
  * (unsupported/unreadable images must surface as notices, never vanish), the
- * replay-batch fold (the transcript reset path for session switches), and the
- * mid-turn queue hand-off to the next turn.
+ * replay-batch fold (the transcript reset path for session switches), the
+ * mid-turn queue hand-off to the next turn, and the queue taking back a
+ * steering batch the stream layer could not resolve.
  */
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -31,6 +33,7 @@ const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
   declines: new Set<number>(),
+  signals: [] as AbortSignal[],
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -38,9 +41,10 @@ vi.mock('./live-session.js', () => ({
   async *livePromptEvents(
     _config: unknown,
     prompt: unknown,
-    _signal: unknown,
+    signal: AbortSignal,
     options: unknown,
   ) {
+    live.signals.push(signal);
     live.turns.push({ prompt, options });
     if (live.turns.length === 1) {
       await new Promise<void>((resolve) => live.waiters.push(resolve));
@@ -111,6 +115,51 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.turns.length = 0;
     live.waiters.length = 0;
     live.declines.clear();
+    live.signals.length = 0;
+  });
+
+  it('fires onComplete once when a turn completes without an abort', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('plain prompt', undefined, { onComplete });
+    });
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire onComplete when the turn ends on an aborted signal (R6-6)', async () => {
+    // Esc while a tool batch is out: the generator's abort paths (the
+    // all-cancelled batch above them) end with a normal return, so the seq
+    // guard alone passes and the signal has to settle it — a command's
+    // onComplete (e.g. /dream's manual-run recording) must not run for a turn
+    // the user cancelled.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('dream prompt', undefined, { onComplete });
+    });
+    act(() => {
+      result.current.interrupt();
+    });
+    expect(live.signals[0]?.aborted).toBe(true);
+
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it('forwards per-turn options through the idle submit hop (R1-4)', () => {
@@ -131,6 +180,66 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       submittedPrompt: 'first prompt',
       modelOverride: 'qwen3-max',
     });
+  });
+
+  it('echoes an idle submit once as a user row', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('plain prompt');
+    });
+
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toMatchObject([{ kind: 'user', text: 'plain prompt' }]);
+  });
+
+  it('adds no user row for a submit whose invocation was already echoed', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      // A skill command: the transcript already holds the row projected from
+      // the recorded `/skill-name …` invocation; the expanded prompt is
+      // generated text the user never typed (ink skips its USER item too).
+      result.current.submit('expanded skill prompt', undefined, {
+        invocationEchoed: true,
+      });
+    });
+
+    expect(result.current.items.filter((item) => item.kind === 'user')).toEqual(
+      [],
+    );
+    // Suppression covers the echo only — the turn still sends its prompt.
+    expect(live.turns[0]?.prompt).toBe('expanded skill prompt');
+  });
+
+  it('keeps the transcript seam callbacks stable across turn state', () => {
+    const { result, rerender } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const applyEvent = result.current.applyEvent;
+    const resetTranscript = result.current.resetTranscript;
+
+    // The app shell memoizes its host on these identities, so a dependency on
+    // anything that moves during a turn rebuilds the host on every render.
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    rerender();
+    act(() => {
+      applyEvent({ type: 'info', text: 'a notice' });
+    });
+    rerender();
+
+    expect(result.current.items.some((item) => item.kind === 'user')).toBe(
+      true,
+    );
+    expect(result.current.applyEvent).toBe(applyEvent);
+    expect(result.current.resetTranscript).toBe(resetTranscript);
   });
 
   it('replays queued mid-turn text as the next turn, raw and with provenance', async () => {
@@ -193,5 +302,39 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[1]?.prompt).toBe('look @notes.md');
     expect(live.turns[2]?.prompt).toBe('then do the other thing');
     expect(result.current.queueLength).toBe(0);
+  });
+
+  it('restores a dropped steering batch at the front of the queue', () => {
+    // The stream layer owns `@path` expansion and can hand a drained batch
+    // back when the turn dies resolving it. Front-prepend (ink's
+    // restoreMessages) keeps the steering order: restored first, then whatever
+    // the composer queued since.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    act(() => {
+      result.current.submit('queued after');
+    });
+    expect(result.current.queueLength).toBe(1);
+
+    const { restoreSteering } = live.turns[0]?.options as unknown as {
+      restoreSteering: (texts: readonly string[]) => void;
+    };
+    act(() => {
+      restoreSteering(['  steer me  ', '', 'then @b.ts']);
+    });
+    expect(result.current.queueLength).toBe(3);
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popQueue();
+    });
+
+    expect(result.current.queueLength).toBe(0);
+    expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
   });
 });

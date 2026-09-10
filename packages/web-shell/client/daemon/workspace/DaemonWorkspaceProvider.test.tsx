@@ -379,6 +379,75 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.capabilities).toBe(accepted);
   });
 
+  it.each([false, true])(
+    'ignores an initial rejection after a newer refresh (refresh fails: %s)',
+    async (refreshFails) => {
+      let rejectInitial!: (reason: Error) => void;
+      sdkMocks.capabilities.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => (rejectInitial = reject)),
+      );
+      let context: DaemonWorkspaceContextValue | undefined;
+      function Harness() {
+        context = useDaemonWorkspace();
+        return null;
+      }
+      await renderWithProvider(<Harness />);
+      const accepted = { workspaceCwd: '/accepted', features: [] };
+      const acceptedError = new Error('latest refresh failed');
+      if (refreshFails) {
+        sdkMocks.capabilities.mockRejectedValueOnce(acceptedError);
+      } else {
+        sdkMocks.capabilities.mockResolvedValueOnce(accepted);
+      }
+
+      await act(async () => {
+        const result = context!.refreshCapabilities!();
+        if (refreshFails) {
+          await expect(result).rejects.toBe(acceptedError);
+        } else {
+          await expect(result).resolves.toBe(accepted);
+        }
+      });
+      await act(async () => {
+        rejectInitial(new Error('stale discovery failed'));
+        await Promise.resolve();
+      });
+
+      expect(context?.status).toBe(refreshFails ? 'error' : 'connected');
+      expect(context?.capabilities).toBe(refreshFails ? undefined : accepted);
+      expect(context?.error).toBe(refreshFails ? acceptedError : undefined);
+    },
+  );
+
+  it('publishes the initial error when a cached reader retries immediately', async () => {
+    let rejectInitial!: (reason: Error) => void;
+    sdkMocks.capabilities.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectInitial = reject)),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    const initialError = new Error('initial discovery failed');
+    const recovered = { workspaceCwd: '/recovered', features: [] };
+    sdkMocks.capabilities.mockResolvedValueOnce(recovered);
+    const retriedRead = context!.getCapabilities!().catch(() =>
+      context!.getCapabilities!(),
+    );
+
+    await act(async () => {
+      rejectInitial(initialError);
+      await expect(retriedRead).resolves.toBe(recovered);
+    });
+
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(2);
+    expect(context?.status).toBe('error');
+    expect(context?.error).toBe(initialError);
+    expect(context?.capabilities).toBeUndefined();
+  });
+
   it('makes superseded refreshes resolve to the accepted successor', async () => {
     let context: DaemonWorkspaceContextValue | undefined;
     function Harness() {

@@ -76,10 +76,18 @@ env:
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
   # Single source of truth for the .github/scripts node:test suites — run by
-  # BOTH the github_ci_only helper step and the full-profile helper step,
-  # both in `lint_and_static`, so a new helper test can't be added to one
-  # path and silently dropped from the other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs'
+  # BOTH helper steps in `lint_and_static` (the github_ci_only fast lane and
+  # the full-profile one), so a new helper test can't be added to one path
+  # and silently dropped from the other. The fast lane runs before ANY
+  # dependency install in that job — its setup-node, self-hosted node and
+  # `npm ci` steps are all gated on the full profile — so it takes only
+  # HELPER_TESTS_DEP_FREE, suites whose import closure is node: builtins
+  # alone. HELPER_TESTS keeps the full list: the full-profile helper step
+  # re-runs every suite after `npm ci`, and a push to main always classifies
+  # `full` (classify_pr computes a profile only for pull_request), so what
+  # the fast lane skips is still re-checked post-merge.
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -606,9 +614,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
-          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
           sample_disk() {
-            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true)
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
             echo "$sample"
             echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
           }
@@ -697,6 +706,11 @@ jobs:
           # contention flake pass; a real break still fails all three
           # attempts. Operators can retune or disable ('off') without a PR.
           VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || '2' }}"
+          # Coverage is collected only on the post-merge main run: nothing
+          # read the pull-request reports, and v8 instrumentation cost about
+          # a fifth of the suite's wall time on every push. The vitest configs
+          # of cli, core, web-shell and vscode-ide-companion read this switch.
+          QWEN_CI_COVERAGE: "${{ github.event_name == 'push' && '1' || '' }}"
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
           # Bound each Vitest process on the shared ECS host. Operators can
@@ -710,6 +724,11 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
+          # A millisecond budget written on a developer machine measures the
+          # code; on the shared pool it measures the neighbours, where the same
+          # work runs 5x apart depending on placement (#10490). Skip those
+          # assertions here — they still run locally and on the hosted lanes.
+          QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           # ENOSPC has failed test steps mid-suite while the host looks
@@ -724,7 +743,7 @@ jobs:
           # carries the routed tmpdir, so the header only needs job/runner ids.
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           if [ ! -s "$DISK_SAMPLES" ]; then
-            echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+            echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
           fi
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
@@ -735,7 +754,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
           SAMPLER_PID=$!
           retry_arg=()
           if [ -n "${VITEST_RETRY:-}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
@@ -798,27 +817,35 @@ jobs:
           name: 'test-results-fork-22.x-ubuntu-latest'
           path: 'packages/*/junit.xml'
 
-      # Excludes push: the only consumer, `post_coverage_comment`, is gated to
-      # pull_request and nothing else reads `coverage-reports-*`, so uploading
-      # on every merge spends egress and retention on a lane with no reader.
+      # Push only: that is the one lane where QWEN_CI_COVERAGE turns
+      # collection on, so a pull-request run has nothing to upload.
       - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'push' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
 
   #
-  # Lint & Static: everything that judges the tree without executing it.
+  # Lint & Static: the checks whose verdict depends only on the tree.
   #
   lint_and_static:
     name: 'Lint & Static (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
     # Split out of `test` so this half can become a required status check on
-    # its own: these steps are deterministic (no test execution, no shared
-    # ECS worker contention), while the unit-test half of the old job was
-    # measured failing 41% of post-merge runs on flake alone in the week
-    # this split was made — one red gate must not hold the other's hostages.
+    # its own. The property that justifies that role is deterministic
+    # OUTCOME — no vitest unit-test run, whose flake was measured failing
+    # 41% of post-merge runs in the week of the split — not lightness: the
+    # bundle-closure check builds and bundles the CLI, the helper-suite
+    # steps execute the 26-file HELPER_TESTS battery (most spawn
+    # subprocesses), and the lane runs on the same contended pool as
+    # everything else, which is what the routed 90/45 ceiling below prices.
+    # One honest limit, recorded so the required-check follow-up is argued
+    # on true premises: the incidents that motivated the split all failed in
+    # `Run tests and generate reports`, which stayed in `test` — this lane
+    # would have been green on those merges. What it gates is the class a
+    # required check can hold without flake hostages, not that class.
+    # One red gate must not hold the other's hostages.
     # Same event surface as `test` (see its `if` for the reasoning), and the
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
@@ -1020,6 +1047,25 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: '.github/scripts/check-workflow-size.sh'
 
+      # A green lane proves the branch passes the gate AS THE BRANCH defines
+      # it — the checkout above is refs/pull/N/head by deliberate trade-off —
+      # not as the base defines it. #11117 flipped Prettier --write →
+      # --check on main while #11216's branch still ran --write; it merged
+      # green and reddened every later full-profile PR (#11378 cleaned up).
+      # Fail a branch whose base has since changed a gate-defining file.
+      # PRs only: merge_group validates the prospective merged tree and push
+      # validates the base itself. docs_only runs no lint lane, so there is
+      # no stale green to catch; github_ci_only runs lint.js lanes in the
+      # helper step below, so it is covered. Seconds of API calls before the
+      # expensive steps; details in the script's header.
+      - name: 'Check lint gate freshness'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: 'node .github/scripts/check-lint-gate-freshness.mjs'
+
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -1065,9 +1111,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
-          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
           sample_disk() {
-            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true)
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
             echo "$sample"
             echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
           }
@@ -1084,29 +1131,15 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # The install step above starts the #10035 disk-pressure sampler; this
-      # is its collector, mirrored from `test`. Without it the lane produces
-      # the telemetry and destroys it with the runner temp dir on the exact
-      # ENOSPC death the sampler exists to explain. Distinct artifact name:
-      # both jobs can fail in one run, and upload-artifact v4+ rejects
-      # duplicate names.
-      - name: 'Upload disk-pressure samples'
-        if: '${{ failure() }}'
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'disk-pressure-lint-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
-          path: '${{ runner.temp }}/disk-pressure-samples.log'
-          if-no-files-found: 'ignore'
-          retention-days: 14
       - name: 'GitHub CI helper checks'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
         timeout-minutes: 5
         run: |-
-          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
+          # Keep this path dependency-free: it runs before any dependency install in this job (setup-node, self-hosted node and `npm ci` above are all gated on the full profile), so only the node-builtin-only HELPER_TESTS_DEP_FREE suites run here. The full-profile helper step below re-runs the complete HELPER_TESTS list after `npm ci`, and script formatting is checked when those files hit full CI.
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS_DEP_FREE }}
 
       - name: 'Audit critical runtime dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1196,6 +1229,19 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
 
+      # cli sources name core modules by path (`.../config/storage.js`). In the
+      # repo those resolve through tsconfig paths or vitest aliases; in the
+      # published package neither exists and Node resolves them against core's
+      # `exports`, where one `./*` entry carries all of them. Nothing else
+      # exercises that entry, so without this a change to it — or to the
+      # dist layout — leaves every suite green and breaks `qwen` at startup.
+      # Runs after the step above has already built the workspace.
+      - name: 'Check core subpath exports resolve'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm run build --workspace=packages/core
+          npm run check:core-subpath-exports
+
       # The `github_ci_only` profile runs the .github/scripts helper tests, but a
       # `full` PR that touches those scripts skips that path and `npm run
       # test:ci` (vitest) does not collect `node:test` files — so run them here
@@ -1204,6 +1250,47 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
+
+      # State-at-failure dump for the 19 substantive steps after install: the
+      # install sampler is reaped by that step's `trap … EXIT`, so a death in
+      # ESLint or the bundle-closure build would otherwise upload an artifact
+      # holding only install-window samples. `tee -a` appends — a bare `>`
+      # would truncate exactly those samples — and mirrors to the job log,
+      # because the file it appends to is the one whose writability is under
+      # investigation: redirected straight into it, an ENOSPC death loses the
+      # dump and its own diagnostic together, leaving oncall unable to tell
+      # "dumped, nothing interesting" from "could not write". tee still emits
+      # the data to stdout when the file write fails, and reports why on the
+      # stderr this block does not swallow; it exits 1 there, hence `|| true`.
+      - name: 'Dump disk state on failure'
+        if: '${{ failure() }}'
+        run: |-
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          {
+            echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            df -hT || true
+            df -i || true
+            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+          } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
+      # Collector for the #10035 telemetry, kept as the LAST step: failure()
+      # is evaluated when the step is reached and never revisited, so at its
+      # old slot just after install it had already been passed (and skipped,
+      # nothing yet failed) by the time any lint/static step could die — it
+      # could only ever collect a prelude failure. `test` is NOT mirrored here
+      # and does not get that treatment: its collector sits four steps from the
+      # end, so a failure in the packaging or upload steps that follow it is
+      # never collected in that job. Same loss class, deliberately left to a
+      # follow-up rather than widened into this change. Distinct artifact name:
+      # both jobs can fail in one run and upload-artifact v4+ rejects
+      # duplicate names.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-lint-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
@@ -1217,15 +1304,18 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         needs.test.outputs.ci_profile == 'full'
       }}
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # The same commit repeatedly lost browser resources or exceeded the
+    # document performance budget on ECS, while both gates passed on hosted.
+    # Keep this browser job hosted without relaxing its test assertions.
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 20
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted runners reuse the workspace; a prior containerised job can
-      # leave root-owned, read-only files anywhere in it. Restore ownership and
-      # write permission unconditionally before checkout — see the test job's
-      # 'Restore workspace ownership' step for why probing first is unsafe.
+      # Retain the shared-pool recovery steps so rerouting needs only a runner
+      # change. Hosted workspaces are fresh; on a reused workspace a prior
+      # containerised job can leave root-owned, read-only files. Restore them
+      # unconditionally before checkout, as in the test job.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -1236,11 +1326,9 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Same pre-checkout recovery as the test job: this job lands on the
-      # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too. The
-      # `.qwen.root-orig` name's provenance (an external recovery tool) is
-      # documented on the test job's copy.
+      # Keep this retained sweep pinned to the test job's hardened recovery
+      # recipe, even while hosted. The `.qwen.root-orig` name's provenance
+      # (an external recovery tool) is documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
@@ -1366,9 +1454,8 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
-      # Same pre-install admission check as the test job (#10035): this job
-      # lands on the same self-hosted pool and installs before the gate would
-      # otherwise have freed space for it.
+      # Retained for a future shared-pool reroute: apply the test job's
+      # pre-install admission check (#10035) before dependency installation.
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
@@ -1379,18 +1466,31 @@ jobs:
 
       - name: 'Install Playwright Chromium (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
-        run: 'npx playwright install --with-deps chromium'
+        run: |-
+          node node_modules/playwright/cli.js install --with-deps chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Install Playwright Chromium (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
-        run: 'npx playwright install chromium'
+        run: |-
+          node node_modules/playwright/cli.js install chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Choose web-shell Playwright port'
         run: |-
           port="$(node -e "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>{console.log(server.address().port);server.close();});")"
           echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
           echo "Using web-shell Playwright port ${port}"
+
+      - name: 'Run transcript document browser gate'
+        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
         run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
@@ -1527,7 +1627,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -1699,7 +1799,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -1709,53 +1809,6 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
-
-  post_coverage_comment:
-    name: 'Post Coverage Comment'
-    runs-on: 'ubuntu-latest'
-    needs:
-      - 'classify_pr'
-      - 'test'
-    # !cancelled() not always(): don't let a cancelled run hold the concurrency slot here.
-    if: |-
-      ${{
-        !cancelled() &&
-        needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full' &&
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository
-      }}
-    continue-on-error: true
-    permissions:
-      contents: 'read' # For checkout
-      pull-requests: 'write' # For commenting
-    strategy:
-      matrix:
-        # Reduce noise by only posting the comment once
-        os:
-          - 'ubuntu-latest'
-        node-version:
-          - '22.x'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-
-      - name: 'Download coverage reports artifact'
-        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
-        with:
-          name: 'coverage-reports-${{ matrix.node-version }}-${{ matrix.os }}'
-          path: 'coverage_artifact' # Download to a specific directory
-
-      - name: 'Post Coverage Comment using Composite Action'
-        uses: './.github/actions/post-coverage-comment' # Path to the composite action directory
-        with:
-          cli_json_file: 'coverage_artifact/cli/coverage/coverage-summary.json'
-          core_json_file: 'coverage_artifact/core/coverage/coverage-summary.json'
-          cli_full_text_summary_file: 'coverage_artifact/cli/coverage/full-text-summary.txt'
-          core_full_text_summary_file: 'coverage_artifact/core/coverage/full-text-summary.txt'
-          node_version: '${{ matrix.node-version }}'
-          os: '${{ matrix.os }}'
-          github_token: '${{ secrets.GITHUB_TOKEN }}'
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release

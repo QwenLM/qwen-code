@@ -16,9 +16,10 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import type { CompressionProps } from '../types.js';
+import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
+import { formatTokenCount } from '../statusLinePresets.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
@@ -116,6 +117,46 @@ export type LiveStopHookItem = {
   message: string;
 };
 
+/** Away-summary recap (ink away_recap → AwayRecapMessage). */
+export type LiveAwayRecapItem = {
+  kind: 'away-recap';
+  id: string;
+  text: string;
+};
+
+/** User `!`-shell command row (ink user_shell → UserShellMessage). */
+export type LiveUserShellItem = {
+  kind: 'user-shell';
+  id: string;
+  text: string;
+};
+
+/** Advisor review card (ink advisor → AdvisorMessage). */
+export type LiveAdvisorItem = {
+  kind: 'advisor';
+  id: string;
+  text: string;
+  model: string;
+};
+
+/** Arena agent card (ink arena_agent_complete → ArenaAgentCard). */
+export type LiveArenaAgentItem = {
+  kind: 'arena-agent';
+  id: string;
+  agent: ArenaAgentCardData;
+};
+
+/** Arena session summary card (ink arena_session_complete →
+ * ArenaSessionCard). */
+export type LiveArenaSessionItem = {
+  kind: 'arena-session';
+  id: string;
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
 /** Goal lifecycle card (ink goal_state → GoalStatusMessage/GoalStateCard).
  * `snapshot` is the v2 stream form; `legacy` is the /goal command's
  * goal_status kind form — both render through the describe* helpers. */
@@ -147,6 +188,11 @@ export type LiveHistoryItem =
   | LiveWarningItem
   | LiveRetryItem
   | LiveStopHookItem
+  | LiveAwayRecapItem
+  | LiveUserShellItem
+  | LiveAdvisorItem
+  | LiveArenaAgentItem
+  | LiveArenaSessionItem
   | LiveGoalItem;
 
 let uid = 0;
@@ -163,12 +209,16 @@ function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
 export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
-): LiveHistoryItem[] {
+): readonly LiveHistoryItem[] {
   const items = [...prev];
   const last = items[items.length - 1];
 
   switch (ev.type) {
     case 'user': {
+      // Both `addItem` implementations collapse a user item identical to the
+      // one before it, and this is the chokepoint the projected and live
+      // echoes share: two identical steers in a row are one row.
+      if (last?.kind === 'user' && last.text === ev.text) return prev;
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({
@@ -311,6 +361,18 @@ export function foldLiveEvent(
         done: false,
         confirm: 'pending',
       });
+      return items;
+    }
+    case 'confirm-resolved': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        // Every resolution clears 'pending' (transcript-view gates the
+        // awaiting marker on it); the outcome only picks the recorded state.
+        if (t.confirm === 'pending') {
+          items[i] = { ...t, confirm: ev.outcome };
+        }
+      }
       return items;
     }
     case 'task-start':
@@ -483,6 +545,48 @@ export function foldLiveEvent(
       items.push({ kind: 'stop-hook', id: nid('shk'), message: ev.message });
       return items;
     }
+    case 'away-recap': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'away-recap', id: nid('recap'), text: ev.text });
+      return items;
+    }
+    case 'user-shell': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'user-shell', id: nid('ushl'), text: ev.text });
+      return items;
+    }
+    case 'advisor': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({
+        kind: 'advisor',
+        id: nid('advisor'),
+        text: ev.text,
+        model: ev.model,
+      });
+      return items;
+    }
+    case 'arena-agent': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({ kind: 'arena-agent', id: nid('arena'), agent: ev.agent });
+      return items;
+    }
+    case 'arena-session': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({
+        kind: 'arena-session',
+        id: nid('arena'),
+        sessionStatus: ev.sessionStatus,
+        task: ev.task,
+        totalDurationMs: ev.totalDurationMs,
+        agents: ev.agents,
+      });
+      return items;
+    }
     case 'segment-end': {
       // Close the streaming assistant block only — tools keep running and
       // the turn stays in flight (`done` is the sole turn-end event).
@@ -609,6 +713,15 @@ export function describeGoalCard(
   const activeTimeMs = goal.activeTimeMs ?? 0;
   if (activeTimeMs > 0)
     stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
+  const tokensUsed = goal.tokensUsed ?? 0;
+  if (tokensUsed > 0) {
+    const used = formatTokenCount(tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
+  }
   const reason =
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()

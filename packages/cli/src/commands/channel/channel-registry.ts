@@ -33,6 +33,13 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
+    key: 'messagePrefix',
+    label: 'Message Prefix',
+    kind: 'string',
+    description:
+      'Only dispatch user messages that start with this exact prefix after any leading @mentions. The prefix is removed before the task runs',
+  },
+  {
     key: 'senderPolicy',
     label: 'Sender Policy',
     kind: 'enum',
@@ -113,6 +120,18 @@ function managementFieldsWithSharedControls(
             kind: 'boolean' as const,
             description:
               'Retain an owner-scoped catalog of named tasks in daemon-managed mode',
+          },
+        ]),
+    ...(declared.has('instructions')
+      ? []
+      : [
+          {
+            key: 'instructions',
+            label: 'Instructions',
+            kind: 'string' as const,
+            multiline: true,
+            description:
+              'Guidance injected into each channel session context; some channels replace their own default guidance when this is set',
           },
         ]),
   ];

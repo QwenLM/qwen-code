@@ -9,19 +9,30 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
+
+// A hung-runner bound, not a performance budget, so it rides the suite's own
+// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
+// quiet machine. Release run 33957952281: this harness's heaviest case costs
+// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
+// stub's recording — so a timeout surfaced as a content mismatch.
+const subprocessTimeoutMs = Number(
+  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+);
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // Long-form rationale moved out of the YAML when the file approached
@@ -29,7 +40,10 @@ const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
-const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const releaseStepScript = readFileSync(
+  '.github/scripts/run-release-step.sh',
+  'utf8',
+);
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -202,6 +216,15 @@ const verificationGateBodies = [
   verificationGateSteps[0] ?? '',
   reviewVerificationRunner,
 ];
+const quotedCriticalWitness = (label = '') =>
+  [
+    '**[Suggestion]** Add a regression assertion for the fallback path.',
+    '',
+    ...(label ? [label] : []),
+    '```text',
+    '**[Critical]** quoted fixture output',
+    '```',
+  ].join('\n');
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -339,6 +362,15 @@ function qwenResultLine({ result, errorMessage, isError = false }) {
   })}\n`;
 }
 
+function qwenInitLine({ model, version }) {
+  return `${JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    ...(model === undefined ? {} : { model }),
+    ...(version === undefined ? {} : { qwen_code_version: version }),
+  })}\n`;
+}
+
 function runAutofixRunner(args) {
   return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
     encoding: 'utf8',
@@ -383,15 +415,6 @@ function runDevelopIssue(dir, stub) {
 const IDLE_NOW =
   'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
 const IDLE_HEAD = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
-
-// The heaviest cases here scan the whole rendered workflow (~15k lines)
-// repeatedly: 'upserts deferred findings into a per-PR issue that survives
-// the merge' alone measures ~14s on an idle machine against the 30s suite
-// default, and it exhausted that budget on a contended release runner in
-// runs 33676423730 and 33683912557 — the only failure in a job where the
-// other 75 files passed. Same reasoning as install-script.test.js: give the
-// file headroom rather than let host contention decide a release.
-vi.setConfig({ testTimeout: 90_000 });
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
@@ -2064,7 +2087,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -7011,6 +7034,13 @@ exit 1
     // unclassified comments stay open instead of driving more code changes.
     expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
     expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const leadingCriticalDefinitions = (
+      `${workflow}\n${reviewVerificationRunner}`.match(
+        /def leading_critical:\s*\n\s*gsub\([^\n]+\)\s*\n\s*\| startswith\([^\n]+\);/g,
+      ) ?? []
+    ).map((definition) => definition.replace(/\s+/g, ' ').trim());
+    expect(leadingCriticalDefinitions).toHaveLength(9);
+    expect(new Set(leadingCriticalDefinitions).size).toBe(1);
     const inlineFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -7060,6 +7090,21 @@ exit 1
         author_association: 'MEMBER',
         body: 'The null branch still crashes.',
       },
+      {
+        id: 16,
+        created_at: '2026-01-02T00:00:05Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness('Witness:'),
+      },
+      {
+        id: 17,
+        in_reply_to_id: 16,
+        created_at: '2026-01-02T00:00:06Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'The assertion should cover the fallback path too.',
+      },
     ];
     const reviews = [
       {
@@ -7102,7 +7147,7 @@ exit 1
           },
         ),
       );
-    expect(countInline(false)).toBe(5);
+    expect(countInline(false)).toBe(7);
     // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
     // but MAINTAINER comments (13) stay actionable regardless of wording —
     // the lexical **[Critical]** test applies only to the bot's own
@@ -7138,7 +7183,10 @@ exit 1
         submitted_at: '2026-01-02T00:00:01Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: 'Looks good overall',
+        body: [
+          '<!-- hidden from readers',
+          '**[Critical]** invisible marker',
+        ].join('\n'),
       },
       {
         id: 22,
@@ -7146,7 +7194,16 @@ exit 1
         submitted_at: '2026-01-02T00:00:02Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: '**[Critical]** memory leak in the owner route',
+        body: [
+          '<!-- rendered metadata -->',
+          '',
+          '\uFEFF',
+          '**[Critical]** Blocking finding(s) follow.',
+          '',
+          '⚠️ Downgraded from Request changes to Comment: self-PR.',
+          '',
+          '**[Critical]** memory leak in the owner route',
+        ].join('\n'),
       },
       {
         id: 23,
@@ -7155,6 +7212,14 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableReviews = (criticalOnly, over = []) =>
@@ -7185,10 +7250,11 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
         ),
       );
-    // All four are actionable while suggestions are in scope; in
-    // Critical-only mode only the BOT's non-Critical COMMENTED review is
-    // excluded — the maintainer's COMMENTED review stays actionable.
-    expect(countActionableReviews(false)).toBe(4);
+    // All five are actionable while suggestions are in scope. In Critical-only
+    // mode, the rendered-invisible residue ahead of 22 still leaves its
+    // Critical marker leading, while the unclosed comment in 21 and quoted
+    // marker in 24 stay non-Critical.
+    expect(countActionableReviews(false)).toBe(5);
     expect(countActionableReviews(true)).toBe(3);
     // Over-budget: the maintainer's COMMENTED review defers; their formal
     // CHANGES_REQUESTED (20) still cuts through.
@@ -7219,6 +7285,13 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: '@qwen-code /review',
+      },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableIssue = (criticalOnly, over = []) =>
@@ -7253,7 +7326,7 @@ exit 1
     // scope; the command-style comment is always excluded. In Critical-only
     // mode the maintainer's comment STAYS actionable alongside the bot's
     // Critical one — only bot non-Critical output is filtered.
-    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(false)).toBe(3);
     expect(countActionableIssue(true)).toBe(2);
     // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
     // still counts.
@@ -7294,6 +7367,15 @@ exit 1
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
         html_url: 'https://github.com/test/pull/1#review-23',
       },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#review-24',
+      },
     ];
     const countDeferredReviews = (over = []) =>
       Number(
@@ -7320,11 +7402,9 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
         ),
       );
-    // Only the BOT's COMMENTED non-Critical review is deferred;
-    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
-    // COMMENTED review are not.
-    expect(countDeferredReviews()).toBe(1);
-    expect(countDeferredReviews(['maintainer'])).toBe(2);
+    // The ordinary suggestion and the fenced-marker suggestion are deferred.
+    expect(countDeferredReviews()).toBe(2);
+    expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
       /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
@@ -7359,14 +7439,14 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
         ),
       );
-    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
-    // unclassified comment (13) stays actionable, and Critical (11),
-    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
-    // never deferred.
-    expect(countDeferredInline()).toBe(1);
+    // The ordinary suggestion (12), fenced-marker root (16), and its reply
+    // (17) defer together. The maintainer's unclassified comment (13) stays
+    // actionable, as do Critical (11), reply-to-Critical (14), and the
+    // CHANGES_REQUESTED-associated comment (15).
+    expect(countDeferredInline()).toBe(3);
     // Over-budget maintainer: their unclassified comment (13) joins the
     // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
-    expect(countDeferredInline(['maintainer'])).toBe(2);
+    expect(countDeferredInline(['maintainer'])).toBe(4);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
       /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -7405,6 +7485,14 @@ exit 1
         body: '**[Suggestion]** consider caching this lookup',
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
       },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#issuecomment-34',
+      },
     ];
     const countDeferredIssue = (over = []) =>
       Number(
@@ -7431,10 +7519,10 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(issueComments) },
         ),
       );
-    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
-    // comment (30), the Critical (31), and the command (32) are not.
-    expect(countDeferredIssue()).toBe(1);
-    expect(countDeferredIssue(['maintainer'])).toBe(2);
+    // Both bot suggestions are deferred; the maintainer's normal comment
+    // (30), the Critical (31), and the command (32) are not.
+    expect(countDeferredIssue()).toBe(2);
+    expect(countDeferredIssue(['maintainer'])).toBe(3);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
@@ -7512,6 +7600,18 @@ exit 1
           humanC('onetime', '2026-06-14T12:00:00Z'),
           humanC('looper', '2026-07-01T12:00:00Z'),
           humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC(
+            'quoted-issue',
+            '2026-07-02T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
+          humanC(
+            'quoted-issue',
+            '2026-07-03T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
           humanC(
             'looper',
@@ -7584,6 +7684,20 @@ exit 1
             submitted_at: '2026-07-02T12:30:00Z',
             body: 'feedback delivered through a review',
           },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-03T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
           // Request changes / APPROVED reviews are never deferrable, so two
           // consumed-span batches of each must not count (both authors absent):
           // the census mirrors the deferred renderer's `state == "COMMENTED"`.
@@ -7635,6 +7749,32 @@ exit 1
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:30:00Z',
             body: 'feedback delivered through an inline comment',
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            id: 902,
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:20:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 902,
+            created_at: '2026-07-03T13:20:00Z',
+            body: 'The same fallback path is still uncovered.',
           },
           // Critical root comment (id 901) that replyguy's replies attach to.
           {
@@ -7698,17 +7838,31 @@ exit 1
         ],
         { encoding: 'utf8' },
       );
-      // Only the two looped authors land here; every protected author above
-      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
-      // two consumed-span batches yet stays absent — dropping any one of the
-      // census's deferral-mirroring exclusions surfaces one of them and fails.
-      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
+      // The four fenced-marker authors are regular feedback in every input
+      // shape, including a reply to a fenced-marker root. The protected
+      // authors (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/
+      // sentinelvictim) still stay absent.
+      expect(JSON.parse(overOut)).toEqual([
+        'looper',
+        'quoted-inline',
+        'quoted-issue',
+        'quoted-reply',
+        'quoted-reviewer',
+        'reviewer2',
+      ]);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
     }
     // The deferral note names over-budget authors with the escapes.
     expect(prepareBranchAndFeedbackStep).toContain('is at this window');
     expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'start your comment with **[Critical]**',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '请以 **[Critical]** 开头评论',
+    );
+    expect(designDoc).toContain('starting a comment with **[Critical]**');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the
@@ -9668,6 +9822,83 @@ exit 1
     );
   });
 
+  it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
+    // The salvage step posts the historical-head note with CI_BOT_PAT —
+    // the REVIEW_BOT account the fleet scan counts as actionable. Its
+    // marker must sit in every exclusion that counts or renders REVIEW_BOT
+    // issue comments: without it, a salvaged APPROVE (N_REVIEWS counts
+    // only CHANGES_REQUESTED/COMMENTED) flips "nothing new since
+    // watermark" into a full review-address round dispatched on the bot's
+    // own note, and the NEWEST computation advances the watermark onto
+    // it. Behavioral witness first: the scan's N_ISSUE_COMMENTS filter,
+    // extracted VERBATIM, replayed over the exact note body plus one
+    // human comment.
+    const scanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    const filterDef = scanStep.match(/BOT_COMMENT_FILTER='([^']+)'/)?.[1];
+    expect(filterDef).toContain('qwen-review-salvaged');
+    const cmd =
+      scanStep.match(/N_ISSUE_COMMENTS="\$\(jq[\s\S]*?ic\.json"\)"/)?.[0] ?? '';
+    const jqProgram = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"));
+    expect(jqProgram).toContain('| length');
+    const note = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+      created_at: '2026-08-02T00:00:00Z',
+      body:
+        '<!-- qwen-review-salvaged e2b07356f5d2e56197a89e438535edfc8e23823e -->\n\n' +
+        '⏳ **Historical-head review** — head moved while this review was in flight.',
+    };
+    const human = {
+      user: { login: 'maintainer' },
+      author_association: 'MEMBER',
+      created_at: '2026-08-02T01:00:00Z',
+      body: 'please address the remaining findings',
+    };
+    const countComments = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-08-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'bf',
+          filterDef,
+          '--arg',
+          'cf',
+          '^\\s*@qwen-code /',
+          jqProgram,
+        ],
+        { input: JSON.stringify(comments), encoding: 'utf8' },
+      ).trim();
+    // The note alone adds nothing actionable; the human comment still
+    // counts beside it.
+    expect(countComments([note])).toBe('0');
+    expect(countComments([note, human])).toBe('1');
+    expect(countComments([human])).toBe('1');
+    // Shape pin: the marker rides the shared alternation at the four
+    // sibling sites that count or render REVIEW_BOT issue comments
+    // (NEWEST, LIVE_NEW, and both feedback renderers) plus the scan
+    // filter's BOT_COMMENT_FILTER — and at no other site (the
+    // conflict-wake and over-budget filters already exclude REVIEW_BOT
+    // by login).
+    expect(
+      workflow.match(/qwen-review-ack\|qwen-review-salvaged/g) ?? [],
+    ).toHaveLength(5);
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',
@@ -9749,14 +9980,14 @@ exit 1
   });
 
   it('keeps release-failure autofix issues approved for scheduled fallback', () => {
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'Safe to auto-apply approval: release-failure issue content is',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
     );
-    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseStepScript).toContain(
       'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
     );
   });
@@ -9890,7 +10121,7 @@ exit 1
         ],
         // spawnSync blocks the event loop, so vitest's async timeout can't
         // fire — bound each subprocess directly against a hung runner.
-        { encoding: 'utf8', timeout: 10_000 },
+        { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
@@ -9934,9 +10165,19 @@ exit 1
     // secret, so it is safe to echo into a public comment. Each reporting
     // step must plumb it in and render a footer that names Qwen Code and the
     // model, with an empty-variable fallback so the footer never renders a
-    // bare backtick pair.
+    // bare backtick pair. The footer prefers the model the session ACTUALLY
+    // ran: run-agent.mjs writes the stream-json init event's resolved model
+    // + CLI version to agent-model, and every read site hardens the read
+    // (WORKDIR is agent-writable) before interpolating: regular file only
+    // (a planted directory or FIFO must not abort or wedge the PAT-bearing
+    // step under -eo pipefail), never a symlink (head would follow it to an
+    // arbitrary host file), bounded head -c prefixes (sed buffers a whole
+    // line before cut could bound it), allowlist + length cap per value, and
+    // || true so any read failure degrades to the configured MODEL. The
+    // executed replay below gates the ordering and the shell semantics;
+    // these pins gate that all THREE copies carry them.
     const footer =
-      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`${CLI_DISPLAY}"';
     for (const step of [
       pushAndReportStep,
       reviewAddressReportStep,
@@ -9946,6 +10187,21 @@ exit 1
         "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
       );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain(
+        'if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then',
+      );
+      expect(step).toContain(
+        'AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'1p\' | tr -cd \'A-Za-z0-9._:/+-\' | cut -c1-100 || true)"',
+      );
+      expect(step).toContain(
+        'AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'2p\' | tr -cd \'A-Za-z0-9._+-\' | cut -c1-40 || true)"',
+      );
+      expect(step).toContain(
+        '[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"',
+      );
+      expect(step).toContain(
+        'CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \\`${AGENT_CLI_VERSION}\\`}"',
+      );
       expect(step).toContain(footer);
     }
     // Push-and-report carries BOTH the fixed and no-action bodies, so the
@@ -9963,6 +10219,163 @@ exit 1
     expect(pushAndReportStep).toMatch(
       /echo "🧠 Handled by[^\n]*\n\s+echo\n\s+echo "<!-- autofix-eval ts=\$\{NEWEST\} acted=true/,
     );
+  });
+
+  it('executes the footer read block: preference ordering, allowlist, and fail-safe on planted paths', () => {
+    // The pins above are order-blind source substrings and execute nothing.
+    // Replay the REAL block (canonical script copy) under the same flags
+    // GitHub runs `run:` with, so the load-bearing ordering is gated —
+    // moving MODEL_DISPLAY's default below the preference would silently
+    // revert every footer to the requested model — and every planted-path
+    // shape the hardening exists for must degrade to the fallback with
+    // exit 0, never abort the PAT-bearing step under -eo pipefail.
+    // The extractor stays anchored on the default assignment immediately
+    // followed by a newline; an unanchored lazy span could silently degrade
+    // to block === '' (guarded below, and by the identity assertion).
+    const blockRe =
+      /MODEL_DISPLAY="\$\{MODEL:-default\}"\n[\s\S]*?CLI_DISPLAY="\$\{AGENT_CLI_VERSION:\+[^\n]*\n/;
+    const block = pushAndReportScript.match(blockRe)?.[0] ?? '';
+    expect(block).toContain('agent-model');
+    expect(block.trimEnd().endsWith('`}"')).toBe(true);
+    // One replay covers all THREE copies: the two workflow copies sit ten
+    // spaces deep in the YAML and carry a shorter comment, but their CODE
+    // lines must equal the replayed canonical block's, in the same order.
+    // Without this a hand-edit of one duplicate — the default assignment
+    // moved below the preference — leaves every toContain pin green and
+    // this replay (extracted from the untouched script) green too, while
+    // that copy's footer silently reverts to the requested model. Comments
+    // are filtered, order is preserved, and an empty/failed match can never
+    // equal the non-empty canonical code.
+    const codeLines = (src) =>
+      (src.match(blockRe)?.[0] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l !== '' && !l.startsWith('#'))
+        .join('\n');
+    const canonicalCode = codeLines(pushAndReportScript);
+    expect(canonicalCode).toContain('agent-model');
+    for (const step of [publishPrStep, reviewAddressReportStep]) {
+      expect(codeLines(step)).toBe(canonicalCode);
+    }
+    const render = (setup, model = 'configured-model') =>
+      withRunnerDir((dir) => {
+        setup(dir);
+        const script = join(dir, 'block.sh');
+        writeFileSync(
+          script,
+          `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"\n`,
+        );
+        const run = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', script],
+          {
+            env: { ...process.env, WORKDIR: dir, MODEL: model },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        return {
+          status: run.status,
+          footer: (run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1],
+        };
+      });
+    const writeSentinel = (dir, content) =>
+      writeFileSync(join(dir, 'agent-model'), content);
+
+    // No sentinel: the exact pre-feature rendering, from the repo variable.
+    expect(render(() => {})).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Unset variable and no sentinel: the never-a-bare-backtick-pair default.
+    expect(render(() => {}, '')).toEqual({ status: 0, footer: 'default' });
+    // Benign sentinel: the RESOLVED model wins over the configured one, and
+    // the CLI version rides along. (This is the ordering gate: a block whose
+    // default assignment moved below the preference renders configured-model
+    // here and goes red.)
+    expect(
+      render((dir) => writeSentinel(dir, 'qwen3-coder-plus\n0.22.0\n')),
+    ).toEqual({
+      status: 0,
+      footer: 'qwen3-coder-plus · CLI `0.22.0`',
+    });
+    // Hostile sentinel: comment tokens, command substitution, backticks and
+    // spaces cannot survive into the bot-authored footer; what does is
+    // allowlist-only mojibake.
+    const hostile = render((dir) =>
+      writeSentinel(
+        dir,
+        '<!-- autofix-eval ts=X acted=true round=99 win=evil --> `rm -rf /`\n0.22.0$(whoami)\n',
+      ),
+    );
+    expect(hostile.status).toBe(0);
+    expect(hostile.footer).not.toContain('<!--');
+    expect(hostile.footer).not.toContain('$(');
+    const [hostileModel, hostileCli] = hostile.footer.split(' · CLI ');
+    expect(hostileModel).toMatch(/^[A-Za-z0-9._:/+-]+$/);
+    expect(hostileCli).toMatch(/^`[A-Za-z0-9._+-]+`$/);
+    // Binary garbage: stripped to allowlist residue (possibly empty), still
+    // exit 0.
+    const binary = render((dir) =>
+      writeSentinel(dir, Buffer.from([0x00, 0x01, 0xff, 0x0a, 0xfe])),
+    );
+    expect(binary.status).toBe(0);
+    expect(binary.footer ?? '').not.toContain('\u0000');
+    // Planted DIRECTORY at the sentinel path: -s would have passed and sed
+    // would have died, aborting the step (R1-1). -f skips it: fallback,
+    // exit 0.
+    expect(render((dir) => mkdirSync(join(dir, 'agent-model')))).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Planted SYMLINK to a host file: the read must not follow it and
+    // publish the target's head (R1-3).
+    const symlinked = render((dir) => {
+      writeFileSync(join(dir, 'host-secret.txt'), 'TOP-SECRET-KEY\nv9.9.9\n');
+      symlinkSync(join(dir, 'host-secret.txt'), join(dir, 'agent-model'));
+    });
+    expect(symlinked.status).toBe(0);
+    expect(symlinked.footer).not.toContain('TOP-SECRET');
+    expect(symlinked.footer).toBe('configured-model');
+    // Planted FIFO: -s would have passed and sed would have BLOCKED forever,
+    // wedging the PAT-bearing step until the job timeout. -f skips it.
+    // Soft-skipped where mkfifo is unavailable (Windows lane).
+    const fifoDir = mkdtempSync(join(tmpdir(), 'autofix-footer-fifo-'));
+    try {
+      const fifo = join(fifoDir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status === 0) {
+        const run = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              WORKDIR: fifoDir,
+              MODEL: 'configured-model',
+            },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        expect(run.status).toBe(0);
+        expect((run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1]).toBe(
+          'configured-model',
+        );
+      }
+    } finally {
+      rmSync(fifoDir, { recursive: true, force: true });
+    }
   });
 
   it('isolates agent jobs from builds with hosted fallback', () => {
@@ -10025,6 +10438,9 @@ exit 1
     for (const step of envCheckSteps) {
       expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
       expect(step).toContain('not an approved agent pool member');
+      expect(step).toContain(
+        'echo \'QWEN_SKIP_LATENCY_BUDGETS=1\' >> "${GITHUB_ENV}"',
+      );
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -12509,7 +12925,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13540,7 +13956,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -13965,6 +14381,10 @@ exit 1
       carry = '',
       listPages = null,
       listErr = '',
+      prJson = '{"title":"Some PR title","user":{"login":"someone"}}',
+      prFail = false,
+      prErr = '',
+      assignFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
       const bin = join(dir, 'bin');
@@ -14026,6 +14446,12 @@ exit 1
           '    printf "%s" "$LIST_JSON";;',
           '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
           '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
+          // PR_ERR mirrors LIST_ERR: the script captures this call's stderr as
+          // the warning's reason, so a fetch failure has to produce one.
+          '  repos/*/pulls/*) if [[ "$PR_FETCH_FAIL" == 1 ]]; then printf "%s" "$PR_ERR" >&2; exit 1; fi; printf "%s" "$PR_JSON";;',
+          // The assignment is its own endpoint call, matched before the
+          // issue-body read below so ASSIGN_FAIL fails ONLY the assignment.
+          '  */assignees) [[ "$ASSIGN_FAIL" == 1 ]] && exit 1; echo ok;;',
           '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
           '  repos/*/issues/*) [[ "$BODY_FAIL" == 1 ]] && exit 1; printf "%s" "$BODY_TEXT";;',
           'esac',
@@ -14040,7 +14466,7 @@ exit 1
           encoding: 'utf8',
           // spawnSync blocks the event loop, so vitest's async timeout cannot
           // fire — bound each subprocess directly against a hung runner.
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -14058,6 +14484,10 @@ exit 1
             COMMENTS_JSON: comments,
             COMMENTS_FAIL: commentsFail ? '1' : '0',
             WRITE_FAIL: writeFail ? '1' : '0',
+            PR_JSON: prJson,
+            PR_FETCH_FAIL: prFail ? '1' : '0',
+            PR_ERR: prErr,
+            ASSIGN_FAIL: assignFail ? '1' : '0',
           },
         },
       );
@@ -14077,6 +14507,245 @@ exit 1
     expect(created.calls).toContain(marker);
     expect(created.calls).toContain('- rc:7 `src/a.ts`: real, out of scope');
     expect(created.out).toContain('tracked in new issue #77');
+    // The creation path makes the tracking issue self-describing: the title
+    // carries the PR title, the issue is assigned to the PR author, and each
+    // rc bullet deep-links to the original review comment.
+    expect(created.calls).toContain('api repos/o/r/pulls/5');
+    expect(created.calls).toContain(
+      '-f title=Deferred review findings from PR #5: Some PR title',
+    );
+    expect(created.calls).toContain('-f assignees[]=someone');
+    // External contributors are not assignable, so the body also cc's the
+    // author — the mention is what actually reaches them.
+    expect(created.calls).toContain('cc @someone');
+    expect(created.calls).toContain(
+      'https://github.com/o/r/pull/5#discussion_r7',
+    );
+    // The ready-for-agent pointer attaches to the PER-ITEM issue, not to this
+    // tracking one: once the assign above lands this issue carries an assignee,
+    // and the scheduled ready-for-agent scan filters `no:assignee`
+    // (AUTOFIX_ISSUE_EXCLUDES in qwen-autofix.yml), so labelling it here would
+    // run without the scan that retries a label-event run cancelled by the
+    // per-issue concurrency group. Restoring the old ambiguous
+    // "(or apply the ready-for-agent flow)" parenthetical must red this.
+    expect(created.calls).toContain(
+      'apply the ready-for-agent flow to that issue',
+    );
+    expect(created.calls).not.toContain('(or apply the ready-for-agent flow)');
+    // The fetch-failure warning is gated on the CALL status plus "both derived
+    // strings came back empty" — never on a body FIELD's presence: this stub's
+    // PR_JSON is a title/user object with no `.number`, so a `jq -e '.number'`
+    // gate would warn here on every healthy round.
+    expect(created.out).not.toContain('could not fetch PR');
+    // A failed PR-context fetch degrades to the bare title and no assignee —
+    // the findings themselves are still persisted — and it WARNS, like every
+    // other gh failure path in the script: the `gh_err_reset` before the
+    // create call would otherwise wipe this call's reason unread, so a
+    // systematic pulls-endpoint failure (a fine-grained PAT rotated without
+    // pull-requests:read, a rate limit, a persistent 404) would silently
+    // revert every new tracking issue to the bare form behind a clean success
+    // line. Deleting the warning, or reading raw `${GH_ERR}` instead of
+    // `gh_reason()`, must red one of the two assertions below — the payload
+    // carries `::`, which gh_reason() neutralizes to `;;`.
+    const prFetchFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prFail: true,
+      prErr: '::error::fine-grained PAT lacks pull-requests read scope',
+    });
+    expect(prFetchFailed.out).toContain('tracked in new issue #77');
+    expect(prFetchFailed.out).toContain(
+      '::warning::could not fetch PR #5 context (;;error;;fine-grained PAT lacks pull-requests read scope)',
+    );
+    expect(prFetchFailed.out).not.toContain('::error::');
+    expect(prFetchFailed.calls).toContain(
+      '-f title=Deferred review findings from PR #5 -f body=',
+    );
+    expect(prFetchFailed.calls).not.toContain('assignees');
+    expect(prFetchFailed.calls).not.toContain('cc @');
+    // The gate's SECOND half needs its own witness, because `prFetchFailed`
+    // cannot provide one: its stub exits 1, so the first half already fires.
+    // This create path passes no --jq and gh copies a non-JSON body raw with
+    // serverError set only above status 299, so a transparent proxy answering
+    // `200 text/html` exits 0 with nothing usable — every derivation comes back
+    // empty through its `|| true`, and the issue degrades to the bare title /
+    // no cc / no assignee behind a clean success line. Dropping
+    // `( -z "${PR_TITLE_RAW}" && -z "${PR_AUTHOR}" )` from the script's gate
+    // must red the warning assertion below and leave `created` green.
+    const prUnusableBody = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '<!DOCTYPE html><html><body>200 from a transparent proxy</body>',
+    });
+    expect(prUnusableBody.out).toContain('tracked in new issue #77');
+    expect(prUnusableBody.out).toContain(
+      '::warning::could not fetch PR #5 context (the call exited 0 but returned no usable PR object)',
+    );
+    expect(prUnusableBody.out).not.toContain('no stderr captured');
+    expect(prUnusableBody.calls).toContain(
+      '-f title=Deferred review findings from PR #5 -f body=',
+    );
+    expect(prUnusableBody.calls).not.toContain('assignees');
+    expect(prUnusableBody.calls).not.toContain('cc @');
+    // A bot-authored PR gets no assignee (the bot never assigns itself).
+    const botAuthor = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"bot"}}',
+    });
+    expect(botAuthor.out).toContain('tracked in new issue #77');
+    expect(botAuthor.calls).not.toContain('assignees');
+    expect(botAuthor.calls).not.toContain('cc @');
+    // The login-charset guard in the script is the ONLY thing keeping a
+    // malformed `.user.login` (a space, an `@`, an over-long string, a
+    // non-login shape) out of both the deliberate `cc @…` mention in the
+    // public body and the `assignees[]` argument — so one fixture per declared
+    // shape. A lone space-bearing login is rejected by ANY bound: on its own it
+    // stays green when `{1,39}` is widened to `{1,}` or `@` is admitted into
+    // the class, and no test asserts the regex literal, so these cases are the
+    // guard's only witnesses. Deleting or weakening the regex must red one of
+    // the three below. (A `{"title":"t"}` fixture with no `.user` would pin
+    // nothing — `jq -r '.user.login // ""'` already yields empty there.)
+    const badLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"not a login"}}',
+    });
+    expect(badLogin.out).toContain('tracked in new issue #77');
+    expect(badLogin.calls).not.toContain('assignees');
+    expect(badLogin.calls).not.toContain('cc @');
+    // Title present + author rejected is the ONLY input that distinguishes the
+    // degradation gate's `&&` from an `||` (PR_TITLE_RAW set, PR_AUTHOR empty).
+    // Under `||` this healthy round would print "creating … with the bare
+    // title, no assignee and no cc" while still creating the ENRICHED title
+    // asserted just below — a warning naming a pulls-endpoint failure that did
+    // not happen and a degradation that did not occur, polluting the very
+    // signal the warning exists to protect. Both halves are pinned so flipping
+    // the operator reds this case either way.
+    expect(badLogin.out).not.toContain('could not fetch PR');
+    expect(badLogin.calls).toContain(
+      '-f title=Deferred review findings from PR #5: t',
+    );
+    // `@` outside the class: admitting it would publish a mention whose handle
+    // is not the login it looks like, under the bot identity.
+    const atLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"a@b"}}',
+    });
+    expect(atLogin.out).toContain('tracked in new issue #77');
+    expect(atLogin.calls).not.toContain('assignees');
+    expect(atLogin.calls).not.toContain('cc @');
+    expect(atLogin.out).not.toContain('could not fetch PR');
+    // One past GitHub's 39-char login bound: only the `{1,39}` upper bound
+    // rejects this, so widening it to `{1,}` must red this case.
+    const longLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: `{"title":"t","user":{"login":"${'a'.repeat(40)}"}}`,
+    });
+    expect(longLogin.out).toContain('tracked in new issue #77');
+    expect(longLogin.calls).not.toContain('assignees');
+    expect(longLogin.calls).not.toContain('cc @');
+    expect(longLogin.out).not.toContain('could not fetch PR');
+    // A rejected assignment only warns: by then the findings are already
+    // persisted, and the assignment is a SEPARATE idempotent call — never a
+    // second create POST. POST /repos/{owner}/{repo}/issues is not idempotent
+    // and the failures that reach a retry are the ambiguous ones (connection
+    // reset, gateway 502, a read timeout after the server committed), so a
+    // create-retry can mint a second tracking issue with the same marker that
+    // the next round's newest-first lookup orphans. This case does not pin
+    // that: its create SUCCEEDS, so a retry-on-create-failure branch never
+    // runs here — the failed-create half is pinned by the writeFail case's
+    // create-count assertion below.
+    const assignFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      assignFail: true,
+    });
+    expect(assignFailed.out).toContain('tracked in new issue #77');
+    expect(assignFailed.out).toContain('could not assign');
+    // gh.log records one call per line but the body argument contains
+    // newlines, so split on the call head rather than filtering lines.
+    const createCalls = assignFailed.calls.split(
+      'api repos/o/r/issues -f title=',
+    );
+    expect(createCalls).toHaveLength(2);
+    // Exactly one assignment attempt, against the issue the create returned,
+    // and the finding itself still reached the body.
+    expect(
+      assignFailed.calls.split('api repos/o/r/issues/77/assignees').length - 1,
+    ).toBe(1);
+    expect(assignFailed.calls).toContain('-f assignees[]=someone');
+    expect(assignFailed.calls).toContain('- rc:7 `?`: r');
+    // The PR title is API-derived content published under the bot identity, on
+    // ONE surface: the issue TITLE, which GitHub stores and renders as plain
+    // text (no markdown pass, no mention filter), so it carries the raw title
+    // — flatten+cap only, and escaping it would just corrupt the one readable
+    // string this enrichment exists to add.
+    //
+    // It must NOT reach the markdown-rendered BODY. A PR title is fully
+    // contributor-controlled and no enumerated escape chain closes that
+    // surface, so this fixture carries the payloads that survive mention /
+    // entity / comment-opener neutralization byte-identical: a markdown link
+    // (a live, clickable, attacker-chosen URL inside bot-authored text that
+    // maintainers read as trusted automation output) and an unclosed
+    // `<details>`, which makes a real HTML5 parser nest the findings `<ul>`
+    // inside it — the whole human-facing surface collapses behind GitHub's
+    // generic `Details` fold while the round logs clean success, and since
+    // the dedupe
+    // corpus reads the RAW body, the hidden items count as already tracked and
+    // are never re-published. Asserted per call on purpose: over the whole
+    // log, a rendering could be coming from the other site.
+    const titled = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson:
+        '{"title":"[URGENT](https://evil.example/y) <details> fix @foo <!-- x -->","user":{"login":"someone"}}',
+    });
+    const titledTitle = titled.calls.match(/-f title=(.*?) -f body=/)?.[1];
+    expect(titledTitle).toBe(
+      'Deferred review findings from PR #5: [URGENT](https://evil.example/y) <details> fix @foo <!-- x -->',
+    );
+    const titledBody = titled.calls.split('-f body=')[1] ?? '';
+    // The title reaches the body in NO spelling — raw, neutralized, or capped.
+    // `evil.example` is the sharpest witness, and deliberately not the
+    // `](https://` syntax: the rc deep link is a legitimate
+    // `](https://github.com/…)` in this same body, so a syntax-level assertion
+    // would stay red even with the title correctly absent.
+    expect(titledBody).not.toContain('evil.example');
+    expect(titledBody).not.toContain('URGENT');
+    expect(titledBody).not.toContain('<details>');
+    expect(titledBody).not.toContain('fix @foo');
+    expect(titledBody).not.toContain('@\u200bfoo');
+    // …while the body keeps everything it is supposed to carry: the finding,
+    // the auto-linking PR number, and the charset-validated author.
+    expect(titledBody).toContain('- rc:7 `?`: r');
+    expect(titledBody).toContain('from PR #5 by someone');
+    // The issue-TITLE surface is plain text — no mention filter — so a raw
+    // entity is inert there and escaping it would only corrupt the string;
+    // what this case pins there is the shared [\r\n\t] flatten and the .[0:80]
+    // codepoint cap (deleting either reds an assertion below). The
+    // markdown-rendered BODY is the opposite: GitHub decodes &#64; BEFORE its
+    // mention filter, so an entity there is a live mention published under the
+    // bot identity — which is why the title is kept OUT of the body entirely
+    // rather than escaped into it (the reason path's identical escape is
+    // pinned separately by `mentions`).
+    const paddedTitle = 'A'.repeat(100);
+    const entityTitle = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: `{"title":"ping &#64;admin &commat;x\\n${paddedTitle}","user":{"login":"someone"}}`,
+    });
+    // Title surface: raw entities, the newline flattened to a space, capped
+    // at 80 codepoints — the 26-codepoint prefix leaves 54 A's.
+    const entityTitleArg = entityTitle.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(entityTitleArg).toBe(
+      `Deferred review findings from PR #5: ping &#64;admin &commat;x ${'A'.repeat(54)}`,
+    );
+    const entityBody = entityTitle.calls.split('-f body=')[1] ?? '';
+    // No spelling of the title may appear in the markdown surface: not the raw
+    // entity, not the `&amp;`-escaped form the body copy used to carry, not
+    // the padded tail. Re-adding a title-body copy — escaped or not — reds one
+    // of these.
+    expect(entityBody).not.toContain('ping');
+    expect(entityBody).not.toContain('&#64;');
+    expect(entityBody).not.toContain('&amp;#64;');
+    expect(entityBody).not.toContain('&commat;');
+    expect(entityBody).not.toContain('A'.repeat(60));
     // Append path: existing issue found → dedupe against body+comments,
     // then POST an issue COMMENT (append-only; no body PATCH anywhere).
     const appended = runUpsert({
@@ -14097,6 +14766,16 @@ exit 1
     expect(appended.calls).not.toContain('- rc:8 ');
     expect(appended.calls).not.toContain('- rc:9 ');
     expect(appended.calls).not.toContain('PATCH');
+    // Negative half: the PR-context fetch is CREATION-only (the script's own
+    // comment, "Creation-only context"). The create-path assertion at the top
+    // of this block is the file's only other `pulls/` witness and it is
+    // positive, so hoisting the 4-line fetch unit (`gh_err_reset` plus
+    // `PR_FETCH_OK`/`PR_JSON`) above the create/append branch shipped green —
+    // and in production that spends an authenticated `GET /pulls/N` against the
+    // bot PAT's rate limit on every steady-state append round, the path that
+    // runs most often, instead of once per tracking issue's lifetime. Hoisting
+    // the fetch must red this.
+    expect(appended.calls).not.toContain('repos/o/r/pulls/');
     expect(appended.out).toContain('appended to issue #42');
     // Free-text mentions do not suppress (line-anchored dedupe), and a PULL
     // REQUEST carrying the marker is never selected as the tracking issue.
@@ -14153,6 +14832,20 @@ exit 1
     expect(writeFail.out).toContain('watermark-gated');
     expect(writeFail.out).toContain('- rc:7 ');
     expect(writeFail.out).not.toContain('NOT persisted this round');
+    // The create is issued ONCE, never retried (rationale: the assignFailed
+    // comment above). Only the call log can see a retry here — with the
+    // create failing, both arms print the same LOST warning, so no output
+    // assertion can distinguish them. Split on the call head because the
+    // logged body argument contains newlines.
+    const writeCreates = writeFail.calls.split(
+      'api repos/o/r/issues -f title=',
+    );
+    expect(writeCreates).toHaveLength(2);
+    // A failed create must not reach the assignment: with NUM empty, the
+    // `-n "${NUM}" &&` half of the assign guard is the only thing keeping a
+    // `repos/o/r/issues//assignees` POST off the log. Mirrors prFetchFailed's
+    // pin above, which covers the AUTHOR gate (ASSIGNABLE=0), not NUM=''.
+    expect(writeFail.calls).not.toContain('assignees');
     // Path bytes are sanitized before rendering (no forged bullet lines).
     const forged = runUpsert({
       findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
@@ -14407,6 +15100,24 @@ exit 1
     // alone silently ate every sibling but the first — R9-2.)
     expect(perSource.calls).not.toContain('`?`: dup');
     expect(perSource.calls).toContain('- ic:21 ');
+    // The ic side of the deep-link exemption, which `perSource` only pins for
+    // rv: an already-tracked issue_comment item is suppressed BY ITS RENDERED
+    // LINE, so widening the suffix condition to issue_comment would re-render
+    // every persisted ic item as new — the one-time duplicate wave over the
+    // existing tracking issues that the script's comment warns against.
+    const icTracked = runUpsert({
+      findings: '[{"id":21,"source":"issue_comment","reason":"dup"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- ic:21 `?`: dup' },
+      ]),
+    });
+    expect(icTracked.status).toBe(0);
+    // Nothing new → no write call at all. The comments READ above is spelled
+    // `?per_page=100`; the append is the `-f body=` form.
+    expect(icTracked.calls).not.toContain('issues/42/comments -f body=');
+    expect(icTracked.calls).not.toContain('#discussion_r21');
+    expect(icTracked.out).not.toContain('appended to issue');
     // A DIFFERENT finding under the same review id is still appended.
     const siblingFinding = runUpsert({
       findings:
@@ -14669,6 +15380,66 @@ exit 1
     });
     expect(titledPr.calls).toContain('-f title=');
     expect(titledPr.calls).not.toContain('issues/9/comments');
+    // The title fallback also adopts the ENRICHED creation form ("base: <PR
+    // title>") when the body lost its marker …
+    const enrichedAdopted = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 44,
+          title: 'Deferred review findings from PR #5: Some PR title',
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(enrichedAdopted.calls).toContain('issues/44/comments -f body=');
+    expect(enrichedAdopted.calls).not.toContain('-f title=');
+    // … but the colon guard keeps PR #5's base from prefix-adopting the
+    // tracking issue of PR #50 — a plain startswith would fork nothing but
+    // adopt wrongly, appending one PR's findings into another's issue.
+    const numberCollide = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 45,
+          title: 'Deferred review findings from PR #50',
+          body: 'no marker here',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(numberCollide.calls).toContain(
+      '-f title=Deferred review findings from PR #5: Some PR title',
+    );
+    expect(numberCollide.calls).not.toContain('issues/45/comments');
+    // Round-trip: the title the create path WRITES must be the title the
+    // marker-less lookup ACCEPTS. enrichedAdopted and numberCollide pin each
+    // side from its own hand-typed literal, so a one-sided restyle (": " to
+    // " - " at creation, or ":" to " -" at the lookup's startswith) leaves
+    // the other green while production forks a second tracking issue — the
+    // outcome this file ranks worst. Deriving the fixture from the recorded
+    // create call ties the two sides: a restyle on EITHER side reds this.
+    const roundTripCreate = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+    });
+    const createdTitle = roundTripCreate.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(createdTitle).toBeTruthy();
+    const roundTripAdopt = runUpsert({
+      findings: '[{"id":8,"reason":"r2"}]',
+      list: JSON.stringify([
+        {
+          number: 46,
+          title: createdTitle,
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(roundTripAdopt.calls).toContain('issues/46/comments -f body=');
+    expect(roundTripAdopt.calls).not.toContain('-f title=');
     // An unknown source value fails the gate loudly rather than silently
     // rendering under the default prefix.
     const badSource = runUpsert({
@@ -14762,7 +15533,12 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  }, 30000);
+    // No per-test timeout: this is the file's heaviest case and it inherits
+    // the suite's 90s contention budget from scripts/tests/vitest.config.ts.
+    // A 30s cap on this exact test was removed by #10870 after it timed out on
+    // contended release runners (33676423730 / 33683912557); each spawnSync
+    // already carries its own 30s child timeout for the only real hang risk.
+  });
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -14956,6 +15732,62 @@ exit 1
       expect(testSide.out).toContain('SURVIVED');
       expect(testSide.out).not.toContain('REJECT:');
       expect(testSide.advisory).toContain('test-side defect claim');
+      // A fenced marker on a source comment is not a second Critical claim.
+      // The real test-side Critical keeps the advisory path; if either of the
+      // two gate predicates treats the quoted marker as a signal, this turns
+      // into a source-side rejection.
+      const quotedSource = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedSource.out).toContain('SURVIVED');
+      expect(quotedSource.out).not.toContain('REJECT:');
+      expect(quotedSource.advisory).toContain('test-side defect claim');
+      const quotedRootReply = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n103\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+            {
+              id: 103,
+              in_reply_to_id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: 'The same fallback path is still uncovered.',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedRootReply.out).toContain('SURVIVED');
+      expect(quotedRootReply.out).not.toContain('REJECT:');
+      expect(quotedRootReply.advisory).toContain('test-side defect claim');
       // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
       // resolved alongside must not break the demotion.
       expect(
@@ -15262,6 +16094,18 @@ exit 1
     expect(repairCleanup).toContain('gate-rejection.md');
     expect(repairCleanup).toContain('"${WORKDIR}/resolved-comments.txt"');
     expect(repairCleanup).toContain('"${WORKDIR}/comment-replies.json"');
+    // The model sentinel is round-scoped by THIS deletion: dropping the line
+    // leaves run 1's agent-model readable by run 2's report when run 2 dies
+    // before its own init event — the exact no-file shape the runner test
+    // pins — attributing run 2's round to run 1's session.
+    expect(repairCleanup).toContain('"${WORKDIR}/agent-model"');
+    // rm -f exits non-zero on a directory planted at a sentinel path; the
+    // list must stay best-effort or the repair step aborts BEFORE the second
+    // agent pass (attempted=true is already written, so the round loses its
+    // repair to a cleanup failure).
+    expect(repairCleanup).toContain(
+      '"${WORKDIR}/comment-replies.json" || true',
+    );
     expect(
       repairDeterministicRejectionStep.match(
         /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
@@ -15759,11 +16603,18 @@ exit 1
     const escapeSiteRe = /sed(?: -e)? 's\/<!--\/[^']*\/g'/g;
     const escapeSites = workflowWithScripts.match(escapeSiteRe) ?? [];
     expect(escapeSites).toHaveLength(12);
-    // The next agent-derived publish site lives in
-    // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
-    // sed afterwards: the rv/ic dedupe identity is the rendered line, so
-    // escaping after the corpus comparison meant a reason containing `<!--`
-    // never matched its stored form and republished every round (R10-5).
+    // The agent-derived publish sites in upsert-deferred-issue.sh escape
+    // INSIDE jq, not in a sed afterwards: the rv/ic dedupe identity is the
+    // rendered line, so escaping after the corpus comparison meant a reason
+    // containing `<!--` never matched its stored form and republished every
+    // round (R10-5). ONE site remains — the line-builder reason escape, which
+    // must carry the canonical spelling and precede the dedupe comparison.
+    // The second site this census used to count was the PR-title
+    // neutralization at creation. It is gone on purpose: a contributor-
+    // controlled title is no longer copied into the markdown-rendered issue
+    // body at all, because no escape chain closes that surface (see the
+    // comment above the pulls fetch in the script). Re-adding a title-body
+    // copy must raise this count deliberately, not silently.
     const scriptEscapeSites =
       upsertDeferredScript.match(/gsub\("<!--"; "[^"]*"\)/g) ?? [];
     expect(scriptEscapeSites).toHaveLength(1);
@@ -16116,7 +16967,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -17323,7 +18174,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  }, 30000);
+  });
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -17806,7 +18657,7 @@ exit 1
     expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \[\[ "\$\{STALE_BASE_DEFERRED:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -17824,6 +18675,8 @@ exit 1
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
     const STALE_BASE =
       '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
+    const STALE_BASE_DEFER =
+      '🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind `main`, but a review of this PR is still in flight (#10110).';
 
     const run = (
       priorHeadlines,
@@ -17834,6 +18687,7 @@ exit 1
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        staleBaseDeferred = false,
         agentTimeout = '',
       } = {},
     ) => {
@@ -17863,7 +18717,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -17977,6 +18831,18 @@ exit 1
     expect(
       run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
     ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Same for a DEFERRED stale-base refresh (#10110): the round failed
+    // because the base is stale AND a review was in flight — the fix was
+    // never re-attempted on a fresh base, so the failure is not evidence
+    // about the PR. Current-round exemption and prior-headline streak reset
+    // both mirror the retry branch.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseDeferred: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(run([FAIL, FAIL, STALE_BASE_DEFER, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -20965,6 +21831,243 @@ exit 0
     });
   });
 
+  it('records the resolved model and CLI version for the report footers', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // The init event carries what the session ACTUALLY ran — the resolved
+      // model and the CLI version — which the footers prefer over the
+      // configured OPENAI_MODEL.
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('flattens and caps a newline-bearing, oversized init model so the sentinel stays two lines', () => {
+    // The writer's invariant — "newlines are flattened so the sentinel file
+    // stays two lines" — is what keeps the read sites' sed -n '1p'/'2p' from
+    // rendering a model fragment as the CLI version. TWO fixtures, because
+    // one cannot pin both halves: a newline discriminates the flattening
+    // only INSIDE the cap (past it, slice(0, 100) of the unflattened value
+    // equals the flattened-and-capped one), and the cap discriminates only
+    // when the value EXCEEDS it.
+    const runInit = (dir, init) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(qwenInitLine(init))});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+      expect(runAddressReview(dir, stub).status).toBe(0);
+      return readFileSync(join(dir, 'agent-model'), 'utf8');
+    };
+    // Flattening: both newlines sit inside their caps (model index 10 < 100,
+    // version index 6 < 40). Dropping either .split('\n')[0] writes a
+    // THREE-line sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: 'first-line\nsecond-line',
+          version: '0.22.0\nzap',
+        }),
+      ).toBe('first-line\n0.22.0\n');
+    });
+    // Caps: both values exceed theirs. Dropping either .slice() rides the
+    // oversized value into the sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: `${'x'.repeat(250)}\nsecond-line`,
+          version: 'v'.repeat(100),
+        }),
+      ).toBe(`${'x'.repeat(100)}\n${'v'.repeat(40)}\n`);
+    });
+  });
+
+  it('refuses a planted FIFO or symlink at the sentinel path when writing agent-model', () => {
+    // The sentinel write runs in finish() — AFTER every watchdog has been
+    // disarmed — so a plain O_WRONLY open of a planted FIFO blocks forever
+    // with nothing left to kill it, and a planted symlink is followed with
+    // O_TRUNC: the target loses its content while the round still exits 0
+    // and reports success (both arms measured in the round-4 review, with
+    // the plants created from inside the real sandbox image as the same
+    // uid). The writer opens O_NOFOLLOW|O_NONBLOCK, so the symlink becomes
+    // ELOOP and the readerless FIFO ENXIO, both landing in the best-effort
+    // catch: the run completes and the plants survive untouched.
+    const stubLines = [
+      `process.stdout.write(${JSON.stringify(
+        qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+      )});`,
+      "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+      'process.exit(0);',
+    ];
+    // FIFO arm — soft-skipped where mkfifo is unavailable (Windows lane).
+    withRunnerDir((dir) => {
+      const fifo = join(dir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status !== 0) return;
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // Bounded spawn, NOT runAddressReview: a flags-removed runner blocks
+      // inside open(2), which blocks the worker thread synchronously —
+      // measured: vitest's 90 s testTimeout never fires on it and the whole
+      // suite hangs instead of going red. The spawn timeout's SIGTERM
+      // interrupts the blocked open, so dropping O_NONBLOCK goes red
+      // deterministically at 45 s (status null); the intact arm still
+      // asserts the runner's real exit code.
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          writeWorkdirStub(dir, stubLines),
+        ],
+        { encoding: 'utf8', timeout: 45_000 },
+      );
+      expect(result.status).toBe(0);
+      expect(statSync(fifo).isFIFO()).toBe(true);
+    });
+    // Symlink arm — dropping O_NOFOLLOW truncates the canary and this
+    // asserts red on its content.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const canary = join(dir, 'canary.txt');
+      writeFileSync(canary, 'CI_DEV_BOT_PAT=canary-value\n');
+      symlinkSync(canary, join(dir, 'agent-model'));
+      const result = runAddressReview(dir, writeWorkdirStub(dir, stubLines));
+      expect(result.status).toBe(0);
+      expect(readFileSync(canary, 'utf8')).toBe(
+        'CI_DEV_BOT_PAT=canary-value\n',
+      );
+      expect(lstatSync(join(dir, 'agent-model')).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  it('keeps the writer caps equal to the reader caps so nothing publishes silently truncated', () => {
+    // A writer cap ABOVE the reader's published bound writes a legitimate
+    // value in full only to have the read site clip it — allowlist-clean
+    // output, exit 0, and a public attribution comment that looks accurate
+    // while naming a truncated model (measured in this PR's sandboxed
+    // verification: a 154-char model published as 100). Equal caps make
+    // written == published; the head -c windows must then still cover the
+    // largest file the writer can emit, or the version read loses line 2 to
+    // the byte window before sed ever sees it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const writerModelCap = Number(
+      runner.match(
+        /initModel = event\.model\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const writerVersionCap = Number(
+      runner.match(
+        /event\.qwen_code_version\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const readerModelCap = Number(
+      pushAndReportScript.match(
+        /AGENT_MODEL="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    const readerVersionCap = Number(
+      pushAndReportScript.match(
+        /AGENT_CLI_VERSION="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    for (const cap of [
+      writerModelCap,
+      writerVersionCap,
+      readerModelCap,
+      readerVersionCap,
+    ]) {
+      // A regex that stopped matching yields NaN; fail on that explicitly
+      // rather than comparing NaN to NaN.
+      expect(Number.isInteger(cap)).toBe(true);
+    }
+    expect(writerModelCap).toBe(readerModelCap);
+    expect(writerVersionCap).toBe(readerVersionCap);
+    // The windows bound BYTES while the caps count UTF-16 CODE UNITS, and
+    // writeFileSync encodes UTF-8: a BMP code unit occupies up to 3 bytes
+    // (surrogate pairs fold to 2 bytes per unit), so the largest sentinel
+    // the writer can emit is 3*(model+version)+2 bytes, not model+version+2
+    // — a one-byte-per-char figure would be ~3x too loose and let a window
+    // shrink below what line 1 actually needs. Bound each window against
+    // the line IT reads: the model read needs line 1 plus its LF, the
+    // version read needs the whole file for sed -n '2p' to see line 2.
+    // windows comes back in script order (model read first); the literal
+    // per-line pins in the footer test freeze that order.
+    const windows = [
+      ...pushAndReportScript.matchAll(
+        /head -c (\d+) "\$\{WORKDIR\}\/agent-model"/g,
+      ),
+    ].map((m) => Number(m[1]));
+    expect(windows).toHaveLength(2);
+    const maxModelBytes = 3 * writerModelCap + 1;
+    const maxSentinelBytes = maxModelBytes + 3 * writerVersionCap + 1;
+    expect(windows[0]).toBeGreaterThanOrEqual(maxModelBytes);
+    expect(windows[1]).toBeGreaterThanOrEqual(maxSentinelBytes);
+  });
+
+  it('records the model even when the run dies before a verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "process.stderr.write('boom\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      // A crashed round is exactly when the diagnosis footer needs to name
+      // the model that died.
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('writes no agent-model when the stream never reached an init event', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('died at startup\\n');",
+        'process.exit(1);',
+      ]);
+
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      // No file at all, rather than an empty one: the read sites' -s test
+      // falls back to the configured MODEL.
+      expect(existsSync(join(dir, 'agent-model'))).toBe(false);
+    });
+  });
+
   it('does not flag an API error that appears after a real verdict or a loop guard', () => {
     // Case C: the agent wrote its OWN failure.md (a real verdict) and an API
     // error also appears in the tail — that verdict must advance the watermark,
@@ -21087,7 +22190,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -23770,10 +24873,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
     // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+    // replay under bash — this outgrows vitest's 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head), so it runs on the suite
+    // ceiling in scripts/tests/vitest.config.ts rather than a per-test one.
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside
@@ -24372,7 +25475,7 @@ describe('run-agent idle watchdog', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24615,7 +25718,7 @@ describe('stale sandbox container cleanup', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24661,5 +25764,247 @@ describe('stale sandbox container cleanup', () => {
     expect(r.failure).toContain('timeout (1200ms)');
     expect(r.failure).not.toContain('idle-timeout');
     expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+});
+
+describe('report-step stale-base hold while review-pr is in flight (#10110)', () => {
+  // The scan's dispatch gate (#8888) covers every push the SCAN can make,
+  // but the report step's stale-base retry calls update-branch hours after
+  // that gate last looked — the one loop-owned head move outside the hold.
+  // Full rationale → qwen-autofix.md#af-155.
+
+  it('probes for a live review before the report-step update-branch', () => {
+    const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
+    const updateAt = reviewAddressReportStep.indexOf(
+      'gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}"',
+    );
+    expect(probeAt).toBeGreaterThan(-1);
+    expect(updateAt).toBeGreaterThan(probeAt);
+    // Both probe layers, mirroring the scan gate: the rollup filter (any
+    // started review-pr check) and the runs-API fallback for lifecycle runs
+    // still parked in the delay window with no check-run yet. The probe is
+    // lifecycle-scoped by construction — a command run carries no PR-head
+    // check and the runs fallback is event-scoped (af-155).
+    expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
+    expect(reviewAddressReportStep).toContain(
+      'actions/workflows/qwen-code-pr-review.yml',
+    );
+    // The update runs only on a falsy probe — fail-open: a probe error must
+    // not wedge stale-base recovery, so errors read as "no review live".
+    // R32-1: the deferral is only honest while a next round exists — at
+    // the cap the scan's round gate parks the PR before any report step,
+    // so the hold yields to the refresh there.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${REVIEW_LIVE_R}" == \'true\' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then\n                          STALE_BASE_DEFERRED=true\n                        elif gh api -X PUT',
+    );
+    expect(designDoc).toContain('At the cap itself (MARK_ROUND ==');
+  });
+
+  it('refreshes instead of deferring on the capped round (replayed decision)', () => {
+    // The hold's branch choice, executed: the block from the rollup probe
+    // through the update-branch PUT runs verbatim with a stub gh (live
+    // rollup, PUT logged) and the real jq. Below the cap a live review
+    // defers; AT the cap (MARK_ROUND == MAX_ROUNDS) the same live review
+    // must yield to the refresh, because the next scan the deferred
+    // headline promises is the one the round gate skips (R32-1).
+    const start = reviewAddressReportStep.indexOf(
+      'ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup',
+    );
+    const putAt = reviewAddressReportStep.indexOf(
+      'elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch"',
+      start,
+    );
+    const end =
+      reviewAddressReportStep.indexOf('\n                        fi', putAt) +
+      '\n                        fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(putAt).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(putAt);
+    const block = reviewAddressReportStep.slice(start, end);
+    const decide = ({ markRound, maxRounds, live }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-hold-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  *"--json statusCheckRollup"*) printf "%s\\n" "$ROLLUP_JSON" ;;',
+            '  *"update-branch"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const rollup = live
+          ? [
+              {
+                name: 'review-pr',
+                workflowName: '🧐 Qwen Pull Request Review',
+                status: 'IN_PROGRESS',
+              },
+            ]
+          : [];
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -euo pipefail',
+              'PR=1; REPO=o/r; REPORT_HEAD=sha-head',
+              `MARK_ROUND=${markRound}; MAX_ROUNDS=${maxRounds}`,
+              'STALE_BASE_DEFERRED=false; STALE_BASE_RETRY=false',
+              block,
+              'printf "deferred=%s retry=%s\\n" "$STALE_BASE_DEFERRED" "$STALE_BASE_RETRY"',
+            ].join('\n'),
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              ROLLUP_JSON: JSON.stringify(rollup),
+            },
+          },
+        ).trim();
+        const put = readFileSync(ghLog, 'utf8').includes('update-branch');
+        return `${out} put=${put}`;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Below the cap, a live review defers and the PUT is withheld.
+    expect(decide({ markRound: 5, maxRounds: 10, live: true })).toBe(
+      'deferred=true retry=false put=false',
+    );
+    // At the cap the same live review yields: the PUT is issued and the
+    // deferred headline (with its "next scan" promise) is never taken.
+    expect(decide({ markRound: 10, maxRounds: 10, live: true })).toBe(
+      'deferred=false retry=true put=true',
+    );
+    // No live review: the refresh runs whatever the round.
+    expect(decide({ markRound: 10, maxRounds: 10, live: false })).toBe(
+      'deferred=false retry=true put=true',
+    );
+  });
+
+  it('defers with the retry branch sentinel and an exempted headline', () => {
+    // Deferred keeps the exact semantics of the retry branch minus the
+    // update: the 9999 sentinel keeps feedback live so the next round
+    // re-runs and ITS report step refreshes the base once the review landed.
+    const deferred = reviewAddressReportStep.match(
+      /elif \[\[ "\$\{STALE_BASE_DEFERRED\}" == 'true' \]\]; then[\s\S]*?(?=\n {16}else)/,
+    )?.[0];
+    expect(deferred).toBeTruthy();
+    expect(deferred).toContain("MARK_TS='9999-12-31T23:59:59Z'");
+    expect(deferred).toContain('deferred a stale-base refresh');
+    expect(deferred).toContain('#10110');
+    // The deferred headline joins the streak-reset needles: a round that
+    // failed because it was reviewed at the wrong moment is not evidence
+    // about the PR.
+    expect(reviewAddressReportStep).toContain(
+      '|| "${H}" == *"deferred a stale-base refresh"*',
+    );
+  });
+
+  it('detects a live review through the replayed rollup filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /REVIEW_LIVE_R="\$\(jq -r '([\s\S]*?)' <<< "\$\{ROLLUP_R\}"/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (checks) =>
+      execFileSync('jq', ['-r', filter], {
+        input: JSON.stringify(checks),
+        encoding: 'utf8',
+      }).trim();
+    const live = {
+      name: 'review-pr',
+      workflowName: '🧐 Qwen Pull Request Review',
+      status: 'IN_PROGRESS',
+    };
+    expect(probe([live])).toBe('true');
+    expect(probe([{ ...live, status: 'QUEUED' }])).toBe('true');
+    // A finished review does not hold, and neither does a live check that
+    // is not the review workflow's review-pr.
+    expect(
+      probe([{ ...live, status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    ).toBe('false');
+    expect(probe([{ ...live, workflowName: 'CI' }])).toBe('false');
+    expect(probe([{ ...live, name: 'lint' }])).toBe('false');
+    expect(probe([])).toBe('false');
+  });
+
+  it('detects a delay-parked lifecycle run through the replayed runs filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /jq -r --arg pr "\$\{PR\}" --arg head "\$\{LIVE_HEAD_R\}" '([\s\S]*?)' 2> \/dev\/null \|\| echo/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (runs, pr = '9729', head = 'sha-live') =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'pr', pr, '--arg', 'head', head, filter],
+        {
+          input: JSON.stringify({ workflow_runs: runs }),
+          encoding: 'utf8',
+        },
+      ).trim();
+    const parked = {
+      event: 'pull_request_target',
+      status: 'waiting',
+      head_sha: 'sha-live',
+      pull_requests: [],
+    };
+    expect(probe([parked])).toBe('true');
+    // Matches by PR number too (fork heads may not equal the fetched head).
+    expect(
+      probe([
+        { ...parked, head_sha: 'other', pull_requests: [{ number: 9729 }] },
+      ]),
+    ).toBe('true');
+    // Completed runs, non-lifecycle events, and unrelated runs do not
+    // hold. The command-event exclusion is a DELIBERATE scope, not coverage
+    // (af-155): the hold does not see command runs, and the design doc must
+    // say so instead of claiming a trigger-independent probe.
+    expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
+    expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
+    expect(
+      probe([{ ...parked, head_sha: 'other', pull_requests: [{ number: 1 }] }]),
+    ).toBe('false');
+    // An empty fetched head must not wildcard-match every run.
+    expect(probe([{ ...parked, head_sha: '' }], '9729', '')).toBe('false');
+  });
+
+  it('documents the hold in the design doc', () => {
+    // af-155 is the hold's own entry (af-149 predates it: pinning that
+    // anchor let the section be removed or renumbered with the suite green).
+    expect(designDoc).toContain('<a id="af-155"></a>');
+    expect(designDoc).toContain(
+      'Hold the stale-base refresh while a review-pr is in flight',
+    );
+    expect(designDoc).toContain('deferred a stale-base refresh');
+  });
+
+  it('scopes the hold to lifecycle runs instead of claiming trigger independence (R13-2)', () => {
+    // The probe pair is structurally blind to command-triggered review
+    // runs: they execute against the base branch (their review-pr check
+    // attaches to main's commit, never the PR's rollup) and the runs
+    // fallback is event-scoped to pull_request_target. The docs and the
+    // deferred headline must scope the hold to what it sees, so no reader
+    // relies on protection for command runs that does not exist; the
+    // mechanism fix (a PR-head-visible signal posted by command runs) is
+    // deliberately deferred (af-155).
+    expect(designDoc).not.toContain('trigger-independent');
+    expect(designDoc).toContain('The probe sees');
+    expect(designDoc).toContain('LIFECYCLE runs only');
+    expect(reviewAddressReportStep).toContain(
+      'but a lifecycle review of this PR is still in flight',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Command-triggered reviews are invisible to this probe (af-155)',
+    );
   });
 });

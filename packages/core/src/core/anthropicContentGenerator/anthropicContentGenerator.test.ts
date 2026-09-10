@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import { isRateLimitError } from '../../utils/rateLimit.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
@@ -151,6 +152,54 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+    expect(anthropicState.constructorOptions?.['fetch']).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('installs session ID injection on the runtime fetch', async () => {
+    const runtimeFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    vi.doMock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+      const actual =
+        await importOriginal<
+          typeof import('../../utils/runtimeFetchOptions.js')
+        >();
+      return {
+        ...actual,
+        buildRuntimeFetchOptions: vi.fn(() => ({ fetch: runtimeFetch })),
+      };
+    });
+
+    try {
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const sessionAwareFetch = anthropicState.constructorOptions?.[
+        'fetch'
+      ] as typeof fetch;
+      await sessionAwareFetch(
+        'https://routify-pub.alibaba-inc.com/protocol/anthropic/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session');
+    } finally {
+      vi.doUnmock('../../utils/runtimeFetchOptions.js');
+    }
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {
@@ -3289,12 +3338,13 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
-    const collectGeneratedStream = async () => {
+    const collectGeneratedStream = async (baseUrl?: string) => {
       const { AnthropicContentGenerator } = await importGenerator();
       const generator = new AnthropicContentGenerator(
         {
           model: 'claude-test',
           apiKey: 'test-key',
+          baseUrl,
           timeout: 10_000,
           maxRetries: 2,
           samplingParams: { max_tokens: 100 },
@@ -3315,6 +3365,93 @@ describe('AnthropicContentGenerator', () => {
       }
       return { chunks, error };
     };
+
+    it.each([
+      [
+        'api_error',
+        'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+        429,
+      ],
+      ['api_error', 'Streaming error: 404: Model not found.', undefined],
+      ['api_error', 'Streaming error: 404: Account quota exceeded.', undefined],
+      [
+        'authentication_error',
+        'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+        undefined,
+      ],
+      [
+        'api_error',
+        'Invalid prompt containing Rate limit exceeded on Anthropic API.',
+        undefined,
+      ],
+    ])(
+      'normalizes actual SDK SSE %s / %s to status %s',
+      async (type, message, status) => {
+        const { default: ActualAnthropic } =
+          await vi.importActual<typeof import('@anthropic-ai/sdk')>(
+            '@anthropic-ai/sdk',
+          );
+        const client = new ActualAnthropic({
+          apiKey: 'test-key',
+          maxRetries: 0,
+          fetch: vi.fn().mockResolvedValue(
+            new Response(
+              `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`,
+              {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' },
+              },
+            ),
+          ),
+        });
+        const stream = await client.messages.create({
+          model: 'test-model',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'test' }],
+          stream: true,
+        });
+        anthropicState.createImpl.mockResolvedValue(stream);
+        const { chunks, error } = await collectGeneratedStream(
+          'https://anthropic-proxy.example.test',
+        );
+        expect(chunks).toEqual([]);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as { status?: number }).status).toBe(status);
+        expect(isRateLimitError(error)).toBe(status === 429);
+        if (status === 429) {
+          expect(error).toHaveProperty('cause', expect.any(Error));
+          expect((error as Error).cause).not.toHaveProperty('status', 429);
+        }
+      },
+    );
+
+    it.each([401, 404])(
+      'preserves explicit status %s on stream errors',
+      async (status) => {
+        const original = Object.assign(
+          new Error(
+            JSON.stringify({
+              type: 'error',
+              error: {
+                type: 'api_error',
+                message:
+                  'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+              },
+            }),
+          ),
+          { status },
+        );
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* () {
+            throw original;
+            yield {};
+          })(),
+        );
+        const { error } = await collectGeneratedStream();
+        expect(error).toBe(original);
+        expect(isRateLimitError(error)).toBe(false);
+      },
+    );
 
     it.each([
       {

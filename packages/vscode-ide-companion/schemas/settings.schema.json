@@ -71,7 +71,7 @@
           "type": "string"
         },
         "outputStyle": {
-          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style. Change it with /output-style.",
+          "description": "Name of the output style that shapes how responses are written: a built-in such as \"Concise\" or \"Explanatory\", or a custom style's name — its frontmatter `name`, defaulting to the file name without \".md\" — from ~/.qwen/output-styles or .qwen/output-styles. Leave unset for the default style. Change it with /output-style. Only the built-ins are available in --bare and --safe-mode.",
           "type": "string"
         },
         "vimMode": {
@@ -440,7 +440,8 @@
             },
             "screenReader": {
               "description": "Render output in plain-text to be more screen reader accessible",
-              "type": "boolean"
+              "type": "boolean",
+              "default": false
             }
           }
         },
@@ -455,7 +456,7 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. These mouse interactions are controlled by ui.mouseTracking; disable that setting to restore native right-click and OSC 8 hyperlink clicks.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. A single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu. These mouse interactions are controlled by ui.mouseTracking; disable that setting to hand the mouse fully back to the terminal.",
           "type": "boolean",
           "default": true
         },
@@ -465,9 +466,14 @@
           "default": true
         },
         "mouseTracking": {
-          "description": "Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).",
+          "description": "Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).",
           "type": "boolean",
           "default": true
+        },
+        "showToolCallArgs": {
+          "description": "Render tool calls on their own line with their raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into \"Read 3 files\". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. The row is capped at 2 wrapped lines (and never more than 1000 characters) and truncated with a `+N chars` marker; press Ctrl+O for the complete payload. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view — press Ctrl+O there. Does not change result-output truncation.",
+          "type": "boolean",
+          "default": false
         },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
@@ -632,6 +638,11 @@
           "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
           "type": "boolean",
           "default": false
+        },
+        "allowDynamicHeaderValues": {
+          "description": "SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders — currently `${session_id}` — expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether `${session_id}` may be expanded from live session state and does not identify which settings source supplied the header.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -715,6 +726,12 @@
         "goalTokenBudget": {
           "description": "Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.",
           "type": "integer"
+        },
+        "goalCheckpointTimeoutSeconds": {
+          "description": "Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call. A check whose claims overrun the aggregate byte budget, or include a claim over the per-claim character limit, makes one corrective retry, and both calls share this ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900
         },
         "maxToolCalls": {
           "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
@@ -1232,16 +1249,15 @@
           "type": "string"
         },
         "webSearch": {
-          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.",
-              "type": "boolean",
-              "default": false
+              "description": "Set false to disable the built-in web_search tool. Automatic startup activation requires leaving enabled, model, and the env-only backend unset. Setting true permits automatic derivation only when the env-only backend is also unset; otherwise a model is required. Env override: ENABLE_WEB_SEARCH.",
+              "type": "boolean"
             },
             "model": {
-              "description": "Model selector for the search side request, resolved against modelProviders like fastModel (\"modelId\" or \"authType:modelId\"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
+              "description": "Model selector for the explicit search path (\"modelId\" or \"authType:modelId\"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
               "type": "string"
             },
             "webExtractor": {
@@ -1275,6 +1291,17 @@
           "properties": {
             "enabled": {
               "description": "Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "todoWrite": {
+          "description": "Settings for the built-in todo_write tool. Opt-in: the tool is disabled by default.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in todo_write tool and its system-prompt guidance.",
               "type": "boolean",
               "default": false
             }
@@ -1491,7 +1518,8 @@
             },
             "useExternal": {
               "description": "Whether to use an external authentication flow.",
-              "type": "boolean"
+              "type": "boolean",
+              "default": false
             },
             "apiKey": {
               "description": "API key for OpenAI compatible authentication.",
@@ -1599,12 +1627,22 @@
           "default": false
         },
         "crossSessionInbound": {
-          "description": "What happens to messages other sessions send this one. \"accept\" delivers them; \"hold\" parks them for your review without letting the model act; \"refuse\" opts this session out. Unset means approval-mode parity: a message auto-delivers only when this session reviews every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review. Options: accept, hold, refuse",
+          "description": "What happens to inbound cross-session messages. \"accept\" delivers them; \"hold\" parks them for your review without letting the model act; \"refuse\" opts this session out. Unset means user-minted controllers and this session's own child processes auto-deliver, while other sessions use review-class parity: both must review every action, or both must declare a mode that can apply actions without per-action review. Other messages are held for you to review. Options: accept, hold, refuse",
           "enum": [
             "accept",
             "hold",
             "refuse"
           ]
+        },
+        "crossSessionHeldExpiry": {
+          "description": "How long a message held for your review waits before it expires and the sending session is told nobody answered. \"never\" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival. Options: 1m, 5m, 10m, never",
+          "enum": [
+            "1m",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "default": "5m"
         },
         "modelGrades": {
           "type": "object",
@@ -3646,7 +3684,7 @@
           "default": true
         },
         "todoStopGuard": {
-          "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Requires tools.todoWrite.enabled. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
           "type": "boolean",
           "default": false
         },

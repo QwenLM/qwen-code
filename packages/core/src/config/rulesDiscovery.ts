@@ -18,7 +18,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import picomatch from 'picomatch';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import { normalizeContent } from '../utils/textUtils.js';
+import { normalizeContent, stripHtmlComments } from '../utils/textUtils.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import { Storage } from './storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -51,22 +51,6 @@ export interface LoadRulesResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/;
-
-function stripHtmlComments(content: string): string {
-  // Iteratively strip complete <!-- ... --> pairs so adjacent or
-  // malformed-looking sequences (e.g. <!-- A --><!-- B -->) fully clear.
-  let result = content;
-  let prev: string;
-  do {
-    prev = result;
-    result = prev.replace(/<!--[\s\S]*?-->/g, '');
-  } while (result !== prev);
-  // Strip any residual unclosed <!-- markers. Not a security issue in
-  // system-prompt context (output isn't rendered as HTML), but leaving
-  // them would waste tokens and trip static analyzers (CodeQL flags
-  // "incomplete multi-character sanitization" without this step).
-  return result.replace(/<!--/g, '');
-}
 
 /**
  * Parse a rule file's YAML frontmatter and body content.

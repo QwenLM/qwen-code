@@ -431,6 +431,7 @@ export default {
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',
   'Hide Tips': 'Ocultar Dicas',
+  'Show Tool Call Arguments': 'Mostrar Argumentos das Chamadas de Ferramenta',
   'Show Line Numbers in Code': 'Mostrar Números de Linhas no Código',
   'Show Citations': 'Mostrar Citações',
   'Custom Witty Phrases': 'Frases de Efeito Personalizadas',

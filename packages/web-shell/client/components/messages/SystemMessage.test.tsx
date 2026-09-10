@@ -62,6 +62,35 @@ describe('SystemMessage — prompt_cancelled marker', () => {
   });
 });
 
+describe('SystemMessage — goal status', () => {
+  it.each([
+    ['en', 'Goal usage limited', 'Last check: token budget reached'],
+    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+  ] as const)(
+    'renders a usage-limited goal distinctly in %s',
+    (language, title, reason) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="goal"
+          data={{
+            kind: 'usage_limited',
+            condition: 'finish the evaluation',
+            lastReason: 'token budget reached',
+          }}
+        />,
+        language,
+      );
+
+      expect(container.textContent).toContain(title);
+      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain('Goal aborted');
+      expect(container.textContent).not.toContain('目标已中止');
+    },
+  );
+});
+
 describe('SystemMessage — terminal turn error copy', () => {
   it('copies the displayed error without triggering retry', async () => {
     vi.useFakeTimers();
@@ -377,6 +406,20 @@ describe('SystemMessage — background notification label', () => {
 });
 
 describe('SystemMessage — background notification i18n body', () => {
+  it('renders an overflow summary record without task metadata verbatim', () => {
+    const content =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const container = render(
+      <SystemMessage
+        content={content}
+        variant="info"
+        source="background_notification"
+      />,
+    );
+
+    expect(container.textContent).toContain(content);
+  });
+
   it('renders shell notifications with structured command via i18n', () => {
     const container = render(
       <SystemMessage
@@ -629,6 +672,7 @@ describe('SystemMessage — inline images', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,base64data',
       'User uploaded image 1',
+      undefined,
     );
   });
 

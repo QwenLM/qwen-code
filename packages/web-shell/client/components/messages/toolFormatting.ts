@@ -142,6 +142,41 @@ export function isAskUserQuestionToolName(toolName: string): boolean {
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
+export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
+  return (
+    tool.status === 'completed' && isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
+export function getQuestionAnswerResult(tool: ACPToolCall): {
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+} | null {
+  const output = tool.rawOutput;
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    !('type' in output) ||
+    output.type !== 'ask_user_question_answers' ||
+    !('text' in output) ||
+    typeof output.text !== 'string' ||
+    !('answers' in output) ||
+    !Array.isArray(output.answers) ||
+    !output.answers.every(
+      (entry: unknown): entry is { question: string; answer: string } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        'question' in entry &&
+        typeof entry.question === 'string' &&
+        'answer' in entry &&
+        typeof entry.answer === 'string',
+    )
+  ) {
+    return null;
+  }
+  return { text: output.text, answers: output.answers };
+}
+
 export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
@@ -381,6 +416,17 @@ function getStringArg(
   return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
 }
 
+/**
+ * Like every other is*ToolName helper, normalizes case so callers can pass
+ * the raw wire name. One predicate on purpose: ToolGroup gates the detail
+ * view, the ToolLine route and the collapsed keep-mounted behaviour on
+ * this, and three hand-inlined copies could diverge on a rename with no
+ * compile error — routing would then disagree with mounting.
+ */
+export function isWorkflowToolName(name: string): boolean {
+  return name.toLowerCase() === 'workflow';
+}
+
 export function isShellToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
@@ -487,6 +533,33 @@ export function isAgentCancelled(agent: ACPToolCall): boolean {
     status === 'canceled' ||
     reason.toLowerCase().includes('cancel')
   );
+}
+
+export function getSubagentDetailsUnavailableReason(
+  agent: ACPToolCall,
+): string | undefined {
+  if (agent.subagentSessionReady !== false) return undefined;
+  const rawStatus =
+    agent.rawOutput && typeof agent.rawOutput === 'object'
+      ? (agent.rawOutput as Record<string, unknown>)['status']
+      : undefined;
+  // Safe projections can map cancellation to failed while retaining this flag.
+  if (
+    agent.wasCancelled ||
+    (typeof rawStatus === 'string' &&
+      ['cancelled', 'canceled'].includes(rawStatus.toLowerCase()))
+  )
+    return 'subagent.cancelled';
+  if (
+    agent.status === 'failed' ||
+    getTaskExecutionRecord(agent.rawOutput)?.['status'] === 'failed'
+  )
+    return 'subagent.failed';
+  if (isAgentCancelled(agent)) return 'subagent.cancelled';
+  // Successful teammate launches use a different session mechanism and may
+  // complete without publishing readiness.
+  if (agent.status === 'completed') return undefined;
+  return 'subagent.creating';
 }
 
 export function getAgentDisplayStatus(

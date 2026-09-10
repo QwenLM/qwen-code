@@ -59,8 +59,14 @@ export interface ServeOptions {
   port: number;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
   mode: ServeMode;
@@ -301,7 +307,7 @@ export interface ServeOptions {
     timeoutMs?: number;
   };
   /**
-   * Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];
@@ -414,6 +420,8 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
+  sessionLiveStatePollIntervalMs?: number;
   mode: ServeMode;
   features: string[];
   /**

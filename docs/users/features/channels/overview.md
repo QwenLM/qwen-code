@@ -50,31 +50,33 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required         | Description                                                                                                                                                                                                             |
-| ------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
-| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                             |
-| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                            |
-| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                     |
-| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
-| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
-| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                |
-| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
-| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
-| `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
-| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
-| `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
-| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
-| `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
-| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
-| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
-| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
-| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
-| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
-| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                         |
-| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
-| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
+| Option              | Required         | Description                                                                                                                                                                                                             |
+| ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
+| `token`             | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                             |
+| `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                            |
+| `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                     |
+| `botId`             | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
+| `secret`            | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
+| `model`             | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                |
+| `senderPolicy`      | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
+| `allowedUsers`      | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
+| `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
+| `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
+| `messagePrefix`     | No               | Only dispatch user messages that begin with this exact, case-sensitive prefix after any leading `@mentions`; the prefix and following whitespace are removed before dispatch                                            |
+| `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
+| `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
+| `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
+| `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
+| `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
+| `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
+| `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
+| `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
+| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
+
+When `messagePrefix` is set, every user-authored message must begin with the prefix and a non-empty payload, for example `/review inspect #123`. Only the prefix and the mentions ahead of it are removed; a mention the user typed after the prefix reaches the agent unchanged. Shared and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Telegram's registered command-menu actions remain available without the prefix — unless the configured prefix is itself one of them, in which case the prefix wins and that command has to be sent prefixed too (`/new /new`). Attachments need a matching caption when the platform supports one; captionless Telegram, Feishu, WeChat, DingTalk and WeCom media messages continue to run, and their placeholder text is never quoted back as group history. Native todos, webhooks, and provider-generated assignment or review-request events also continue to run without a prefix because they are system events rather than chat messages.
+
+Two behaviours are deliberate and worth knowing before you turn the prefix on. A voice message whose transcript DingTalk or WeCom fills in counts as text the user spoke, so it must carry the prefix like any other message and is dropped otherwise — only an untranscribed voice note runs as captionless media. And the prefix is checked before pairing, so first contact from an unknown sender or an unapproved group has to carry the prefix as well; without that ordering every unprefixed message in a busy group would draw a pairing reply, which is exactly the noise the prefix exists to suppress. Tell new users the prefix out of band, or leave pairing channels unprefixed.
 
 ### Sender Policy
 
@@ -113,7 +115,7 @@ The catalog is private to the exact channel, chat, and sender. Task names use 1�
 
 Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
 
-One task remains selected to receive the next normal message, but other named tasks may keep running concurrently in the shared working directory. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. Per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+One task remains selected to receive the next normal message, but other named tasks may keep running concurrently. `/session new <name>` shares the configured workspace, while `/session new <name> --worktree` creates an isolated checkout for that task under the daemon workspace's `.qwen/worktrees/` directory. The daemon verifies the persisted worktree owner before reopening the task after a restart; a missing, changed, or foreign ownership record fails closed instead of silently moving the task into the shared workspace. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. `/clear`, `/new`, and `/reset` also work on a selected worktree task: the task gets a fresh conversation while its worktree and files are kept. A busy worktree task refuses the reset until its prompt finishes, and a task whose worktree record was damaged reports the failure without touching files. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
@@ -412,33 +414,11 @@ You can also set dispatch mode per group, overriding the channel default:
 }
 ```
 
-## Block Streaming
+## Response delivery
 
-By default, the agent works for a while and then sends one large response. With block streaming enabled, the response arrives as multiple shorter messages while the agent is still working — similar to how ChatGPT or Claude show progressive output.
+Channels use their normal response delivery path. The shared delivery layer sends completed responses, and adapters may provide native progressive display, such as updating an interactive card in place. Platform message-length limits may still split long responses.
 
-```json
-{
-  "channels": {
-    "my-channel": {
-      "type": "telegram",
-      "blockStreaming": "on",
-      "blockStreamingChunk": { "minChars": 400, "maxChars": 1000 },
-      "blockStreamingCoalesce": { "idleMs": 1500 },
-      ...
-    }
-  }
-}
-```
-
-### How it works
-
-- The agent's response is split into blocks at paragraph boundaries and sent as separate messages
-- `minChars` (default 400) — don't send a block until it's at least this long, to avoid spamming tiny messages
-- `maxChars` (default 1000) — if a block gets this long without a natural break, send it anyway
-- `idleMs` (default 1500) — if the agent pauses (e.g., running a tool), send what's buffered so far
-- When the agent finishes, any remaining text is sent immediately
-
-Only `blockStreaming` is required. The chunk and coalesce settings are optional and have sensible defaults.
+The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
 
 ## Scheduled Channel Loops
 
@@ -493,7 +473,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/sessions [all]` — List open named tasks, or include closed tasks; available only with `multiSession: true`
 - `/session current` — Show the selected named task
 - `/session new <name>` — Create and select a shared-workspace task
-- `/session new <name> --worktree` — Recognized but deferred to Part 4
+- `/session new <name> --worktree` — Create and select a task in its own Git worktree; daemon-managed named-task mode only
 - `/session use <name>` — Select an open task or reopen a closed task
 - `/session cancel [<name>]` — Cancel the selected task's active prompt, or name another owned task; independently queued turns are not cancelled, but `collect`-mode follow-ups buffered behind the cancelled prompt are discarded by the existing cancellation behavior; media preparation is not targeted
 - `/session close <name>` — Close a task without deleting its transcript

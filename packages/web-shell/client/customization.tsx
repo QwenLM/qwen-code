@@ -13,6 +13,7 @@ import type {
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionArtifact,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -122,10 +123,11 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
-  | 'tokenUsage';
+  | 'tokenUsage'
+  | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Token usage is opt-in. */
+  /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
@@ -139,7 +141,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */
@@ -166,6 +170,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens context usage for the current session, when available. */
+  onOpenContextUsage?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
@@ -227,9 +233,28 @@ export interface WebShellAssistantTurnFooterRenderInfo {
   message: WebShellAssistantMessageInfo;
 }
 
+export type WebShellSessionArtifactsChangeReason = 'restore' | 'change';
+
+export interface WebShellSessionArtifactsChange {
+  reason: WebShellSessionArtifactsChangeReason;
+  sessionId: string;
+  sequence: number;
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+}
+
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -453,10 +478,27 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
   exitCode?: number;
 }
 
+export interface WebShellWorkflowTask extends WebShellTaskBase {
+  kind: 'workflow';
+  status:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  currentPhase?: string;
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal?: number;
+}
+
 export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
-  | WebShellMonitorTask;
+  | WebShellMonitorTask
+  | WebShellWorkflowTask;
 
 // ---- Model info (public type for footer renderer) ----
 
@@ -509,6 +551,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
@@ -547,13 +590,18 @@ export interface WebShellCustomization {
   loadingPhrases?: LoadingPhrasesResolver;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
    * while `true`/omitted still requires the capability (and the workspace
    * trust / qualified-route safety checks) to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.

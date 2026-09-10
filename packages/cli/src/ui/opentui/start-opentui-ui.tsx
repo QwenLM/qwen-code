@@ -68,20 +68,23 @@ import {
   useSessionStats,
 } from '../contexts/SessionContext.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { setUpdateHandler } from '../handleAutoUpdate.js';
+import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { useLogger } from '../hooks/useLogger.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import { useFollowupSuggestionGeneration } from './followup-generation.js';
+import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import {
+  armCapturedInputInjection,
   drainCapturedInputAsText,
-  injectCapturedInput,
 } from './early-input.js';
 
 const debugLogger = createDebugLogger('OPEN_TUI_START');
@@ -100,6 +103,8 @@ interface OpenTuiEntryAppProps {
   extensionRefreshState?: ExtensionRefreshState;
   /** Decoded early-captured keystrokes; injected into the composer once. */
   capturedText: string;
+  /** Boot-computed auth auto-open request (U-6); null when none. */
+  initialDialog: OpenTuiDialogRequest | null;
 }
 
 function OpenTuiEntryApp({
@@ -109,6 +114,7 @@ function OpenTuiEntryApp({
   startupWarnings,
   extensionRefreshState,
   capturedText,
+  initialDialog,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
   const { stats, startNewSession } = useSessionStats();
@@ -116,6 +122,17 @@ function OpenTuiEntryApp({
   const live = useOpenTuiLiveTurn({ config });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
+
+  // U-7: generate follow-up suggestions on the streaming→idle edge — the
+  // entry owns that edge, the shell stays stream-state-free.
+  const { promptSuggestion, abortPromptSuggestion, dismissPromptSuggestion } =
+    useFollowupSuggestionGeneration({
+      config,
+      settings,
+      streaming: live.streaming,
+      items: live.items,
+      waitingCalls: live.waitingCalls,
+    });
 
   const statsRef = useRef(stats);
   useEffect(() => {
@@ -129,7 +146,7 @@ function OpenTuiEntryApp({
     setText: (text: string) => void;
   } | null>(null);
   useEffect(
-    () => injectCapturedInput(() => composerHandle.current, capturedText),
+    () => armCapturedInputInjection(() => composerHandle.current, capturedText),
     [capturedText],
   );
 
@@ -164,14 +181,7 @@ function OpenTuiEntryApp({
   const setUpdateInfo = useCallback((info: UpdateObject | null) => {
     setUpdateNotice(info?.message ?? null);
   }, []);
-  useEffect(() => {
-    const { cleanup } = setUpdateHandler(
-      addUpdateItem,
-      setUpdateInfo,
-      isIdleRef,
-    );
-    return cleanup;
-  }, [addUpdateItem, setUpdateInfo]);
+  useUpdateNoticeFlush(addUpdateItem, setUpdateInfo, isIdleRef, live.streaming);
 
   // --- two-press exit guard (ink useDoublePress parity) ---------------------
   const [exitHint, setExitHint] = useState<string | null>(null);
@@ -207,7 +217,7 @@ function OpenTuiEntryApp({
     }
     const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
     if (exitGuard.press(guardKey) === 'exit') {
-      void exitSession(EXIT_CODE_INTERRUPT);
+      void exitSession(config, EXIT_CODE_INTERRUPT);
     } else {
       setExitHint(exitGuardHint(guardKey));
     }
@@ -228,16 +238,19 @@ function OpenTuiEntryApp({
     [live.items, width, height, exitHint],
   );
 
-  const handleRenderError = useCallback((error: Error) => {
-    debugLogger.error(
-      `[FATAL_RENDER_ERROR] ${error.message}\n${error.stack ?? ''}`,
-    );
-    // ink parity: the fallback unmounted the composer and Ctrl+C handling;
-    // schedule a graceful exit so the session cannot hang.
-    setTimeout(() => {
-      void exitSession(1);
-    }, 5000);
-  }, []);
+  const handleRenderError = useCallback(
+    (error: Error) => {
+      debugLogger.error(
+        `[FATAL_RENDER_ERROR] ${error.message}\n${error.stack ?? ''}`,
+      );
+      // ink parity: the fallback unmounted the composer and Ctrl+C handling;
+      // schedule a graceful exit so the session cannot hang.
+      setTimeout(() => {
+        void exitSession(config, 1);
+      }, 5000);
+    },
+    [config],
+  );
 
   const handleStartNewSession = useCallback(
     (sessionId: string) => startNewSession(sessionId),
@@ -254,8 +267,8 @@ function OpenTuiEntryApp({
   );
 
   const handleQuit = useCallback(() => {
-    void exitSession(0);
-  }, []);
+    void exitSession(config, 0);
+  }, [config]);
 
   return (
     <OpenTuiApp
@@ -265,10 +278,12 @@ function OpenTuiEntryApp({
       getSessionStats={getSessionStats}
       runtime={runtime}
       extensionRefreshState={extensionRefreshState}
+      initialDialog={initialDialog}
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}
+      onTranscriptEvent={applyEvent}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       availableTerminalHeight={height}
@@ -281,6 +296,9 @@ function OpenTuiEntryApp({
       onToolCallSettled={live.settleWaitingCall}
       onRenderError={handleRenderError}
       composerHandle={composerHandle}
+      promptSuggestion={promptSuggestion}
+      onPromptSuggestionDismiss={dismissPromptSuggestion}
+      onPromptSuggestionAbort={abortPromptSuggestion}
     />
   );
 }
@@ -295,7 +313,7 @@ export async function startOpenTuiUI(
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
-  _initializationResult: InitializationResult,
+  initializationResult: InitializationResult,
   options: StartOpenTuiUIOptions = {},
 ): Promise<boolean> {
   let renderer: CliRenderer;
@@ -315,6 +333,10 @@ export async function startOpenTuiUI(
   const root = createRoot(renderer);
   let runtime: OpenTuiRuntime | null = null;
   try {
+    // Start the one shared initialization flight before anything can load
+    // commands or submit; the turn path and the registry loader both await
+    // (or join) this same flight via ensureConfigInitialized.
+    void ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (
       !settings.merged.ui?.hideWindowTitle &&
@@ -334,6 +356,18 @@ export async function startOpenTuiUI(
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
+    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
+    // plus the one-shot startup authError (useInitializationAuthError);
+    // shouldOpenAuthDialog is never read in ink's production code, so the
+    // behavior contract is exactly these two.
+    const initialDialog: OpenTuiDialogRequest | null =
+      initializationResult.authError || config.getAuthType() === undefined
+        ? {
+            dialog: 'auth',
+            initialError: initializationResult.authError ?? undefined,
+          }
+        : null;
+
     root.render(
       // children must sit in the props object: the provider declares it as a
       // required prop, which createElement's rest-children overloads can't fill.
@@ -348,6 +382,7 @@ export async function startOpenTuiUI(
             startupWarnings={startupWarnings}
             extensionRefreshState={options.extensionRefreshState}
             capturedText={capturedText}
+            initialDialog={initialDialog}
           />
         ),
       }),
@@ -416,6 +451,7 @@ export async function startOpenTuiUI(
         sessionId: config.getSessionId(),
         cwd: config.getTargetDir(),
         qwenVersion: version,
+        kind: 'tui',
       }),
     );
     registerCleanup(() => config.unregisterSessionRegistry());

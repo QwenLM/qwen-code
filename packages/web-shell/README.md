@@ -13,6 +13,21 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
 Tailwind 或额外引入全局 CSS。
 
+## 浏览器任务通知
+
+通过 `qwen serve` 打开的独立 Web Shell 可在 **Settings → UI → 浏览器任务通知**
+开启提醒。默认关闭，仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
+不写入 daemon 或 workspace 设置，同源标签页之间同步。
+
+页面在后台或窗口失焦时，当前聊天及 Split View 中仍挂载的聊天在回合结束或失败后
+可以发送系统通知。取消回合、初次加载历史和前台已处理的回合保持静默。通知只显示
+通用状态，不含聊天正文、错误详情或工作目录；点击通知尝试聚焦原窗口。
+
+需要支持 Notifications API 的桌面浏览器以及 HTTPS 或可信的 localhost 环境。
+支持 Web Locks 且存储可用时，同源标签页协调去重；否则退化为页面内去重及相同 tag
+的通知替换。关闭网页、页面冻结或离开未挂载的聊天后不保证提醒。嵌入式组件不自动
+启用此能力；Channel 推送不在首版范围内。
+
 ## Tailwind 与 shadcn/ui
 
 Web Shell 已配置 Tailwind CSS v4 和 shadcn/ui。shadcn 的 token 仅用于新增的
@@ -158,19 +173,44 @@ import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
   WebShell,
+  useWorkspace,
 } from '@qwen-code/web-shell';
+
+function SessionViews() {
+  const workspace = useWorkspace();
+  if (!workspace.capabilities) {
+    if (workspace.status === 'error') {
+      return (
+        <button
+          onClick={() => void workspace.refreshCapabilities?.().catch(() => {})}
+        >
+          Try again
+        </button>
+      );
+    }
+    return <p role="status">Loading workspace…</p>;
+  }
+  return (
+    <DaemonSessionProvider sessionId="...">
+      <ChatPanel />
+      <WebShell theme="dark" language="zh-CN" />
+    </DaemonSessionProvider>
+  );
+}
 
 export function App() {
   return (
     <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="...">
-      <DaemonSessionProvider sessionId="...">
-        <ChatPanel />
-        <WebShell theme="dark" language="zh-CN" />
-      </DaemonSessionProvider>
+      <SessionViews />
     </DaemonWorkspaceProvider>
   );
 }
 ```
+
+恢复已有会话时，直接组合 Provider 的宿主需要像示例一样，等待首次 capabilities
+成功后再挂载 `DaemonSessionProvider`，并在它上方提供发现失败的重试入口。
+否则主工作区稍后确定时，会话上下文变化可能触发重复恢复。后续刷新失败会保留已知
+capabilities，此时应保持会话挂载。该等待只用于首次发现，不应屏蔽真正的工作区切换。
 
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
@@ -181,9 +221,12 @@ export function App() {
 审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
 投影：
 
+> 只渲染 transcript 的宿主请从 `@qwen-code/web-shell/transcript` 子路径导入。包根会连带
+> `App`、daemon providers 和编辑器/终端相关代码，不要依赖 tree shaking 把它们摇掉。
+
 ```tsx
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { WebShellTranscript } from '@qwen-code/web-shell';
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 
 const records = jsonl
   .split(/\r?\n/)
@@ -201,6 +244,25 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
 历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
+## 拖入文件的默认行为
+
+通过 `fileDropAction` 指定拖入文件时的默认去向，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders fileDropAction="upload" fileUploadDirectory="uploads" />
+<WebShellWithProviders fileDropAction="attach" />
+```
+
+- `upload`：直接上传到工作区，并插入 `@文件` 引用。
+- `attach`：直接添加为当前消息的附件。
+- 不传：仅当上传和附件都可用时显示选择弹窗。
+
+只有一种方式可用时直接使用它，即使配置的默认去向是另一种；两种都不可用时
+不接收拖入文件。`fileUploadEnabled={false}` 只关闭工作区上传，不再关闭附件
+拖入或添加附件入口。上传仍受 daemon 能力、工作区信任及目标路径检查约束。
+修改默认去向或可用方式时，会关闭已经打开的选择弹窗；需要重新拖入文件。
 
 ## 消息操作
 
@@ -226,15 +288,16 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 ### WebShell
 
-| 属性                | 类型                                                                                                                                  | 说明                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `onSessionIdChange` | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报 |
-| `onSessionCreated`  | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒      |
-| `theme`             | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                  |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                           |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                               |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                     |
-| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                    |
+| 属性                       | 类型                                                                                                                                  | 说明                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报 |
+| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒      |
+| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                  |
+| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                           |
+| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                               |
+| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                     |
+| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                    |
+| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                         |
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
@@ -252,6 +315,36 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
 回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
 
+宿主需要同步 Session 产物时，可以监听完整快照：
+
+```tsx
+<WebShell
+  onSessionArtifactsChange={({
+    reason,
+    sessionId,
+    sequence,
+    artifacts,
+    artifactsByTurn,
+  }) => {
+    replaceSessionArtifacts({
+      reason,
+      sessionId,
+      sequence,
+      artifacts,
+      artifactsByTurn,
+    });
+  }}
+/>
+```
+
+`restore` 表示进入新 Session 后的首次恢复，可携带空快照；`change` 表示实时
+Artifact 变化、同 Session 重连对账发现的差异，或 transcript 补齐后的 turn
+归属变化。每次都返回完整 `artifacts` 和 `artifactsByTurn`，不提供增量。新 Artifact
+可能先于 turn 归属交付，归属稍后补齐时会再交付一份完整快照。回调会等待 transcript
+load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账，因此宿主应接受重复
+交付，但不需要从 SSE 时序推断遗漏。`sequence` 在每个新 Session 从 1 开始。宿主回调
+抛错不会影响 WebShell 内置 Artifact 面板与轮末渲染。
+
 嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
 
 ```tsx
@@ -260,6 +353,13 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+`Live` 会话分组默认不向嵌入宿主展示；此前版本会默认展示，依赖该分组的宿主升级时
+需要显式开启：
+
+```tsx
+<WebShellWithProviders sidebar={{ showLive: true }} />
+```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

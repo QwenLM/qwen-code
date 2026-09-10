@@ -6,6 +6,8 @@
 
 import {
   AuthType,
+  type ChatRecord,
+  computeInitialTurnFromHistory,
   type Config,
   InputFormat,
   isDebugLogFileEnabled,
@@ -19,6 +21,8 @@ import {
   createDebugLogger,
   persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -384,6 +388,14 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  // Captured beside the private parent capability so a Conversations
+  // provenance marker can never be introduced or withdrawn later by settings
+  // or environment files; acceptance below additionally requires ACP mode and
+  // the capability.
+  const conversationsRuntimeMarkerSeen =
+    process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE;
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
   const privateExternalToolGuard =
     process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
     EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
@@ -415,10 +427,20 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  const conversationsRuntimeProvenance =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    conversationsRuntimeMarkerSeen;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
           [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(conversationsRuntimeProvenance
+            ? {
+                [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+              }
+            : {}),
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
@@ -453,6 +475,9 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  // A user-level .env or settings reload may have reintroduced the marker;
+  // the accepted value already lives in immutable local state.
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -681,6 +706,12 @@ export async function main() {
             sessionId,
           )
         : injectStdinIntoArgs(process.argv, stdinData);
+
+      // The seatbelt spawn merges `{ ...process.env, ...childEnv }`, so the
+      // marker must not be sitting in process.env at the handoff: auth
+      // validation above re-runs the environment load, and the accepted
+      // provenance travels in `privateAcpChildEnv`, which is spread last.
+      delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
       await relaunchOnExitCode(
         () =>
@@ -1119,6 +1150,7 @@ export async function main() {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
+          conversationsRuntimeProvenance,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
@@ -1389,7 +1421,10 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = createNonInteractivePromptId(config.getSessionId());
+    const prompt_id = createNonInteractivePromptId(
+      config.getSessionId(),
+      config.getResumedSessionData?.()?.conversation.messages,
+    );
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -1463,8 +1498,33 @@ export async function main() {
   }
 }
 
-export function createNonInteractivePromptId(sessionId: string): string {
-  return `${sessionId}########0`;
+/**
+ * Mints the single promptId a headless `-p` run uses for its one turn.
+ *
+ * A run that resumes nothing keeps the historical `########0`. A resumed one
+ * (`--resume` / `--continue`) reuses the previous session's id, so without a
+ * seed every process mints `########0` again and one transcript ends up with
+ * several turns under a single promptId — the key #9466's rewind mapping
+ * anchors on, and the `prompt_id` persisted on `ui_telemetry` records, which
+ * is itself what the next resume reads back to seed from.
+ *
+ * Seed from the highest turn the transcript claims and continue past it, the
+ * same rule `Session.getNextPromptId` applies, so the two headless paths
+ * cannot drift.
+ */
+export function createNonInteractivePromptId(
+  sessionId: string,
+  resumedRecords?: readonly ChatRecord[],
+): string {
+  // -1 for a run that resumes nothing, so the shared `+ 1` still yields the
+  // historical `########0`. Seeding from the helper's own 0 instead would
+  // re-mint a turn the transcript already claims in the case where it returns
+  // 0 for a non-empty transcript: highest claimed turn 0, and no record with
+  // non-blank user text for its fallback to count.
+  const lastTurn = resumedRecords?.length
+    ? computeInitialTurnFromHistory(resumedRecords, sessionId)
+    : -1;
+  return `${sessionId}########${lastTurn + 1}`;
 }
 
 /**

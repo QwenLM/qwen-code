@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   readWorktreeSession,
+  readWorktreeSessionStrict,
   writeWorktreeSession,
   clearWorktreeSession,
   restoreWorktreeContext,
@@ -112,6 +113,203 @@ describe('readWorktreeSession', () => {
   });
 });
 
+describe('readWorktreeSessionStrict', () => {
+  it('distinguishes missing, valid, and malformed sidecars', async () => {
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'missing',
+    });
+
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'valid',
+      session: sample,
+    });
+
+    await fs.writeFile(filePath, '{broken', 'utf8');
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
+
+  it('rejects symlinked, hard-linked, and oversized sidecars', async () => {
+    const target = path.join(tmpDir, 'target');
+    await fs.writeFile(target, JSON.stringify(sample), 'utf8');
+    await fs.symlink(target, filePath);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.unlink(filePath);
+    await fs.link(target, filePath);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.unlink(filePath);
+    await fs.writeFile(filePath, 'x'.repeat(64 * 1024 + 1));
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+  });
+
+  it('uses a bounded read for sidecar contents', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'read' | 'readFile'
+    >;
+    const readSpy = vi.spyOn(prototype, 'read');
+    const readFileSpy = vi.spyOn(prototype, 'readFile');
+    await probe.close();
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+        state: 'valid',
+      });
+      expect(readFileSpy).not.toHaveBeenCalled();
+      expect(readSpy).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        0,
+        64 * 1024 + 1,
+        0,
+      );
+    } finally {
+      readSpy.mockRestore();
+      readFileSpy.mockRestore();
+    }
+  });
+
+  it('rejects a sidecar whose opened identity differs from its path', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementationOnce(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        return Object.assign(stats, {
+          ino: typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+        });
+      });
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar identity changed before read',
+      });
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('rejects a sidecar whose opened identity changes during the read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    let statCalls = 0;
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        statCalls++;
+        return statCalls === 2
+          ? Object.assign(stats, {
+              ino:
+                typeof stats.ino === 'bigint' ? stats.ino + 1n : stats.ino + 1,
+            })
+          : stats;
+      });
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar identity changed during read',
+      });
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('distinguishes a sidecar that disappears during the read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    let removed = false;
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(async function (
+        this: typeof probe,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) {
+        const result = await originalRead.call(this, {
+          buffer,
+          offset,
+          length,
+          position,
+        });
+        if (!removed) {
+          removed = true;
+          await fs.unlink(filePath);
+        }
+        return result;
+      } as typeof prototype.read);
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'invalid',
+        reason: 'sidecar disappeared during read',
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('continues reading a stable sidecar after a short read', async () => {
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    const shortRead = function (
+      this: typeof probe,
+      buffer: Buffer,
+      offset: number,
+      length: number,
+      position: number,
+    ) {
+      return originalRead.call(this, {
+        buffer,
+        offset,
+        length: Math.min(length, 5),
+        position,
+      });
+    };
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(shortRead as typeof prototype.read);
+
+    try {
+      await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+        state: 'valid',
+        session: sample,
+      });
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+});
+
 describe('writeWorktreeSession', () => {
   it('writes a readable JSON file', async () => {
     await writeWorktreeSession(filePath, sample);
@@ -130,6 +328,42 @@ describe('writeWorktreeSession', () => {
     const nestedPath = path.join(tmpDir, 'nested', 'deep', 'session.json');
     await writeWorktreeSession(nestedPath, sample);
     expect(await readWorktreeSession(nestedPath)).toEqual(sample);
+  });
+
+  it('round-trips the supersede link fields used by worktree reset', async () => {
+    const linked: WorktreeSession = { ...sample, supersedes: 'session-old' };
+    await writeWorktreeSession(filePath, linked);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toEqual({
+      state: 'valid',
+      session: linked,
+    });
+
+    const superseded: WorktreeSession = {
+      ...sample,
+      supersededBy: 'session-new',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    await expect(readWorktreeSession(filePath)).resolves.toEqual(superseded);
+  });
+
+  it('rejects sidecars with non-string supersede links', async () => {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersededBy: 42 }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
+
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, supersedes: null }),
+      'utf-8',
+    );
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'invalid',
+    });
   });
 });
 
@@ -238,6 +472,41 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
+  it('refuses to restore a live worktree whose sidecar names a replacement session', async () => {
+    // A worktree reset moves ownership of the checkout to the replacement
+    // session but leaves the superseded sidecar (and transcript) on disk.
+    // Resuming the old id must not inject the "continue using this path"
+    // notice — that would put a second live writer in the replacement's
+    // worktree.
+    const supersededCwd = path.join(tmpDir, 'superseded-repo');
+    const supersededWorktree = path.join(
+      supersededCwd,
+      '.qwen',
+      'worktrees',
+      'my-feature',
+    );
+    await fs.mkdir(supersededWorktree, { recursive: true });
+    const superseded: WorktreeSession = {
+      ...sample,
+      originalCwd: supersededCwd,
+      worktreePath: supersededWorktree,
+      supersededBy: 'session-replacement',
+    };
+    await writeWorktreeSession(filePath, superseded);
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (e) =>
+      warnings.push(e),
+    );
+
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    // Unlike the stale cases, the sidecar survives: its supersede link is the
+    // daemon reset route's redirect and interrupted-transfer evidence.
+    expect(await readWorktreeSession(filePath)).toEqual(superseded);
+    expect(warnings).toHaveLength(1);
+  });
+
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {
     // A tampered sidecar pointing at /tmp itself (a real dir) but not
     // under `<originalCwd>/.qwen/worktrees/` must be treated as
@@ -258,6 +527,26 @@ describe('restoreWorktreeContext', () => {
     // Sidecar should have been cleared.
     expect(await readWorktreeSession(filePath)).toBeNull();
     expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  it('rejects and clears a sidecar that names the managed root itself', async () => {
+    const managedRoot = path.join(tmpDir, '.qwen', 'worktrees');
+    await fs.mkdir(managedRoot, { recursive: true });
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: tmpDir,
+      worktreePath: managedRoot,
+    });
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (error) =>
+      warnings.push(error),
+    );
+
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    expect(warnings).toHaveLength(1);
   });
 
   it('cleans up stale sidecar when worktree dir is gone', async () => {

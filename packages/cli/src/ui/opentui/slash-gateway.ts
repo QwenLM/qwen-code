@@ -16,13 +16,39 @@
  *    submission instead of silently misrouting `/help` to the model;
  *  - rejects a submission while a command is already running (the ink
  *    processor gates on isProcessing; the OpenTUI prompt does not disable);
- *  - routes Esc to `dispatcher.cancel()` while a command runs.
+ *  - routes Esc to `dispatcher.cancel()` while a command runs;
+ *  - normalizes ink's bare quit tokens to `/quit` for the shell, ahead of the
+ *    gate ({@link normalizeQuitSubmission}).
  */
 
+import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
 } from './commands-dispatch.js';
+
+// ink's quit family (AppContainer.handleFinalSubmit): `/exit` is quit's own
+// altName, so the whole set collapses onto `/quit`.
+const QUIT_TOKENS = new Set([
+  '/quit',
+  '/exit',
+  'exit',
+  'quit',
+  ':q',
+  ':q!',
+  ':wq',
+  ':wq!',
+]);
+
+/**
+ * Rewrites a bare quit token to `/quit` so it reaches the dispatcher as the
+ * command it means. ink checks this ahead of its message queue — a quit has to
+ * be able to stop a live stream instead of queueing behind it, and anything the
+ * gate leaves alone would otherwise be submitted to the model as text.
+ */
+export function normalizeQuitSubmission(text: string): string {
+  return QUIT_TOKENS.has(text.trim()) ? '/quit' : text;
+}
 
 export type SlashSettlement =
   /** The dispatcher processed the input (false = not a slash command). */
@@ -70,6 +96,28 @@ export class OpenTuiSlashGateway {
   async mustDeferDuringStreaming(text: string): Promise<boolean> {
     await this.ready;
     return this.dispatcher?.mustDeferDuringStreaming(text) ?? false;
+  }
+
+  /**
+   * Whether the dispatcher claims this input instead of the shell lane — the
+   * single admission rule the shell must reuse when tagging a mid-turn
+   * shell-mode submission, so routing cannot diverge between the two gates.
+   */
+  async takesAsSlashCommand(text: string): Promise<boolean> {
+    await this.ready;
+    if (!this.dispatcher) {
+      // No registry to ask (failed init): mirror the real admission rule's
+      // shape so a slash-form submission still reaches dispatch and its
+      // recorded init-error rejection, instead of `?? false` tagging it for
+      // bash. A `/`-prefixed path keeps the shell lane via the same
+      // separator carve-out the dispatcher applies.
+      const trimmed = text.trim();
+      return (
+        trimmed.startsWith('?') ||
+        (trimmed.startsWith('/') && !hasSlashCommandPathSeparator(trimmed))
+      );
+    }
+    return this.dispatcher.takesAsSlashCommand(text.trim());
   }
 
   /** True while a dispatched command is still running. */
