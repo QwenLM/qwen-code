@@ -3193,6 +3193,11 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.releaseManagedConversationBinding(sessionId, expectation);
       expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      await bridge.getSessionSources(sessionId);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: 'qwen/session/sources/list',
+        params: { sessionId },
+      });
       const deferredArtifactId = stableSessionArtifactId(
         sessionId,
         'url:https://example.com/deferred-artifact',
