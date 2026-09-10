@@ -13,7 +13,7 @@ import {
   clickSidebarElement,
   installSidebarDomShims,
   resolveWebShellSessions,
-} from './WebShellSidebar.test-harness';
+} from '../../test/sidebarHarness';
 
 const {
   connection,

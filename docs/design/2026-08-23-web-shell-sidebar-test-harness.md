@@ -9,11 +9,14 @@ sessions.
 
 ## Decision
 
-Add one collocated test harness for the stable shared behavior. All three
-sidebar suites use the same session-page resolver and DOM setup; the two suites
-that build session fixtures also share those helpers. Keep suite-specific mock
-controllers and render options local because the workspace-removal suite
-models additional catalog invalidation, channels, and multi-workspace routes.
+Add one shared test harness under `client/test/` (the package's existing
+test-support directory, excluded from the declaration build and coverage) for
+the stable shared behavior. All three sidebar suites use the same session-page
+resolver and DOM setup; the two suites that build session fixtures also share
+those helpers. The flush helper is re-exported from the existing
+`reactHarness` rather than copied. Keep suite-specific mock controllers and
+render options local because the workspace-removal suite models additional
+catalog invalidation, channels, and multi-workspace routes.
 
 ## Validation
 

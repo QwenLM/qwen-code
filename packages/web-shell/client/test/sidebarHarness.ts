@@ -1,5 +1,6 @@
-import { act } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+
+export { flushReact as flushSidebar } from './reactHarness';
 
 interface SessionPageState {
   sessions: DaemonSessionSummary[];
@@ -74,13 +75,6 @@ export function makeSidebarSession(
     color: null,
     ...overrides,
   } as DaemonSessionSummary;
-}
-
-export async function flushSidebar(): Promise<void> {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
 }
 
 export function clickSidebarElement(

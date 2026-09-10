@@ -12,7 +12,7 @@ import {
   installSidebarDomShims,
   makeSidebarSession as makeSession,
   resolveWebShellSessions,
-} from './WebShellSidebar.test-harness';
+} from '../../test/sidebarHarness';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -1069,13 +1069,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Group'));
     expect(groupItem).not.toBeNull();
     act(() => {
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      groupItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(groupItem!, true);
     });
     await flushSidebar();
 
@@ -1383,13 +1377,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Rename'));
     expect(renameItem).toBeDefined();
     act(() => {
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      renameItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(renameItem!, true);
     });
     await flushSidebar();
 
@@ -1413,13 +1401,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     act(() => {
-      document.body.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      document.body.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(document.body, true);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));

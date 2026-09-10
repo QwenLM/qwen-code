@@ -10,7 +10,7 @@ import {
   installSidebarDomShims,
   makeSidebarSession as makeSession,
   resolveWebShellSessions,
-} from './WebShellSidebar.test-harness';
+} from '../../test/sidebarHarness';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
