@@ -240,11 +240,18 @@ describe('bundled goal-draft skill', () => {
     // rules of thumb name them instead. One placement, pinned both ways, so
     // the two cannot drift apart again.
     expect(template).not.toContain('model.goalMax');
-    const exemplar = body
+    // Every literal Budget exemplar, not just the first: a drafting model
+    // copies whichever example it imitates, so one unmarked row is enough to
+    // put an unenforced turn count into an objective.
+    const weakToStrong = body.slice(body.indexOf('### Weak'));
+    const exemplars = weakToStrong
       .split('\n')
-      .find((line) => line.startsWith('| make checkout faster'));
-    expect(exemplar).toBeDefined();
-    expect(exemplar).not.toContain('model.goalMax');
+      .filter((line) => line.startsWith('| ') && line.includes('Budget:'));
+    expect(exemplars.length).toBeGreaterThanOrEqual(2);
+    for (const exemplar of exemplars) {
+      expect(exemplar).toContain('as model guidance');
+      expect(exemplar).not.toContain('model.goalMax');
+    }
     expect(body).toContain('model.goalMaxTurns');
     expect(body).toContain('model.goalMaxActiveMinutes');
     expect(body).toContain('never write the setting into the objective');
