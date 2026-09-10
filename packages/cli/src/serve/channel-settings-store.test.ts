@@ -751,7 +751,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
-  it.each(['final_only', 'process_and_result'])(
+  it.each(['per_task', 'per_response', 'per_turn'])(
     'persists and removes DingTalk shared outputMode %s',
     async (outputMode) => {
       writeWorkspaceSettings(
@@ -798,6 +798,46 @@ describe('WorkspaceChannelSettingsStore', () => {
     { outputMode: 'process_and_result', stored: false },
     { outputMode: 'final_only', stored: true },
     { outputMode: 'process_and_result', stored: true },
+  ])(
+    'rejects unpublished outputMode $outputMode even when already stored ($stored)',
+    async ({ outputMode, stored }) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'dingtalk',
+              clientId: 'client-id',
+              clientSecret: 'secret',
+              ...(stored ? { outputMode } : {}),
+            },
+          },
+        }),
+      );
+      const before = readWorkspaceSettings();
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: { type: 'dingtalk', clientId: 'client-id', outputMode },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message:
+          'Channel "bot" outputMode must be "per_task", "per_response", or "per_turn".',
+      });
+      expect(readWorkspaceSettings()).toEqual(before);
+    },
+  );
+
+  it.each([
+    { outputMode: 'per_task', stored: false },
+    { outputMode: 'per_response', stored: false },
+    { outputMode: 'per_turn', stored: false },
+    { outputMode: 'per_task', stored: true },
+    { outputMode: 'per_response', stored: true },
+    { outputMode: 'per_turn', stored: true },
   ])(
     'rejects unsupported outputMode $outputMode even when already stored ($stored)',
     async ({ outputMode, stored }) => {

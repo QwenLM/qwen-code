@@ -238,7 +238,12 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import {
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+} from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import {
@@ -1047,6 +1052,7 @@ const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 // burn a core for the whole wait, which on the conditional-close path is the
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
+const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
@@ -1532,7 +1538,16 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
+interface ChannelTaskResponseCapture {
+  workChainId?: string;
+  finalText?: string;
+  controller: AbortController;
+  signal: AbortSignal;
+}
+
 interface AgentResponseCapture {
+  channelTask?: ChannelTaskResponseCapture;
+  backgroundResponse?: (text: string) => Promise<void>;
   channelDelivery?: {
     finalText: string;
   };
@@ -1561,11 +1576,17 @@ function beginChannelDeliveryResponseBlock(
   capture?.agentOutput.beginResponse();
   if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
   if (capture?.turnResult) capture.turnResult.finalText = '';
-  if (!capture?.channelDelivery && !capture?.turnResult) return undefined;
+  if (
+    !capture?.channelDelivery &&
+    !capture?.turnResult &&
+    !capture?.backgroundResponse
+  ) {
+    return undefined;
+  }
   return {
     parts: [],
     chars: 0,
-    ...(capture?.channelDelivery
+    ...(capture?.channelDelivery || capture?.backgroundResponse
       ? {}
       : { capChars: TURN_RESULT_TEXT_MAX_CHARS + 1 }),
   };
@@ -2083,6 +2104,8 @@ export class Session implements SessionContext {
   private currentAgentNotificationTaskId: string | null = null;
   private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
+  private currentNotificationWorkChainId?: string;
+  private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -4246,6 +4269,9 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    for (const capture of this.channelTaskCaptures) {
+      capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
+    }
     this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -4518,7 +4544,13 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (!hadPrompt && !hadCron && !hadNotification && !hadQueuedGoalTurn) {
+    if (
+      !hadPrompt &&
+      !hadCron &&
+      !hadNotification &&
+      !hadQueuedGoalTurn &&
+      this.channelTaskCaptures.size === 0
+    ) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
@@ -4527,6 +4559,9 @@ export class Session implements SessionContext {
       this.closing || this.disposed
         ? SESSION_DISPOSE_ABORT_REASON
         : USER_CANCEL_ABORT_REASON;
+    for (const capture of this.channelTaskCaptures) {
+      capture.controller.abort(abortReason);
+    }
 
     if (this.pendingPrompt) {
       this.pendingPrompt.abort(abortReason);
@@ -4614,15 +4649,31 @@ export class Session implements SessionContext {
       );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    const controller = new AbortController();
+    const channelTask =
+      params._meta?.[CHANNEL_PROMPT_META_KEY] === true &&
+      params._meta?.[CHANNEL_OUTPUT_MODE_META_KEY] === 'per_task'
+        ? {
+            controller,
+            signal: admissionCancellation
+              ? AbortSignal.any([admissionCancellation, controller.signal])
+              : controller.signal,
+          }
+        : undefined;
+    if (channelTask) this.channelTaskCaptures.add(channelTask);
     try {
-      const result = await this.#promptWithTurnRecording(
+      let result = await this.#promptWithTurnRecording(
         params,
         invocationContext,
         admissionCancellation,
         modelPrompt,
         scheduledGoalTurn,
         turnRecording,
+        channelTask,
       );
+      if (channelTask && result.stopReason === 'end_turn') {
+        result = await this.#waitForChannelTaskResult(channelTask, result);
+      }
       this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -4653,7 +4704,90 @@ export class Session implements SessionContext {
       }
       this.#settleTurnRecording('error', turnRecording, undefined, error);
       throw error;
+    } finally {
+      if (channelTask) this.channelTaskCaptures.delete(channelTask);
     }
+  }
+
+  #hasPendingChannelTaskWork(workChainId: string): boolean {
+    return (
+      this.config
+        .getBackgroundTaskRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId &&
+            task.isBackgrounded &&
+            (task.status === 'running' ||
+              task.status === 'paused' ||
+              (task.status === 'cancelled' && !task.notified)),
+        ) ||
+      this.config
+        .getBackgroundShellRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId && task.status === 'running',
+        ) ||
+      this.config
+        .getMonitorRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId && task.status === 'running',
+        ) ||
+      this.config
+        .getWorkflowRunRegistry()
+        .list()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId &&
+            !isTerminalWorkflowStatus(task.status),
+        ) ||
+      this.notificationQueue.some(
+        (item) => item.todoWorkChainId === workChainId,
+      ) ||
+      this.currentNotificationWorkChainId === workChainId
+    );
+  }
+
+  async #waitForChannelTaskResult(
+    capture: ChannelTaskResponseCapture,
+    result: PromptResponse,
+  ): Promise<PromptResponse> {
+    while (true) {
+      // Registry completion and notification enqueue happen in the same turn.
+      // Let both settle before interpreting an empty work set as terminal.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (capture.signal.aborted || this.disposed || this.closing) {
+        return { ...result, stopReason: 'cancelled' };
+      }
+      if (
+        !capture.workChainId ||
+        !this.#hasPendingChannelTaskWork(capture.workChainId)
+      ) {
+        break;
+      }
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          capture.signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, CHANNEL_TASK_POLL_INTERVAL_MS);
+        capture.signal.addEventListener('abort', finish, { once: true });
+        if (capture.signal.aborted) finish();
+      });
+    }
+    return capture.finalText
+      ? {
+          ...result,
+          _meta: {
+            ...result._meta,
+            [CHANNEL_TASK_RESULT_META_KEY]: capture.finalText,
+          },
+        }
+      : result;
   }
 
   async #promptWithTurnRecording(
@@ -4663,6 +4797,7 @@ export class Session implements SessionContext {
     modelPrompt: string | undefined,
     scheduledGoalTurn: AcpGoalTurn | undefined,
     turnRecording: InFlightTurnRecording | null,
+    channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -4885,6 +5020,7 @@ export class Session implements SessionContext {
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
     const responseCapture: AgentResponseCapture = {
+      ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
@@ -5680,6 +5816,10 @@ export class Session implements SessionContext {
                 : undefined,
             );
             this.activeTodoWorkChainPromptId = promptId;
+            if (responseCapture.channelTask) {
+              responseCapture.channelTask.workChainId =
+                this.config.getActiveTodoWorkChainOwner(promptId);
+            }
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
             // block in LlmClient.sendMessageStream). Placed after
@@ -7116,11 +7256,16 @@ export class Session implements SessionContext {
             const candidate = response.value.candidates[0];
             for (const part of candidate.content?.parts ?? []) {
               if (!part.text) continue;
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
-              );
+              if (
+                !options.responseCapture?.backgroundResponse ||
+                part.thought
+              ) {
+                this.messageEmitter.emitMessage(
+                  part.text,
+                  'assistant',
+                  part.thought,
+                );
+              }
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
                 appendChannelDeliveryResponseText(
@@ -7250,6 +7395,11 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
+      if (options.responseCapture?.backgroundResponse) {
+        await options.responseCapture.backgroundResponse(
+          channelDeliveryResponseBlock?.parts.join('') ?? '',
+        );
+      }
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
@@ -9902,6 +10052,7 @@ export class Session implements SessionContext {
         this.currentWorkflowNotificationTaskId =
           item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
+        this.currentNotificationWorkChainId = item.todoWorkChainId;
         this.#activeWorkChanged();
         try {
           // A notification fires from async resources created inside the
@@ -9921,6 +10072,7 @@ export class Session implements SessionContext {
           this.currentAgentNotificationTaskId = null;
           this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
+          this.currentNotificationWorkChainId = undefined;
           this.#activeWorkChanged();
         }
       }
@@ -9982,6 +10134,7 @@ export class Session implements SessionContext {
               );
               responseTurnComplete = true;
               await this.messageRewriter?.flushTurn(ac.signal);
+              await this.messageRewriter?.waitForPendingRewrites();
             } catch (error) {
               debugLogger.warn(
                 `Failed to complete background notification response: ${this.#formatError(error)}`,
@@ -9989,6 +10142,17 @@ export class Session implements SessionContext {
             }
           }
           await this.#emitBackgroundNotificationEndTurn(reason);
+        };
+        const emitBackgroundResponse = async (text: string): Promise<void> => {
+          if (!text.length) return;
+          await this.#emitBackgroundNotificationResponse(
+            item,
+            text,
+            ac.signal,
+            promptId,
+            false,
+          );
+          responseSegmentEmitted = true;
         };
         this.notificationAbortController = ac;
         const continuesCurrentWorkChain =
@@ -10185,21 +10349,7 @@ export class Session implements SessionContext {
               }
             }
 
-            const turnComplete = functionCalls.length === 0;
-            if (
-              responseText.length > 0 ||
-              (turnComplete && responseSegmentEmitted)
-            ) {
-              await this.#emitBackgroundNotificationResponse(
-                item,
-                responseText,
-                ac.signal,
-                promptId,
-                turnComplete,
-              );
-              if (responseText.length > 0) responseSegmentEmitted = true;
-              if (turnComplete) responseTurnComplete = true;
-            }
+            await emitBackgroundResponse(responseText);
 
             if (this.messageRewriter) {
               await this.messageRewriter.flushTurn(ac.signal);
@@ -10255,20 +10405,29 @@ export class Session implements SessionContext {
           }
 
           let stopReason: PromptResponse['stopReason'] = 'end_turn';
+          let loopProtectionStopped = false;
           if (this.todoStopGuard.needsStopInspection) {
-            stopReason = (
-              await this.#handleStopHookLoop(
-                ac,
-                promptId,
-                false,
-                undefined,
-                false,
-              )
-            ).stopReason;
+            const responseCapture: AgentResponseCapture = {
+              agentOutput: new AgentOutputMessageCapture(this.config),
+              backgroundResponse: emitBackgroundResponse,
+            };
+            const guardResult = await this.#handleStopHookLoop(
+              ac,
+              promptId,
+              false,
+              undefined,
+              false,
+              undefined,
+              responseCapture,
+            );
+            stopReason = guardResult.stopReason;
+            loopProtectionStopped = guardResult.loopProtectionStopped === true;
           }
           await finishBackgroundNotificationTurn(
             ac.signal.aborted ? 'cancelled' : stopReason,
-            ac.signal.aborted,
+            ac.signal.aborted ||
+              stopReason === 'cancelled' ||
+              loopProtectionStopped,
           );
         } catch (error) {
           if (ac.signal.aborted) {
@@ -10344,6 +10503,17 @@ export class Session implements SessionContext {
     turnComplete: boolean,
     partial = false,
   ): Promise<void> {
+    let channelTaskOutput = false;
+    for (const capture of this.channelTaskCaptures) {
+      if (
+        capture.workChainId &&
+        capture.workChainId === item.todoWorkChainId &&
+        !capture.signal.aborted
+      ) {
+        if (text.trim()) capture.finalText = text;
+        channelTaskOutput = true;
+      }
+    }
     const rawLabel =
       item.label ??
       (item.kind === 'agent'
@@ -10356,6 +10526,7 @@ export class Session implements SessionContext {
       _meta: {
         source: 'background_notification_response',
         qwenDiscreteMessage: true,
+        ...(channelTaskOutput ? { [CHANNEL_TASK_OUTPUT_META_KEY]: true } : {}),
         backgroundTask: {
           taskId: item.taskId,
           status: item.status,

@@ -44,7 +44,7 @@ function fixture(overrides: Partial<BackgroundOutputCoordinatorOptions> = {}) {
     return { turnComplete: packet.turnComplete };
   });
   const options = {
-    outputMode: 'final_only' as const,
+    outputMode: 'per_turn' as const,
     getTarget: vi.fn(() => target),
     resolveDelivery: vi.fn(async () => ({
       target,
@@ -66,7 +66,7 @@ describe('BackgroundOutputCoordinator', () => {
     vi.useRealTimers();
   });
 
-  it.each([undefined, 'process_and_result'] as const)(
+  it.each([undefined, 'per_response'] as const)(
     'leaves output immediate for mode %s',
     async (outputMode) => {
       const { coordinator, options, packets } = fixture({ outputMode });

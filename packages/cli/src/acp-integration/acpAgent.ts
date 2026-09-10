@@ -204,6 +204,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
@@ -6304,12 +6305,14 @@ class QwenAgent implements Agent {
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
@@ -6330,6 +6333,9 @@ class QwenAgent implements Agent {
       suppliedChannelPrompt === true
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
+      if (suppliedChannelOutputMode === 'per_task') {
+        meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
     // injects it from the trusted context); an untrusted direct-ACP caller

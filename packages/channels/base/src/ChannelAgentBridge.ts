@@ -11,6 +11,15 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
+export const CHANNEL_TASK_OUTPUT_META_KEY = 'qwen.channel.taskOutput';
+
+export class ChannelPromptCancelledError extends Error {
+  constructor() {
+    super('Channel task cancelled');
+  }
+}
 export const CHANNEL_BTW_METHOD = 'qwen/control/session/btw';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).
@@ -180,6 +189,7 @@ export interface ChannelPromptImage {
 }
 
 export interface ChannelAgentBridgePromptOptions {
+  outputMode?: 'per_task';
   images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;

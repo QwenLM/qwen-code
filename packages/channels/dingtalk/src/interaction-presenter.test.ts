@@ -127,7 +127,7 @@ function permissionContext(): ChannelPermissionRequestContext {
 function createHarness(
   options: {
     language?: string;
-    outputMode?: 'final_only' | 'process_and_result';
+    outputMode?: 'per_task' | 'per_turn' | 'per_response';
   } = {},
 ) {
   const projectionOrder: string[] = [];
@@ -199,8 +199,31 @@ afterEach(() => {
 });
 
 describe('DingtalkInteractionPresenter', () => {
+  it.each(['per_task', 'per_turn', 'per_response'] as const)(
+    'preserves long replies for ordinary-message delivery in %s',
+    async (outputMode) => {
+      const sendFallback = vi.fn().mockResolvedValue(undefined);
+      const presenter = new DingtalkInteractionPresenter({
+        outputMode,
+        sendFallback,
+      });
+      presenter.registerRun(
+        'run-1',
+        'owner-1',
+        { chatId: 'cid-1', isGroup: true },
+        'session-1',
+      );
+      const text = `START-${'x'.repeat(25_000)}-END`;
+      presenter.appendOutput(segment('segment-1'), text);
+      await presenter.closeOutput('segment-1', '', 'response_boundary');
+      presenter.terminalizeRun('run-1', 'completed');
+      await vi.waitFor(() => expect(sendFallback).toHaveBeenCalledOnce());
+      expect(sendFallback.mock.calls[0]?.[1]).toBe(text);
+    },
+  );
+
   it('retains the last non-empty reply through whitespace-only final-only output', async () => {
-    const { client, presenter } = createHarness({ outputMode: 'final_only' });
+    const { client, presenter } = createHarness({ outputMode: 'per_turn' });
     presenter.appendOutput(segment('segment-1'), 'Last non-empty reply');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
     presenter.appendOutput(segment('segment-2'), '   ');
@@ -220,7 +243,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('does not create a process card for whitespace-only trailing output', async () => {
     const { client, presenter } = createHarness({
-      outputMode: 'process_and_result',
+      outputMode: 'per_response',
     });
     presenter.appendOutput(segment('segment-1'), 'Only reply');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
@@ -236,7 +259,7 @@ describe('DingtalkInteractionPresenter', () => {
     'does not send retained final-only progress after %s',
     async (terminal) => {
       const { client, presenter, sendFallback } = createHarness({
-        outputMode: 'final_only',
+        outputMode: 'per_turn',
       });
       const creation = deferred<void>();
       vi.mocked(client.createAndDeliver).mockReturnValueOnce(creation.promise);
@@ -256,7 +279,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('withholds intermediate fallback in final-only mode when cards fail', async () => {
     const { client, presenter, sendFallback } = createHarness({
-      outputMode: 'final_only',
+      outputMode: 'per_turn',
     });
     vi.mocked(client.createAndDeliver).mockRejectedValue(
       new DingtalkCardRequestError('unavailable', false),
@@ -277,7 +300,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('falls back to the last completed output on an empty final-only completion', async () => {
     const { client, presenter, sendFallback } = createHarness({
-      outputMode: 'final_only',
+      outputMode: 'per_turn',
     });
     vi.mocked(client.createAndDeliver).mockRejectedValue(
       new DingtalkCardRequestError('unavailable', false),
@@ -296,7 +319,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('completes each process output before displaying the next segment', async () => {
     const { client, presenter } = createHarness({
-      outputMode: 'process_and_result',
+      outputMode: 'per_response',
     });
     const completion = deferred<void>();
     vi.mocked(client.updateInstance).mockReturnValueOnce(completion.promise);
@@ -343,7 +366,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('does not replay an older final-only preview after an input boundary', async () => {
     const { client, presenter, sendFallback } = createHarness({
-      outputMode: 'final_only',
+      outputMode: 'per_turn',
     });
     vi.mocked(client.createAndDeliver).mockRejectedValue(
       new DingtalkCardRequestError('unavailable', false),
@@ -365,7 +388,7 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('does not create an empty card after the last process output', async () => {
     const { client, presenter } = createHarness({
-      outputMode: 'process_and_result',
+      outputMode: 'per_response',
     });
     presenter.appendOutput(segment('segment-1'), 'Only output');
     await presenter.closeOutput('segment-1', '', 'response_boundary');

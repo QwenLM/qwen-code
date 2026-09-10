@@ -422,14 +422,15 @@ The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesc
 
 ### Turn output mode
 
-`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it. Other adapters retain their existing behavior: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
+`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it and defaults to `per_turn` when the setting is omitted. Other adapters retain their existing behavior and receive no output-mode default: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
 
-- `final_only` selects the last non-empty assistant reply within each turn.
-- `process_and_result` delivers each complete assistant response, not each token chunk.
+- `per_task` waits for the main task and its associated background tasks and notifications, then delivers one final result containing the last non-empty assistant reply for that task.
+- `per_response` delivers each complete assistant response, not each token chunk.
+- `per_turn` delivers the last non-empty assistant reply within each turn. The main turn finishes immediately when its prompt ends; later background notification turns deliver separate results.
 
-The main turn completes independently of background work. A later background callback starts a separate output turn and cannot reopen or replace the completed main result. Eleven independent callback turns can therefore produce eleven follow-up results; this setting does not merge separate turns or generate an extra summary. Omitting `outputMode` preserves the adapter's existing delivery.
+In the default `per_turn` mode, a later background callback cannot reopen or replace the completed main result. A main result followed by eleven independent callback turns can therefore produce twelve result messages or cards. Choose `per_task` when the final result should wait for the associated background work. These modes select assistant output; they do not generate an extra summary or concatenate every intermediate reply.
 
-The shared layer owns output selection and background turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for card requirements, partial-result behavior and the conversation scope. Channel loops and webhook runs are unchanged.
+The selected policy applies whether interactive cards are enabled or replies use ordinary messages. The shared layer owns output selection and task/turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for presentation details and the conversation scope. Channel loops and webhook runs are unchanged.
 
 ## Scheduled Channel Loops
 

@@ -10,12 +10,16 @@ export type ChannelOutputDecision =
   | { kind: 'preview'; text: string; deferFallback: boolean }
   | { kind: 'complete'; text: string; rotate: boolean };
 
-/** One foreground turn; background follow-ups use independent turn state. */
+/** Selects output within the completion boundary owned by the runtime. */
 export class ChannelOutputTurn {
   private lastOutput?: string;
   private finished = false;
 
   constructor(private readonly mode?: ChannelOutputMode) {}
+
+  private get latestOnly(): boolean {
+    return this.mode === 'per_turn' || this.mode === 'per_task';
+  }
 
   shouldPreview(text: string): boolean {
     return !this.finished && (this.mode === undefined || text.trim() !== '');
@@ -35,18 +39,18 @@ export class ChannelOutputTurn {
       !text.trim() &&
       (reason === 'response_boundary' || reason === 'completed')
     ) {
-      if (reason !== 'completed' || this.mode !== 'final_only') {
+      if (reason !== 'completed' || !this.latestOnly) {
         return { kind: 'skip' };
       }
       text = this.lastOutput ?? '';
       if (!text.trim()) return { kind: 'skip' };
     }
-    if (reason === 'response_boundary' && this.mode !== 'process_and_result') {
-      if (this.mode === 'final_only') this.lastOutput = text;
+    if (reason === 'response_boundary' && this.mode !== 'per_response') {
+      if (this.latestOnly) this.lastOutput = text;
       return {
         kind: 'preview',
         text,
-        deferFallback: this.mode === 'final_only',
+        deferFallback: this.latestOnly,
       };
     }
     this.lastOutput = undefined;

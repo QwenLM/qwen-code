@@ -19,6 +19,7 @@ import type {
   ChannelAgentBridge,
   ChannelLoopToolHandler,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
@@ -722,6 +723,36 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
+    it('terminalizes a remotely cancelled task without delivering retained output', async () => {
+      const ch = createChannel({ outputMode: 'per_task' });
+      bridge.prompt.mockImplementation(async (sessionId) => {
+        bridge.emit('textChunk', sessionId, 'Stale main response');
+        throw new ChannelPromptCancelledError();
+      });
+      await ch.handleInbound(envelope({ text: 'inspect this' }));
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'cancelled'),
+      ).toHaveLength(1);
+      expect(
+        ch.taskEvents.some(
+          (event) => event.type === 'completed' || event.type === 'failed',
+        ),
+      ).toBe(false);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it.each([undefined, 'per_task', 'per_turn', 'per_response'] as const)(
+      'requests runtime task completion only for %s',
+      async (outputMode) => {
+        const ch = createChannel({ outputMode });
+        await ch.handleInbound(envelope({ text: 'inspect this' }));
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        expect(bridge.prompt.mock.calls[0]?.[2]?.outputMode).toBe(
+          outputMode === 'per_task' ? 'per_task' : undefined,
+        );
+      },
+    );
+
     it('filters and strips configured message prefixes before dispatch', async () => {
       const ch = createChannel({ messagePrefix: '/review' });
 

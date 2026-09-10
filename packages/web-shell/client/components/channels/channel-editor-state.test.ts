@@ -93,6 +93,24 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const DINGTALK_WITH_OUTPUT: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'outputMode',
+      label: 'Output Mode',
+      kind: 'enum',
+      default: 'per_turn',
+      options: [
+        { value: 'per_task', label: 'Per task' },
+        { value: 'per_response', label: 'Per response' },
+        { value: 'per_turn', label: 'Per turn (default)' },
+      ],
+    },
+  ],
+};
+
 function configuredInstance(): DaemonChannelInstanceSnapshot {
   return {
     name: 'release-bot',
@@ -116,6 +134,79 @@ function configuredInstance(): DaemonChannelInstanceSnapshot {
 }
 
 describe('Channel editor state', () => {
+  it.each([false, true])(
+    'selects the per-turn default for an unconfigured output mode (editing=%s)',
+    (editing) => {
+      const instance = editing ? configuredInstance() : undefined;
+      const draft = createChannelEditorDraft(DINGTALK_WITH_OUTPUT, instance);
+
+      expect(draft.values.outputMode).toBe('per_turn');
+      expect(
+        buildChannelUpsertRequest(
+          DINGTALK_WITH_OUTPUT,
+          draft,
+          'revision-output',
+          instance,
+        ).config.outputMode,
+      ).toBe('per_turn');
+    },
+  );
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'preserves explicitly configured output mode %s',
+    (outputMode) => {
+      const instance = configuredInstance();
+      instance.config.outputMode = outputMode;
+      const draft = createChannelEditorDraft(DINGTALK_WITH_OUTPUT, instance);
+
+      expect(draft.values.outputMode).toBe(outputMode);
+      expect(
+        buildChannelUpsertRequest(
+          DINGTALK_WITH_OUTPUT,
+          draft,
+          'revision-output',
+          instance,
+        ).config.outputMode,
+      ).toBe(outputMode);
+    },
+  );
+
+  it('does not add output mode to descriptors that do not support it', () => {
+    const instance = configuredInstance();
+    const draft = createChannelEditorDraft(DINGTALK, instance);
+
+    expect(draft.values).not.toHaveProperty('outputMode');
+    expect(
+      buildChannelUpsertRequest(DINGTALK, draft, 'revision-output', instance)
+        .config,
+    ).not.toHaveProperty('outputMode');
+  });
+
+  it('keeps unrelated optional enums unset when editing', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_OUTPUT,
+      fields: [
+        ...DINGTALK_WITH_OUTPUT.fields,
+        {
+          key: 'customMode',
+          label: 'Custom Mode',
+          kind: 'enum',
+          default: 'safe',
+          options: [{ value: 'safe', label: 'Safe' }],
+        },
+      ],
+    };
+    const instance = configuredInstance();
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.outputMode).toBe('per_turn');
+    expect(draft.values.customMode).toBe('');
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-output', instance)
+        .config,
+    ).not.toHaveProperty('customMode');
+  });
+
   it('builds a new typed configuration with an explicit secret replacement', () => {
     const draft = createChannelEditorDraft(DINGTALK);
     draft.name = 'release-bot';

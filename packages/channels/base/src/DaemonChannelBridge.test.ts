@@ -12,6 +12,9 @@ import {
 import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
 
@@ -4089,6 +4092,120 @@ describe('DaemonChannelBridge', () => {
     expect(session.removeAttachment).toHaveBeenCalledOnce();
     expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
 
+    events.close();
+    bridge.stop();
+  });
+
+  it.each([undefined, 'per_task'] as const)(
+    'consumes a task result only for %s',
+    async (outputMode) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      session.prompt.mockImplementation(async () => {
+        events.push({
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Main result' },
+            },
+          },
+        });
+        for (const claimed of [true, false]) {
+          events.push({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: {
+                  type: 'text',
+                  text: claimed ? 'Task result' : 'Unrelated result',
+                },
+                _meta: {
+                  qwenDiscreteMessage: true,
+                  source: 'background_notification_response',
+                  [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
+                  backgroundTask: {
+                    taskId: 'task-1',
+                    kind: 'agent',
+                    status: 'completed',
+                    turnComplete: true,
+                  },
+                },
+              },
+            },
+          });
+        }
+        events.push(turnCompleteEvent());
+        return { stopReason: 'end_turn' };
+      });
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      const backgroundResponse = vi.fn();
+      bridge.on('backgroundResponse', backgroundResponse);
+      await bridge.start();
+      await bridge.newSession('/repo');
+      await expect(
+        bridge.prompt('session-1', 'question', { outputMode }),
+      ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
+      expect(
+        session.prompt.mock.calls[0]?.[0]?._meta?.[
+          CHANNEL_OUTPUT_MODE_META_KEY
+        ],
+      ).toBe(outputMode);
+      expect(backgroundResponse).toHaveBeenCalledOnce();
+      expect(backgroundResponse).toHaveBeenCalledWith(
+        'session-1',
+        'Unrelated result',
+        expect.any(Object),
+      );
+      events.close();
+      bridge.stop();
+    },
+  );
+
+  it('does not deliver captured task output after remote cancellation', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Stale task result' },
+            _meta: {
+              qwenDiscreteMessage: true,
+              source: 'background_notification_response',
+              [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'cancelled' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.prompt('session-1', 'question', { outputMode: 'per_task' }),
+    ).rejects.toBeInstanceOf(ChannelPromptCancelledError);
+    session.prompt.mockResolvedValue({ stopReason: 'end_turn' });
+    await expect(
+      bridge.prompt('session-1', 'fresh', { outputMode: 'per_task' }),
+    ).resolves.toBe('');
     events.close();
     bridge.stop();
   });

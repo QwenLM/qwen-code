@@ -9,7 +9,7 @@ export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
-export type ChannelOutputMode = 'final_only' | 'process_and_result';
+export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -61,7 +61,7 @@ export interface ChannelConfig {
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
-  /** Output selection within each turn, available on opted-in adapters only. */
+  /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
   outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
@@ -562,7 +562,7 @@ export interface ChannelPlugin {
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
 
-  /** Opt in to shared per-turn output selection and independent follow-ups. */
+  /** Opt in to shared task, response, and turn output grouping. */
   supportsOutputMode?: boolean;
 
   /** Serializable metadata for safe configuration management. */

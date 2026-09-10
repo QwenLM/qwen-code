@@ -20,6 +20,10 @@ import {
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -328,11 +332,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     prompt.push({ type: 'text', text });
 
     try {
-      await conn.prompt({
+      const result = await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.outputMode === 'per_task'
+            ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
+            : {}),
           ...(options?.displayText !== undefined
             ? {
                 [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
@@ -340,13 +347,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             : {}),
         },
       });
+      if (
+        options?.outputMode === 'per_task' &&
+        result?.stopReason === 'cancelled'
+      ) {
+        throw new ChannelPromptCancelledError();
+      }
+      const taskResult = result?._meta?.[CHANNEL_TASK_RESULT_META_KEY];
+      return options?.outputMode === 'per_task' &&
+        typeof taskResult === 'string' &&
+        taskResult.trim()
+        ? taskResult
+        : chunks.join('') || slashCommandOutput;
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
     }
-
-    return chunks.join('') || slashCommandOutput;
   }
 
   async btw(
@@ -465,7 +482,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true
+            meta['rewritten'] !== true &&
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
           ) {
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],

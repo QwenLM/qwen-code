@@ -1117,24 +1117,18 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (
-        this.statusCardController ||
-        this.questionCardController ||
-        this.permissionCardController
-      ) {
-        this.interactionPresenter = new DingtalkInteractionPresenter({
-          outputMode: this.outputMode,
-          statusCards: this.statusCardController,
-          questionCards: this.questionCardController,
-          permissionCards: this.permissionCardController,
-          ...(options?.displayLanguage
-            ? { language: options.displayLanguage }
-            : {}),
-          sendFallback: (chatId, text, sessionId, sourceLabel) =>
-            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-        });
-      }
     }
+    this.interactionPresenter = new DingtalkInteractionPresenter({
+      outputMode: this.outputMode,
+      statusCards: this.statusCardController,
+      questionCards: this.questionCardController,
+      permissionCards: this.permissionCardController,
+      ...(options?.displayLanguage
+        ? { language: options.displayLanguage }
+        : {}),
+      sendFallback: (chatId, text, sessionId, sourceLabel) =>
+        this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
+    });
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
         initialClient: this.client,
@@ -2605,13 +2599,19 @@ export class DingtalkChannel extends ChannelBase {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
         const sourceLabel = this.getResponseSourceLabel(event.sessionId);
+        const atUserId =
+          this.atSender && event.messageId
+            ? this.mentionTargets.get(event.messageId)
+            : undefined;
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
-          ...(sourceLabel ? [sourceLabel] : []),
+          sourceLabel,
+          (chatId, text, _sessionId, label) =>
+            this.sendReply(chatId, text, atUserId, label),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
@@ -2796,11 +2796,7 @@ export class DingtalkChannel extends ChannelBase {
     context?: BackgroundResponseContext,
   ): Promise<void> {
     const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      (!this.outputMode && context !== undefined && context.kind !== 'agent')
-    ) {
+    if (!target || target.channelName !== this.name) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
 
@@ -2809,13 +2805,7 @@ export class DingtalkChannel extends ChannelBase {
     ) {
       return;
     }
-    return super.dispatchBackgroundResponse(
-      sessionId,
-      this.outputMode || !text.trim()
-        ? text
-        : this.formatBackgroundAgentResponse(text, context?.label),
-      context,
-    );
+    return super.dispatchBackgroundResponse(sessionId, text, context);
   }
 
   private createBackgroundOutputDelivery(
@@ -2853,7 +2843,7 @@ export class DingtalkChannel extends ChannelBase {
           await this.deliverReplyText(target.target.chatId, replyPlan, true);
         } else {
           if (
-            (this.outputMode && this.statusCardController) ||
+            this.statusCardController ||
             !this.supportsProactiveSend() ||
             !this.supportsProactiveTarget(target.target)
           ) {
@@ -2901,10 +2891,6 @@ export class DingtalkChannel extends ChannelBase {
     return delivery.text ? `${header}\n\n${delivery.text}` : header;
   }
 
-  private formatBackgroundAgentResponse(text: string, label?: string): string {
-    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
-  }
-
   private formatBackgroundAgentLabel(label?: string): string {
     const normalized = label
       ?.replace(/\p{Cc}+/gu, ' ')
@@ -2931,11 +2917,7 @@ export class DingtalkChannel extends ChannelBase {
     prepared = false,
   ): Promise<void> {
     const { target, sourceLabel } = delivery;
-    if (!this.outputMode && !prepared) {
-      return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
-    }
     if (
-      this.outputMode &&
       this.statusCardController &&
       this.supportsProactiveDeliveryTarget(target) &&
       (target.isGroup === true || this.isStableTargetId(target.senderId))

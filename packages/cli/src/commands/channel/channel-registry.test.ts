@@ -38,9 +38,13 @@ describe('channel registry', () => {
     expect(fields).toHaveLength(1);
     expect(fields?.[0]).toMatchObject({
       kind: 'enum',
-      options: [{ value: 'final_only' }, { value: 'process_and_result' }],
+      options: [
+        { value: 'per_task' },
+        { value: 'per_response' },
+        { value: 'per_turn' },
+      ],
     });
-    expect(fields?.[0]?.default).toBeUndefined();
+    expect(fields?.[0]?.default).toBe('per_turn');
   });
 
   it('publishes a plugin session-scope descriptor once with its runtime default', async () => {

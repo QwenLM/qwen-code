@@ -117,7 +117,8 @@ export class BackgroundOutputCoordinator {
     context?: BackgroundResponseContext,
   ): Promise<boolean> {
     if (
-      this.options.outputMode !== 'final_only' ||
+      (this.options.outputMode !== 'per_turn' &&
+        this.options.outputMode !== 'per_task') ||
       !context ||
       typeof context.turnComplete !== 'boolean'
     ) {

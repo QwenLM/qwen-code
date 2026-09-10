@@ -187,7 +187,7 @@ describe('parseChannelConfig', () => {
     expect(result.outputMode).toBeUndefined();
   });
 
-  it.each(['final_only', 'process_and_result'])(
+  it.each(['per_task', 'per_response', 'per_turn'])(
     'accepts shared outputMode %s for an opted-in adapter',
     async (outputMode) => {
       const result = await parseChannelConfig('bot', {
@@ -200,16 +200,25 @@ describe('parseChannelConfig', () => {
     },
   );
 
-  it('keeps output mode unset for an opted-in adapter when omitted', async () => {
+  it('defaults output mode to per turn for an opted-in adapter when omitted', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'dingtalk',
       clientId: 'client-id',
       clientSecret: 'secret',
     });
-    expect(result.outputMode).toBeUndefined();
+    expect(result.outputMode).toBe('per_turn');
   });
 
-  it.each(['all', '', null, false, 1, '$OUTPUT_MODE'])(
+  it.each([
+    'final_only',
+    'process_and_result',
+    'all',
+    '',
+    null,
+    false,
+    1,
+    '$OUTPUT_MODE',
+  ])(
     'rejects invalid shared outputMode %j before adapter startup',
     async (outputMode) => {
       await expect(
@@ -220,12 +229,12 @@ describe('parseChannelConfig', () => {
           outputMode,
         }),
       ).rejects.toThrow(
-        'Channel "bot" outputMode must be "final_only" or "process_and_result".',
+        'Channel "bot" outputMode must be "per_task", "per_response", or "per_turn".',
       );
     },
   );
 
-  it.each(['final_only', 'process_and_result'])(
+  it.each(['per_task', 'per_response', 'per_turn'])(
     'rejects outputMode %s for adapters that have not opted in',
     async (outputMode) => {
       await expect(
