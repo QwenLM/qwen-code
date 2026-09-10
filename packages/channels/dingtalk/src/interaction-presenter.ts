@@ -42,6 +42,7 @@ interface SegmentPresentation {
 }
 
 export interface DingtalkInteractionPresenterOptions {
+  outputMode?: 'final_only' | 'process_and_result';
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   permissionCards?: PermissionCardController;
@@ -164,8 +165,9 @@ export class DingtalkInteractionPresenter {
     presentation.content = this.boundContent(presentation.content + chunk);
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
-    const statusContext = this.ensureStatusContext(run, segment);
+    if (this.options.outputMode && !presentation.content.trim()) return;
     void this.enqueue(run, () => {
+      const statusContext = this.ensureStatusContext(run, segment);
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
@@ -194,6 +196,17 @@ export class DingtalkInteractionPresenter {
       run.activeSegmentId = undefined;
     }
     return this.enqueue(run, async () => {
+      const output = text || presentation.content;
+      if (
+        this.options.outputMode &&
+        !output.trim() &&
+        (reason === 'response_boundary' || reason === 'completed')
+      ) {
+        if (reason !== 'completed') return true;
+        if (this.options.outputMode === 'process_and_result') return true;
+        text = run.cardDelivered?.text ?? '';
+        if (!text.trim()) return true;
+      }
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
       if (reason === 'failed') {
@@ -205,18 +218,23 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
-        await this.redeliverCardDeliveredContent(run);
+        if (this.options.outputMode !== 'final_only') {
+          await this.redeliverCardDeliveredContent(run);
+        }
         return statusCards !== undefined;
       }
       if (reason === 'cancelled') {
         return statusCards !== undefined;
       }
-      if (reason === 'response_boundary') {
+      if (
+        reason === 'response_boundary' &&
+        this.options.outputMode !== 'process_and_result'
+      ) {
         const deliveredViaCard =
           statusCards !== undefined &&
           (await statusCards.isCardLive(statusContext.segmentId)) &&
           (await statusCards.flushPending(statusContext.segmentId));
-        if (deliveredViaCard) {
+        if (deliveredViaCard || this.options.outputMode === 'final_only') {
           run.cardDelivered = {
             text: stripPartialImageMarker(text || presentation.content),
             chatId: presentation.context.target.chatId,
@@ -237,7 +255,7 @@ export class DingtalkInteractionPresenter {
         statusCards?.abandon(statusContext.segmentId);
         return true;
       }
-      if (reason === 'input_requested') {
+      if (reason === 'input_requested' || reason === 'response_boundary') {
         const completed =
           statusCards !== undefined &&
           (await statusCards.complete(
@@ -266,6 +284,8 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(run, text || presentation.content),
         ));
+      if (this.options.outputMode === 'final_only')
+        run.cardDelivered = undefined;
       if (completed) return true;
       const fallbackText = stripPartialImageMarker(
         text || presentation.content,
@@ -364,6 +384,12 @@ export class DingtalkInteractionPresenter {
     }
     const copy = this.terminalCopy();
     const finalization = this.enqueue(run, async () => {
+      if (
+        this.options.outputMode === 'final_only' &&
+        terminal !== 'completed'
+      ) {
+        run.cardDelivered = undefined;
+      }
       if (terminal === 'failed') {
         const statusContext = this.ensureStatusContext(run);
         this.options.statusCards?.ensure(
@@ -397,7 +423,7 @@ export class DingtalkInteractionPresenter {
         // last boundary) leaves the eagerly created card running forever.
         const statusContext = run.statusContext;
         if (statusContext) {
-          await this.options.statusCards?.complete(
+          const completed = await this.options.statusCards?.complete(
             statusContext.segmentId,
             '',
             (retained) =>
@@ -408,6 +434,9 @@ export class DingtalkInteractionPresenter {
                   )
                 : retained,
           );
+          if (!completed && this.options.outputMode === 'final_only') {
+            await this.redeliverCardDeliveredContent(run);
+          }
         }
       }
     });

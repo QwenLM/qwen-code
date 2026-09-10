@@ -27,6 +27,7 @@ import type {
   DingtalkCardCallback,
   DingtalkCardCallbackResult,
 } from './interactive-card-types.js';
+import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -376,6 +377,287 @@ it('rejects a non-boolean background Agent aggregation setting', () => {
     createChannel({ aggregateBackgroundAgentResponses: 'true' }),
   ).toThrow(
     'Channel "test-dingtalk" aggregateBackgroundAgentResponses must be a boolean.',
+  );
+});
+
+it('rejects an invalid output mode', () => {
+  expect(() => createChannel({ outputMode: 'all' })).toThrow(
+    'outputMode must be "final_only" or "process_and_result"',
+  );
+});
+
+describe('turn-scoped output modes', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function createOutputChannel(
+    outputMode: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const channel = createChannel({ outputMode, ...overrides });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      chatId: 'cidGroup==',
+      senderId: 'owner-1',
+      isGroup: true,
+    });
+    const create = vi
+      .spyOn(DingtalkInteractiveCardClient.prototype, 'createAndDeliver')
+      .mockResolvedValue(undefined);
+    const stream = vi
+      .spyOn(DingtalkInteractiveCardClient.prototype, 'openOrUpdateStream')
+      .mockResolvedValue(undefined);
+    const update = vi
+      .spyOn(DingtalkInteractiveCardClient.prototype, 'updateInstance')
+      .mockResolvedValue(undefined);
+    return { channel, create, stream, update };
+  }
+
+  it.each(['agent', 'shell', 'monitor', 'workflow'] as const)(
+    'keeps only the last assistant reply in a %s follow-up turn',
+    async (kind) => {
+      const { channel, create, stream } = createOutputChannel('final_only', {
+        aggregateBackgroundAgentResponses: true,
+      });
+      const context = {
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        kind,
+        status: 'completed',
+        turnComplete: false,
+      };
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        'Working on historical notices',
+        context,
+      );
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        'Historical notices processed. HANDOFF_READY.',
+        context,
+      );
+      expect(create).not.toHaveBeenCalled();
+      await channel.dispatchBackgroundResponse('session-1', '', {
+        ...context,
+        turnComplete: true,
+      });
+      expect(create).toHaveBeenCalledOnce();
+      expect(create.mock.calls[0]![0].cardParamMap).toEqual(
+        expect.objectContaining({
+          content: expect.stringContaining(
+            'Historical notices processed. HANDOFF_READY.',
+          ),
+          flowStatus: 3,
+          stop_action: 'false',
+        }),
+      );
+      expect(create.mock.calls[0]![0].cardParamMap.content).not.toContain(
+        'Working on',
+      );
+      expect(stream).not.toHaveBeenCalled();
+    },
+  );
+
+  it('delivers each complete background output in process mode and ignores its empty terminal marker', async () => {
+    const { channel, create } = createOutputChannel('process_and_result', {
+      aggregateBackgroundAgentResponses: true,
+    });
+    const context = {
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      kind: 'shell' as const,
+      status: 'completed',
+      turnComplete: false,
+    };
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'First output',
+      context,
+    );
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Second output',
+      context,
+    );
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      ...context,
+      turnComplete: true,
+    });
+    expect(
+      create.mock.calls.map(([request]) => request.cardParamMap.content),
+    ).toEqual(['First output', 'Second output']);
+    expect(
+      new Set(create.mock.calls.map(([request]) => request.outTrackId)).size,
+    ).toBe(2);
+  });
+
+  it('completes the main card before a background turn and never rewrites it afterward', async () => {
+    const { channel, create, update } = createOutputChannel('final_only');
+    const main = {
+      channelName: 'test-dingtalk',
+      sessionId: 'session-1',
+      runId: 'main-run',
+      segmentId: 'main-segment',
+      owner: { kind: 'channel_user' as const, id: 'owner-1' },
+      target: {
+        channelName: 'test-dingtalk',
+        chatId: 'cidGroup==',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    };
+    const internals = channel as unknown as {
+      inboundCardOwners: Map<
+        string,
+        { ownerId: string; target: { chatId: string; isGroup: boolean } }
+      >;
+    };
+    internals.inboundCardOwners.set('message-1', {
+      ownerId: 'owner-1',
+      target: main.target,
+    });
+    const lifecycle = {
+      channelName: 'test-dingtalk',
+      sessionId: 'session-1',
+      chatId: 'cidGroup==',
+      messageId: 'message-1',
+      runId: main.runId,
+      owner: main.owner,
+      timestamp: Date.now(),
+    };
+    getLifecycleHook(channel)({ ...lifecycle, type: 'started' });
+    const context = {
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      kind: 'monitor' as const,
+      status: 'completed',
+      turnComplete: false,
+    };
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Background final reply',
+      context,
+    );
+    getChunkHook(channel)('cidGroup==', 'Main result', 'session-1', main);
+    await getCompleteHook(channel)(
+      'cidGroup==',
+      'Main result',
+      'session-1',
+      main,
+    );
+    getLifecycleHook(channel)({ ...lifecycle, type: 'completed' });
+    expect(create).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'Main result',
+          flowStatus: 3,
+        }),
+      }),
+    );
+    const mainId = create.mock.calls[0]![0].outTrackId;
+    const before = update.mock.calls.length;
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      ...context,
+      turnComplete: true,
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]![0].outTrackId).not.toBe(mainId);
+    expect(create.mock.calls[1]![0].cardParamMap.flowStatus).toBe(3);
+    expect(update).toHaveBeenCalledTimes(before);
+  });
+
+  it('routes a direct-message follow-up card to the sender', async () => {
+    const { channel, create } = createOutputChannel('final_only');
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      chatId: 'conversation-id',
+      senderId: 'owner-1',
+      isGroup: false,
+    });
+    await channel.dispatchBackgroundResponse('session-1', 'Follow-up', {
+      taskId: 'task-1',
+      kind: 'shell',
+      status: 'completed',
+      turnComplete: true,
+    });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { chatId: 'owner-1', isGroup: false },
+      }),
+    );
+  });
+
+  it.each([{ isGroup: undefined }, { isGroup: true, threadId: 'thread-1' }])(
+    'keeps an ambiguous or threaded target on its conversation reply path: %j',
+    async (targetFields) => {
+      const { channel, create } = createOutputChannel('final_only');
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        chatId: 'original-conversation',
+        senderId: 'owner-1',
+        ...targetFields,
+      });
+      const reply = vi
+        .spyOn(
+          channel as unknown as {
+            deliverBackgroundReply(
+              chatId: string,
+              text: string,
+              sessionId: string,
+              sourceLabel?: string,
+              prepared?: boolean,
+              strict?: boolean,
+            ): Promise<void>;
+          },
+          'deliverBackgroundReply',
+        )
+        .mockResolvedValue(undefined);
+      await channel.dispatchBackgroundResponse('session-1', 'Follow-up', {
+        taskId: 'task-1',
+        kind: 'shell',
+        status: 'completed',
+        turnComplete: true,
+      });
+      expect(create).not.toHaveBeenCalled();
+      expect(reply).toHaveBeenCalledWith(
+        'original-conversation',
+        expect.stringContaining('Follow-up'),
+        'session-1',
+        undefined,
+        true,
+        true,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'retains message fallback when cards are unavailable (disabled: %s)',
+    async (disabled) => {
+      const { channel, create } = createOutputChannel(
+        'final_only',
+        disabled ? { interactiveCards: undefined } : {},
+      );
+      if (!disabled)
+        create.mockRejectedValueOnce(new Error('card unavailable'));
+      const push = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+      await channel.dispatchBackgroundResponse('session-1', 'Follow-up', {
+        taskId: 'task-1',
+        kind: 'shell',
+        status: 'completed',
+        turnComplete: true,
+      });
+      expect(push).toHaveBeenCalledWith(
+        expect.objectContaining({ chatId: 'cidGroup==' }),
+        expect.stringContaining('Follow-up'),
+      );
+    },
   );
 });
 

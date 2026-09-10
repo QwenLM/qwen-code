@@ -105,9 +105,41 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
-### Background Agent Responses
+### Turn Output Mode
 
-Background Agent output is sent as soon as each response segment is available.
+Set `outputMode` to opt in to turn-scoped result cards:
+
+- `final_only`: the main status card previews the assistant's output and completes with its last reply when the main prompt ends. Each background notification turn keeps its last non-empty assistant reply and sends it as a separate completed card.
+- `process_and_result`: each complete assistant output gets its own completed card. Token chunks update the current card; they do not create new cards. Background assistant outputs also get separate completed cards.
+
+In both modes, background tasks never extend the main card's lifetime. A later callback cannot overwrite the completed main card. For example, a main result followed by eleven separate background notification turns produces a main result card and eleven follow-up result cards, not one card that stays running until every task finishes. The content comes from the assistant; no additional summary is generated.
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "outputMode": "final_only",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+Use the foreground card modes with interactive status cards enabled. When status cards are unavailable, replies fall back to ordinary messages; background output keeps the selected per-turn grouping. Disabling all interactive cards retains the existing foreground delivery behavior. Background results that exceed the card content limit also fall back to ordinary messages. File and image delivery keeps its existing rules.
+
+The setting applies to DingTalk conversation replies and their background follow-ups. Channel loops and webhook runs retain their existing presentation. An interrupted background turn, or one that has not ended after ten minutes, may send a labeled partial result; this bounded wait never delays the main prompt.
+
+Omitting `outputMode` preserves existing behavior. An explicit mode takes precedence over `aggregateBackgroundAgentResponses`.
+
+### Legacy Background Agent Responses
+
+When `outputMode` is unset, background Agent output is sent as soon as each response segment is available.
 Every message is labeled with the Agent name so concurrent work remains
 attributable.
 

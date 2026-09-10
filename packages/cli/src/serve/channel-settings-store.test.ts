@@ -751,6 +751,42 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it.each(['final_only', 'process_and_result'])(
+    'persists DingTalk outputMode %s through management metadata',
+    async (outputMode) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'dingtalk',
+              clientId: 'client-id',
+              clientSecret: 'secret',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const next = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'dingtalk', clientId: 'client-id', outputMode },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      });
+      expect(next.channels['bot']?.['outputMode']).toBe(outputMode);
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'dingtalk',
+            clientId: 'client-id',
+            outputMode: 'all',
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toThrow('outputMode');
+    },
+  );
+
   it('persists DingTalk interactive card configuration through management metadata', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

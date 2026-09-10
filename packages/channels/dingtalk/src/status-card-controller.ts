@@ -131,6 +131,48 @@ export class StatusCardController {
 
   constructor(private readonly options: StatusCardControllerOptions) {}
 
+  async deliverCompletedResult(
+    target: { chatId: string; isGroup: boolean },
+    text: string,
+    sourceLabel?: string,
+  ): Promise<boolean> {
+    const content = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n${text}`
+      : text;
+    if (this.disposed || !text.trim() || content.length > CONTENT_LIMIT) {
+      return false;
+    }
+    try {
+      await this.options.client.createAndDeliver({
+        templateId: STATUS_CARD_TEMPLATE_ID,
+        outTrackId: `qwen-result-${randomUUID()}`,
+        target,
+        cardParamMap: this.terminalCardParams(
+          content,
+          [this.statusStateLabel('Completed'), this.options.model?.trim()]
+            .filter(Boolean)
+            .join(' · '),
+        ),
+      });
+      return true;
+    } catch (error) {
+      this.options.onError?.('completed result card', error);
+      return false;
+    }
+  }
+
+  private terminalCardParams(content: string, statusLine: string) {
+    return {
+      blockList: JSON.stringify([{ type: 0, markdown: content }]),
+      content,
+      copy_content: content,
+      flowStatus: 3,
+      statusLine,
+      hasAction: 'false',
+      stop_action: 'false',
+    };
+  }
+
   ensure(
     segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
@@ -593,20 +635,10 @@ export class StatusCardController {
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: {
-          blockList: JSON.stringify([
-            {
-              type: 0,
-              markdown: intent.content,
-            },
-          ]),
-          content: intent.content,
-          copy_content: intent.content,
-          flowStatus: 3,
-          statusLine: intent.statusLine,
-          hasAction: 'false',
-          stop_action: 'false',
-        },
+        cardParamMap: this.terminalCardParams(
+          intent.content,
+          intent.statusLine,
+        ),
       });
       record.content = '';
       this.removeRecord(record);

@@ -910,6 +910,7 @@ async function withConnectLoggingSuppressed<T>(
 /* eslint-enable no-console */
 
 type DingtalkChannelConfig = ChannelConfig & {
+  outputMode?: unknown;
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
   aggregateBackgroundAgentResponses?: unknown;
@@ -921,6 +922,7 @@ interface BackgroundResponseAggregation {
   target: SessionTarget;
   sourceLabel?: string;
   status: string;
+  kind: BackgroundResponseContext['kind'];
   label?: string;
   parts: string[];
   timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -962,6 +964,7 @@ interface PendingBackgroundResponseTerminal {
 
 interface BackgroundResponseDelivery {
   status: string;
+  kind: BackgroundResponseContext['kind'];
   label?: string;
   parts: string[];
   partial: boolean;
@@ -970,7 +973,7 @@ interface BackgroundResponseDelivery {
   proactivePlan?: ProactiveTextDelivery;
   replyPlan?: ReplyTextDelivery;
   /**
-   * Reply-path body whose `[FILE: ...]` markers were already delivered. A
+   * Prepared body whose `[FILE: ...]` markers were already delivered. A
    * retry must reuse it: `prepareReplyOutput` sends the file messages, so
    * re-running it would post every file again.
    */
@@ -1047,6 +1050,7 @@ export class DingtalkChannel extends ChannelBase {
    */
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
+  private readonly outputMode?: 'final_only' | 'process_and_result';
   private readonly aggregateBackgroundAgentResponses: boolean;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
@@ -1103,6 +1107,17 @@ export class DingtalkChannel extends ChannelBase {
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
     );
+    const outputMode = (config as DingtalkChannelConfig).outputMode;
+    if (
+      outputMode !== undefined &&
+      outputMode !== 'final_only' &&
+      outputMode !== 'process_and_result'
+    ) {
+      throw new Error(
+        `Channel "${name}" outputMode must be "final_only" or "process_and_result".`,
+      );
+    }
+    this.outputMode = outputMode;
     const rawAggregateBackgroundAgentResponses = (
       config as DingtalkChannelConfig
     ).aggregateBackgroundAgentResponses;
@@ -1197,6 +1212,7 @@ export class DingtalkChannel extends ChannelBase {
         this.permissionCardController
       ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
+          outputMode: this.outputMode,
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
           permissionCards: this.permissionCardController,
@@ -2863,7 +2879,6 @@ export class DingtalkChannel extends ChannelBase {
     this.stopReaction(chatId, messageId, sessionId);
   }
 
-  /** Deliver every Agent segment immediately unless aggregation is enabled. */
   override async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
@@ -2873,14 +2888,15 @@ export class DingtalkChannel extends ChannelBase {
     if (
       !target ||
       target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent')
+      (!this.outputMode && context !== undefined && context.kind !== 'agent')
     ) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
 
     const canAggregate =
-      this.aggregateBackgroundAgentResponses &&
-      context?.kind === 'agent' &&
+      (this.outputMode === 'final_only' ||
+        (!this.outputMode && this.aggregateBackgroundAgentResponses)) &&
+      context !== undefined &&
       typeof context.turnComplete === 'boolean';
     if (!canAggregate) {
       if (text.trim().length === 0) {
@@ -2888,12 +2904,19 @@ export class DingtalkChannel extends ChannelBase {
       }
       return super.dispatchBackgroundResponse(
         sessionId,
-        this.formatBackgroundAgentResponse(text, context?.label),
+        this.outputMode
+          ? text
+          : this.formatBackgroundAgentResponse(text, context?.label),
         context,
       );
     }
 
-    const key = JSON.stringify([sessionId, context.taskId, context.turnId]);
+    const key = JSON.stringify([
+      sessionId,
+      context.kind,
+      context.taskId,
+      context.turnId,
+    ]);
     let current = this.backgroundResponseAggregations.get(key);
     let parked = this.pendingBackgroundResponseTerminals.get(key);
     if (current?.turnComplete === true) {
@@ -3081,7 +3104,7 @@ export class DingtalkChannel extends ChannelBase {
 
     current.status = context.status;
     current.label = context.label ?? current.label;
-    if (text.trim().length > 0) current.parts.push(text);
+    this.appendBackgroundResponsePart(current, text);
 
     if (context.turnComplete && parked && parked.resolvers > 0) {
       parked.turnComplete = true;
@@ -3141,6 +3164,7 @@ export class DingtalkChannel extends ChannelBase {
       const parts = aggregation.parts.splice(0);
       delivery = {
         status: aggregation.status,
+        kind: aggregation.kind,
         label: aggregation.label,
         parts,
         partial: this.isPartialBackgroundResponseDelivery(
@@ -3168,30 +3192,25 @@ export class DingtalkChannel extends ChannelBase {
           delivery.replyPlan,
           true,
         );
-      } else if (
-        this.supportsProactiveSend() &&
-        this.supportsProactiveTarget(aggregation.target)
-      ) {
+      } else {
+        if (
+          (this.outputMode && this.statusCardController) ||
+          !this.supportsProactiveSend() ||
+          !this.supportsProactiveTarget(aggregation.target)
+        ) {
+          delivery.preparedReplyBody ??= await this.prepareBackgroundOutput(
+            aggregation.target,
+            body,
+          );
+        }
         await this.deliverBackgroundResponseToTarget(
           aggregation.sessionId,
-          body,
+          delivery.preparedReplyBody ?? body,
           {
             target: aggregation.target,
             sourceLabel: aggregation.sourceLabel,
           },
-        );
-      } else {
-        delivery.preparedReplyBody ??= await this.prepareReplyOutput(
-          aggregation.target.chatId,
-          body,
-        );
-        await this.deliverBackgroundReply(
-          aggregation.target.chatId,
-          delivery.preparedReplyBody,
-          aggregation.sessionId,
-          aggregation.sourceLabel,
-          true,
-          true,
+          delivery.preparedReplyBody !== undefined,
         );
       }
     } catch (caught) {
@@ -3310,7 +3329,10 @@ export class DingtalkChannel extends ChannelBase {
     const body = this.formatBackgroundResponseAggregation(delivery);
     const header = body.split('\n', 1)[0]!;
     const replaceHeader = (text: string) =>
-      text.replace(/## (?:✅|❌|⏹️) Agent · [^\n]+/, () => header);
+      text.replace(
+        /## (?:✅|❌|⏹️) (?:Agent|Shell|Monitor|Workflow) · [^\n]+/,
+        () => header,
+      );
     if (plan) {
       plan.title = extractTitle(body);
       plan.chunks[0] = replaceHeader(plan.chunks[0]!);
@@ -3410,6 +3432,7 @@ export class DingtalkChannel extends ChannelBase {
       target,
       sourceLabel,
       status: context.status,
+      kind: context.kind,
       label: context.label,
       parts: [],
     };
@@ -3568,7 +3591,7 @@ export class DingtalkChannel extends ChannelBase {
     for (const { text, context } of pending.held.splice(0)) {
       aggregation.status = context.status;
       aggregation.label = context.label ?? aggregation.label;
-      aggregation.parts.push(text);
+      this.appendBackgroundResponsePart(aggregation, text);
       if (context.turnComplete) {
         aggregation.turnComplete = true;
         aggregation.completionPartial = context.partial === true;
@@ -3629,6 +3652,7 @@ export class DingtalkChannel extends ChannelBase {
       target: delivery.target,
       sourceLabel: delivery.sourceLabel,
       status: first.context.status,
+      kind: first.context.kind,
       label: first.context.label,
       parts: [],
       turnComplete: pending.turnComplete,
@@ -3661,7 +3685,7 @@ export class DingtalkChannel extends ChannelBase {
   private formatBackgroundResponseAggregation(
     delivery: Pick<
       BackgroundResponseDelivery,
-      'status' | 'label' | 'parts' | 'partial'
+      'status' | 'kind' | 'label' | 'parts' | 'partial'
     >,
   ): string {
     const icon =
@@ -3671,7 +3695,13 @@ export class DingtalkChannel extends ChannelBase {
           ? '❌'
           : '⏹️';
     const label = this.formatBackgroundAgentLabel(delivery.label);
-    const header = `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}`;
+    const kind = {
+      agent: 'Agent',
+      shell: 'Shell',
+      monitor: 'Monitor',
+      workflow: 'Workflow',
+    }[delivery.kind];
+    const header = `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
     if (delivery.parts.length === 0) return header;
     return `${header}\n\n${delivery.parts.join('\n\n')}`;
   }
@@ -3686,6 +3716,72 @@ export class DingtalkChannel extends ChannelBase {
       .replace(/\s+/g, ' ')
       .trim();
     return escapeDingTalkMarkdown(normalized || '后台任务');
+  }
+
+  private appendBackgroundResponsePart(
+    aggregation: BackgroundResponseAggregation,
+    text: string,
+  ): void {
+    if (!text.trim()) return;
+    if (this.outputMode === 'final_only') aggregation.parts.length = 0;
+    aggregation.parts.push(text);
+  }
+
+  private prepareBackgroundOutput(
+    target: SessionTarget,
+    text: string,
+  ): Promise<string> {
+    return this.supportsProactiveSend() && this.supportsProactiveTarget(target)
+      ? this.prepareFileOutput(text, (file, mediaId) =>
+          this.sendProactiveFile(target, file, mediaId),
+        )
+      : this.prepareReplyOutput(target.chatId, text);
+  }
+
+  protected override async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: { target: SessionTarget; sourceLabel?: string },
+    prepared = false,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
+    if (!this.outputMode && !prepared) {
+      return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    if (
+      this.outputMode &&
+      this.statusCardController &&
+      this.supportsProactiveDeliveryTarget(target) &&
+      (target.isGroup === true || this.isStableTargetId(target.senderId))
+    ) {
+      if (!prepared) {
+        text = await this.prepareBackgroundOutput(target, text);
+        prepared = true;
+      }
+      if (
+        await this.statusCardController.deliverCompletedResult(
+          {
+            chatId: target.isGroup ? target.chatId : target.senderId,
+            isGroup: target.isGroup === true,
+          },
+          text,
+          sourceLabel,
+        )
+      ) {
+        return;
+      }
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    await this.deliverBackgroundReply(
+      target.chatId,
+      text,
+      sessionId,
+      sourceLabel,
+      prepared,
+      true,
+    );
   }
 
   /**
