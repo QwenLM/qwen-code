@@ -13,6 +13,7 @@ import {
   persistDaemonToken,
 } from '../config/daemon';
 import {
+  getWorkspaceReturnUrl,
   openHostedWorkspace,
   readWorkspaceHosts,
 } from '../config/workspace-hosts';
@@ -57,6 +58,7 @@ interface AuthCopy {
   retry: string;
   hint: string;
   local: string;
+  previous: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
@@ -79,6 +81,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
     local: 'Return to local workspaces',
+    previous: 'Return to previous session',
     retry: 'Retry',
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
@@ -98,6 +101,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     tokenLabel: 'Bearer token（可选）',
     connect: '连接',
     local: '返回本地工作区',
+    previous: '返回原会话',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
@@ -137,6 +141,7 @@ export function StandaloneAuth({
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
+  const returnUrl = getWorkspaceReturnUrl();
   const [address, setAddress] = useState(initialAddress);
   const [hosts] = useState(readWorkspaceHosts);
   const [token, setToken] = useState(initialToken ?? '');
@@ -365,6 +370,11 @@ export function StandaloneAuth({
             </Button>
           </form>
           <div className="flex flex-col gap-2">
+            {returnUrl && (
+              <Button variant="outline" asChild>
+                <a href={returnUrl}>{copy.previous}</a>
+              </Button>
+            )}
             {(invalidTarget || baseUrl !== window.location.origin) && (
               <Button
                 variant="outline"

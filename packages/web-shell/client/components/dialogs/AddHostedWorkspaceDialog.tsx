@@ -8,6 +8,7 @@ import {
   persistDaemonToken,
 } from '../../config/daemon';
 import {
+  getWorkspaceReturnUrl,
   readWorkspaceHosts,
   rememberWorkspaceHost,
   openHostedWorkspace,
@@ -32,15 +33,8 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
   const addedRef = useRef(false);
   const [returnTo] = useState(() => {
     const current = new URL(window.location.href);
-    const saved = current.searchParams.get('workspaceReturn');
-    if (saved) {
-      try {
-        const url = new URL(saved, current.origin);
-        if (url.origin === current.origin) return url.toString();
-      } catch {
-        /* Ignore malformed continuation URLs. */
-      }
-    }
+    const saved = getWorkspaceReturnUrl();
+    if (saved) return saved;
     current.searchParams.delete('addWorkspace');
     current.searchParams.delete('workspaceReturn');
     current.searchParams.delete('token');

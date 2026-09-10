@@ -14,7 +14,11 @@ import {
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { getAllowedDaemonOrigin, navigateToDaemon } from '../../config/daemon';
+import {
+  getAllowedDaemonOrigin,
+  getDaemonToken,
+  navigateToDaemon,
+} from '../../config/daemon';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { Button } from '../ui/button';
@@ -834,7 +838,10 @@ function DaemonStatusDialogInner({
                   return;
                 }
                 setConnectionError('');
-                onChangeTarget(daemonOrigin, connectionToken.trim());
+                onChangeTarget(
+                  daemonOrigin,
+                  connectionToken.trim() || getDaemonToken(daemonOrigin),
+                );
               }}
             >
               <Label htmlFor="daemon-connection-address">
@@ -846,7 +853,10 @@ function DaemonStatusDialogInner({
                 inputMode="url"
                 autoComplete="url"
                 value={connectionAddress}
-                onChange={(event) => setConnectionAddress(event.target.value)}
+                onChange={(event) => {
+                  setConnectionAddress(event.target.value);
+                  setConnectionToken('');
+                }}
               />
               <Label htmlFor="daemon-connection-token">
                 {t('daemon.connection.token')}

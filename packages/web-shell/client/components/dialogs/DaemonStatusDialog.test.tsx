@@ -312,6 +312,14 @@ describe('DaemonStatusDialog', () => {
       'https://remote.example:4170',
       'remote-token',
     );
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://another.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(token.value).toBe('');
   });
 
   it('keeps an invalid daemon address on the form', () => {

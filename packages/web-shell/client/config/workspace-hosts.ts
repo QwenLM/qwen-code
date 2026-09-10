@@ -39,20 +39,44 @@ export function rememberWorkspaceHost(
   origin: string,
   workspaces: WorkspaceHost['workspaces'],
 ): void {
-  const hosts = readWorkspaceHosts().filter((host) => host.origin !== origin);
-  hosts.push({
+  const hosts = readWorkspaceHosts();
+  const index = hosts.findIndex((host) => host.origin === origin);
+  const host = {
     origin,
     workspaces: workspaces.map(({ id, cwd, displayName }) => ({
       id,
       cwd,
       displayName,
     })),
-  });
+  };
+  if (index >= 0) {
+    if (JSON.stringify(hosts[index]) === JSON.stringify(host)) return;
+    hosts[index] = host;
+  } else {
+    hosts.push(host);
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
     window.dispatchEvent(new Event('qwen-workspace-hosts'));
   } catch {
     // Connections remain usable when browser persistence is unavailable.
+  }
+}
+
+export function getWorkspaceReturnUrl(): string | undefined {
+  const current = new URL(window.location.href);
+  const saved = current.searchParams.get('workspaceReturn');
+  if (!saved) return undefined;
+  try {
+    const url = new URL(saved, current.origin);
+    if (url.origin !== current.origin) return undefined;
+    url.searchParams.delete('token');
+    url.searchParams.delete('workspaceReturn');
+    url.searchParams.delete('addWorkspace');
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return undefined;
   }
 }
 
