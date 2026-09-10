@@ -69,6 +69,7 @@ function inferProfile(
     host === 'api.deepseek.com' || host.endsWith('.api.deepseek.com');
   if (route.authType === 'gemini' || route.authType === 'vertex-ai')
     return 'gemini';
+  if (route.authType === 'openai-responses') return 'openai-reasoning';
   if (route.authType === 'anthropic') {
     if (deepseek) return 'deepseek-anthropic';
     const version = parseClaudeModelVersion(route.model);
@@ -151,7 +152,12 @@ export function resolveModelReasoningConfig(
       ? 'gemini'
       : route.authType === 'qwen-oauth'
         ? 'openai'
-        : route.authType;
+        : route.authType === 'openai-responses'
+          ? 'openai'
+          : route.authType;
+  if (route.authType === 'openai-responses' && profile !== 'openai-reasoning') {
+    fail('profile', '"openai-responses" requires openai-reasoning');
+  }
   if (routeProtocol && protocol !== routeProtocol)
     fail('profile', `"${profile}" requires ${protocol}, got ${route.authType}`);
   const explicitProfile = input.profile !== undefined;

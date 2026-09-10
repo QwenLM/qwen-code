@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionSourceService } from '../services/session-sources.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -4627,6 +4629,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.sessionSourceService = this.sessionSourceServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -5269,6 +5272,7 @@ export class Config {
     const resolved = getModelReasoningConfig(this, generation);
     return resolved &&
       (generation.authType === AuthType.USE_OPENAI ||
+        generation.authType === AuthType.USE_OPENAI_RESPONSES ||
         generation.authType === AuthType.QWEN_OAUTH)
       ? getOpenAIReasoningState(generation, resolved)
       : resolveEffectiveReasoning(generation, resolved);
@@ -7938,6 +7942,20 @@ export class Config {
     return this.artifactEnabled;
   }
 
+  private sessionSourceService?: SessionSourceService;
+  private sessionSourceServiceFactory?: () => SessionSourceService;
+
+  setSessionSourceServiceFactory(factory: () => SessionSourceService): void {
+    this.sessionSourceServiceFactory = factory;
+    this.sessionSourceService = factory();
+  }
+
+  getSessionSourceService(): SessionSourceService | undefined {
+    return Object.hasOwn(this, 'sessionSourceService')
+      ? this.sessionSourceService
+      : undefined;
+  }
+
   isRecordArtifactEnabled(): boolean {
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
@@ -9550,6 +9568,47 @@ export class Config {
     }
   }
 
+  async registerSessionSourceTool(
+    registry: ToolRegistry = this.toolRegistry,
+  ): Promise<void> {
+    if (
+      !this.getSessionSourceService() ||
+      this.sdkMode ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      registry.getAllToolNames().includes(ToolNames.RECORD_SOURCE)
+    ) {
+      return;
+    }
+    let status: ToolRegistrationStatus = 'registered';
+    try {
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(
+            ToolNames.RECORD_SOURCE,
+          )
+        : 'registered';
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.RECORD_SOURCE}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    const factory: ToolFactory = async () => {
+      const { RecordSourceTool } = await import('../tools/record-source.js');
+      return new RecordSourceTool(this);
+    };
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(
+        ToolNames.RECORD_SOURCE,
+        factory,
+      );
+    } else if (status === 'registered') {
+      registry.registerFactory(ToolNames.RECORD_SOURCE, factory);
+    }
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
@@ -9884,6 +9943,9 @@ export class Config {
         );
         return new ArtifactTool(this);
       });
+    }
+    if (!options?.forSubAgent) {
+      await this.registerSessionSourceTool(registry);
     }
     if (this.isRecordArtifactEnabled()) {
       await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {

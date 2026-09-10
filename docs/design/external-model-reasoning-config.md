@@ -31,7 +31,9 @@ Existing `reasoning.budget_tokens` remains the fixed-budget escape hatch.
 
 Profiles reuse the existing thinking wire formats:
 
-- OpenAI: `openai-reasoning`, `openai-effort`, `deepseek-openai`.
+- OpenAI Chat Completions: `openai-reasoning`, `openai-effort`,
+  `deepseek-openai`.
+- OpenAI Responses: `openai-reasoning`.
 - Qwen: `dashscope-thinking`, `dashscope-effort`, `qwen-chat-template`.
 - Anthropic: `anthropic-manual`, `anthropic-adaptive`,
   `anthropic-adaptive-only`, `deepseek-anthropic`.

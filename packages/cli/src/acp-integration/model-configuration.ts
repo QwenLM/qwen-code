@@ -583,7 +583,9 @@ export function buildModelReasoningConfigPreview(
   const externalState =
     generation &&
     external &&
-    (generation.authType === 'openai' || generation.authType === 'qwen-oauth')
+    (generation.authType === 'openai' ||
+      generation.authType === 'openai-responses' ||
+      generation.authType === 'qwen-oauth')
       ? getOpenAIReasoningState(
           { ...generation, reasoning: effectiveReasoning },
           external,

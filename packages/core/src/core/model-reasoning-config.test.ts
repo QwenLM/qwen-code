@@ -162,6 +162,28 @@ describe('external model reasoning configuration', () => {
     ).toThrow('Gemini supports');
   });
 
+  it('reuses the nested reasoning profile for the OpenAI Responses protocol', () => {
+    const resolved = resolveModelReasoningConfig({
+      model: 'responses-alias',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      reasoningConfig: {
+        supportedEfforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      },
+    });
+    expect(resolved).toMatchObject({
+      profile: 'openai-reasoning',
+      defaultEffort: 'medium',
+    });
+    expect(() =>
+      resolveModelReasoningConfig({
+        model: 'responses-alias',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        reasoningConfig: { profile: 'openai-effort' },
+      }),
+    ).toThrow('openai-responses');
+  });
+
   it('keeps exact same-name endpoints separate and clears an unknown request override', () => {
     const registry = new ModelRegistry({
       openai: [
