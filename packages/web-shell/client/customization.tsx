@@ -140,13 +140,15 @@ export interface WebShellRightPanelOptions {
 
 export type WebShellEnvironmentPanelItem =
   | 'environment'
+  | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
-  /** Sections to show. Defaults to all sections. */
+  /** Sections to show. Sources includes attachments; both keys render one section. */
   items?: readonly WebShellEnvironmentPanelItem[];
 }
 
@@ -590,13 +592,18 @@ export interface WebShellCustomization {
   loadingPhrases?: LoadingPhrasesResolver;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
    * while `true`/omitted still requires the capability (and the workspace
    * trust / qualified-route safety checks) to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.

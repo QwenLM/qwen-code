@@ -69,6 +69,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -210,7 +211,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
+  // Extension activation commits do not refresh active sessions. Clients that
+  // need immediate runtime application must submit the independent refresh
+  // operation after the activation operation commits.
+  extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -644,6 +654,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_sources',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [

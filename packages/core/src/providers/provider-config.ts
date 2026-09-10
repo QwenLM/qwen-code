@@ -87,11 +87,22 @@ function buildGenerationConfig(
 
 function buildAdvancedGenerationConfig(
   advCfg: ProviderSetupInputs['advancedConfig'] | undefined,
+  protocol: AuthType,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const cfg: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (advCfg?.enableThinking) {
-    cfg.extra_body = { enable_thinking: true };
+    // `extra_body.enable_thinking` is a DashScope/Qwen-specific wire knob:
+    // sibling wires either translate it (OpenAI Chat, when the baseUrl looks
+    // like DashScope) or silently drop it. The Responses wire does neither —
+    // it forwards extra_body verbatim, so enable_thinking would ship as an
+    // undefined top-level field with no reasoning actually requested. Route
+    // this protocol through the unified reasoning-effort ladder instead.
+    if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+      cfg.reasoning = { effort: 'medium' };
+    } else {
+      cfg.extra_body = { enable_thinking: true };
+    }
     hasAny = true;
   }
   if (advCfg?.multimodal && Object.values(advCfg.multimodal).some(Boolean)) {
@@ -120,6 +131,7 @@ function specToModelConfig(
     id: spec.id,
     name: prefix ? `[${prefix}] ${spec.id}` : spec.id,
     ...(spec.description ? { description: spec.description } : {}),
+    ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
     baseUrl,
     envKey,
     ...(spec.supportsImageGeneration ? { supportsImageGeneration: true } : {}),
@@ -154,6 +166,7 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
+  const protocol = inputs.protocol ?? config.protocol;
 
   let models: ProviderModelConfig[];
 
@@ -164,13 +177,21 @@ function buildModelConfigs(
     );
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
-    const specMap = new Map(config.models.map((s) => [s.id, s]));
+    const specMap = new Map(config.models.map((s) => [s.id.toLowerCase(), s]));
     models = inputs.modelIds.map((id) => {
-      const spec = specMap.get(id);
+      const spec = specMap.get(id.toLowerCase());
       if (spec) {
-        return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
+        return specToModelConfig(
+          { ...spec, id },
+          prefix,
+          inputs.baseUrl,
+          envKey,
+        );
       }
-      const genConfig = buildAdvancedGenerationConfig(inputs.advancedConfig);
+      const genConfig = buildAdvancedGenerationConfig(
+        inputs.advancedConfig,
+        protocol,
+      );
       return {
         id,
         name: prefix ? `[${prefix}] ${id}` : id,
@@ -184,7 +205,7 @@ function buildModelConfigs(
     const advCfg = inputs.advancedConfig;
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
-      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
       return {
         id,
         name: displayName(id),
@@ -308,6 +329,7 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  */
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
   [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+  [AuthType.USE_OPENAI_RESPONSES]: 'https://api.openai.com',
   [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
   [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
 };

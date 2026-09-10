@@ -571,6 +571,87 @@ const simpleTurns = (count: number): Message[] =>
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
 
+describe('MessageList — locate scroll timer lifecycle', () => {
+  it('does not schedule scroll work after unmounting before locate settles', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(149));
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+    const requestFrame = vi.spyOn(globalThis, 'requestAnimationFrame');
+
+    act(() => vi.advanceTimersByTime(200));
+
+    expect(requestFrame).not.toHaveBeenCalled();
+  });
+
+  it('keeps normal and repeated locate scrolling and highlighting working', () => {
+    vi.useFakeTimers();
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u2')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBeNull();
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+    act(() => vi.advanceTimersByTime(150));
+  });
+
+  it('clears every pending locate timer after repeated navigation and unmount', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    for (const id of ['u1', 'u2']) {
+      act(() => {
+        expect(ref.current?.scrollToMessage(id)).toBe(true);
+      });
+      act(() => vi.advanceTimersByTime(32));
+    }
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('MessageList — failed prompt retry', () => {
   it('marks only the matching user message and forwards retry', () => {
     const onRetry = vi.fn();
@@ -903,7 +984,7 @@ describe('MessageList — compact mode', () => {
     ).toBeNull();
   });
 
-  it.each(['TodoWrite', 'AskUserQuestion'])(
+  it.each(['TodoWrite'])(
     'folds %s groups into the summary across hidden thinking',
     (toolName) => {
       const container = mount(
@@ -930,7 +1011,6 @@ describe('MessageList — compact mode', () => {
 
   it.each([
     ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
-    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
     ['agent', agentMsg('special')],
   ])(
     'merges a leading %s group with later thinking and tools',
@@ -956,6 +1036,49 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it.each([false, true])(
+    'keeps completed questions outside a collapsed mixed tool group (compact=%s)',
+    (compactMode) => {
+      const question = standaloneToolMsg('ask', 'AskUserQuestion').tools[0];
+      const c = mount(
+        [
+          userMsg('u1'),
+          thinkingMsg('thought'),
+          {
+            ...toolMsg('mixed'),
+            tools: [
+              toolMsg('before').tools[0],
+              question,
+              toolMsg('after').tools[0],
+            ],
+          },
+          asstMsg('a1'),
+        ],
+        undefined,
+        { compactMode },
+      );
+      expect(c.textContent).toContain('2 tool calls');
+      expect(c.textContent).not.toContain('3 tool calls');
+      const assertAnswerVisible = () => {
+        expect(c.querySelectorAll('[data-tool-ids="call-ask"]')).toHaveLength(
+          1,
+        );
+        expect(has(c, 'u1')).toBe(true);
+        expect(has(c, 'a1')).toBe(true);
+      };
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).not.toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).not.toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+    },
+  );
+
   it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
     const c = mount(
       [
@@ -5034,8 +5157,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = mockMessageListWidth(1000);
+  it('hides the session timeline below the default content width', async () => {
+    const rectSpy = mockMessageListWidth(999);
 
     const c = mount(simpleTurns(4));
     await nextFrame();

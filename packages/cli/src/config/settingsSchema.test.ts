@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
@@ -379,6 +380,20 @@ describe('SettingsSchema', () => {
       expect(timeout.showInDialog).toBe(false);
     });
 
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.requiresRestart).toBe(false);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
     it('should define count-based model limits as integers', () => {
       const model = getSettingsSchema().model.properties;
 
@@ -604,6 +619,24 @@ describe('SettingsSchema', () => {
         getSettingsSchema().advanced.properties.autoConfigureMemory
           .showInDialog,
       ).toBe(false);
+    });
+
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
     });
 
     it('should define Markdown render mode as a user-facing UI enum', () => {

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/external-context-mem0",
-  "version": "0.23.0",
+  "version": "0.23.3",
   "description": "Configurable Mem0-compatible External Context Extension",
   "repository": {
     "type": "git",
@@ -12,7 +12,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "npm run clean && esbuild src/main.ts src/auto-recall.ts src/write-main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outdir=dist",
+    "build": "npm run clean && esbuild src/main.ts src/auto-recall.ts src/write-main.ts src/delete-main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outdir=dist",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "eslint src",
     "test": "npm run build && vitest run --config vitest.config.ts",
@@ -23,6 +23,7 @@
     "dist/main.js",
     "dist/auto-recall.js",
     "dist/write-main.js",
+    "dist/delete-main.js",
     "schemas",
     "examples",
     "qwen-extension.json",

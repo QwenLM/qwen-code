@@ -190,13 +190,17 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'slow_client_warning':
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: 'SSE stream is lagging',
-        },
-      ];
+      // The daemon reports this SSE subscriber's queue backing up — a
+      // transport diagnostic, not a user-facing failure. Surfacing it as a
+      // transcript status reads as a broken connection mid-turn, so log the
+      // queue watermarks to the console instead; `client_evicted` remains the
+      // real disconnect signal and flows through its own error path. Fires at
+      // most once per overflow episode (daemon-side hysteresis).
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
+        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+      }
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
@@ -367,6 +371,19 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
@@ -1135,6 +1152,11 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const subagentSessionReady =
+    isRecord(rawOutput) &&
+    typeof rawOutput['subagentSessionReady'] === 'boolean'
+      ? rawOutput['subagentSessionReady']
+      : metadata?.['subagentSessionReady'];
   const { provenance, serverId } = extractToolProvenance(update, toolName);
   // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
   // `tool_call._meta` when the call was invoked inside a sub-agent
@@ -1170,6 +1192,9 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(typeof subagentSessionReady === 'boolean'
+      ? { subagentSessionReady }
+      : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(resultPreview ? { resultPreview } : {}),

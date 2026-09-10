@@ -228,30 +228,43 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).toBe('chat_thread');
   });
 
-  it('round-trips a managed message prefix', async () => {
+  it('preserves a stored legacy messagePrefix when saving other settings', async () => {
+    const settings = readWorkspaceSettings();
+    const channels = settings['channels'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    channels['bot']!['messagePrefix'] = '/review';
+    writeWorkspaceSettings(JSON.stringify(settings));
     const store = new WorkspaceChannelSettingsStore(workspace);
+    const config = {
+      type: 'management-validation-test',
+      clientId: 'client-id',
+      messagePrefix: '/review',
+      instructions: 'Use concise replies.',
+    };
 
     const next = await store.upsert('bot', {
       expectedRevision: store.snapshot().revision,
-      config: {
-        type: 'management-validation-test',
-        clientId: 'client-id',
-        messagePrefix: '/review',
-      },
+      config,
     });
 
-    expect(next.channels['bot']?.['messagePrefix']).toBe('/review');
-    expect(
-      (
-        readWorkspaceSettings()['channels'] as Record<
-          string,
-          Record<string, unknown>
-        >
-      )['bot']?.['messagePrefix'],
-    ).toBe('/review');
+    expect(next.channels['bot']).toMatchObject({
+      messagePrefix: '/review',
+      instructions: 'Use concise replies.',
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: { ...config, messagePrefix: '/changed' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "messagePrefix" is not manageable.',
+    });
   });
 
-  it('rejects a non-string managed message prefix', async () => {
+  it('rejects adding the removed messagePrefix setting', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
     await expect(
@@ -260,12 +273,12 @@ describe('WorkspaceChannelSettingsStore', () => {
         config: {
           type: 'management-validation-test',
           clientId: 'client-id',
-          messagePrefix: 42,
-        } as never,
+          messagePrefix: '/review',
+        },
       }),
     ).rejects.toMatchObject({
       code: 'channel_settings_invalid_config',
-      message: 'Channel field "messagePrefix" must be a string.',
+      message: 'Channel field "messagePrefix" is not manageable.',
     });
   });
 
@@ -634,7 +647,6 @@ describe('WorkspaceChannelSettingsStore', () => {
           'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
         },
         groupHistoryLimit: 25,
-        blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
       },
       secrets: {
@@ -661,10 +673,64 @@ describe('WorkspaceChannelSettingsStore', () => {
         'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
       },
       groupHistoryLimit: 25,
-      blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
     });
   });
+
+  it.each([
+    ['blockStreaming', 'on', 'off'],
+    ['blockStreamingChunk', { minChars: 400 }, { minChars: 100 }],
+    ['blockStreamingCoalesce', { idleMs: 1500 }, { idleMs: 500 }],
+  ] as const)(
+    'retires %s without blocking unrelated settings edits',
+    async (key, value, changed) => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const config = {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+      };
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...config, [key]: value },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              ...config,
+              clientSecret: '$BOT_TOKEN',
+              [key]: value,
+            },
+          },
+        }),
+      );
+      const stored = fs.readFileSync(settingsPath, 'utf8');
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...config, [key]: changed },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(stored);
+
+      const preserved = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...config, senderPolicy: 'open', [key]: value },
+      });
+      expect(preserved.channels['bot']?.[key]).toEqual(value);
+      const removed = await store.upsert('bot', {
+        expectedRevision: preserved.revision,
+        config,
+      });
+      expect(removed.channels['bot']).not.toHaveProperty(key);
+    },
+  );
 
   it('accepts string-list and record descriptor fields', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
