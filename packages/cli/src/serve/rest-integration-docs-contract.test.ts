@@ -9,65 +9,82 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-/**
- * `docs/developers/rest-api-integration.md` tells integrators that a specific
- * 25-route subset is the surface they should build on. That claim has no
- * mechanical backing: the daemon registers 237 routes, and a rename upstream
- * would leave the guide promising a route that no longer answers, with nothing
- * failing.
- *
- * This is the same shape as `capabilities-docs-contract.test.ts`, which guards
- * the protocol doc's conditional-tag table against the capability registry.
- * Scope is deliberately the guide's own promises rather than all 237 routes: a
- * full inventory would need a ~174-entry "known undocumented" baseline, which
- * is bulk in service of a problem nobody has reported. Widen it when that
- * changes.
- */
-
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../../..',
 );
 const GUIDE = path.join(REPO_ROOT, 'docs/developers/rest-api-integration.md');
 const PROTOCOL = path.join(REPO_ROOT, 'docs/developers/qwen-serve-protocol.md');
+const OPENAPI = path.join(
+  REPO_ROOT,
+  'docs/developers/daemon-rest-api.openapi.json',
+);
 const SERVE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
-/** Routes the guide presents as the integration surface. */
-const GUIDE_ROUTES: readonly string[] = [
-  '/health',
-  '/capabilities',
-  '/session',
-  '/session/:id',
-  '/session/:id/prompt',
-  '/session/:id/cancel',
-  '/session/:id/events',
-  '/session/:id/status',
-  '/session/:id/transcript',
-  '/session/:id/context',
-  '/session/:id/export',
-  '/session/:id/pending-prompts',
-  '/session/:id/heartbeat',
-  '/session/:id/metadata',
-  '/session/:id/model',
-  '/session/:id/load',
-  '/session/:id/resume',
-  '/session/:id/permission/:requestId',
-  '/permission/:requestId',
-  '/workspace/tools',
-  '/file',
-  '/file/bytes',
-  '/stat',
-  '/list',
-  '/glob',
+/** Operations the guide presents as the supported integration surface. */
+const GUIDE_OPERATIONS: readonly string[] = [
+  'GET /health',
+  'GET /capabilities',
+  'POST /session',
+  'DELETE /session/:id',
+  'POST /session/:id/prompt',
+  'POST /session/:id/cancel',
+  'GET /session/:id/events',
+  'GET /session/:id/status',
+  'GET /session/:id/transcript',
+  'GET /session/:id/context',
+  'GET /session/:id/export',
+  'GET /session/:id/pending-prompts',
+  'POST /session/:id/heartbeat',
+  'PATCH /session/:id/metadata',
+  'POST /session/:id/model',
+  'POST /session/:id/load',
+  'POST /session/:id/resume',
+  'POST /session/:id/permission/:requestId',
+  'POST /permission/:requestId',
+  'GET /workspace/tools',
+  'GET /file',
+  'GET /file/bytes',
+  'GET /stat',
+  'GET /list',
+  'GET /glob',
 ];
 
-/**
- * Collect every path the serve tree registers on an Express app or router.
- * Reading the sources rather than instantiating the app keeps this independent
- * of the bridge/deps wiring `createServeApp` needs, and covers route groups
- * that only mount under specific options.
- */
-function registeredPaths(): Set<string> {
+const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
+
+interface OpenApiOperation {
+  operationId?: string;
+  responses?: Record<string, unknown>;
+  security?: unknown[];
+  externalDocs?: { url?: string };
+  'x-qwen-capability'?: string | null;
+  'x-qwen-scope'?: string;
+  'x-qwen-stability'?: string;
+  'x-qwen-sdk-method'?: string;
+}
+
+interface OpenApiDocument {
+  openapi?: string;
+  paths?: Record<
+    string,
+    Partial<Record<(typeof HTTP_METHODS)[number], OpenApiOperation>>
+  >;
+  components?: { schemas?: Record<string, unknown> };
+}
+
+function guideOperations(): string[] {
+  return readFileSync(GUIDE, 'utf8')
+    .split('\n')
+    .filter((line) => /^\| .*`(?:GET|POST|PATCH|DELETE) \//.test(line))
+    .flatMap((row) =>
+      [...row.split('|')[1].matchAll(/`(GET|POST|PATCH|DELETE) ([^`]+)`/g)].map(
+        (match) => `${match[1]} ${match[2]}`,
+      ),
+    );
+}
+
+/** Collect every operation registered on an Express app or router. */
+function registeredOperations(): Set<string> {
   const found = new Set<string>();
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -80,12 +97,12 @@ function registeredPaths(): Set<string> {
         continue;
       }
       const src = readFileSync(full, 'utf8');
-      // The path literal is often on its own line after the method call.
       const re =
-        /\b(?:app|router)\.(?:get|post|patch|put|delete|all)\(\s*\n?\s*'([^']+)'/g;
+        /\b(?:app|router)\.(get|post|patch|put|delete|all)\(\s*\n?\s*'([^']+)'/g;
       for (const match of src.matchAll(re)) {
-        // Workspace-qualified routes mirror their primary-workspace form.
-        found.add(match[1].replace(/^\/workspaces\/:workspace/, '/workspace'));
+        if (match[1] !== 'all') {
+          found.add(`${match[1].toUpperCase()} ${match[2]}`);
+        }
       }
     }
   };
@@ -93,7 +110,23 @@ function registeredPaths(): Set<string> {
   return found;
 }
 
-/** GitHub/Nextra heading slug, so anchor links in the guide can be checked. */
+function openApiOperations(
+  document: OpenApiDocument,
+): Map<string, OpenApiOperation> {
+  const found = new Map<string, OpenApiOperation>();
+  for (const [openApiPath, pathItem] of Object.entries(document.paths ?? {})) {
+    const expressPath = openApiPath.replace(/\{([^}]+)\}/g, ':$1');
+    for (const method of HTTP_METHODS) {
+      const operation = pathItem[method];
+      if (operation) {
+        found.set(`${method.toUpperCase()} ${expressPath}`, operation);
+      }
+    }
+  }
+  return found;
+}
+
+/** GitHub/Nextra heading slug, so anchor links can be checked. */
 function slug(heading: string): string {
   return heading
     .replace(/`/g, '')
@@ -103,46 +136,92 @@ function slug(heading: string): string {
     .replace(/\s+/g, '-');
 }
 
-describe('REST integration guide contract', () => {
-  it('matches the routes and missing-section notes in the guide tables', () => {
-    const rows = readFileSync(GUIDE, 'utf8')
-      .split('\n')
-      .filter((line) => /^\| .*`(?:GET|POST|PATCH|DELETE) \//.test(line));
-    const routes = rows.flatMap((row) =>
-      [
-        ...row
-          .split('|')[1]
-          .matchAll(/`(?:GET |POST |PATCH |DELETE )?(\/[^`]+)`/g),
-      ].map((match) => ({
-        route: match[1] === '/resume' ? '/session/:id/resume' : match[1],
-        undocumented: /no dedicated/i.test(row),
-      })),
+function collectRefs(value: unknown, found: Set<string>): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectRefs(entry, found));
+    return;
+  }
+  if (typeof value !== 'object' || value === null) {
+    return;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === '$ref' && typeof entry === 'string') {
+      found.add(entry);
+    } else {
+      collectRefs(entry, found);
+    }
+  }
+}
+
+describe('REST integration documentation contract', () => {
+  it('keeps the guide, OpenAPI document, and daemon registrations aligned', () => {
+    const expected = [...GUIDE_OPERATIONS].sort();
+    expect(guideOperations().sort()).toEqual(expected);
+
+    const registered = registeredOperations();
+    expect(GUIDE_OPERATIONS.filter((entry) => !registered.has(entry))).toEqual(
+      [],
     );
-    expect(routes.map(({ route }) => route).sort()).toEqual(
-      [...GUIDE_ROUTES].sort(),
-    );
-    expect(
-      routes
-        .filter(({ undocumented }) => undocumented)
-        .map(({ route }) => route)
-        .sort(),
-    ).toEqual([
-      '/glob',
-      '/list',
-      '/session/:id/export',
-      '/session/:id/pending-prompts',
-      '/session/:id/permission/:requestId',
-      '/session/:id/status',
-      '/stat',
-      '/workspace/tools',
-    ]);
+
+    const openApi = JSON.parse(
+      readFileSync(OPENAPI, 'utf8'),
+    ) as OpenApiDocument;
+    expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
-  it('links only to documentation files that exist', () => {
-    const targets = [
-      ...readFileSync(GUIDE, 'utf8').matchAll(
-        /\]\((\.\.?\/[^)#\s]+\.md)(?:#[^)]*)?\)/g,
+  it('keeps the OpenAPI contract self-describing', () => {
+    const openApi = JSON.parse(
+      readFileSync(OPENAPI, 'utf8'),
+    ) as OpenApiDocument;
+    expect(openApi.openapi).toBe('3.1.0');
+    const protocolAnchors = new Set(
+      [...readFileSync(PROTOCOL, 'utf8').matchAll(/^#{1,6} (.+)$/gm)].map(
+        (match) => slug(match[1]),
       ),
+    );
+    const operationIds: string[] = [];
+    for (const operation of openApiOperations(openApi).values()) {
+      const operationId = operation.operationId;
+      expect(operationId).toBeTruthy();
+      if (operationId) {
+        operationIds.push(operationId);
+      }
+      expect(operation).toHaveProperty('x-qwen-capability');
+      expect(operation['x-qwen-scope']).toBeTruthy();
+      expect(operation['x-qwen-stability']).toBe('stable');
+      expect(operation['x-qwen-sdk-method']).toMatch(/^DaemonClient\./);
+      const anchor = operation.externalDocs?.url?.match(
+        /qwen-serve-protocol\/#([a-z0-9-]+)$/,
+      )?.[1];
+      expect(anchor).toBeTruthy();
+      if (anchor) {
+        expect(protocolAnchors.has(anchor)).toBe(true);
+      }
+      expect(operation.security?.length).toBeGreaterThan(0);
+      expect(
+        Object.keys(operation.responses ?? {}).some((code) =>
+          /^2\d\d$/.test(code),
+        ),
+      ).toBe(true);
+    }
+    expect(new Set(operationIds).size).toBe(operationIds.length);
+
+    const refs = new Set<string>();
+    collectRefs(openApi, refs);
+    const schemas = openApi.components?.schemas ?? {};
+    expect(
+      [...refs].filter(
+        (ref) =>
+          !ref.startsWith('#/components/schemas/') ||
+          !(ref.slice('#/components/schemas/'.length) in schemas),
+      ),
+    ).toEqual([]);
+  });
+
+  it('links only to documentation files and protocol anchors that exist', () => {
+    const guide = readFileSync(GUIDE, 'utf8');
+    const targets = [
+      ...guide.matchAll(/\]\((\.\.?\/[^)#\s]+\.md)(?:#[^)]*)?\)/g),
     ].map((match) => match[1]);
     expect(targets.length).toBeGreaterThan(0);
     expect(
@@ -150,58 +229,34 @@ describe('REST integration guide contract', () => {
         (target) => !existsSync(path.resolve(path.dirname(GUIDE), target)),
       ),
     ).toEqual([]);
-  });
 
-  it('promises only routes the daemon still registers', () => {
-    const registered = registeredPaths();
-    expect(GUIDE_ROUTES.filter((route) => !registered.has(route))).toEqual([]);
-  });
-
-  it('links only to anchors the protocol reference actually has', () => {
     const anchors = new Set(
       [...readFileSync(PROTOCOL, 'utf8').matchAll(/^#{1,6} (.+)$/gm)].map(
         (match) => slug(match[1]),
       ),
     );
     const broken = [
-      ...readFileSync(GUIDE, 'utf8').matchAll(
-        /\]\(\.\/qwen-serve-protocol\.md#([a-z0-9-]+)\)/g,
-      ),
+      ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9-]+)\)/g),
     ]
       .map((match) => match[1])
       .filter((anchor) => !anchors.has(anchor));
     expect(broken).toEqual([]);
   });
 
-  it('keeps its "no dedicated section yet" notes honest', () => {
-    // The guide marks 8 of the 25 as lacking a reference section. When someone
-    // writes one, this fails so the note gets removed instead of going stale.
-    const protocol = readFileSync(PROTOCOL, 'utf8');
-    const documented = new Set(
+  it('gives every supported operation a dedicated protocol heading', () => {
+    const headings = new Set(
       [
-        ...protocol.matchAll(
-          /^#{3,4} `(?:GET|POST|PATCH|PUT|DELETE) ([^`]+)`/gm,
+        ...readFileSync(PROTOCOL, 'utf8').matchAll(
+          /^#{3,4} `(GET|POST|PATCH|PUT|DELETE) ([^`]+)`/gm,
         ),
-      ].map((match) => match[1]),
+      ].map((match) => `${match[1]} ${match[2]}`),
     );
-    const undocumented = GUIDE_ROUTES.filter((route) => !documented.has(route));
-    expect(undocumented.sort()).toEqual(
-      [
-        '/glob',
-        '/list',
-        '/session/:id/export',
-        '/session/:id/pending-prompts',
-        '/session/:id/permission/:requestId',
-        '/session/:id/status',
-        '/stat',
-        '/workspace/tools',
-      ].sort(),
+    expect(GUIDE_OPERATIONS.filter((entry) => !headings.has(entry))).toEqual(
+      [],
     );
   });
 
   it('still sees the bulk of the route surface', () => {
-    // Guards the walker itself: if registrations move to a style this regex
-    // cannot match, the route check above would pass vacuously on an empty set.
-    expect(registeredPaths().size).toBeGreaterThan(100);
+    expect(registeredOperations().size).toBeGreaterThan(100);
   });
 });

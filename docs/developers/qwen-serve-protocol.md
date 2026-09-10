@@ -1813,6 +1813,36 @@ carries a single `ServeStatusCell` describing the failure and the cells
 fall back to `not_started` ACP placeholders. Daemon-level cells are still
 returned.
 
+### `GET /workspace/tools`
+
+Return the tool catalog reported by the primary workspace's ACP child. This is
+a legacy primary-workspace route: it has no workspace selector and must not be
+used to infer the tools of a non-primary runtime.
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "acpChannelLive": true,
+  "tools": [
+    {
+      "name": "ReadFile",
+      "displayName": "Read",
+      "description": "Read a file",
+      "enabled": true
+    }
+  ]
+}
+```
+
+When no ACP child is live, the route still returns `200` with
+`acpChannelLive: false`, an empty `tools` array, and a `not_started` entry in
+the optional `errors` array. Unexpected bridge failures use the standard `500`
+bridge error response. The TypeScript SDK method is `workspaceTools()`; there
+is no dedicated capability tag, so clients that support older daemons should
+treat `404` as unsupported.
+
 ### Workspace file routes
 
 All file paths are resolved through the daemon's primary workspace. Responses use
@@ -1930,6 +1960,67 @@ entire file.
   "hash": "sha256:..."
 }
 ```
+
+#### `GET /stat`
+
+Return metadata for one primary-workspace path. Query parameter `path` is
+required.
+
+```json
+{
+  "kind": "stat",
+  "path": "src/index.ts",
+  "type": "file",
+  "sizeBytes": 128,
+  "modifiedMs": 1700000000123
+}
+```
+
+`type` is `file`, `directory`, `symlink`, or `other`. The route uses the
+workspace file boundary and the common filesystem error envelope described
+above. The TypeScript SDK method is `fileStat()`.
+
+#### `GET /list`
+
+List one primary-workspace directory. Query parameter `path` is required;
+`includeIgnored=1` (or `true`) includes entries matched by ignore rules. The
+response is capped at 2,000 entries and sets `truncated: true` when more exist.
+
+```json
+{
+  "kind": "list",
+  "path": ".",
+  "entries": [{ "name": "src", "kind": "directory", "ignored": false }],
+  "truncated": false,
+  "matchedIgnore": null
+}
+```
+
+Each entry's `kind` is `file`, `directory`, `symlink`, or `other`. The
+TypeScript SDK method is `dirList()`.
+
+#### `GET /glob`
+
+Match paths inside the primary workspace. Query parameter `pattern` is
+required. Optional `cwd` narrows the search, `includeIgnored=1` (or `true`)
+includes ignored paths, and `maxResults` is an integer from 1 to 50,000
+(default 5,000).
+
+```json
+{
+  "kind": "glob",
+  "pattern": "**/*.ts",
+  "cwd": "",
+  "matches": ["src/index.ts"],
+  "count": 1,
+  "truncated": false,
+  "durationMs": 4
+}
+```
+
+Matches are workspace-relative. Invalid query values return `400`; workspace
+trust, containment, missing-path, and unexpected failures use the common
+filesystem error envelope. The TypeScript SDK method is `glob()`.
 
 #### `POST /file/write`
 
@@ -2294,6 +2385,32 @@ Concurrent `POST /session` calls for the same workspace are **coalesced** to one
 > event (covers the spawn-time `model_switch_failed` even if the
 > subscribe lands a few ms after the create response).
 
+### `GET /session/:id/status`
+
+Return the live summary from the runtime that owns the session. This route does
+not load a persisted-only session and never falls back to the primary runtime.
+Pre-flight `caps.features.session_status`.
+
+```json
+{
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/path",
+  "createdAt": "2026-09-10T08:00:00.000Z",
+  "clientCount": 1,
+  "hasActivePrompt": true,
+  "isWaitingForPermission": false,
+  "isWaitingForUserQuestion": false,
+  "pendingInteractionCount": 0,
+  "pendingInteractions": []
+}
+```
+
+The response is the `DaemonSessionSummary` wire shape. Optional fields include
+display and source metadata, `activeWorkState`, `updatedAt`, `turnError`,
+organization state, worktree or branch metadata, and PR bindings. `404` means
+no live owner exists; a bootstrapping, draining, or unavailable owner returns
+`503` instead of falling back. The TypeScript SDK method is `sessionStatus()`.
+
 ### ACP `session/new` caller-supplied ID
 
 ACP clients request the same behavior through the extension metadata field:
@@ -2424,6 +2541,22 @@ To protect daemon memory and latency, snapshots above the transcript indexing ca
 - `409` — transcript snapshot is unavailable because the file was deleted, truncated, replaced, or archived after the cursor was issued; this also applies when preflight can no longer find the active file for a cursor request.
 - `413` — `transcript_too_large` when the frozen transcript snapshot exceeds the daemon indexing cap.
 - `413` — `transcript_page_too_large` when one aggregate record exceeds the workspace-qualified page budget or the serialized page exceeds its response budget.
+
+### `GET /session/:id/export`
+
+Download the primary workspace's active persisted session transcript. The
+optional `format` query is `html` (default), `md`, `json`, or `jsonl`.
+Pre-flight `caps.features.session_export`.
+
+Successful responses are attachments with a sanitized filename,
+`Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. The content
+type is `text/html`, `text/markdown`, `application/json`, or
+`application/x-ndjson` according to the selected format. The route reads
+persisted storage only: it does not resolve a live owner, start ACP, or attach
+a client. Use the workspace-qualified route below when the target may be in a
+non-primary workspace. Invalid formats return `400 invalid_export_format`;
+missing active sessions return `404`; archived, transitioning, or conflicting
+storage returns `409`. The TypeScript SDK method is `exportSession()`.
 
 ### `GET /workspaces/:workspace/session/:id/transcript`
 
@@ -2768,6 +2901,33 @@ When a queued message is drained into the active turn, the daemon publishes `mid
 
 When `session_mid_turn_message_mutation` is advertised, an attached session client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It removes the message from either the mid-turn queue or its promoted pending-prompt state; removing a promoted message that is already running aborts that turn, matching ordinary pending-prompt removal. Daemon-owned queue additions and removals publish the existing `pending_prompt_added` and `pending_prompt_completed` session events so attached clients refresh both authoritative queue snapshots. `{ "removed": false }` means the message was already injected, completed, or not found.
 
+### `GET /session/:id/pending-prompts`
+
+Return the currently running prompt and the prompts waiting in the live
+session's FIFO. The request may include `X-Qwen-Client-Id`; when present it must
+identify an attached client.
+
+```json
+{
+  "pendingPrompts": [
+    {
+      "promptId": "<prompt-id>",
+      "text": "Explain the failure",
+      "queuedAt": 1700000000123,
+      "state": "running",
+      "originatorClientId": "<client-id>"
+    }
+  ]
+}
+```
+
+`state` is `running` for the prompt being dispatched and `queued` for waiting
+prompts. `content` appears when the prompt includes structured content such as
+images. This is a live-session-owner route: `404` means no live owner and
+`503` means the owner is temporarily unavailable. There is no dedicated
+capability tag; older daemons return `404`. The TypeScript SDK method is
+`getPendingPrompts()`.
+
 ### `POST /session/:id/prompt`
 
 Forward a prompt to the agent. Multi-prompt callers FIFO-queue per session (ACP guarantees one active prompt per session).
@@ -2880,25 +3040,47 @@ Idempotent: returns `404` for unknown sessions. The error envelope uses `code: "
 
 ### `PATCH /session/:id/metadata`
 
-Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`. Grouping and pinning are intentionally not part of this route; use `PATCH /session/:id/organization` under `session_organization`.
+Update mutable session metadata. Pre-flight `caps.features.session_metadata`.
+Grouping and pinning are intentionally not part of this route; use
+`PATCH /session/:id/organization` under `session_organization`.
 
 Request:
 
 ```json
-{ "displayName": "My Investigation Session" }
+{
+  "displayName": "My Investigation Session",
+  "pr": {
+    "number": 123,
+    "url": "https://github.com/QwenLM/qwen-code/pull/123",
+    "state": "open"
+  }
+}
 ```
 
-| Field         | Required | Notes                                                                          |
-| ------------- | -------- | ------------------------------------------------------------------------------ |
-| `displayName` | no       | String, max 256 characters. Empty string clears the name. Omit to leave as-is. |
+| Field         | Required | Notes                                                                                                                                                                                      |
+| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `displayName` | no       | String. Values longer than 256 characters are truncated. Empty string clears the name; omit to leave it unchanged.                                                                         |
+| `pr`          | no       | Bind one pull request. Requires a positive integer `number`, an HTTP(S) `url` of at most 2,048 characters without control characters, and optional `state`: `open`, `merged`, or `closed`. |
 
 Response:
 
 ```json
-{ "sessionId": "<uuid>", "displayName": "My Investigation Session" }
+{
+  "sessionId": "<uuid>",
+  "displayName": "My Investigation Session",
+  "prs": [
+    {
+      "number": 123,
+      "url": "https://github.com/QwenLM/qwen-code/pull/123",
+      "state": "open"
+    }
+  ]
+}
 ```
 
-Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
+`prs` is the effective bounded binding history and may include refreshed issue
+links. Publishes a `session_metadata_updated` event on the session's SSE stream
+with the effective metadata.
 
 ### `PATCH /session/:id/organization` and `PATCH /workspaces/:workspace/session/:id/organization`
 
@@ -3430,6 +3612,22 @@ Backpressure:
 - Override only the frame cap via `?maxQueued=N` (range `[16, 2048]`) on the SSE request. There is deliberately no `?maxQueuedBytes`; clients cannot raise daemon memory budget.
 - When a subscriber's live frame backlog or live byte backlog crosses 75% full the bus force-pushes a `slow_client_warning` synthetic frame to that subscriber (once per overflow episode; re-armed after both measurements drain below 37.5%). The stream stays open — the warning is a heads-up so the client can drain faster or detach + reconnect cleanly.
 - If the live frame cap overflows, the bus emits `client_evicted` with `reason: "queue_overflow"`. If the live byte cap overflows, it emits `reason: "queue_bytes_overflow"`. In both cases the terminal frame is force-pushed and the subscription closes.
+
+### `POST /session/:id/permission/:requestId`
+
+Cast the same vote documented below, but route it through the runtime that owns
+the named live session. New multi-workspace integrations should use this form
+instead of the legacy process-global route. Pre-flight
+`caps.features.session_permission_vote`.
+
+The request body, mediation policies, outcomes, and success response are
+identical to `POST /permission/:requestId`. The optional
+`X-Qwen-Client-Id` header participates in designated and consensus policy.
+Errors are `400` for invalid input or client identity, `403` when policy rejects
+the voter, `404` for an unknown live session or pending request, `500` for a
+permission contract violation, `501` for an unimplemented policy, and `503`
+when the owning runtime is unavailable. It never retries against the primary
+bridge. The TypeScript SDK method is `respondToSessionPermission()`.
 
 ### `POST /permission/:requestId`
 

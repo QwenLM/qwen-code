@@ -3,7 +3,9 @@
 For teams putting Qwen Code inside their own product over HTTP: run `qwen serve`
 as a backend and drive it from your own front end.
 
-This page is the entry point. The full route reference is
+This page is the entry point. The curated
+[Daemon REST API reference](./daemon-rest-api-reference.md) covers the stable
+integration surface and links to its OpenAPI 3.1 contract. The full protocol is
 [`qwen-serve-protocol.md`](./qwen-serve-protocol.md); the internals are the
 [daemon deep dive](./daemon/00-index.md); a runnable TypeScript walkthrough is
 [`examples/daemon-client-quickstart.md`](./examples/daemon-client-quickstart.md).
@@ -13,14 +15,14 @@ This page is the entry point. The full route reference is
 Six ways to build on the daemon, separated by one question — **how much of the
 front end do you own?**
 
-| Path                                 | You own                           | Status                                                                                                                                                                                                                         |
-| ------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                                             |
-| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                                    |
-| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                                         |
-| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                                         |
-| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP                     |
-| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see the [bridge README](../../packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md); `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` optionally permits global-scope write mutations |
+| Path                                 | You own                           | Status                                                                                                                                                                                                                                                                 |
+| ------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                                                                                     |
+| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                                                                            |
+| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                                                                                 |
+| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                                                                                 |
+| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP                                                             |
+| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see the [bridge README](https://github.com/QwenLM/qwen-code/blob/main/packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md); `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` optionally permits global-scope write mutations |
 
 Headless `qwen -p` and ACP over stdio for editors are separate integration
 paths. Channels and extensions can also run through the daemon; see the
@@ -75,6 +77,8 @@ every platform `GET /mcp-app-sandbox`. Pass the token by environment rather than
 
 The Bash examples below pass the Authorization header through a file descriptor
 using the shell's `printf` builtin, keeping the token out of curl's arguments.
+They require Bash, curl, and jq. For cross-device access, terminate TLS as
+described in [HTTPS / TLS for mobile and cross-device access](../users/qwen-serve.md#https--tls-for-mobile--cross-device-access).
 
 ## The routes an integration actually uses
 
@@ -93,48 +97,41 @@ These are the ones a REST integration needs. Treat the rest as internal.
 
 ### Session lifecycle
 
-| Route                                                                                                                                | Purpose                                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
-| [`POST /session`](./qwen-serve-protocol.md#post-session)                                                                             | Create. Send `sessionScope: "thread"` for an independent conversation |
-| [`DELETE /session/:id`](./qwen-serve-protocol.md#delete-sessionid)                                                                   | Close. The persisted session survives and can be reloaded             |
-| [`POST /session/:id/load`](./qwen-serve-protocol.md#post-sessionidload) · [`/resume`](./qwen-serve-protocol.md#post-sessionidresume) | Restore a persisted session                                           |
-| [`POST /session/:id/heartbeat`](./qwen-serve-protocol.md#post-sessionidheartbeat)                                                    | Defer the idle reaper                                                 |
-| [`PATCH /session/:id/metadata`](./qwen-serve-protocol.md#patch-sessionidmetadata)                                                    | Session metadata                                                      |
-| [`POST /session/:id/model`](./qwen-serve-protocol.md#post-sessionidmodel)                                                            | Switch model within the bound service                                 |
-| `GET /session/:id/status`                                                                                                            | Runtime status — _no dedicated reference section yet_                 |
+| Route                                                                                                                                                 | Purpose                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [`POST /session`](./qwen-serve-protocol.md#post-session)                                                                                              | Create. Send `sessionScope: "thread"` for an independent conversation |
+| [`DELETE /session/:id`](./qwen-serve-protocol.md#delete-sessionid)                                                                                    | Close. The persisted session survives and can be reloaded             |
+| [`POST /session/:id/load`](./qwen-serve-protocol.md#post-sessionidload) · [`POST /session/:id/resume`](./qwen-serve-protocol.md#post-sessionidresume) | Restore a persisted session                                           |
+| [`POST /session/:id/heartbeat`](./qwen-serve-protocol.md#post-sessionidheartbeat)                                                                     | Defer the idle reaper                                                 |
+| [`PATCH /session/:id/metadata`](./qwen-serve-protocol.md#patch-sessionidmetadata)                                                                     | Session metadata                                                      |
+| [`POST /session/:id/model`](./qwen-serve-protocol.md#post-sessionidmodel)                                                                             | Switch model within the bound service                                 |
+| [`GET /session/:id/status`](./qwen-serve-protocol.md#get-sessionidstatus)                                                                             | Runtime status                                                        |
 
 ### Prompting and streaming
 
-| Route                                                                             | Purpose                                                |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| [`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt)       | Submit. Returns `202` on **admission**, not completion |
-| [`POST /session/:id/cancel`](./qwen-serve-protocol.md#post-sessionidcancel)       | Cancel the active prompt only                          |
-| [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)     | SSE stream. Subscribe **before** prompting             |
-| [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript) | Conversation history                                   |
-| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)       | Context window usage                                   |
-| `GET /session/:id/export` · `GET /session/:id/pending-prompts`                    | _No dedicated reference sections yet_                  |
+| Route                                                                                                                                                                   | Purpose                                                |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| [`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt)                                                                                             | Submit. Returns `202` on **admission**, not completion |
+| [`POST /session/:id/cancel`](./qwen-serve-protocol.md#post-sessionidcancel)                                                                                             | Cancel the active prompt only                          |
+| [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)                                                                                           | SSE stream. Subscribe **before** prompting             |
+| [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript)                                                                                       | Conversation history                                   |
+| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                                                                                             | Context window usage                                   |
+| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export or inspect the current prompt queue             |
 
 ### Permissions
 
-| Route                                                                              | Purpose                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /session/:id/permission/:requestId`                                          | Answer a `permission_request`. Routed to the runtime that owns the session, so it is correct in every workspace state — _no dedicated section yet_                                                                                                                                          |
-| [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid) | Process-global form, wired to the **primary** workspace's bridge only: it `404`s for a session owned by another registered runtime, with the same body as a lost vote under the default `first-responder` policy — so a `404` here does not by itself mean the request was already answered |
+| Route                                                                                                   | Purpose                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`POST /session/:id/permission/:requestId`](./qwen-serve-protocol.md#post-sessionidpermissionrequestid) | Answer a `permission_request`. Routed to the runtime that owns the session, so it is correct in every workspace state                                                                                                                                                                       |
+| [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid)                      | Process-global form, wired to the **primary** workspace's bridge only: it `404`s for a session owned by another registered runtime, with the same body as a lost vote under the default `first-responder` policy — so a `404` here does not by itself mean the request was already answered |
 
 ### Read-only workspace context
 
-| Route                                                                                                      | Purpose                                                                                                                                                          |
-| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`GET /file`](./qwen-serve-protocol.md#get-file) · [`/file/bytes`](./qwen-serve-protocol.md#get-filebytes) | Read a file, or a byte range                                                                                                                                     |
-| `GET /stat` · `GET /list` · `GET /glob`                                                                    | Path metadata, directory listing, glob — _no dedicated sections yet_                                                                                             |
-| `GET /workspace/tools`                                                                                     | Tools reported by the live ACP child; without one, the response has `acpChannelLive: false`, `tools: []`, and a `not_started` error — _no dedicated section yet_ |
-
-> **Reference coverage.** 17 of the 25 routes above have dedicated sections.
-> Of the 8 marked otherwise, some are mentioned only in passing and three are
-> absent entirely: `GET /session/:id/pending-prompts`,
-> `POST /session/:id/permission/:requestId`, and `GET /workspace/tools`.
-> Closing that gap is tracked in
-> [#11359](https://github.com/QwenLM/qwen-code/issues/11359).
+| Route                                                                                                                                                  | Purpose                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| [`GET /file`](./qwen-serve-protocol.md#get-file) · [`GET /file/bytes`](./qwen-serve-protocol.md#get-filebytes)                                         | Read a file, or a byte range                                                                                                        |
+| [`GET /stat`](./qwen-serve-protocol.md#get-stat) · [`GET /list`](./qwen-serve-protocol.md#get-list) · [`GET /glob`](./qwen-serve-protocol.md#get-glob) | Path metadata, directory listing, glob                                                                                              |
+| [`GET /workspace/tools`](./qwen-serve-protocol.md#get-workspacetools)                                                                                  | Tools reported by the live ACP child; without one, the response has `acpChannelLive: false`, `tools: []`, and a `not_started` error |
 
 ## Minimal flow
 
@@ -151,13 +148,16 @@ same-workspace create _reuse_ the existing session, serialising unrelated
 callers through one queue.
 
 ```bash
-curl -sX POST http://daemon:4170/session \
+SESSION_JSON="$(curl -sX POST http://daemon:4170/session \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
-  -d '{"sessionScope":"thread"}'
+  -d '{"sessionScope":"thread"}')"
+printf '%s\n' "$SESSION_JSON"
+export SID="$(printf '%s' "$SESSION_JSON" | jq -er '.sessionId')"
 # → {"sessionId":"…","workspaceCwd":"/srv/project","attached":false}
 ```
 
-**3. Subscribe before prompting.** `Last-Event-ID: 0` replays from the oldest
+**3. Subscribe before prompting.** Run this in a second terminal with the same
+`QWEN_SERVER_TOKEN` and `SID`. `Last-Event-ID: 0` replays from the oldest
 retained event, which is how you catch events fired between create and
 subscribe — notably `model_switch_failed`. On an **attach** (the default
 `sessionScope: "single"` reusing an existing session) that event is the only
@@ -214,9 +214,11 @@ decide up front how it answers: auto-approval can already be in effect without
 anyone having chosen it.
 
 Answer on the session-scoped route: it is routed to the runtime that owns the
-session, so it works whatever the workspace configuration.
+session, so it works whatever the workspace configuration. Copy `data.requestId`
+from the `permission_request` event and set it before voting:
 
 ```bash
+export REQUEST_ID='<data.requestId>'
 curl -sX POST http://daemon:4170/session/$SID/permission/$REQUEST_ID \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
   -d '{"outcome":{"outcome":"selected","optionId":"proceed_once"}}'
