@@ -37,11 +37,18 @@ describe('Web Shell sandbox framing', () => {
     );
   });
 
-  it('allows only the daemon loopback port in frame-src', () => {
+  it('allows local Blob previews and only the daemon loopback port in frame-src', () => {
     const csp = buildWebShellCsp([], loopbackSandboxOrigins('localhost:4170'));
     expect(csp).toContain(
-      'frame-src http://localhost:4170 http://127.0.0.1:4170 https://localhost:4170 https://127.0.0.1:4170',
+      'frame-src blob: http://localhost:4170 http://127.0.0.1:4170 https://localhost:4170 https://127.0.0.1:4170',
     );
+    expect(
+      csp
+        .split('; ')
+        .find((directive) => directive.startsWith('frame-src '))
+        ?.split(' ')
+        .slice(1),
+    ).toEqual(['blob:', ...loopbackSandboxOrigins('localhost:4170')]);
     expect(csp).not.toContain('[::1]');
     expect(csp).not.toContain('http://localhost:*');
     expect(csp).not.toContain('http://127.0.0.1:*');
