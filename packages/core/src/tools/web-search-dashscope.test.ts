@@ -13,8 +13,29 @@ const CANDIDATES = [
 ];
 const OPENED = ['https://example.com/a'];
 
+/**
+ * Every known page is within the render caps — the ordinary case. Tests that
+ * exercise a capped-out page pass their own `rendered` set.
+ */
+function renderedSet(
+  candidates: ReadonlyArray<{ url: string }>,
+  opened: readonly string[],
+): Set<string> {
+  return new Set(
+    [...candidates.map((c) => c.url), ...opened].map((url) => {
+      const parsed = new URL(url);
+      return `${parsed.host.toLowerCase()}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`;
+    }),
+  );
+}
+
 function attach(answerText: string) {
-  return attachSideModelTitles(answerText, CANDIDATES, OPENED);
+  return attachSideModelTitles(
+    answerText,
+    CANDIDATES,
+    OPENED,
+    renderedSet(CANDIDATES, OPENED),
+  );
 }
 
 describe('attachSideModelTitles', () => {
@@ -46,6 +67,13 @@ describe('attachSideModelTitles', () => {
   });
 
   it('accepts the separators and bullets models actually emit', () => {
+    const BULLET_CANDIDATES = [
+      { url: 'https://example.com/a' },
+      { url: 'https://example.com/b' },
+      { url: 'https://example.com/c' },
+      { url: 'https://example.com/d' },
+      { url: 'https://example.com/e' },
+    ];
     const { titles } = attachSideModelTitles(
       [
         'Answer.',
@@ -56,14 +84,9 @@ describe('attachSideModelTitles', () => {
         '– Example D page — https://example.com/d',
         '— Example E page — https://example.com/e',
       ].join('\n'),
-      [
-        { url: 'https://example.com/a' },
-        { url: 'https://example.com/b' },
-        { url: 'https://example.com/c' },
-        { url: 'https://example.com/d' },
-        { url: 'https://example.com/e' },
-      ],
+      BULLET_CANDIDATES,
       [],
+      renderedSet(BULLET_CANDIDATES, []),
     );
 
     expect(titles.get('example.com/a')).toBe('Example A page');
@@ -289,6 +312,7 @@ describe('attachSideModelTitles', () => {
       ].join('\n'),
       [{ url: wiki }, { url: msdn }],
       [],
+      renderedSet([{ url: wiki }, { url: msdn }], []),
     );
 
     expect(titles.get('en.wikipedia.org/wiki/Foo_(bar)')).toBe(
@@ -307,6 +331,10 @@ describe('attachSideModelTitles', () => {
       ].join('\n'),
       [{ url: 'https://example.com/a' }],
       ['https://example.com/opened-only'],
+      renderedSet(
+        [{ url: 'https://example.com/a' }],
+        ['https://example.com/opened-only'],
+      ),
     );
 
     expect(titles.get('example.com/opened-only')).toBe('Opened Only page');

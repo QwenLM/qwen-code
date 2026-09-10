@@ -23,7 +23,11 @@ import type {
   WebSearchOutcome,
   WebSearchSource,
 } from './web-search-backend.js';
-import { sliceAtCharBoundary } from './web-search-backend.js';
+import {
+  MAX_CANDIDATE_URLS,
+  MAX_OPENED_URLS,
+  sliceAtCharBoundary,
+} from './web-search-backend.js';
 import { DashScopeWebSearchBackend } from './web-search-dashscope.js';
 import type {
   ToolCallConfirmationDetails,
@@ -47,10 +51,6 @@ const MAX_RESULT_SIZE_CHARS = 100_000;
  * does not get its footers bisected by the generic truncator.
  */
 const RESULT_ENVELOPE_HEADROOM_CHARS = 2_000;
-/** Search-returned URLs that were not opened are capped in the LLM payload. */
-const MAX_CANDIDATE_URLS = 25;
-/** Opened-page URLs are capped symmetrically so the URL sections stay bounded. */
-const MAX_OPENED_URLS = 25;
 
 /**
  * Search model used when the backend is derived from the main model's
@@ -641,19 +641,33 @@ const CITATION_POLICY =
  *
  * Backslashes are escaped along with the brackets, and first: a title ending
  * in one would otherwise consume the escape we add and turn `]` back into a
- * literal, breaking the very link this guards.
+ * literal, breaking the very link this guards. `)` is deliberately not
+ * escaped — it needs none inside link text, and the CLI never unescapes what
+ * it renders, so escaping it would show the user a literal backslash in an
+ * ordinary parenthesized title.
  */
 function escapeLinkText(title: string): string {
-  return title.replace(/([\\[\])])/g, '\\$1');
+  return title.replace(/([\\[\]])/g, '\\$1');
 }
 
 /**
- * Wrap URLs that markdown cannot carry bare. Parenthesized paths are common
- * enough in reference material (Wikipedia disambiguation, MSDN) that an
- * unwrapped one would truncate a real citation.
+ * Percent-encode the characters that break a markdown destination.
+ *
+ * The `<...>` form markdown also offers is not an option here: the CLI's own
+ * hyperlink check requires a bare scheme prefix, so a wrapped destination
+ * loses its OSC 8 link and shows the user literal angle brackets — for
+ * exactly the parenthesized URLs this exists to protect. Encoding keeps the
+ * scheme in front, so the link stays clickable in every renderer, and it also
+ * covers the cases wrapping never fixed: unbalanced or nested parens, which
+ * the CLI's link pattern truncates, and `>`/`<`, which would corrupt the OSC 8
+ * target. Already-encoded input is untouched, since only literals are
+ * replaced.
  */
 function renderLinkTarget(url: string): string {
-  return /[()\s]/.test(url) ? `<${url}>` : url;
+  return url.replace(
+    /[()<>\s]/g,
+    (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'),
+  );
 }
 
 /** One evidence line: a titled link when the backend knew the title. */

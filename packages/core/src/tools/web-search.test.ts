@@ -1461,6 +1461,33 @@ describe('WebSearchTool execute', () => {
     expect(content).toContain('The answer is 42.');
   });
 
+  it('falls back to extracted page text when the reply was only the block', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          EXTRACTOR_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: 'Sources:\n- Example A page — https://example.com/a',
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('- [Example A page](https://example.com/a)');
+    // Stripping the block emptied the narration; without the fallback the
+    // model would get a successful result carrying no findings at all.
+    expect(content).toContain('page content');
+  });
+
   it('drops a listed URL the search never returned', async () => {
     mockCreate.mockResolvedValueOnce(
       makeStream(
@@ -1672,7 +1699,7 @@ describe('WebSearchTool execute', () => {
     );
   });
 
-  it('escapes link syntax in a title and wraps a parenthesized URL', async () => {
+  it('escapes link syntax in a title and encodes a parenthesized URL', async () => {
     const url = 'https://example.com/wiki/Foo_(bar)';
     mockCreate.mockResolvedValueOnce(
       makeStream(
@@ -1698,10 +1725,17 @@ describe('WebSearchTool execute', () => {
       ),
     );
 
-    const result = await runSearch(makeConfig());
-    expect(result.llmContent as string).toContain(
-      '- [Foo \\[bar\\] (baz\\)](<https://example.com/wiki/Foo_(bar)>)',
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain(
+      '- [Foo \\[bar\\] (baz)](https://example.com/wiki/Foo_%28bar%29)',
     );
+    // The destination must keep a bare scheme prefix: the CLI only turns a
+    // link into an OSC 8 hyperlink when it can read the scheme, so wrapping
+    // it in <...> would leave the user with literal angle brackets.
+    const target = /\]\((.+?)\)$/m.exec(
+      content.split('\n').find((line) => line.includes('Foo_')) ?? '',
+    )?.[1];
+    expect(target).toMatch(/^https:/);
   });
 
   it('escapes a backslash so it cannot consume the bracket escape', async () => {
@@ -1918,13 +1952,33 @@ describe('WebSearchTool execute', () => {
             ...SEARCH_ITEM,
             action: { ...SEARCH_ITEM.action, sources: manySources },
           },
-          MESSAGE_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: [
+                  'Sources:',
+                  '- In cap — https://example.com/0',
+                  '- Over cap — https://example.com/39',
+                  '',
+                  'Node 24 shipped in April.',
+                ].join('\n'),
+              },
+            ],
+          },
         ]),
       ),
     );
     const result = await runSearch(makeConfig());
     const content = result.llmContent as string;
     expect(content).toContain('15 more candidate URL(s) omitted');
+    // A page the caps exclude keeps its narration line: dropping it there as
+    // well would erase the page from the result while the prose still
+    // credits it.
+    expect(content).toContain('https://example.com/39');
+    expect(content).toContain('Node 24 shipped in April.');
   });
 
   it('caps opened URLs and notes the omission', async () => {
@@ -1942,7 +1996,21 @@ describe('WebSearchTool execute', () => {
             urls: manyOpened,
             output: 'content',
           },
-          MESSAGE_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: [
+                  'Sources:',
+                  '- Over cap — https://example.com/opened/29',
+                  '',
+                  'The answer is 42.',
+                ].join('\n'),
+              },
+            ],
+          },
         ]),
       ),
     );
@@ -1952,6 +2020,10 @@ describe('WebSearchTool execute', () => {
     expect(content).toContain('https://example.com/opened/24');
     expect(content).not.toContain('https://example.com/opened/25');
     expect(content).toContain('5 more opened page(s) omitted');
+    // Same rule in the opened tier: the narration keeps the only pointer to
+    // a page the cap excludes.
+    expect(content).toContain('https://example.com/opened/29');
+    expect(content).toContain('The answer is 42.');
   });
 
   it('maps HTTP 429 to WEB_SEARCH_RATE_LIMITED', async () => {

@@ -29,6 +29,15 @@ export interface WebSearchBackendConfig {
 }
 
 /**
+ * Per-tier render caps. The formatter bounds each evidence section to this
+ * many pages, and the DashScope backend reads the same values so the lines it
+ * removes from a narration are exactly the ones the formatter will render —
+ * a page dropped from both would vanish from the result entirely.
+ */
+export const MAX_OPENED_URLS = 25;
+export const MAX_CANDIDATE_URLS = 25;
+
+/**
  * One page the search produced. `title` is present only when the backend
  * actually learned it — the tool renders a titled markdown link when it did
  * and a bare URL when it did not, so a backend that cannot supply titles

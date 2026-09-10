@@ -20,7 +20,11 @@ import type {
   WebSearchOutcome,
   WebSearchSource,
 } from './web-search-backend.js';
-import { sliceAtCharBoundary } from './web-search-backend.js';
+import {
+  MAX_CANDIDATE_URLS,
+  MAX_OPENED_URLS,
+  sliceAtCharBoundary,
+} from './web-search-backend.js';
 
 /** Total budget for one tool invocation, covering the no-search retry. */
 const SEARCH_TIMEOUT_MS = 60_000;
@@ -150,6 +154,12 @@ interface CollectedSearchData {
    * titles, or the page would author its own citation.
    */
   narrated: boolean;
+  /**
+   * Extracted page text, kept separate from {@link answerText} so the block
+   * stripper never sees it (a page could then author its own citation) while
+   * it stays available as a last-resort answer once the strip has run.
+   */
+  extractedParts: string[];
   searchCallCount: number;
   usage?: WsUsage;
 }
@@ -229,6 +239,7 @@ function collectFromItems(
     // extraction text is the fallback when narration never arrived.
     answerText:
       messageParts.join('\n') || fallbackText || extractedParts.join('\n\n'),
+    extractedParts,
     narrated: messageParts.length > 0 || fallbackText.length > 0,
     searchCallCount,
     usage,
@@ -315,6 +326,11 @@ function parseSourceLine(line: string): ParsedSourceLine | undefined {
  * removed only when at least one line matched, so a model that ignored the
  * format keeps its answer intact instead of losing its last paragraph.
  *
+ * `rendered` is the set of pages the tool will actually list. A line naming a
+ * page outside it stays in the narration: the evidence sections are capped,
+ * so removing that line as well would erase the page from the result while
+ * the prose still credits it.
+ *
  * @returns the narration with the block removed, and titles keyed by
  * {@link normalizeSourceUrl}.
  */
@@ -322,6 +338,7 @@ export function attachSideModelTitles(
   answerText: string,
   candidates: readonly CandidateSource[],
   openedUrls: readonly string[],
+  rendered: ReadonlySet<string>,
 ): { answerText: string; titles: Map<string, string> } {
   const titles = new Map<string, string>();
   if (!answerText.trim()) return { answerText, titles };
@@ -347,6 +364,9 @@ export function attachSideModelTitles(
     // cite from.
     let lastMember = i;
     let matched = false;
+    // Lines naming a page the tool will not list: they are the reader's only
+    // remaining pointer to it, so they outlive the block.
+    const retained = new Set<number>();
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j];
       if (!line.trim()) continue;
@@ -359,12 +379,18 @@ export function attachSideModelTitles(
       if (!known.has(key)) continue;
       matched = true;
       if (!titles.has(key)) titles.set(key, parsed.title);
+      if (!rendered.has(key)) retained.add(j);
     }
     // Only a block that named a real page is removed; one that matched
     // nothing may be prose the model wrote, and losing it would cost the
     // answer a paragraph.
     if (!matched) continue;
-    for (let j = i; j <= lastMember; j++) dropped.add(j);
+    for (let j = i; j <= lastMember; j++) {
+      if (!retained.has(j)) dropped.add(j);
+    }
+    // A retained entry needs its heading: without it the narration would end
+    // on a bullet belonging to a list that is no longer there.
+    if (retained.size > 0) dropped.delete(i);
     i = lastMember;
   }
 
@@ -717,8 +743,35 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     data: CollectedSearchData,
     partialNote: string | undefined,
   ): WebSearchOutcome {
+    // The extractor reports the URL it fetched while the search index
+    // reports its own; a trailing slash or scheme difference must not list
+    // one page in both evidence tiers.
+    const openedSet = new Set(data.openedUrls.map(normalizeSourceUrl));
+    const tiers: Array<{ url: string; opened: boolean }> = [
+      ...data.openedUrls.map((url) => ({ url, opened: true })),
+      ...data.candidates
+        .filter(
+          (candidate) => !openedSet.has(normalizeSourceUrl(candidate.url)),
+        )
+        .map((candidate) => ({ url: candidate.url, opened: false })),
+    ];
+    // What the formatter will keep once it applies the per-tier caps. The
+    // stripper needs it before the titles exist, so it is derived from the
+    // tiers rather than from the finished sources.
+    const rendered = new Set(
+      [
+        ...tiers.filter((tier) => tier.opened).slice(0, MAX_OPENED_URLS),
+        ...tiers.filter((tier) => !tier.opened).slice(0, MAX_CANDIDATE_URLS),
+      ].map((tier) => normalizeSourceUrl(tier.url)),
+    );
+
     const { answerText, titles } = data.narrated
-      ? attachSideModelTitles(data.answerText, data.candidates, data.openedUrls)
+      ? attachSideModelTitles(
+          data.answerText,
+          data.candidates,
+          data.openedUrls,
+          rendered,
+        )
       : { answerText: data.answerText, titles: new Map<string, string>() };
     // A title the side model gave wins over one the response carried: it
     // read the page, the search index only listed it.
@@ -728,29 +781,19 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     const titleFor = (url: string): string | undefined =>
       titles.get(normalizeSourceUrl(url)) ?? declared.get(url);
 
-    // The extractor reports the URL it fetched while the search index
-    // reports its own; a trailing slash or scheme difference must not list
-    // one page in both evidence tiers.
-    const openedSet = new Set(data.openedUrls.map(normalizeSourceUrl));
-    const sources: WebSearchSource[] = [
-      ...data.openedUrls.map((url) => ({
-        url,
-        title: titleFor(url),
-        opened: true,
-      })),
-      ...data.candidates
-        .filter(
-          (candidate) => !openedSet.has(normalizeSourceUrl(candidate.url)),
-        )
-        .map((candidate) => ({
-          url: candidate.url,
-          title: titleFor(candidate.url),
-          opened: false,
-        })),
-    ];
+    const sources: WebSearchSource[] = tiers.map((tier) => ({
+      url: tier.url,
+      title: titleFor(tier.url),
+      opened: tier.opened,
+    }));
 
     return {
-      answerText,
+      // A reply that was nothing but the Sources block leaves no narration
+      // once the block is taken out, and a success with no findings at all
+      // reads as though the search found nothing. Fall back to the extracted
+      // page text — after the strip, never before it, so the stripper is
+      // never handed raw page text to mine for titles.
+      answerText: answerText.trim() || data.extractedParts.join('\n\n'),
       sources,
       executedQueries: data.executedQueries,
       searchCount:
