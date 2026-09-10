@@ -7,6 +7,9 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -338,6 +341,7 @@ export class DaemonChannelBridge
   private readonly requestToSession = new Map<string, string>();
   private readonly respondedRequestToSession = new Map<string, string>();
   private readonly activePrompts = new Set<string>();
+  private readonly taskOutputs = new Map<string, { text?: string }>();
   private readonly activePromptControllers = new Map<
     string,
     Set<AbortController>
@@ -555,6 +559,9 @@ export class DaemonChannelBridge
       );
     }
     this.activePrompts.add(sessionId);
+    const taskOutput: { text?: string } | undefined =
+      options?.outputMode === 'per_task' ? {} : undefined;
+    if (taskOutput) this.taskOutputs.set(sessionId, taskOutput);
 
     const controller = new AbortController();
     let controllers = this.activePromptControllers.get(sessionId);
@@ -716,6 +723,9 @@ export class DaemonChannelBridge
             prompt,
             _meta: {
               [CHANNEL_PROMPT_META_KEY]: true,
+              ...(options?.outputMode === 'per_task'
+                ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
+                : {}),
               ...(promptAuthorization
                 ? {
                     [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]:
@@ -746,7 +756,14 @@ export class DaemonChannelBridge
         turnBarrier,
         new Promise<void>((resolve) => setTimeout(resolve, 0)),
       ]);
-      const textResult = chunks.join('') || slashCommandOutput;
+      if (
+        options?.outputMode === 'per_task' &&
+        result.stopReason === 'cancelled'
+      ) {
+        throw new ChannelPromptCancelledError();
+      }
+      const textResult =
+        taskOutput?.text || chunks.join('') || slashCommandOutput;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -760,6 +777,9 @@ export class DaemonChannelBridge
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
+      if (this.taskOutputs.get(sessionId) === taskOutput) {
+        this.taskOutputs.delete(sessionId);
+      }
       controllers.delete(controller);
       if (
         controllers.size === 0 &&
@@ -1064,7 +1084,17 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true
+            meta['rewritten'] !== true &&
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] === true
+          ) {
+            const taskOutput = this.taskOutputs.get(sessionId);
+            if (taskOutput && text?.trim()) taskOutput.text = text;
+            break;
+          }
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
           ) {
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],

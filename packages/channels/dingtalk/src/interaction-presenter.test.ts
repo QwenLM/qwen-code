@@ -124,7 +124,12 @@ function permissionContext(): ChannelPermissionRequestContext {
   };
 }
 
-function createHarness(options: { language?: string } = {}) {
+function createHarness(
+  options: {
+    language?: string;
+    outputMode?: 'per_task' | 'per_turn' | 'per_response';
+  } = {},
+) {
   const projectionOrder: string[] = [];
   const client = {
     createAndDeliver: vi.fn().mockImplementation(async (request) => {
@@ -168,6 +173,7 @@ function createHarness(options: { language?: string } = {}) {
       presenterRef.current?.reserveProjection(runId),
   });
   const presenter = new DingtalkInteractionPresenter({
+    outputMode: options.outputMode,
     statusCards,
     questionCards,
     permissionCards,
@@ -193,6 +199,205 @@ afterEach(() => {
 });
 
 describe('DingtalkInteractionPresenter', () => {
+  it.each(['per_task', 'per_turn', 'per_response'] as const)(
+    'preserves long replies for ordinary-message delivery in %s',
+    async (outputMode) => {
+      const sendFallback = vi.fn().mockResolvedValue(undefined);
+      const presenter = new DingtalkInteractionPresenter({
+        outputMode,
+        sendFallback,
+      });
+      presenter.registerRun(
+        'run-1',
+        'owner-1',
+        { chatId: 'cid-1', isGroup: true },
+        'session-1',
+      );
+      const text = `START-${'x'.repeat(25_000)}-END`;
+      presenter.appendOutput(segment('segment-1'), text);
+      await presenter.closeOutput('segment-1', '', 'response_boundary');
+      presenter.terminalizeRun('run-1', 'completed');
+      await vi.waitFor(() => expect(sendFallback).toHaveBeenCalledOnce());
+      expect(sendFallback.mock.calls[0]?.[1]).toBe(text);
+    },
+  );
+
+  it('retains the last non-empty reply through whitespace-only final-only output', async () => {
+    const { client, presenter } = createHarness({ outputMode: 'per_turn' });
+    presenter.appendOutput(segment('segment-1'), 'Last non-empty reply');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.appendOutput(segment('segment-2'), '   ');
+    await presenter.closeOutput('segment-2', '', 'response_boundary');
+    presenter.appendOutput(segment('segment-3'), '\n ');
+    await presenter.closeOutput('segment-3', '\n ', 'completed');
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'Last non-empty reply',
+          flowStatus: 3,
+        }),
+      }),
+    );
+  });
+
+  it('does not create a process card for whitespace-only trailing output', async () => {
+    const { client, presenter } = createHarness({
+      outputMode: 'per_response',
+    });
+    presenter.appendOutput(segment('segment-1'), 'Only reply');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.appendOutput(segment('segment-2'), '   ');
+    await presenter.closeOutput('segment-2', '   ', 'completed');
+    presenter.terminalizeRun('run-1', 'completed');
+    await Promise.resolve();
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+  });
+
+  it.each(['failed', 'cancelled'] as const)(
+    'does not send retained final-only progress after %s',
+    async (terminal) => {
+      const { client, presenter, sendFallback } = createHarness({
+        outputMode: 'per_turn',
+      });
+      const creation = deferred<void>();
+      vi.mocked(client.createAndDeliver).mockReturnValueOnce(creation.promise);
+      presenter.appendOutput(segment('segment-1'), 'Intermediate reply');
+      const boundary = presenter.closeOutput(
+        'segment-1',
+        '',
+        'response_boundary',
+      );
+      presenter.terminalizeRun('run-1', terminal);
+      creation.resolve();
+      await boundary;
+      await vi.waitFor(() => expect(client.updateInstance).toHaveBeenCalled());
+      expect(sendFallback).not.toHaveBeenCalled();
+    },
+  );
+
+  it('withholds intermediate fallback in final-only mode when cards fail', async () => {
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_turn',
+    });
+    vi.mocked(client.createAndDeliver).mockRejectedValue(
+      new DingtalkCardRequestError('unavailable', false),
+    );
+    presenter.appendOutput(segment('segment-1'), 'Intermediate output');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    expect(sendFallback).not.toHaveBeenCalled();
+    presenter.appendOutput(segment('segment-2'), 'Final output');
+    await presenter.closeOutput('segment-2', '', 'completed');
+    presenter.terminalizeRun('run-1', 'completed');
+    await Promise.resolve();
+    expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'Final output',
+      'session-1',
+    );
+  });
+
+  it('falls back to the last completed output on an empty final-only completion', async () => {
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_turn',
+    });
+    vi.mocked(client.createAndDeliver).mockRejectedValue(
+      new DingtalkCardRequestError('unavailable', false),
+    );
+    presenter.appendOutput(segment('segment-1'), 'Last complete reply');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.terminalizeRun('run-1', 'completed');
+    await vi.waitFor(() =>
+      expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+        'cid-1',
+        'Last complete reply',
+        'session-1',
+      ),
+    );
+  });
+
+  it('completes each process output before displaying the next segment', async () => {
+    const { client, presenter } = createHarness({
+      outputMode: 'per_response',
+    });
+    const completion = deferred<void>();
+    vi.mocked(client.updateInstance).mockReturnValueOnce(completion.promise);
+    presenter.appendOutput(segment('segment-1'), 'First complete output');
+    const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledOnce(),
+    );
+    presenter.appendOutput(segment('segment-2'), 'Final output');
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    completion.resolve();
+    await closed;
+    await presenter.closeOutput('segment-2', '', 'completed');
+
+    const cards = vi.mocked(client.createAndDeliver).mock.calls;
+    expect(cards).toHaveLength(2);
+    const firstId = cards[0]![0].outTrackId;
+    const secondId = cards[1]![0].outTrackId;
+    expect(firstId).not.toBe(secondId);
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outTrackId: firstId,
+        cardParamMap: expect.objectContaining({
+          content: 'First complete output',
+          flowStatus: 3,
+        }),
+      }),
+    );
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outTrackId: secondId,
+        cardParamMap: expect.objectContaining({ content: 'Final output' }),
+      }),
+    );
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.filter(([request]) => request.outTrackId === firstId)
+        .map(([request]) => request.content)
+        .join('\n'),
+    ).not.toContain('Final output');
+    presenter.terminalizeRun('run-1', 'completed');
+  });
+
+  it('does not replay an older final-only preview after an input boundary', async () => {
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'per_turn',
+    });
+    vi.mocked(client.createAndDeliver).mockRejectedValue(
+      new DingtalkCardRequestError('unavailable', false),
+    );
+    presenter.appendOutput(segment('segment-1'), 'Older progress');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.appendOutput(segment('segment-2'), 'Please choose an option');
+    await presenter.closeOutput('segment-2', '', 'input_requested');
+    presenter.appendOutput(segment('segment-3'), ' \n');
+    await presenter.closeOutput('segment-3', ' \n', 'completed');
+    presenter.terminalizeRun('run-1', 'completed');
+    await Promise.resolve();
+    expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'Please choose an option',
+      'session-1',
+    );
+  });
+
+  it('does not create an empty card after the last process output', async () => {
+    const { client, presenter } = createHarness({
+      outputMode: 'per_response',
+    });
+    presenter.appendOutput(segment('segment-1'), 'Only output');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.terminalizeRun('run-1', 'completed');
+    await Promise.resolve();
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+  });
+
   it('creates the running card as soon as the run starts', async () => {
     const { client, presenter } = createHarness();
 

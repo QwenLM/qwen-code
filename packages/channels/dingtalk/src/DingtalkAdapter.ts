@@ -12,6 +12,8 @@ import {
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  BackgroundOutputCoordinator,
+  parseChannelOutputMode,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizePromptText,
@@ -69,6 +71,10 @@ import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
+  BackgroundOutputTarget,
+  ChannelOutputMode,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
@@ -918,6 +924,29 @@ interface ReplyTextDelivery {
   atUserId?: string;
 }
 
+class ProactiveTextDeliveryError extends Error {
+  readonly retryable?: boolean;
+
+  constructor(
+    readonly plan: ProactiveTextDelivery,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    if (cause instanceof DingtalkCardRequestError) {
+      this.retryable = cause.retryable;
+    }
+  }
+}
+
+class ReplyTextDeliveryError extends Error {
+  constructor(
+    readonly plan: ReplyTextDelivery,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
@@ -952,6 +981,7 @@ export class DingtalkChannel extends ChannelBase {
    */
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
+  private readonly outputMode?: ChannelOutputMode;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
@@ -967,6 +997,7 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { sessionId: string; projector: OutboundFileProjector }
   >();
+  private readonly backgroundOutputCoordinator: BackgroundOutputCoordinator;
 
   constructor(
     name: string,
@@ -995,6 +1026,22 @@ export class DingtalkChannel extends ChannelBase {
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
     );
+    this.outputMode = parseChannelOutputMode(name, config.outputMode, true);
+    this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
+      outputMode: this.outputMode,
+      getTarget: (sessionId) => this.router.getTarget(sessionId),
+      resolveDelivery: (sessionId) =>
+        this.resolveBackgroundResponseDelivery(sessionId),
+      createDelivery: (sessionId, target) =>
+        this.createBackgroundOutputDelivery(sessionId, target),
+      isRetryableError: (error) =>
+        !(
+          error instanceof ProactiveTextDeliveryError &&
+          error.retryable === false
+        ),
+      log: (message) =>
+        process.stderr.write(`[DingTalk:${this.name}] ${message}`),
+    });
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -1070,23 +1117,18 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (
-        this.statusCardController ||
-        this.questionCardController ||
-        this.permissionCardController
-      ) {
-        this.interactionPresenter = new DingtalkInteractionPresenter({
-          statusCards: this.statusCardController,
-          questionCards: this.questionCardController,
-          permissionCards: this.permissionCardController,
-          ...(options?.displayLanguage
-            ? { language: options.displayLanguage }
-            : {}),
-          sendFallback: (chatId, text, sessionId, sourceLabel) =>
-            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-        });
-      }
     }
+    this.interactionPresenter = new DingtalkInteractionPresenter({
+      outputMode: this.outputMode,
+      statusCards: this.statusCardController,
+      questionCards: this.questionCardController,
+      permissionCards: this.permissionCardController,
+      ...(options?.displayLanguage
+        ? { language: options.displayLanguage }
+        : {}),
+      sendFallback: (chatId, text, sessionId, sourceLabel) =>
+        this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
+    });
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
         initialClient: this.client,
@@ -1571,6 +1613,7 @@ export class DingtalkChannel extends ChannelBase {
     atUserId?: string,
     sourceLabel?: string,
     prepared = false,
+    failOnHttpError = false,
   ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook.
     const webhook = this.webhooks.get(chatId);
@@ -1578,6 +1621,9 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] No webhook for chatId ${chatId}, cannot send.\n`,
       );
+      if (failOnHttpError) {
+        throw new Error('DingTalk session webhook unavailable');
+      }
       return;
     }
 
@@ -1590,7 +1636,11 @@ export class DingtalkChannel extends ChannelBase {
       atUserId,
       sourceLabel,
     );
-    await this.deliverReplyText(chatId, plan);
+    try {
+      await this.deliverReplyText(chatId, plan, failOnHttpError);
+    } catch (error) {
+      throw new ReplyTextDeliveryError(plan, error);
+    }
   }
 
   private createReplyTextDelivery(
@@ -1623,9 +1673,13 @@ export class DingtalkChannel extends ChannelBase {
   private async deliverReplyText(
     chatId: string,
     plan: ReplyTextDelivery,
+    failOnHttpError = false,
   ): Promise<void> {
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
+      if (failOnHttpError) {
+        throw new Error('DingTalk session webhook unavailable');
+      }
       return;
     }
     while (plan.nextChunk < plan.chunks.length) {
@@ -1683,6 +1737,31 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
+        if (failOnHttpError) {
+          throw new Error(
+            `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
+          );
+        }
+      } else if (failOnHttpError) {
+        const payload = (await resp
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        const response =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : undefined;
+        const value = response?.['errcode'] ?? response?.['code'];
+        if (value !== undefined && String(value) !== '0') {
+          const detail = sanitizeLogText(
+            String(response?.['errmsg'] ?? response?.['message'] ?? value),
+            300,
+          );
+          process.stderr.write(
+            `[DingTalk:${this.name}] sendMessage failed: ${detail}\n`,
+          );
+          throw new Error(`DingTalk reply send failed: ${detail}`);
+        }
       }
       plan.nextChunk++;
     }
@@ -1752,7 +1831,11 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel,
     );
     if (!plan) return;
-    await this.deliverProactiveText(target, plan);
+    try {
+      await this.deliverProactiveText(target, plan);
+    } catch (error) {
+      throw new ProactiveTextDeliveryError(plan, error);
+    }
   }
 
   private async createProactiveTextDelivery(
@@ -2119,6 +2202,7 @@ export class DingtalkChannel extends ChannelBase {
       this.finishReaction(state.chatId, state.messageId, state.sessionId);
     }
     this.statusCardController?.dispose();
+    this.backgroundOutputCoordinator.drain();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.reactionStates.clear();
@@ -2454,6 +2538,8 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
+    // Preserve a pending background turn's latest result if its session dies.
+    this.backgroundOutputCoordinator.drain(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -2491,6 +2577,10 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
+  protected override onSessionRetiring(sessionId: string): void {
+    this.backgroundOutputCoordinator.drain(sessionId);
+  }
+
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
       this.startReaction(event.chatId, event.messageId, event.sessionId);
@@ -2506,13 +2596,19 @@ export class DingtalkChannel extends ChannelBase {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
         const sourceLabel = this.getResponseSourceLabel(event.sessionId);
+        const atUserId =
+          this.atSender && event.messageId
+            ? this.mentionTargets.get(event.messageId)
+            : undefined;
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
-          ...(sourceLabel ? [sourceLabel] : []),
+          sourceLabel,
+          (chatId, text, _sessionId, label) =>
+            this.sendReply(chatId, text, atUserId, label),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
@@ -2697,23 +2793,97 @@ export class DingtalkChannel extends ChannelBase {
     context?: BackgroundResponseContext,
   ): Promise<void> {
     const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent') ||
-      !text.trim()
-    ) {
+    if (!target || target.channelName !== this.name) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
-    return super.dispatchBackgroundResponse(
-      sessionId,
-      this.formatBackgroundAgentResponse(text, context?.label),
-      context,
-    );
+
+    if (
+      await this.backgroundOutputCoordinator.dispatch(sessionId, text, context)
+    ) {
+      return;
+    }
+    return super.dispatchBackgroundResponse(sessionId, text, context);
   }
 
-  private formatBackgroundAgentResponse(text: string, label?: string): string {
-    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
+  private createBackgroundOutputDelivery(
+    sessionId: string,
+    target: BackgroundOutputTarget,
+  ): BackgroundOutputDelivery {
+    let proactivePlan: ProactiveTextDelivery | undefined;
+    let replyPlan: ReplyTextDelivery | undefined;
+    // Prepared output can already have sent attachment messages.
+    let preparedReplyBody: string | undefined;
+    let composedTurnComplete = false;
+    return async (output) => {
+      const body = this.formatBackgroundOutput(output);
+      const plan = proactivePlan ?? replyPlan;
+      if (!plan || plan.nextChunk === 0) {
+        const header = body.split('\n', 1)[0]!;
+        const replaceHeader = (text: string) =>
+          text.replace(
+            /## (?:✅|❌|⏹️) (?:Agent|Shell|Monitor|Workflow) · [^\n]+/,
+            () => header,
+          );
+        if (plan) {
+          plan.title = extractTitle(body);
+          plan.chunks[0] = replaceHeader(plan.chunks[0]!);
+        }
+        if (preparedReplyBody) {
+          preparedReplyBody = replaceHeader(preparedReplyBody);
+        }
+        composedTurnComplete = output.turnComplete;
+      }
+      try {
+        if (proactivePlan) {
+          await this.deliverProactiveText(target.target, proactivePlan);
+        } else if (replyPlan) {
+          await this.deliverReplyText(target.target.chatId, replyPlan, true);
+        } else {
+          if (
+            this.statusCardController ||
+            !this.supportsProactiveSend() ||
+            !this.supportsProactiveTarget(target.target)
+          ) {
+            preparedReplyBody ??= await this.prepareBackgroundOutput(
+              target.target,
+              body,
+            );
+          }
+          await this.deliverBackgroundResponseToTarget(
+            sessionId,
+            preparedReplyBody ?? body,
+            target,
+            preparedReplyBody !== undefined,
+          );
+        }
+        return { turnComplete: composedTurnComplete };
+      } catch (error) {
+        if (error instanceof ProactiveTextDeliveryError) {
+          proactivePlan = error.plan;
+        } else if (error instanceof ReplyTextDeliveryError) {
+          replyPlan = error.plan;
+        }
+        throw error;
+      }
+    };
+  }
+
+  private formatBackgroundOutput(delivery: BackgroundOutputPacket): string {
+    const icon =
+      delivery.status === 'completed'
+        ? '✅'
+        : delivery.status === 'failed'
+          ? '❌'
+          : '⏹️';
+    const label = this.formatBackgroundAgentLabel(delivery.label);
+    const kind = {
+      agent: 'Agent',
+      shell: 'Shell',
+      monitor: 'Monitor',
+      workflow: 'Workflow',
+    }[delivery.kind];
+    const header = `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
+    return delivery.text ? `${header}\n\n${delivery.text}` : header;
   }
 
   private formatBackgroundAgentLabel(label?: string): string {
@@ -2724,12 +2894,92 @@ export class DingtalkChannel extends ChannelBase {
     return escapeDingTalkMarkdown(normalized || '后台任务');
   }
 
+  private prepareBackgroundOutput(
+    target: SessionTarget,
+    text: string,
+  ): Promise<string> {
+    return this.supportsProactiveSend() && this.supportsProactiveTarget(target)
+      ? this.prepareFileOutput(text, (file, mediaId) =>
+          this.sendProactiveFile(target, file, mediaId),
+        )
+      : this.prepareReplyOutput(target.chatId, text);
+  }
+
+  protected override async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: { target: SessionTarget; sourceLabel?: string },
+    prepared = false,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
+    if (
+      this.statusCardController &&
+      this.supportsProactiveDeliveryTarget(target) &&
+      (target.isGroup === true || this.isStableTargetId(target.senderId))
+    ) {
+      if (!prepared) {
+        text = await this.prepareBackgroundOutput(target, text);
+        prepared = true;
+      }
+      if (
+        await this.statusCardController.deliverCompletedResult(
+          {
+            chatId: target.isGroup ? target.chatId : target.senderId,
+            isGroup: target.isGroup === true,
+          },
+          text,
+          sourceLabel,
+        )
+      ) {
+        return;
+      }
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    await this.deliverBackgroundReply(
+      target.chatId,
+      text,
+      sessionId,
+      sourceLabel,
+      prepared,
+      true,
+    );
+  }
+
+  /**
+   * Body-identical to the base implementation — this override exists only to
+   * widen the signature, which the base seam does not declare. The background
+   * output delivery passes `prepared` so the body it already projected isn't
+   * projected a second time (that would re-upload its files), and
+   * `failOnHttpError` so a failed send throws instead of being swallowed,
+   * letting the flush capture the delivery plan for the next retry.
+   */
+  protected override async deliverBackgroundReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+    prepared = false,
+    failOnHttpError = false,
+  ): Promise<void> {
+    await this.sendResponseMessage(
+      chatId,
+      text,
+      sessionId,
+      sourceLabel,
+      prepared,
+      failOnHttpError,
+    );
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
     sourceLabel?: string,
     prepared = false,
+    failOnHttpError = false,
   ): Promise<void> {
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
@@ -2741,6 +2991,7 @@ export class DingtalkChannel extends ChannelBase {
       atUserId,
       sourceLabel ?? this.getResponseSourceLabel(sessionId),
       prepared,
+      failOnHttpError,
     );
   }
 

@@ -4,6 +4,7 @@ import type {
   ChannelPlugin,
   SessionScope,
 } from '@qwen-code/channel-base';
+import { CHANNEL_OUTPUT_MODE_FIELD } from '@qwen-code/channel-base';
 
 export interface ChannelTypeDescriptor {
   type: string;
@@ -80,6 +81,7 @@ const SESSION_SCOPE_OPTIONS: ReadonlyArray<{
 function managementFieldsWithSharedControls(
   fields: readonly ChannelConfigFieldDescriptor[],
   defaultSessionScope: SessionScope,
+  supportsOutputMode: boolean,
 ): readonly ChannelConfigFieldDescriptor[] {
   const declared = new Set(fields.map((field) => field.key));
   const normalizedFields = fields.map((field) =>
@@ -89,6 +91,7 @@ function managementFieldsWithSharedControls(
   );
   return [
     ...normalizedFields,
+    ...(supportsOutputMode ? [CHANNEL_OUTPUT_MODE_FIELD] : []),
     ...SHARED_ACCESS_FIELDS.filter((field) => !declared.has(field.key)),
     ...(declared.has('sessionScope')
       ? []
@@ -167,6 +170,11 @@ function assertManagementField(
   if (!nested && field.key === 'type') {
     throw new Error(
       `Channel field "${path}" cannot use the reserved key "type".`,
+    );
+  }
+  if (!nested && field.key === 'outputMode') {
+    throw new Error(
+      'Channel field "outputMode" is shared; declare supportsOutputMode instead.',
     );
   }
   if (typeof field.label !== 'string' || field.label.length === 0) {
@@ -399,7 +407,13 @@ export async function supportedChannelCatalog(): Promise<
 > {
   await ensureBuiltins();
   return [...registry.values()].map(
-    ({ channelType, displayName, management, defaultSessionScope }) => ({
+    ({
+      channelType,
+      displayName,
+      management,
+      defaultSessionScope,
+      supportsOutputMode,
+    }) => ({
       type: channelType,
       displayName,
       manageable: management !== undefined,
@@ -407,6 +421,7 @@ export async function supportedChannelCatalog(): Promise<
         ? managementFieldsWithSharedControls(
             management.fields,
             defaultSessionScope ?? 'user',
+            supportsOutputMode === true,
           )
         : [],
     }),

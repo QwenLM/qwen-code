@@ -9,6 +9,7 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  supportsOutputMode: true,
   management: {
     fields: [
       {

@@ -13,12 +13,14 @@ vi.mock('./channel-registry.js', () => ({
         requiredConfigFields?: string[];
         envResolvableConfigFields?: string[];
         defaultSessionScope?: string;
+        supportsOutputMode?: boolean;
       }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
+        supportsOutputMode: true,
       },
       wecom: {
         channelType: 'wecom',
@@ -181,7 +183,64 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({});
     expect(result.identity).toBeUndefined();
     expect(result.memoryScope).toBeUndefined();
+    expect(result.outputMode).toBeUndefined();
   });
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'accepts shared outputMode %s for an opted-in adapter',
+    async (outputMode) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: 'secret',
+        outputMode,
+      });
+      expect(result.outputMode).toBe(outputMode);
+    },
+  );
+
+  it('defaults output mode to per turn for an opted-in adapter when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'dingtalk',
+      clientId: 'client-id',
+      clientSecret: 'secret',
+    });
+    expect(result.outputMode).toBe('per_turn');
+  });
+
+  it.each([
+    'final_only',
+    'process_and_result',
+    'all',
+    '',
+    null,
+    false,
+    1,
+    '$OUTPUT_MODE',
+  ])(
+    'rejects invalid shared outputMode %j before adapter startup',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          clientSecret: 'secret',
+          outputMode,
+        }),
+      ).rejects.toThrow(
+        'Channel "bot" outputMode must be "per_task", "per_response", or "per_turn".',
+      );
+    },
+  );
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'rejects outputMode %s for adapters that have not opted in',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', outputMode }),
+      ).rejects.toThrow('Channel "bot" does not support outputMode.');
+    },
+  );
 
   it.each(['  /review  ', false])(
     'treats an old messagePrefix value as unknown configuration data: %s',

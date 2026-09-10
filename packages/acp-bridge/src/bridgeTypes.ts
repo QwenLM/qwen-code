@@ -1057,6 +1057,7 @@ export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

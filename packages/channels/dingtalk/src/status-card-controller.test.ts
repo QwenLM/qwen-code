@@ -86,6 +86,65 @@ function createHarness(
 }
 
 describe('StatusCardController', () => {
+  it('delivers a standalone result as completed without live state or a stop action', async () => {
+    const { client, controller, cancelRun } = createHarness({
+      model: 'test-model',
+      language: 'zh-CN',
+    });
+    await expect(
+      controller.deliverCompletedResult(target, 'Follow-up result', 'task_*'),
+    ).resolves.toBe(true);
+    const request = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    expect(request).toEqual(
+      expect.objectContaining({
+        target,
+        cardParamMap: {
+          blockList: JSON.stringify([
+            { type: 0, markdown: 'task\\_\\*\n\nFollow-up result' },
+          ]),
+          content: 'task\\_\\*\n\nFollow-up result',
+          copy_content: 'task\\_\\*\n\nFollow-up result',
+          flowStatus: 3,
+          statusLine: '已完成 · test-model',
+          hasAction: 'false',
+          stop_action: 'false',
+        },
+      }),
+    );
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    expect(tracking(controller).recordsBySegment.size).toBe(0);
+    expect(controller.claimStop(request.outTrackId, 'owner-1')).toEqual({
+      kind: 'ignored',
+      actorId: 'owner-1',
+    });
+    expect(cancelRun).not.toHaveBeenCalled();
+  });
+
+  it('leaves an oversized result intact for message fallback', async () => {
+    const { client, controller } = createHarness();
+    expect(
+      await controller.deliverCompletedResult(
+        target,
+        'x'.repeat(20_000),
+        'source',
+      ),
+    ).toBe(false);
+    expect(client.createAndDeliver).not.toHaveBeenCalled();
+  });
+
+  it('falls back when result-card delivery fails', async () => {
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new Error('offline'),
+    );
+    expect(await controller.deliverCompletedResult(target, 'Result')).toBe(
+      false,
+    );
+    expect(tracking(controller).recordsBySegment.size).toBe(0);
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.useRealTimers();
   });

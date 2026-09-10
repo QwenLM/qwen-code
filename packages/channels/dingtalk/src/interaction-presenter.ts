@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { sanitizeSenderName } from '@qwen-code/channel-base';
+import { ChannelOutputTurn, sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
+  ChannelOutputMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
@@ -31,7 +32,10 @@ interface RunPresentation {
   senderPrefix?: string;
   senderRawPrefix?: string;
   sourceLabel?: string;
+  sendFallback?: DingtalkInteractionPresenterOptions['sendFallback'];
   cardDelivered?: { text: string; chatId: string; sessionId: string };
+  output: ChannelOutputTurn;
+  lastOutputContext?: ChannelOutputSegmentContext;
   terminal: boolean;
 }
 
@@ -42,6 +46,7 @@ interface SegmentPresentation {
 }
 
 export interface DingtalkInteractionPresenterOptions {
+  outputMode?: ChannelOutputMode;
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   permissionCards?: PermissionCardController;
@@ -92,6 +97,7 @@ export class DingtalkInteractionPresenter {
     sessionId = '',
     sender?: DingtalkCardSender,
     sourceLabel?: string,
+    sendFallback?: DingtalkInteractionPresenterOptions['sendFallback'],
   ): void {
     this.runs.set(runId, {
       runId,
@@ -112,8 +118,10 @@ export class DingtalkInteractionPresenter {
         sourceLabel,
       },
       projectionChain: Promise.resolve(),
+      output: new ChannelOutputTurn(this.options.outputMode),
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
       ...(sourceLabel ? { sourceLabel } : {}),
+      ...(sendFallback ? { sendFallback } : {}),
       terminal: false,
     });
   }
@@ -161,11 +169,12 @@ export class DingtalkInteractionPresenter {
       context: segment,
       content: '',
     };
-    presentation.content = this.boundContent(presentation.content + chunk);
+    presentation.content += chunk;
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
-    const statusContext = this.ensureStatusContext(run, segment);
+    if (!run.output.shouldPreview(presentation.content)) return;
     void this.enqueue(run, () => {
+      const statusContext = this.ensureStatusContext(run, segment);
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
@@ -194,9 +203,11 @@ export class DingtalkInteractionPresenter {
       run.activeSegmentId = undefined;
     }
     return this.enqueue(run, async () => {
+      const decision = run.output.close(text || presentation.content, reason);
+      if (decision.kind === 'skip') return true;
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
-      if (reason === 'failed') {
+      if (decision.kind === 'failed') {
         statusCards?.ensure(
           statusContext,
           this.cardTarget(statusContext.target),
@@ -208,26 +219,29 @@ export class DingtalkInteractionPresenter {
         await this.redeliverCardDeliveredContent(run);
         return statusCards !== undefined;
       }
-      if (reason === 'cancelled') {
+      if (decision.kind === 'cancelled') {
         return statusCards !== undefined;
       }
-      if (reason === 'response_boundary') {
+      if (decision.kind === 'preview') {
         const deliveredViaCard =
           statusCards !== undefined &&
           (await statusCards.isCardLive(statusContext.segmentId)) &&
           (await statusCards.flushPending(statusContext.segmentId));
+        if (decision.deferFallback) {
+          run.lastOutputContext = presentation.context;
+          return true;
+        }
         if (deliveredViaCard) {
           run.cardDelivered = {
-            text: stripPartialImageMarker(text || presentation.content),
+            text: stripPartialImageMarker(decision.text),
             chatId: presentation.context.target.chatId,
             sessionId: presentation.context.sessionId,
           };
           return true;
         }
-        const fallbackText = stripPartialImageMarker(
-          text || presentation.content,
-        );
-        if (!fallbackText || !this.options.sendFallback) return false;
+        const fallbackText = stripPartialImageMarker(decision.text);
+        if (!fallbackText || !(run.sendFallback ?? this.options.sendFallback))
+          return false;
         await this.sendFallback(
           run,
           presentation.context.target.chatId,
@@ -237,40 +251,23 @@ export class DingtalkInteractionPresenter {
         statusCards?.abandon(statusContext.segmentId);
         return true;
       }
-      if (reason === 'input_requested') {
-        const completed =
-          statusCards !== undefined &&
-          (await statusCards.complete(
-            statusContext.segmentId,
-            this.withSenderPrefix(run, text || presentation.content),
-          ));
-        run.statusContext = undefined;
-        if (completed) return true;
-        const fallbackText = stripPartialImageMarker(
-          text || presentation.content,
+      if (!decision.rotate) {
+        statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
         );
-        if (!fallbackText || !this.options.sendFallback) return false;
-        await this.sendFallback(
-          run,
-          presentation.context.target.chatId,
-          fallbackText,
-          presentation.context.sessionId,
-        );
-        statusCards?.abandon(statusContext.segmentId);
-        return true;
       }
-      statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
       const completed =
         statusCards !== undefined &&
         (await statusCards.complete(
           statusContext.segmentId,
-          this.withSenderPrefix(run, text || presentation.content),
+          this.withSenderPrefix(run, decision.text),
         ));
+      if (decision.rotate) run.statusContext = undefined;
       if (completed) return true;
-      const fallbackText = stripPartialImageMarker(
-        text || presentation.content,
-      );
-      if (!fallbackText || !this.options.sendFallback) return false;
+      const fallbackText = stripPartialImageMarker(decision.text);
+      if (!fallbackText || !(run.sendFallback ?? this.options.sendFallback))
+        return false;
       await this.sendFallback(
         run,
         presentation.context.target.chatId,
@@ -364,6 +361,7 @@ export class DingtalkInteractionPresenter {
     }
     const copy = this.terminalCopy();
     const finalization = this.enqueue(run, async () => {
+      const finalOutput = run.output.finish(terminal);
       if (terminal === 'failed') {
         const statusContext = this.ensureStatusContext(run);
         this.options.statusCards?.ensure(
@@ -397,7 +395,7 @@ export class DingtalkInteractionPresenter {
         // last boundary) leaves the eagerly created card running forever.
         const statusContext = run.statusContext;
         if (statusContext) {
-          await this.options.statusCards?.complete(
+          const completed = await this.options.statusCards?.complete(
             statusContext.segmentId,
             '',
             (retained) =>
@@ -408,6 +406,15 @@ export class DingtalkInteractionPresenter {
                   )
                 : retained,
           );
+          if (!completed && finalOutput) {
+            const context = run.lastOutputContext ?? run.baseContext;
+            await this.sendFallback(
+              run,
+              context.target.chatId,
+              stripPartialImageMarker(finalOutput),
+              context.sessionId,
+            );
+          }
         }
       }
     });
@@ -453,7 +460,7 @@ export class DingtalkInteractionPresenter {
     run: RunPresentation,
   ): Promise<void> {
     const delivered = run.cardDelivered;
-    if (!delivered || !this.options.sendFallback) return;
+    if (!delivered || !(run.sendFallback ?? this.options.sendFallback)) return;
     run.cardDelivered = undefined;
     await this.sendFallback(
       run,
@@ -517,12 +524,13 @@ export class DingtalkInteractionPresenter {
     text: string,
     sessionId: string,
   ): Promise<void> {
-    if (!this.options.sendFallback) return;
+    const sendFallback = run.sendFallback ?? this.options.sendFallback;
+    if (!sendFallback) return;
     if (run.sourceLabel) {
-      await this.options.sendFallback(chatId, text, sessionId, run.sourceLabel);
+      await sendFallback(chatId, text, sessionId, run.sourceLabel);
       return;
     }
-    await this.options.sendFallback(chatId, text, sessionId);
+    await sendFallback(chatId, text, sessionId);
   }
 
   private withoutExistingSenderPrefix(

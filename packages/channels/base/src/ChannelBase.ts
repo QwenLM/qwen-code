@@ -71,6 +71,7 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
@@ -7246,6 +7247,9 @@ export abstract class ChannelBase {
 
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(this.config.outputMode === 'per_task'
+            ? { outputMode: 'per_task' as const }
+            : {}),
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
@@ -7299,6 +7303,10 @@ export abstract class ChannelBase {
         // emit its own terminal once deliveryStarted is set).
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
+          if (err instanceof ChannelPromptCancelledError) {
+            promptState.cancelled = true;
+            this.emitTaskCancellation(promptState, sessionId, 'cancel_command');
+          }
         }
         if (!promptState.cancelled) {
           releaseHeldChunks();

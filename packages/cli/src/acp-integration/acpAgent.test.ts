@@ -2588,6 +2588,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       _meta: {
         keep: true,
         'qwen.channel.prompt': true,
+        'qwen.channel.outputMode': 'per_task',
         'qwen.daemon.channelDelivery': {
           deliveryId: 'delivery-forged',
           target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
@@ -2609,6 +2610,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([true, false])(
+    'accepts per_task channel output mode only for a trusted channel prompt: %s',
+    async (channelPrompt) => {
+      await setupSessionMocks('trusted-output-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        'expected-capability',
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await agent.prompt({
+        sessionId: 'trusted-output-session',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          keep: true,
+          'qwen.channel.prompt': channelPrompt,
+          'qwen.channel.outputMode': 'per_task',
+        },
+      });
+      expect(lastSessionMock?.prompt).toHaveBeenCalledWith(
+        {
+          sessionId: 'trusted-output-session',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: {
+            keep: true,
+            ...(channelPrompt
+              ? {
+                  'qwen.channel.prompt': true,
+                  'qwen.channel.outputMode': 'per_task',
+                }
+              : {}),
+          },
+        },
+        undefined,
+        expect.any(AbortSignal),
+        undefined,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('closes managed writers before resource shutdown on connection EOF', async () => {
     const innerConfig = await setupSessionMocks('managed-session');

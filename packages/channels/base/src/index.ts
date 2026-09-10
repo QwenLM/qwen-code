@@ -9,7 +9,10 @@ export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,
+  CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -100,6 +103,20 @@ export {
   truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  DEFAULT_CHANNEL_OUTPUT_MODE,
+  parseChannelOutputMode,
+} from './output-mode.js';
+export { ChannelOutputTurn } from './output-turn.js';
+export type { ChannelOutputDecision } from './output-turn.js';
+export { BackgroundOutputCoordinator } from './background-output-coordinator.js';
+export type {
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
+  BackgroundOutputTarget,
+  BackgroundOutputCoordinatorOptions,
+} from './background-output-coordinator.js';
 export type {
   Attachment,
   ChannelConfig,
@@ -117,6 +134,7 @@ export type {
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionDecision,

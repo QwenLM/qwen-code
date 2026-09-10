@@ -105,11 +105,42 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
-### Background Agent Responses
+### Turn Output Mode
 
-Background Agent output is sent as soon as each response segment is available.
-Every message is labeled with the Agent name so concurrent work remains
-attributable.
+The [shared `outputMode` setting](./overview#turn-output-mode) controls when DingTalk delivers assistant results. DingTalk is currently the only adapter integrated with this policy. The default is `per_turn`, including when `outputMode` is omitted:
+
+- `per_task`: wait for the main task and its associated background tasks and notifications to finish, then deliver one final result card containing the task's last non-empty assistant reply.
+- `per_response`: each complete assistant response gets its own completed result card. Token chunks update the current card; they do not create new cards. Background assistant responses are delivered separately too.
+- `per_turn`: the main status card completes with the turn's last non-empty assistant reply as soon as the main prompt ends. Each later background notification turn keeps its own last non-empty assistant reply and sends it as a separate completed card.
+
+In the default `per_turn` mode, background tasks never extend the main card's lifetime, and a later callback cannot overwrite it. For example, a main result followed by eleven separate background notification turns produces a main result card and eleven follow-up result cards. Choose `per_task` to wait for that task's associated background work and receive one final result instead. The result comes from the assistant; no additional summary is generated and intermediate replies are not concatenated.
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "outputMode": "per_turn",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+Interactive status cards provide the native card presentation. When status cards are unavailable or all interactive cards are disabled, the same output policy applies through ordinary messages: `per_task` waits for the complete task, `per_response` sends each complete response, and `per_turn` sends one result per turn. Background results that exceed the card content limit also fall back to ordinary messages. Platform message-length limits may split long text. File and image delivery keeps its existing rules.
+
+The setting applies to DingTalk conversation replies and their associated background follow-ups. It does not merge unrelated tasks in the same conversation. Channel loops and webhook runs retain their existing presentation.
+
+`per_task` waits for Agent, background shell, monitor, and workflow work linked to that prompt, including work started by their notification turns. Paused tasks and long-running monitors keep it open until they finish or you cancel. Future scheduled runs and independently managed daemon child sessions are separate work and are not included in this task boundary.
+
+Standalone background turns that are interrupted, or have not ended after ten minutes, may deliver a labeled partial result. This does not reopen a completed main card.
+
+Only `per_task`, `per_response`, and `per_turn` are accepted. The unpublished `final_only` and `process_and_result` values are not aliases; replace them with the desired mode. Removing `outputMode` restores the `per_turn` default. There is no separate background-aggregation toggle.
 
 ## Running
 

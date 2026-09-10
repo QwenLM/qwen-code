@@ -341,6 +341,42 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          default: 'per_turn',
+          options: [
+            { value: 'per_task', label: 'Per task' },
+            { value: 'per_response', label: 'Per response' },
+            { value: 'per_turn', label: 'Per turn (default)' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    expect(fieldByLabel('Output Mode')?.textContent).toBe('Per turn (default)');
+    await selectOption('Output Mode', 'Per task');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ outputMode: 'per_task' }),
+      }),
+    );
+  });
+
   it('defaults to the primary workspace and allows a registered workspace', async () => {
     const onWorkspaceChange = vi.fn();
     await renderDialog({ onWorkspaceChange });
