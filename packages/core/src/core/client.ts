@@ -909,7 +909,10 @@ export class LlmClient {
     }
     if (signal.aborted) return;
     const result = await applyPendingGoalProposal(runtime, proposal);
-    if (signal.aborted && result.applied) {
+    if (
+      (signal.aborted || proposal.approvalSignal?.aborted) &&
+      result.applied
+    ) {
       try {
         await runtime.dispatch({
           action: 'pause',

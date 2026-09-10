@@ -5342,7 +5342,7 @@ export class Session implements SessionContext {
       const result = await applyPendingGoalProposal(runtime, proposal);
       // The automatic queue remains blocked until this prompt releases its
       // completion. Cancellation during persistence must pause before then.
-      if (result.applied && !ownsTurn()) {
+      if (result.applied && (!ownsTurn() || proposal.approvalSignal?.aborted)) {
         try {
           await runtime.dispatch({
             action: 'pause',

@@ -3359,6 +3359,7 @@ describe('Server Config (config.ts)', () => {
         objective: 'first',
         turnKey: 'turn-1',
         reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
@@ -3374,6 +3375,7 @@ describe('Server Config (config.ts)', () => {
         objective: 'explicitly cleared',
         turnKey: 'turn-3',
         reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
     });

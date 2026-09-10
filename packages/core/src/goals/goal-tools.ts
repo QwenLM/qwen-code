@@ -644,6 +644,8 @@ export interface ProposeGoalToolParams {
 export interface PendingGoalProposal {
   objective: string;
   reviewedGoal: Pick<GoalRecord, 'goalId' | 'revision'> | null;
+  /** Plan mode revokes approval even after the host takes the proposal. */
+  approvalSignal?: AbortSignal;
   /**
    * The `prompt_id` of the turn whose dialog approved it. Only that turn's
    * terminal boundary may set or discard the Goal; unrelated frames leave it
@@ -678,6 +680,14 @@ export async function applyPendingGoalProposal(
   runtime: ProposeGoalRuntime,
   proposal: PendingGoalProposal,
 ): Promise<ApplyPendingGoalProposalResult> {
+  if (proposal.approvalSignal?.aborted) {
+    return {
+      applied: false,
+      kind: 'changed',
+      reason:
+        'The approved Goal was not started because its approval was revoked. Ask for a new draft when you are ready to start.',
+    };
+  }
   const objective = proposal.objective.trim();
   const current = runtime.getSnapshot().goal;
   if (current?.status === 'active') {

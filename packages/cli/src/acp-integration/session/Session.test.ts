@@ -33010,6 +33010,27 @@ describe('Session', () => {
     const objective = 'Outcome: tests pass. Done when: npm test exits 0.';
     let pending: core.PendingGoalProposal | undefined;
 
+    function useRealApprovalState() {
+      const config = new core.Config({
+        cwd: '/tmp',
+        targetDir: '/tmp',
+        model: 'test-model',
+        approvalMode: ApprovalMode.DEFAULT,
+        debugMode: false,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+        overrideExtensions: [],
+      });
+      Object.assign(mockConfig, {
+        getApprovalMode: config.getApprovalMode.bind(config),
+        setApprovalMode: config.setApprovalMode.bind(config),
+        hasPendingGoalProposal: config.hasPendingGoalProposal.bind(config),
+        setPendingGoalProposal: config.setPendingGoalProposal.bind(config),
+        takePendingGoalProposal: config.takePendingGoalProposal.bind(config),
+      });
+      return config;
+    }
+
     function proposalStream() {
       return createStreamWithChunks([
         {
@@ -33148,6 +33169,86 @@ describe('Session', () => {
       );
       await prompt();
       expect(mockGoalRuntime.dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['plan', 'default'])(
+      'revokes an approved Goal after entering Plan, even if the final mode is %s',
+      async (finalMode) => {
+        const config = useRealApprovalState();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(proposalStream())
+          .mockImplementationOnce(async () => {
+            expect(config.hasPendingGoalProposal()).toBe(true);
+            await session.setMode({
+              sessionId: 'test-session-id',
+              modeId: 'plan',
+            });
+            if (finalMode === 'default') {
+              await session.setMode({
+                sessionId: 'test-session-id',
+                modeId: 'default',
+              });
+            }
+            return createEmptyStream();
+          });
+
+        await prompt();
+
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+        expect(config.hasPendingGoalProposal()).toBe(false);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'agent_message_chunk',
+              content: expect.objectContaining({
+                text: expect.stringContaining('approval was revoked'),
+              }),
+            }),
+          }),
+        );
+      },
+    );
+
+    it('revokes approval when Plan mode begins during runtime loading', async () => {
+      useRealApprovalState();
+      vi.mocked(mockConfig.getGoalRuntimeReady)
+        .mockReset()
+        .mockResolvedValueOnce(mockGoalRuntime as unknown as core.GoalRuntime)
+        .mockResolvedValueOnce(mockGoalRuntime as unknown as core.GoalRuntime)
+        .mockImplementationOnce(async () => {
+          await session.setMode({
+            sessionId: 'test-session-id',
+            modeId: 'plan',
+          });
+          return mockGoalRuntime as unknown as core.GoalRuntime;
+        });
+
+      await prompt();
+
+      expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalledTimes(3);
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('pauses a Goal when Plan mode begins during creation persistence', async () => {
+      useRealApprovalState();
+      mockGoalRuntime.dispatch.mockImplementationOnce(async () => {
+        await session.setMode({ sessionId: 'test-session-id', modeId: 'plan' });
+        return {
+          snapshot: {
+            goal: { goalId: 'approved-goal', revision: 1, status: 'active' },
+          },
+        };
+      });
+
+      await prompt();
+
+      expect(mockGoalRuntime.dispatch).toHaveBeenNthCalledWith(2, {
+        action: 'pause',
+        expectedGoalId: 'approved-goal',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      });
     });
 
     it('arms and clears declarations only for an approval-capable user turn', async () => {
