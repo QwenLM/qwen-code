@@ -154,11 +154,20 @@ export class SkillCommandLoader implements ICommandLoader {
               };
             }
             // Apply the skill's declared side effects — allowedTools and
-            // frontmatter hooks — before its body is submitted, exactly as the
-            // Skill tool does when the model invokes it. Registering only the
-            // allowedTools here let a skill's PreToolUse gate silently fail
-            // open on this path (#11067).
-            applySkillSideEffects(this.config, skill);
+            // frontmatter tool-lifecycle hooks — before its body is submitted,
+            // exactly as the Skill tool does when the model invokes it.
+            // Registering only the allowedTools here let a skill's PreToolUse
+            // gate silently fail open on this path (#11067).
+            // Prompt-lifecycle events (UserPromptSubmit /
+            // UserPromptExpansion) are deliberately excluded — see
+            // ApplySkillHooksOptions: this action runs inside the dispatch of
+            // the submission that carries the skill's own body, and a hook
+            // registered here would fire on — and could block — that very
+            // submission. The model Skill-tool path keeps full registration
+            // (no collision there: the body arrives as a tool result).
+            applySkillSideEffects(this.config, skill, {
+              excludePromptLifecycleEvents: true,
+            });
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

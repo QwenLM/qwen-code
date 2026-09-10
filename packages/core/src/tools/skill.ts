@@ -485,6 +485,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * restart, and a trust granted again restores them.
    */
   private applySideEffects(skill: SkillConfig): void {
+    // Full registration on the model Skill-tool path (no
+    // `excludePromptLifecycleEvents`): the body arrives here as a tool
+    // result, never as a prompt, so a skill's own prompt-lifecycle hooks
+    // cannot collide with the invocation carrying them. The slash-command
+    // callers of `applySkillSideEffects` pass the exclusion — see
+    // `ApplySkillHooksOptions`.
     applySkillSideEffects(this.config, skill);
   }
 

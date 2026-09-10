@@ -110,9 +110,18 @@ export class BundledSkillLoader implements ICommandLoader {
             };
           }
           // Apply the skill's declared side effects — allowedTools and
-          // frontmatter hooks — before its body is submitted, matching the
-          // Skill tool's model-invocation path (#11067).
-          applySkillSideEffects(this.config, skill);
+          // frontmatter tool-lifecycle hooks — before its body is submitted,
+          // matching the Skill tool's model-invocation path (#11067).
+          // Prompt-lifecycle events (UserPromptSubmit / UserPromptExpansion)
+          // are deliberately excluded — see ApplySkillHooksOptions: this
+          // action runs inside the dispatch of the submission carrying the
+          // skill's own body, and a hook registered here could fire on — and
+          // block — that very submission. The model Skill-tool path keeps
+          // full registration (no collision there: the body arrives as a
+          // tool result).
+          applySkillSideEffects(this.config, skill, {
+            excludePromptLifecycleEvents: true,
+          });
 
           // Resolve template variables in skill body
           let body = skill.body;

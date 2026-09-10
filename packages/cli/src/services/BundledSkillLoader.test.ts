@@ -13,6 +13,8 @@ import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
+  HookEventName,
+  HookType,
   type Config,
   type SkillConfig,
 } from '@qwen-code/qwen-code-core';
@@ -55,6 +57,10 @@ describe('BundledSkillLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      // A live-looking hook system by default (session id + session hooks
+      // manager): the frontmatter-hooks describe blocks assert registration
+      // directly, and any test that needs hooks disabled overrides
+      // getHookSystem itself.
       // BundledSkillLoader filters via this. Default empty so existing
       // assertions about bundled skills surfacing stay true; per-test
       // cases override.
@@ -288,6 +294,220 @@ describe('BundledSkillLoader', () => {
       );
 
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('frontmatter hooks registration via /<skill-name> (#11067)', () => {
+    it('registers PreToolUse hooks as session hooks when the user starts the bundled skill', async () => {
+      const mockAddSessionHook = vi.fn();
+      const byEvent = new Map<
+        string,
+        Array<{ matcher: string; skillRoot?: string; config: unknown }>
+      >();
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue({
+        getSessionHooksManager: () => ({
+          // Minimal fake mirroring SessionHooksManager's storage shape so
+          // registerSkillHooks' dedup sees what addSessionHook stored.
+          addSessionHook: mockAddSessionHook.mockImplementation(
+            (
+              _sessionId: string,
+              event: string,
+              matcher: string,
+              hook: unknown,
+              options?: { skillRoot?: string },
+            ) => {
+              const list = byEvent.get(event) ?? [];
+              list.push({
+                matcher,
+                skillRoot: options?.skillRoot,
+                config: hook,
+              });
+              byEvent.set(event, list);
+            },
+          ),
+          getHooksForEvent: vi.fn(
+            (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+          ),
+        }),
+      });
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+
+      const skill = makeSkill({
+        skillRoot: '/bundled/review',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+                },
+              ],
+            },
+          ],
+        },
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Shell',
+        expect.objectContaining({
+          type: HookType.Command,
+          command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+          env: { QWEN_SKILL_ROOT: '/bundled/review' },
+        }),
+        { skillRoot: '/bundled/review', trustGated: false },
+      );
+    });
+
+    it('excludes prompt-lifecycle hooks so a bundled skill cannot intercept its own submission (PR #11153 R1-1)', async () => {
+      const mockAddSessionHook = vi.fn();
+      const registeredEvents = new Set<string>();
+      const byEvent = new Map<
+        string,
+        Array<{ matcher: string; skillRoot?: string; config: unknown }>
+      >();
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue({
+        getSessionHooksManager: () => ({
+          addSessionHook: mockAddSessionHook.mockImplementation(
+            (
+              _sessionId: string,
+              event: string,
+              matcher: string,
+              hook: unknown,
+              options?: { skillRoot?: string },
+            ) => {
+              registeredEvents.add(event);
+              const list = byEvent.get(event) ?? [];
+              list.push({
+                matcher,
+                skillRoot: options?.skillRoot,
+                config: hook,
+              });
+              byEvent.set(event, list);
+            },
+          ),
+          getHooksForEvent: vi.fn(
+            (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+          ),
+        }),
+      });
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+
+      const skill = makeSkill({
+        skillRoot: '/bundled/review',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+                },
+              ],
+            },
+          ],
+          UserPromptSubmit: [
+            {
+              hooks: [{ type: HookType.Command, command: 'submit-guard.sh' }],
+            },
+          ],
+          UserPromptExpansion: [
+            {
+              matcher: 'review',
+              hooks: [{ type: HookType.Command, command: 'expand-guard.sh' }],
+            },
+          ],
+        },
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      const result = await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      // The skill body still reaches the model — no self-interception.
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      // The PreToolUse gate still registers; the prompt-lifecycle events
+      // do not (see ApplySkillHooksOptions.excludePromptLifecycleEvents).
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(registeredEvents).toContain(HookEventName.PreToolUse);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptSubmit);
+      expect(registeredEvents).not.toContain(HookEventName.UserPromptExpansion);
+    });
+
+    it('does not double-register across repeated invocations', async () => {
+      const mockAddSessionHook = vi.fn();
+      const byEvent = new Map<
+        string,
+        Array<{ matcher: string; skillRoot?: string; config: unknown }>
+      >();
+      (mockConfig.getHookSystem as ReturnType<typeof vi.fn>).mockReturnValue({
+        getSessionHooksManager: () => ({
+          addSessionHook: mockAddSessionHook.mockImplementation(
+            (
+              _sessionId: string,
+              event: string,
+              matcher: string,
+              hook: unknown,
+              options?: { skillRoot?: string },
+            ) => {
+              const list = byEvent.get(event) ?? [];
+              list.push({
+                matcher,
+                skillRoot: options?.skillRoot,
+                config: hook,
+              });
+              byEvent.set(event, list);
+            },
+          ),
+          getHooksForEvent: vi.fn(
+            (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+          ),
+        }),
+      });
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+
+      const skill = makeSkill({
+        skillRoot: '/bundled/review',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: HookType.Command, command: 'gate.sh' }],
+            },
+          ],
+        },
+      });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
     });
   });
 

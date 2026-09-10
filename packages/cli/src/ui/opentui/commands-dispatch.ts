@@ -680,6 +680,13 @@ export class OpenTuiSlashDispatcher {
               { once: true },
             );
           });
+          // Snapshot BEFORE the action runs (parity with
+          // slashCommandProcessor.ts): command actions can install session
+          // hooks as a side effect, and a hook installed by this action
+          // must not fire on — or block — the submission that carried it.
+          const hadUserPromptExpansionHooks = hasUserPromptExpansionHooks(
+            this.services,
+          );
           // A pre-aborted signal must skip the action entirely: an 'abort'
           // listener registered after the signal already aborted never
           // fires, so the race would otherwise await the action's side
@@ -787,7 +794,10 @@ export class OpenTuiSlashDispatcher {
               case 'submit_prompt': {
                 const invocation = fullCommandContext.invocation;
                 let content = result.content;
-                const output = hasUserPromptExpansionHooks(this.services)
+                // Uses the pre-action snapshot (see above): hooks
+                // installed by the command's own action are exempt from
+                // this one expansion.
+                const output = hadUserPromptExpansionHooks
                   ? await this.services.config
                       ?.getHookSystem()
                       ?.fireUserPromptExpansionEvent(

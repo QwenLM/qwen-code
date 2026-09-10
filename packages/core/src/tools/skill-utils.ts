@@ -11,6 +11,7 @@ import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
+import { HookEventName } from '../hooks/types.js';
 import { escapeXml } from '../utils/xml.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -324,7 +325,53 @@ export function applySkillAllowedTools(
 }
 
 /**
- * Registers a skill's frontmatter `hooks:` as session-scoped hooks.
+ * Prompt-lifecycle hook events that a slash-command skill startup must NOT
+ * register (see `ApplySkillHooksOptions.excludePromptLifecycleEvents`).
+ */
+const PROMPT_LIFECYCLE_HOOK_EVENTS: ReadonlySet<HookEventName> = new Set([
+  HookEventName.UserPromptSubmit,
+  HookEventName.UserPromptExpansion,
+]);
+
+/**
+ * Options for {@link applySkillHooks}.
+ */
+export interface ApplySkillHooksOptions {
+  /**
+   * Skip the two prompt-lifecycle events (`UserPromptSubmit`,
+   * `UserPromptExpansion`).
+   *
+   * Slash-command startup must pass this. A `/<skill-name>` action runs
+   * *inside* the dispatch of the very submission that carries the skill
+   * body: registering prompt-lifecycle hooks there lets the skill's own
+   * hook fire on — and block — its own body. The `UserPromptExpansion`
+   * arm self-fires in the command dispatchers, and the `UserPromptSubmit`
+   * arm self-fires downstream when the expanded body is sent as the
+   * user turn (`client.ts` consults `hasHooksForEvent('UserPromptSubmit')`
+   * only after the action registered it); session hooks are never
+   * unregistered, so every later `/<skill-name>` re-blocks too. The model
+   * Skill-tool path has no such collision (the body arrives as a tool
+   * result, never as a prompt), keeps full registration, and therefore
+   * remains the one path that activates a skill's prompt-lifecycle hooks.
+   */
+  excludePromptLifecycleEvents?: boolean;
+}
+
+/**
+ * Registers a skill's frontmatter `hooks:` as session-scoped hooks — the
+ * hooks counterpart of `applySkillAllowedTools`, so that every startup path
+ * of a skill (the model invoking the Skill tool, the user typing
+ * `/<skill-name>` — interactive, stacked, non-interactive, ACP) funnels
+ * through one registration function instead of re-deriving it per call
+ * site (#11067: the slash-command path used to apply `allowedTools` but
+ * silently skip hooks, so a gated skill failed open whenever the user
+ * rather than the model started it).
+ *
+ * Tool-lifecycle events (and every other non-prompt event) register
+ * identically on every path. The two prompt-lifecycle events are the one
+ * deliberate divergence: the slash-command callers pass
+ * `excludePromptLifecycleEvents` (see the option docs for why), so those
+ * events register only via the model Skill-tool path.
  *
  * Mirrors `applySkillAllowedTools`: the caller is responsible for the
  * folder-trust gate (`canApplySkillSideEffects`), and the registration itself
@@ -341,22 +388,30 @@ export function applySkillAllowedTools(
  * restart. Granting trust never retro-registers either way — the skill has
  * to be invoked again, which is safe because registration dedups.
  *
- * No-ops when the session has no hook system or no session id.
+ * No-ops when there is no config, no hooks to register, or no live hook
+ * system — hooks disabled via settings (`disableAllHooks`), safe mode,
+ * bare mode, the ACP agent's `skipHooks`, or `initialize({ skipHooks: true })`.
+ * The `!sessionId` half only trips for a caller that passes an empty session
+ * id explicitly, or for the partial duck-typed configs tests use.
+ *
+ * @returns Number of hooks newly registered (0 when there was nothing to
+ * register or everything was already registered).
  */
 export function applySkillHooks(
-  config: Pick<Config, 'getHookSystem' | 'getSessionId'>,
+  config: Pick<Config, 'getHookSystem' | 'getSessionId'> | null | undefined,
   skill: SkillConfig,
-): void {
+  options?: ApplySkillHooksOptions,
+): number {
   // `{}` is truthy, and `parseSkillContent` assigns an empty object for an
   // explicit `hooks: {}` as well as for a block whose event names are all
   // unknown (a typo'd `PreTooluse:` is parsed, warned about once, and
   // dropped). Such a skill declares no gate, so it must not reach the warn
   // below.
   if (!skill.hooks || Object.keys(skill.hooks).length === 0) {
-    return;
+    return 0;
   }
-  const hookSystem = config.getHookSystem();
-  const sessionId = config.getSessionId();
+  const hookSystem = config?.getHookSystem();
+  const sessionId = config?.getSessionId();
   if (!hookSystem || !sessionId) {
     // Sessions that disable hooks (`disableAllHooks`, safe mode, bare mode,
     // the ACP agent's `skipHooks`) never build a hook system. The skill body
@@ -371,12 +426,20 @@ export function applySkillHooks(
     debugLogger.warn(
       `Skipping hook registration for skill "${skill.name}": no hook system or session id (hooks disabled?)`,
     );
-    return;
+    return 0;
   }
+  const skillToRegister =
+    options?.excludePromptLifecycleEvents &&
+    (skill.hooks.UserPromptSubmit || skill.hooks.UserPromptExpansion)
+      ? {
+          ...skill,
+          hooks: filterOutPromptLifecycleHooks(skill.hooks),
+        }
+      : skill;
   const count = registerSkillHooks(
     hookSystem.getSessionHooksManager(),
     sessionId,
-    skill,
+    skillToRegister,
   );
   if (count > 0) {
     debugLogger.info(`Registered ${count} hooks from skill "${skill.name}"`);
@@ -387,6 +450,24 @@ export function applySkillHooks(
       `No new hooks registered from skill "${skill.name}" (already registered or none registrable)`,
     );
   }
+  return count;
+}
+
+/**
+ * Copies a `hooks:` map without the prompt-lifecycle events, preserving
+ * insertion order of the remaining keys.
+ */
+function filterOutPromptLifecycleHooks(
+  hooks: SkillConfig['hooks'],
+): SkillConfig['hooks'] {
+  const filtered: NonNullable<SkillConfig['hooks']> = {};
+  for (const [event, matchers] of Object.entries(hooks ?? {})) {
+    if (PROMPT_LIFECYCLE_HOOK_EVENTS.has(event as HookEventName)) {
+      continue;
+    }
+    filtered[event as keyof typeof filtered] = matchers;
+  }
+  return filtered;
 }
 
 /**
@@ -400,6 +481,12 @@ export function applySkillHooks(
  * skill's instructions reached the model while the hook that was supposed to
  * enforce them was never registered.
  *
+ * Slash-command callers pass `options` with `excludePromptLifecycleEvents`
+ * so a skill's prompt-lifecycle hooks cannot fire on — and block — the very
+ * submission carrying the skill body (see the option docs); the model
+ * Skill-tool path applies the full set and remains the one path that
+ * activates a skill's prompt-lifecycle hooks.
+ *
  * Both underlying registrations dedup, so calling this repeatedly for the same
  * skill is safe — and necessary, since folder trust can be granted mid-session.
  */
@@ -410,6 +497,7 @@ export function applySkillSideEffects(
     | null
     | undefined,
   skill: SkillConfig,
+  options?: ApplySkillHooksOptions,
 ): void {
   if (!config) {
     return;
@@ -425,7 +513,7 @@ export function applySkillSideEffects(
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',
   });
-  applySkillHooks(config, skill);
+  applySkillHooks(config, skill, options);
 }
 
 /**
@@ -437,7 +525,7 @@ export function applySkillSideEffects(
  * most one duplicate injection on the next invoke, while a stale entry
  * makes the body unrecoverable until session restart.
  *
- * Duck-typed (mirroring `clearCommand`'s existing `clearLoadedSkills`
+ * Duck-typed (mirrors `clearCommand`'s existing `clearLoadedSkills`
  * call) so history-rewrite sites don't need a runtime import of the
  * SkillTool class.
  */

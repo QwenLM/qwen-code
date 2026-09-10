@@ -19,12 +19,14 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
 }));
 import {
   applySkillAllowedTools,
+  applySkillHooks,
   applySkillSideEffects,
   canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
 } from './skill-utils.js';
+import { HookEventName, HookType } from '../hooks/types.js';
 import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -109,6 +111,192 @@ describe('applySkillAllowedTools', () => {
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read', {
       trustGated: false,
     });
+  });
+});
+
+describe('applySkillHooks', () => {
+  function mockHookSystem(): {
+    config: Config;
+    addSessionHook: ReturnType<typeof vi.fn>;
+    getHooksForEvent: ReturnType<typeof vi.fn>;
+  } {
+    const byEvent = new Map<
+      string,
+      Array<{ matcher: string; skillRoot?: string; config: unknown }>
+    >();
+    const addSessionHook = vi.fn(
+      (
+        _sessionId: string,
+        event: string,
+        matcher: string,
+        hook: unknown,
+        options?: { skillRoot?: string },
+      ) => {
+        const list = byEvent.get(event) ?? [];
+        list.push({ matcher, skillRoot: options?.skillRoot, config: hook });
+        byEvent.set(event, list);
+      },
+    );
+    const getHooksForEvent = vi.fn(
+      (_sessionId: string, event: string) => byEvent.get(event) ?? [],
+    );
+    const sessionHooksManager = { addSessionHook, getHooksForEvent };
+    const config = {
+      getHookSystem: () => ({
+        getSessionHooksManager: () => sessionHooksManager,
+      }),
+      getSessionId: () => 'session-1',
+    } as unknown as Config;
+    return { config, addSessionHook, getHooksForEvent };
+  }
+
+  function gatedSkill(): SkillConfig {
+    return {
+      name: 'gated-skill',
+      description: 'Runs shell work behind a gate',
+      level: 'project',
+      filePath: '/repo/.qwen/skills/gated-skill/SKILL.md',
+      skillRoot: '/repo/.qwen/skills/gated-skill',
+      body: 'Do the gated work.',
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Shell',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+              },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  it('registers frontmatter hooks as session hooks and injects QWEN_SKILL_ROOT into the command env', () => {
+    const { config, addSessionHook } = mockHookSystem();
+    const skill = gatedSkill();
+
+    const registered = applySkillHooks(config, skill);
+
+    expect(registered).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.PreToolUse,
+      'Shell',
+      expect.objectContaining({
+        type: HookType.Command,
+        command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+        env: { QWEN_SKILL_ROOT: '/repo/.qwen/skills/gated-skill' },
+      }),
+      { skillRoot: '/repo/.qwen/skills/gated-skill', trustGated: true },
+    );
+  });
+
+  it('dedups across repeated applications so re-invocations never double-fire', () => {
+    const { config, addSessionHook } = mockHookSystem();
+    const skill = gatedSkill();
+
+    expect(applySkillHooks(config, skill)).toBe(1);
+    expect(applySkillHooks(config, skill)).toBe(0);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 0 for a configless caller or a hookless skill', () => {
+    const { config } = mockHookSystem();
+    expect(applySkillHooks(null, gatedSkill())).toBe(0);
+    expect(applySkillHooks(undefined, gatedSkill())).toBe(0);
+    expect(applySkillHooks(config, { ...gatedSkill(), hooks: undefined })).toBe(
+      0,
+    );
+  });
+
+  it('no-ops when the hook system or session id is unavailable', () => {
+    const noHookSystem = {
+      getHookSystem: () => undefined,
+      getSessionId: () => 'session-1',
+    } as unknown as Config;
+    const noSessionId = {
+      getHookSystem: () => ({}),
+      getSessionId: () => '',
+    } as unknown as Config;
+
+    expect(applySkillHooks(noHookSystem, gatedSkill())).toBe(0);
+    expect(applySkillHooks(noSessionId, gatedSkill())).toBe(0);
+  });
+
+  function promptHookSkill(): SkillConfig {
+    return {
+      ...gatedSkill(),
+      hooks: {
+        PreToolUse: gatedSkill().hooks!.PreToolUse,
+        UserPromptSubmit: [
+          {
+            hooks: [{ type: HookType.Command, command: 'submit-guard.sh' }],
+          },
+        ],
+        UserPromptExpansion: [
+          {
+            matcher: 'gated-skill',
+            hooks: [{ type: HookType.Command, command: 'expand-guard.sh' }],
+          },
+        ],
+      },
+    };
+  }
+
+  it('registers prompt-lifecycle events by default (model Skill-tool path)', () => {
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(applySkillHooks(config, promptHookSkill())).toBe(3);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.UserPromptSubmit,
+      expect.any(String),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.UserPromptExpansion,
+      expect.any(String),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('excludePromptLifecycleEvents skips UserPromptSubmit/UserPromptExpansion but keeps tool gates', () => {
+    // The slash-command startup option (PR #11153 R1-1): registering
+    // prompt-lifecycle hooks from inside a /<skill-name> action lets the
+    // skill's own hook fire on — and block — the submission carrying its
+    // body. Only the tool-lifecycle gate may register there.
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(
+      applySkillHooks(config, promptHookSkill(), {
+        excludePromptLifecycleEvents: true,
+      }),
+    ).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+    expect(addSessionHook).toHaveBeenCalledWith(
+      'session-1',
+      HookEventName.PreToolUse,
+      'Shell',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('excludePromptLifecycleEvents is a plain pass-through for skills without prompt hooks', () => {
+    const { config, addSessionHook } = mockHookSystem();
+
+    expect(
+      applySkillHooks(config, gatedSkill(), {
+        excludePromptLifecycleEvents: true,
+      }),
+    ).toBe(1);
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
   });
 });
 

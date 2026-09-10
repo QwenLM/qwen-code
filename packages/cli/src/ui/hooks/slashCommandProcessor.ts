@@ -1133,6 +1133,15 @@ export const useSlashCommandProcessor = (
                 { once: true },
               );
             });
+            // Snapshot BEFORE the action runs. Command actions can install
+            // session hooks as a side effect (skill frontmatter hooks), and
+            // a hook installed by this action must not fire on — or block —
+            // the submission that carried it. Snapshotting the *predicate*
+            // (settings registry OR session manager) rather than just the
+            // settings registry keeps hooks configured before the dispatch
+            // firing normally on skill-command expansions.
+            const hadUserPromptExpansionHooks =
+              hasUserPromptExpansionHooks(config);
             const result = await Promise.race([
               commandToExecute.action(fullCommandContext, args),
               abortPromise,
@@ -1357,7 +1366,10 @@ export const useSlashCommandProcessor = (
                 case 'submit_prompt': {
                   const invocation = fullCommandContext.invocation;
                   let content = result.content;
-                  const output = hasUserPromptExpansionHooks(config)
+                  // Uses the pre-action snapshot (see above): hooks
+                  // installed by the command's own action are exempt from
+                  // this one expansion.
+                  const output = hadUserPromptExpansionHooks
                     ? await config
                         .getHookSystem()
                         ?.fireUserPromptExpansionEvent(
