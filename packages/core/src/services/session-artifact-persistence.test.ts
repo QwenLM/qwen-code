@@ -13,6 +13,7 @@ import {
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   stableSessionArtifactId,
+  selectActiveSideArtifactRecordUuids,
   type PersistedSessionArtifact,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
@@ -52,6 +53,29 @@ function event(payload: SessionArtifactEventRecordPayload): {
     systemPayload: payload,
   };
 }
+
+describe('source snapshots beside artifact history', () => {
+  it.each(['session_sources_snapshot', 'custom_title'])(
+    'does not let %s hide a restored artifact snapshot',
+    (subtype) => {
+      expect(
+        selectActiveSideArtifactRecordUuids(
+          [
+            { uuid: 'turn', parentUuid: null, type: 'user' },
+            {
+              uuid: 'artifact',
+              parentUuid: 'turn',
+              type: 'system',
+              subtype: 'session_artifact_snapshot',
+            },
+            { uuid: 'metadata', parentUuid: 'turn', type: 'system', subtype },
+          ],
+          ['turn'],
+        ),
+      ).toEqual(['artifact']);
+    },
+  );
+});
 
 describe('session artifact persistence records', () => {
   it('keeps saved webpage versions when forking events and snapshots', () => {

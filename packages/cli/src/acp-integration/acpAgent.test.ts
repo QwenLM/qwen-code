@@ -228,6 +228,12 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  SessionSourceService: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceService,
+  SessionSourceError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceError,
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -4458,6 +4464,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
+      registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
+      getSessionSourceService: vi.fn(),
       getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -4494,6 +4503,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
+        setTools: vi.fn().mockResolvedValue(undefined),
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -6950,6 +6961,291 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  async function setupSourceMocks(sessionId: string) {
+    const innerConfig = await setupSessionMocks(sessionId);
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionSourcesSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    innerConfig.getSessionService = vi
+      .fn()
+      .mockReturnValue({ readSessionSources: vi.fn().mockResolvedValue({}) });
+    let service:
+      | import('@qwen-code/qwen-code-core').SessionSourceService
+      | undefined;
+    innerConfig.setSessionSourceServiceFactory.mockImplementation(
+      (
+        factory: () => import('@qwen-code/qwen-code-core').SessionSourceService,
+      ) => {
+        service = factory();
+      },
+    );
+    innerConfig.getSessionSourceService.mockImplementation(() => service);
+    return { innerConfig, recording };
+  }
+
+  it('source methods require the trusted daemon parent before resolving a session', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/list', { sessionId }),
+      ).resolves.toEqual({
+        sourceError: {
+          code: 'source_persistence_unavailable',
+          message: 'Session source operation failed',
+        },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('binds sources before tool discovery and persists owner-session metadata through internal methods', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig, recording } = await setupSourceMocks(sessionId);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(
+      innerConfig.setSessionSourceServiceFactory.mock.invocationCallOrder[0],
+    ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]!);
+    await expect(
+      agent.extMethod('qwen/session/sources/list', { sessionId }),
+    ).resolves.toEqual({ revision: 0, sources: [] });
+    const created = await agent.extMethod('qwen/session/sources/upsert', {
+      sessionId,
+      input: {
+        title: 'Docs',
+        locator: { type: 'workspace_file', workspacePath: 'README.md' },
+      },
+    });
+    expect(created).toMatchObject({ revision: 1, change: 'created' });
+    expect(recording.recordSessionSourcesSnapshot).toHaveBeenCalledOnce();
+    await expect(
+      agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input: {
+          title: 'Docs',
+          locator: { type: 'url', url: 'file:///secret' },
+        },
+      }),
+    ).resolves.toMatchObject({ sourceError: { code: 'invalid_source' } });
+    await expect(
+      agent.extMethod('qwen/session/sources/remove', {
+        sessionId,
+        sourceId: (created['source'] as { id: string }).id,
+      }),
+    ).resolves.toEqual({ revision: 2, removed: true });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds standalone sources only after activation and registers their tool', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig, recording } = await setupSourceMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      });
+      expect(innerConfig.setSessionSourceServiceFactory).not.toHaveBeenCalled();
+      await lastSessionMock!.installManagedConversationActivation.mock.calls[0]![0]();
+      expect(
+        innerConfig.setSessionSourceServiceFactory.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.activateProvisionalWorkspace.mock.invocationCallOrder[0]!,
+      );
+      expect(innerConfig.registerSessionSourceTool).toHaveBeenCalledOnce();
+      expect(innerConfig.getLlmClient().setTools).toHaveBeenCalledOnce();
+      expect(
+        innerConfig.getLlmClient().setTools.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.registerSessionSourceTool.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        innerConfig.getLlmClient().refreshStartupContextReminder,
+      ).toHaveBeenCalledOnce();
+      expect(
+        innerConfig.getLlmClient().refreshStartupContextReminder.mock
+          .invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.getLlmClient().setTools.mock.invocationCallOrder[0]!,
+      );
+      await expect(
+        agent.extMethod('qwen/session/sources/upsert', {
+          sessionId,
+          input: {
+            title: 'Docs',
+            locator: { type: 'workspace_file', workspacePath: 'README.md' },
+          },
+        }),
+      ).resolves.toMatchObject({ revision: 1, change: 'created' });
+      expect(recording.recordSessionSourcesSnapshot).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('keeps source identity on the bound workspace after a live cwd change', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig } = await setupSourceMocks(sessionId);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const input = {
+        title: 'Docs',
+        locator: { type: 'workspace_file', workspacePath: 'README.md' },
+      };
+      const before = await agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input,
+      });
+      innerConfig.getTargetDir.mockReturnValue('/tmp/subdir');
+      const after = await agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input,
+      });
+      expect(after).toMatchObject({
+        revision: 1,
+        change: 'unchanged',
+        source: before['source'],
+      });
+      expect(after['source']).toMatchObject({ workspaceCwd: '/tmp' });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('skips source copying only when chat recording is disabled, retaining route errors', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', { sessionId }),
+      ).resolves.toEqual({ warnings: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/list', { sessionId }),
+      ).resolves.toMatchObject({
+        sourceError: { code: 'source_persistence_unavailable' },
+      });
+      innerConfig.getChatRecordingService.mockReturnValue(
+        {} as ReturnType<typeof innerConfig.getChatRecordingService>,
+      );
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', { sessionId }),
+      ).resolves.toMatchObject({
+        sourceError: { code: 'source_persistence_unavailable' },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('validates fork ownership and preserves durable copy results when temporary cleanup fails', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const targetSessionId = '22222222-2222-4222-8222-222222222222';
+    const { innerConfig } = await setupSourceMocks(sessionId);
+    const loadSession = vi
+      .fn()
+      .mockResolvedValue({ conversation: { messages: [] } });
+    innerConfig.getSessionService.mockReturnValue({
+      loadSession,
+    } as unknown as SessionService);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    const internals = agent as unknown as {
+      newSessionConfig: (...args: unknown[]) => Promise<Config>;
+      cleanupUnstoredConfig: (config: Config) => Promise<void>;
+    };
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const list = vi.fn().mockResolvedValue({ sources: [] });
+      innerConfig.getSessionSourceService.mockReturnValue({ list });
+      const copyFrom = vi
+        .fn()
+        .mockResolvedValue({ warnings: ['Copied with an omission'] });
+      const targetConfig = {
+        getSessionSourceService: () => ({ copyFrom }),
+      } as unknown as Config;
+      const bootstrap = vi
+        .spyOn(internals, 'newSessionConfig')
+        .mockResolvedValue(targetConfig);
+      const cleanup = vi
+        .spyOn(internals, 'cleanupUnstoredConfig')
+        .mockRejectedValue(new Error('cleanup failed'));
+      const request = {
+        sessionId,
+        targetSessionId,
+        targetCwd: '/tmp',
+        attachmentIds: [],
+      };
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toEqual({ warnings: [] });
+      expect(bootstrap).not.toHaveBeenCalled();
+      expect(loadSession).not.toHaveBeenCalled();
+      list.mockResolvedValue({ sources: [{ title: 'Docs' }] });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', {
+          ...request,
+          targetCwd: '/other',
+        }),
+      ).resolves.toHaveProperty('sourceError');
+      expect(loadSession).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toHaveProperty('sourceError');
+      expect(bootstrap).not.toHaveBeenCalled();
+      loadSession.mockResolvedValue({
+        conversation: { messages: [{ forkedFrom: { sessionId } }] },
+      });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toEqual({ warnings: ['Copied with an omission'] });
+      expect(copyFrom).toHaveBeenCalledOnce();
+      expect(cleanup).toHaveBeenCalledWith(targetConfig);
+      copyFrom.mockRejectedValueOnce(new Error('persistence failed'));
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toHaveProperty('sourceError');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('sessionArtifactsPersist records artifact events and snapshots', async () => {
@@ -23667,6 +23963,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
+      registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
+      getSessionSourceService: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
@@ -23686,6 +23985,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
+        setTools: vi.fn().mockResolvedValue(undefined),
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -24156,6 +24457,17 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         vi.mocked(reloadEnvironment).mockClear();
 
         await lastManagedConversationActivation!();
+        expect(
+          innerConfig.getLlmClient().refreshStartupContextReminder,
+        ).toHaveBeenCalledOnce();
+        if (action === 'load') {
+          expect(
+            innerConfig.getLlmClient().refreshStartupContextReminder.mock
+              .invocationCallOrder[0],
+          ).toBeGreaterThan(
+            lastSessionMock!.replayHistory.mock.invocationCallOrder[0]!,
+          );
+        }
 
         expect(reloadScopesFromDiskAtomically).toHaveBeenCalledTimes(2);
         expect(reloadScopesFromDiskAtomically).toHaveBeenLastCalledWith([

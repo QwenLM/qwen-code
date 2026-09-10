@@ -1,5 +1,7 @@
 # Saved webpage versions in Web Shell
 
+[English](web-shell-preview-snapshots.md) | [简体中文](web-shell-preview-snapshots.zh-CN.md)
+
 ## Problem
 
 A historical link to a development server shows the current page. The user
@@ -32,7 +34,10 @@ the HTML, so missing bytes do not prevent restoring the conversation record.
 New snapshots also contain a `references/` directory with hashed session IDs,
 identified by `qwen.snapshot.references: 1` in their metadata. Publication creates
 the producing session's reference. A fork acquires its own reference before
-committing the transcript; a failed fork releases only its operation's reference.
+committing the transcript. Missing snapshot storage does not block the fork:
+it preserves the historical descriptor and warns that the content may be
+unavailable. Other reference errors still abort the fork; a failed fork releases
+only its operation's reference.
 The owning runtime is captured explicitly. Session deletion releases only the
 snapshot UUIDs found in the exact transcripts being removed, including old side
 events; it does not scan other workspaces by session ID. Removal, eviction,
@@ -99,7 +104,9 @@ Test publishing v1 then v2 from one source, retaining the stable latest URL
 while both snapshot files retain their own bytes. Restart/read from persisted
 session data, open each original message, exercise inline interaction, close
 and reload, and make the source/latest page unavailable. Test owner isolation,
-forged descriptors, symlinks, truncation and checksum mismatch. Run the global
+forged descriptors, symlinks, truncation and checksum mismatch. Fork with missing
+snapshot bytes or reference storage and verify the conversation and descriptor
+survive; other reference errors must not commit a partial fork. Run the global
 CLI baseline first, then build/typecheck/bundle, focused unit tests and the
 browser scenario on the local daemon. See
 `.qwen/e2e-tests/web-shell-preview-snapshots.md` for commands and results.

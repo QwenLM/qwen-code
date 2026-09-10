@@ -168,6 +168,7 @@ import {
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
+import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -2285,6 +2286,9 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+  });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
   });
 
   if (liveVoiceSurfaceAvailable) {

@@ -1,5 +1,7 @@
 # Web Shell live development preview
 
+[English](web-shell-live-preview.md) | [简体中文](web-shell-live-preview.zh-CN.md)
+
 ## Problem and current behavior
 
 The right panel renders HTML file contents in a sandboxed `srcDoc`, but cannot
