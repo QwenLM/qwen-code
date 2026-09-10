@@ -610,15 +610,34 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     'dist',
     'export-transcript-document.js',
   );
-  if (existsSync(exportTranscriptRenderer)) {
+  const exportTranscriptCss = join(
+    root,
+    'packages',
+    'web-templates',
+    'src',
+    'export-html',
+    'dist',
+    'export-transcript-document.css',
+  );
+  if (existsSync(exportTranscriptRenderer) && existsSync(exportTranscriptCss)) {
     copyFileSync(
       exportTranscriptRenderer,
       join(distDir, 'export-transcript-document.js'),
     );
+    copyFileSync(
+      exportTranscriptCss,
+      join(distDir, 'export-transcript-document.css'),
+    );
     console.log('Copied HTML export renderer to dist/');
   } else {
+    const missingExportTranscriptAssets = [
+      exportTranscriptRenderer,
+      exportTranscriptCss,
+    ].filter((assetPath) => !existsSync(assetPath));
     console.warn(
-      'Warning: HTML export renderer not found; run a full `npm run build` before bundling.',
+      `Warning: HTML export renderer assets not found at ${missingExportTranscriptAssets.join(', ')}; ` +
+        'dist/ will carry no HTML export renderer. ' +
+        'Run a full `npm run build` before bundling to include it.',
     );
   }
 
