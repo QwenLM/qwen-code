@@ -52,7 +52,11 @@ the current epoch and the coordinator capability state. Restore of a lower
 store generation is supported by the poller's fresh authoritative read: it
 invalidates applied certification and advances the coordinator revision. A
 read overtaken by another observed mutation cannot lower the generation;
-operation receipts alone never lower it.
+operation receipts alone never lower it. A recovery and recommit between two
+reads reuses the generation number for different content, which the number
+alone cannot show; the poller records the store's content hash, and a changed
+hash at the desired generation clears applied certification and re-drives
+reconciliation.
 
 Extension invalidation also invalidates the selected runtime's Skills and MCP
 capabilities because both catalogs include Extension contributions. A late

@@ -1784,6 +1784,17 @@ describe('extension management v2 REST', () => {
         desiredGeneration: 6,
         appliedGeneration: 6,
       });
+      // The projection must serve the coordinator-certified generation on a
+      // coordinator-armed runtime, not the legacy per-workspace map.
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
       const recovered = invalidateCount();
       expect(recovered).toBeGreaterThan(settled);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -1791,6 +1802,108 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles again when the store reuses a generation for different content', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    const invokeWorkspaceCommand = vi.fn(async () => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    }));
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand,
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const extensionReconcileCalls = () =>
+      (invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      const settled = extensionReconcileCalls();
+      expect(settled).toBeGreaterThan(0);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({ state: 'ready', appliedGeneration: 7 });
+
+      // Automatic backup recovery plus a recommit both landed between two
+      // ticks: generation 7 is back but describes different content.
+      const reusedSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'reused-content-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(extensionReconcileCalls()).toBeGreaterThan(settled);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      // With the content identity recorded again the next tick is a no-op.
+      const converged = extensionReconcileCalls();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(extensionReconcileCalls()).toBe(converged);
     } finally {
       vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });

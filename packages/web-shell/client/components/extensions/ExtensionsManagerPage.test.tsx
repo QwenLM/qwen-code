@@ -1769,6 +1769,139 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
     expect(card?.textContent).not.toContain('No description');
   });
 
+  it('keeps the overlaid rows while a refresh re-reads the runtime legs', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'id-main',
+      workspaceCwd: '/repo/main',
+      trusted: true,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled' as const,
+          workspaceActivation: null,
+          effectiveActivation: 'enabled' as const,
+          activationSource: 'default' as const,
+        },
+      ],
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 1,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled' as const,
+          workspaceOverrideCount: 0,
+        },
+      ],
+    });
+    mocks.ensureRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/main',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 7,
+      capabilities: {
+        extensions: {
+          state: 'ready' as const,
+          revision: 1,
+          runtimeEpoch: 7,
+          desiredGeneration: 1,
+          appliedGeneration: 1,
+        },
+      },
+    });
+    const liveCatalog = {
+      v: 1 as const,
+      workspaceCwd: '/repo/main',
+      initialized: true,
+      runtimeEpoch: 7,
+      extensions: [
+        {
+          kind: 'extension' as const,
+          id: 'ext-demo',
+          name: 'demo',
+          displayName: 'Demo Display Name',
+          description: 'live runtime description',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+          details: {
+            mcpServers: [],
+            commands: [],
+            skills: [],
+            agents: [],
+            contextFiles: [],
+            settings: [],
+          },
+        },
+      ],
+    };
+    mocks.workspaceRuntimeExtensions.mockResolvedValue(liveCatalog);
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector(
+          '[role="button"][aria-label="Demo Display Name"]',
+        ),
+      ).not.toBeNull(),
+    );
+
+    // Gate the refresh's runtime-catalog leg: while it is in flight the
+    // overlaid rows must stay on screen, not fall back to the bare catalog.
+    let releaseRuntime!: () => void;
+    mocks.workspaceRuntimeExtensions.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRuntime = () => resolve(liveCatalog);
+        }),
+    );
+    await act(async () => {
+      click(findButton('Refresh'));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mocks.workspaceRuntimeExtensions).toHaveBeenCalledTimes(2);
+
+    const pending = container.querySelector<HTMLElement>(
+      '[role="button"][aria-label="Demo Display Name"]',
+    );
+    expect(pending).not.toBeNull();
+    expect(pending?.textContent).toContain('live runtime description');
+    expect(pending?.textContent).not.toContain('No description');
+
+    await act(async () => {
+      releaseRuntime();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector(
+          '[role="button"][aria-label="Demo Display Name"]',
+        ),
+      ).not.toBeNull(),
+    );
+  });
+
   it('does not refresh the runtime after a user-scope toggle on an untrusted secondary', async () => {
     const workspaceExtensions = vi.fn(async () => ({
       v: 1 as const,

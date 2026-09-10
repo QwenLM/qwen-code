@@ -612,6 +612,16 @@ export function ExtensionsManagerPage({
             : preserveSelectedExtensionName(name, nextExtensions),
         );
       };
+      // The overlay-less durable merge carries no live display metadata
+      // (raw name, no description, no badges): paint it only as a first
+      // load's placeholder, never over rows a previous load already
+      // overlaid; the runtime legs below re-merge with the live catalog.
+      const applyFirstPaint = (nextExtensions: ManagedExtensionEntry[]) => {
+        if (requestId !== loadRequestRef.current) return;
+        setExtensions((current) =>
+          current.length > 0 ? current : nextExtensions,
+        );
+      };
       // The trust this load observed, resolved per branch so awaiting
       // callers decide on the fresh value, not the render-time state
       // snapshot.
@@ -631,7 +641,7 @@ export function ExtensionsManagerPage({
           if (observedTrusted !== null) {
             setWorkspaceTrusted(observedTrusted);
           }
-          apply(
+          applyFirstPaint(
             mergeExtensionCatalog(
               catalog.extensions,
               activation,

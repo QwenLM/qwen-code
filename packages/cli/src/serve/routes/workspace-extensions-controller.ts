@@ -749,7 +749,9 @@ export function createExtensionsController(
                           (reconciliation.state !== 'reconciled' &&
                           reconciliation.state !== 'superseded' &&
                           (runtimeWasLive || operation === 'refresh')
-                            ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
+                            ? runtimeWasLive
+                              ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
+                              : 'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.'
                             : undefined);
                         runtime.bridge.broadcastExtensionsChanged({
                           ...bridgeMutationEvent(event),

@@ -784,10 +784,14 @@ export function registerWorkspaceExtensionRoutes(
             revision: coordinator?.status().capabilities?.extensions?.revision,
           };
         });
-        const generation = (await manager.getExtensionStoreSnapshot())
-          .generation;
+        const snapshot = await manager.getExtensionStoreSnapshot();
+        const generation = snapshot.generation;
         for (const { coordinator, revision } of observations) {
-          coordinator?.observeExtensionGeneration(generation, revision);
+          coordinator?.observeExtensionGeneration(
+            generation,
+            revision,
+            snapshot.legacyProjectionHash,
+          );
         }
         const pendingRuntimes = workspaceRegistry
           .listAll()
@@ -2513,7 +2517,11 @@ export function registerWorkspaceExtensionRoutes(
         const snapshot = await manager.refreshCacheWithSnapshot();
         runtime.generationGuard?.assertOpen();
         const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
-        coordinator?.observeExtensionGeneration(snapshot.generation);
+        coordinator?.observeExtensionGeneration(
+          snapshot.generation,
+          undefined,
+          snapshot.legacyProjectionHash,
+        );
         const extensions = manager.getLoadedExtensions().map((extension) => {
           const activation = manager.getExtensionActivationFromSnapshot(
             extension.id,

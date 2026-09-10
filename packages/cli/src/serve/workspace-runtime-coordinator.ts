@@ -114,6 +114,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private appliedExtensionRuntimeEpoch: number | undefined;
 
+  private observedExtensionStoreHash: string | undefined;
+
   private skillsRevision = 0;
 
   private mcpRevision = 0;
@@ -298,7 +300,14 @@ export class WorkspaceRuntimeCoordinator {
         try {
           await withTimeout(this.prepareExtensions(), remainingMs);
         } catch (error) {
-          this.assertAcceptingWork(error);
+          // A drain landing mid-prepare rethrows this as the
+          // WorkspaceDrainingError cause, which the error response logs —
+          // sanitize it like the status/broadcast sinks.
+          this.assertAcceptingWork(
+            sanitizeExtensionsErrorMessage(
+              error instanceof Error ? error.message : String(error),
+            ),
+          );
         }
       }
     }
@@ -363,17 +372,42 @@ export class WorkspaceRuntimeCoordinator {
   observeExtensionGeneration(
     generation: number,
     storeReadRevision?: number,
+    storeContentHash?: string,
   ): void {
-    if (generation === this.desiredExtensionGeneration) return;
-    if (generation < this.desiredExtensionGeneration) {
-      // Only a fresh store read may adopt automatic backup recovery. A late
-      // operation receipt or a read overtaken by a mutation cannot roll back.
-      if (storeReadRevision !== this.extensionsRevision) return;
+    if (generation === this.desiredExtensionGeneration) {
+      if (
+        storeContentHash === undefined ||
+        storeContentHash === this.observedExtensionStoreHash
+      ) {
+        return;
+      }
+      if (this.observedExtensionStoreHash === undefined) {
+        // The first hash-carrying read at this generation records the
+        // identity; there is nothing to diff it against yet.
+        this.observedExtensionStoreHash = storeContentHash;
+        return;
+      }
+      // Automatic backup recovery plus a recommit between two observations
+      // reuses this generation number for different content, which the
+      // monotonic generation comparison cannot see: the recorded application
+      // no longer describes the store.
       this.appliedExtensionGeneration = 0;
       this.appliedExtensionRuntimeEpoch = undefined;
+    } else {
+      if (generation < this.desiredExtensionGeneration) {
+        // Only a fresh store read may adopt automatic backup recovery. A late
+        // operation receipt or a read overtaken by a mutation cannot roll back.
+        if (storeReadRevision !== this.extensionsRevision) return;
+        this.appliedExtensionGeneration = 0;
+        this.appliedExtensionRuntimeEpoch = undefined;
+      }
+      this.desiredExtensionGeneration = generation;
     }
+    // An operation receipt carries no content identity; clearing it makes the
+    // next store read at the new generation re-record instead of diffing
+    // against content the generation no longer describes.
+    this.observedExtensionStoreHash = storeContentHash;
     this.runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-    this.desiredExtensionGeneration = generation;
     this.extensionsRevision += 1;
     this.extensionsRefreshFailedRevision = undefined;
     this.extensionsRefreshRetryRevision = undefined;
@@ -681,6 +715,13 @@ export class WorkspaceRuntimeCoordinator {
       return;
     }
     if (this.isExtensionsFailureLatched(revision, runtimeEpoch)) return;
+    // A recovery apply at a generation the coordinator already counts (for
+    // example the initial generation after a latched failure) does not
+    // advance anything, but the runtime did load extensions that were
+    // missing when the derived Skills/MCP capabilities last certified.
+    const recoveringFromError =
+      this.extensionsStatus.state === 'error' &&
+      this.extensionsStatus.runtimeEpoch === runtimeEpoch;
     this.extensionsStatus = {
       state: 'starting',
       revision,
@@ -778,9 +819,10 @@ export class WorkspaceRuntimeCoordinator {
         (this.appliedExtensionRuntimeEpoch === runtimeEpoch &&
           (this.appliedExtensionGeneration === generation - 1 ||
             this.appliedExtensionGeneration === generation));
-      const advancesGeneration =
+      const refreshesDerivedCapabilities =
         certifiesGeneration &&
         (this.appliedExtensionGeneration !== generation ||
+          recoveringFromError ||
           // Initial ensure prepares Skills/MCP itself; a later certification
           // reset (including Store recovery to zero) must invalidate them.
           (revision > 0 && this.appliedExtensionRuntimeEpoch !== runtimeEpoch));
@@ -788,7 +830,7 @@ export class WorkspaceRuntimeCoordinator {
         this.appliedExtensionGeneration = generation;
         this.appliedExtensionRuntimeEpoch = runtimeEpoch;
       }
-      if (advancesGeneration) {
+      if (refreshesDerivedCapabilities) {
         this.afterExtensionApply(options);
       }
       this.extensionsStatus = certifiesGeneration

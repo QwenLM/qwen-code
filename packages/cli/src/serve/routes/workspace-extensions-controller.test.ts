@@ -433,7 +433,20 @@ describe('createExtensionsController', () => {
       warns: false,
     },
     { operation: 'install', runtimeLive: true, error: undefined, warns: true },
-    { operation: 'refresh', runtimeLive: false, error: undefined, warns: true },
+    {
+      operation: 'refresh',
+      runtimeLive: false,
+      error: undefined,
+      warns: true,
+      warningText:
+        'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.',
+    },
+    {
+      operation: 'refresh',
+      runtimeLive: true,
+      error: undefined,
+      warns: true,
+    },
     {
       operation: 'refresh',
       runtimeLive: true,
@@ -448,7 +461,14 @@ describe('createExtensionsController', () => {
     },
   ])(
     'reports deferred $operation with runtimeLive=$runtimeLive and error=$error',
-    async ({ operation, runtimeLive, state = 'deferred', error, warns }) => {
+    async ({
+      operation,
+      runtimeLive,
+      state = 'deferred',
+      error,
+      warns,
+      warningText,
+    }) => {
       const reconcileExtensionGeneration = vi.fn(async () => ({
         state,
         refreshed: 0,
@@ -502,6 +522,7 @@ describe('createExtensionsController', () => {
                     workspaceId: 'secondary',
                     error:
                       error ??
+                      warningText ??
                       'Extension runtime has not applied the committed generation. Retry the runtime refresh.',
                   },
                 ],
