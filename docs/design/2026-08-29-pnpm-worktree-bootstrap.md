@@ -53,12 +53,15 @@ enabled while skipping repository build, bundle, and npm-layout notice
 generation. Because `QWEN_SKIP_PREPARE=1` also suppresses the Husky step that
 `scripts/prepare.js` runs for an npm install, the bootstrap installs Husky
 hooks itself once the frozen install succeeds. It preserves an existing
-non-default `core.hooksPath` and honours `HUSKY=0`; in a linked worktree whose
-`core.hooksPath` is unset it skips Husky and reports that, since husky's
+non-default `core.hooksPath` and honours `HUSKY=0`; in a checkout that does not
+own the repository config Husky would write, which git reports as a linked
+worktree whose `core.hooksPath` is unset or as no repository at all, it skips
+Husky and reports that, since husky's
 unguarded `git config` write would otherwise set the hooks path in the config
 every worktree of the repository shares while creating `.husky/_` only in the
 bootstrapped checkout; and it fails closed when a Husky run leaves the hooks
-path unconfigured. Tree cleanliness is preserved by the `.gitignore` husky
+path unconfigured or writes no hook wrappers. Tree cleanliness is preserved by
+the `.gitignore` husky
 generates inside `.husky/_`. Script execution does not
 implicitly install stale dependencies; the bootstrap command is the explicit
 installation boundary. Building from this pnpm layout is deferred to Stage 2.

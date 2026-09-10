@@ -221,6 +221,11 @@ describe('package scripts', () => {
     const commandDir = path.join(binDir, 'runner bin');
     const logFile = path.join(binDir, 'corepack.log');
     mkdirSync(commandDir);
+    // The stub husky has to leave the wrapper the bootstrap verifies. It is
+    // confined to `.husky/_` and removed again unless a real Husky install
+    // already put one there.
+    const stubHooksDir = path.join(root, '.husky', '_');
+    const hadStubHooksDir = existsSync(stubHooksDir);
 
     const runSetup = (envOverride = {}) => {
       writeFileSync(logFile, '');
@@ -245,12 +250,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(commandDir, 'corepack.cmd'),
-          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if not "%2"=="exec" exit /b 0\r\n@if exist ".husky\\_\\pre-commit" exit /b 0\r\n@if not exist ".husky\\_" mkdir ".husky\\_"\r\n@type nul > ".husky\\_\\pre-commit"\r\n',
         );
       } else {
         writeFileSync(
           path.join(commandDir, 'corepack'),
-          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n',
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$2" = "exec" ] || exit 0\n[ -e .husky/_/pre-commit ] && exit 0\nmkdir -p .husky/_\n: > .husky/_/pre-commit\n',
         );
         chmodSync(path.join(commandDir, 'corepack'), 0o755);
       }
@@ -271,51 +276,54 @@ describe('package scripts', () => {
         '1 1 pnpm install --frozen-lockfile --offline',
       );
     } finally {
+      if (!hadStubHooksDir) {
+        rmSync(stubHooksDir, { recursive: true, force: true });
+      }
       rmSync(binDir, { recursive: true, force: true });
     }
   });
 
   /**
-   * The hook logic reads `core.hooksPath` from git and decides from `.git`
-   * whether this checkout owns the config that write would land in. The
-   * injected `GIT_CONFIG_*` constant above cannot express either: it pins the
-   * value for the child's whole lifetime, so the unset state — the only one
-   * where husky is asked to write — is unreachable from it. These cases run the
-   * real script against a throwaway root instead: a synthetic checkout whose
-   * `.git` is a file (linked worktree) or a directory (primary), plus a real
-   * `git init` repo the child reads and writes through `GIT_DIR`, and a stub
-   * husky whose write the case controls.
+   * The hook logic reads `core.hooksPath` from git and asks git which root owns
+   * the config husky would write. Neither is reachable from the injected
+   * `GIT_CONFIG_*` constant above: it pins the value for the child's whole
+   * lifetime, so the unset state — the only one where husky is asked to write —
+   * cannot come from it, and ownership comes from `git rev-parse`, which
+   * answers only for a real layout. These cases build throwaway trees with real
+   * git commands instead: a primary checkout (`.git` directory), a linked
+   * worktree and a `--separate-git-dir` clone (both `.git` files, only the
+   * clone owning its config), and a directory with no repository at all. The
+   * stub husky lets each case choose what husky writes and what it exits with.
    */
   it('installs hooks only where the checkout owns the repository config', () => {
     const sandbox = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-hooks-'));
-    const checkout = path.join(sandbox, 'checkout');
     const commandDir = path.join(sandbox, 'bin');
-    const configRepo = path.join(sandbox, 'config-repo');
-    const configRepoGitDir = path.join(configRepo, '.git');
+    const primary = path.join(sandbox, 'primary');
+    const linked = path.join(sandbox, 'linked');
+    const separate = path.join(sandbox, 'separate');
+    const separateGitDir = path.join(sandbox, 'separate-git');
+    const noRepo = path.join(sandbox, 'no-repo');
     const logFile = path.join(sandbox, 'corepack.log');
     const emptyConfig = path.join(sandbox, 'empty-config');
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_CONFIG_SYSTEM: emptyConfig,
+    };
+    const installLine = '1 1 pnpm install --frozen-lockfile --offline';
+    const huskyLine = '1 1 pnpm exec husky';
 
     try {
-      mkdirSync(path.join(checkout, 'scripts'), { recursive: true });
       mkdirSync(commandDir, { recursive: true });
       writeFileSync(emptyConfig, '');
-      writeFileSync(
-        path.join(checkout, 'package.json'),
-        `${JSON.stringify({ packageManager: 'pnpm@11.24.0' }, null, 2)}\n`,
-      );
-      for (const script of ['setup-worktree.js', 'pnpm-package.js']) {
-        writeFileSync(
-          path.join(checkout, 'scripts', script),
-          readFileSync(path.join(root, 'scripts', script), 'utf8'),
-        );
-      }
 
       // Stands in for husky: logs the invocation like the neighbouring stubs,
-      // then writes the hooks path only when the case asks it to.
+      // then writes what husky writes and exits as the case asks.
       const stub =
         process.platform === 'win32'
-          ? '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if not "%2"=="exec" exit /b 0\r\n@if not "%STUB_HUSKY_SETS_HOOKS_PATH%"=="1" exit /b 0\r\n@git config core.hooksPath .husky/_\r\n'
-          : '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$2" = "exec" ] || exit 0\n[ "$STUB_HUSKY_SETS_HOOKS_PATH" = "1" ] || exit 0\ngit config core.hooksPath .husky/_\n';
+          ? '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if not "%2"=="exec" exit /b 0\r\n@if not "%STUB_HUSKY_EXIT%"=="" exit /b %STUB_HUSKY_EXIT%\r\n@if "%STUB_HUSKY_SETS_HOOKS_PATH%"=="1" git config core.hooksPath .husky/_\r\n@if not "%STUB_HUSKY_WRITES_HOOKS%"=="1" exit /b 0\r\n@if not exist ".husky\\_" mkdir ".husky\\_"\r\n@type nul > ".husky\\_\\pre-commit"\r\n'
+          : '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$2" = "exec" ] || exit 0\n[ -z "$STUB_HUSKY_EXIT" ] || exit "$STUB_HUSKY_EXIT"\n[ "$STUB_HUSKY_SETS_HOOKS_PATH" = "1" ] && git config core.hooksPath .husky/_\n[ "$STUB_HUSKY_WRITES_HOOKS" = "1" ] && mkdir -p .husky/_ && : > .husky/_/pre-commit\nexit 0\n';
       writeFileSync(
         path.join(
           commandDir,
@@ -326,28 +334,55 @@ describe('package scripts', () => {
       if (process.platform !== 'win32') {
         chmodSync(path.join(commandDir, 'corepack'), 0o755);
       }
-      expect(
-        spawnSync('git', ['init', '--quiet', configRepo], { encoding: 'utf8' })
-          .status,
-      ).toBe(0);
 
-      const sharedConfigEnv = {
-        ...process.env,
-        GIT_DIR: configRepoGitDir,
-        GIT_CONFIG_COUNT: '0',
-      };
-      const runSetup = ({ ownsConfig, stubSetsHooksPath }) => {
-        // `.git` as a file is how git marks a linked worktree, and the script
-        // only ever looks at it through `statSync`, so a stand-in is enough.
-        rmSync(path.join(checkout, '.git'), { recursive: true, force: true });
-        if (ownsConfig) {
-          mkdirSync(path.join(checkout, '.git'));
-        } else {
+      const seedCheckout = (checkout) => {
+        mkdirSync(path.join(checkout, 'scripts'), { recursive: true });
+        writeFileSync(
+          path.join(checkout, 'package.json'),
+          `${JSON.stringify({ packageManager: 'pnpm@11.24.0' }, null, 2)}\n`,
+        );
+        for (const script of ['setup-worktree.js', 'pnpm-package.js']) {
           writeFileSync(
-            path.join(checkout, '.git'),
-            `gitdir: ${path.join(configRepoGitDir, 'worktrees', 'checkout')}\n`,
+            path.join(checkout, 'scripts', script),
+            readFileSync(path.join(root, 'scripts', script), 'utf8'),
           );
         }
+      };
+      const git = (args, cwd) =>
+        spawnSync('git', args, { cwd, encoding: 'utf8', env: gitEnv });
+      const identity = [
+        '-c',
+        'user.name=fixture',
+        '-c',
+        'user.email=fixture@example.com',
+      ];
+
+      seedCheckout(primary);
+      expect(git(['init', '--quiet', primary], sandbox).status).toBe(0);
+      expect(git(['add', '--all'], primary).status).toBe(0);
+      expect(
+        git([...identity, 'commit', '--quiet', '-m', 'fixture'], primary)
+          .status,
+      ).toBe(0);
+      expect(
+        git(['worktree', 'add', '--quiet', '--detach', linked], primary).status,
+      ).toBe(0);
+      expect(
+        git(
+          [
+            'clone',
+            '--quiet',
+            '--separate-git-dir',
+            separateGitDir,
+            primary,
+            separate,
+          ],
+          sandbox,
+        ).status,
+      ).toBe(0);
+      seedCheckout(noRepo);
+
+      const runSetup = (checkout, huskyStub = {}) => {
         writeFileSync(logFile, '');
         return spawnSync(
           process.execPath,
@@ -358,12 +393,13 @@ describe('package scripts', () => {
             env: {
               ...process.env,
               HUSKY: '1',
-              STUB_HUSKY_SETS_HOOKS_PATH: stubSetsHooksPath ? '1' : '0',
+              STUB_HUSKY_SETS_HOOKS_PATH: huskyStub.setsHooksPath ? '1' : '0',
+              STUB_HUSKY_WRITES_HOOKS: huskyStub.writesHooks ? '1' : '0',
+              STUB_HUSKY_EXIT: huskyStub.exit ?? '',
               PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
               WORKTREE_SETUP_LOG: logFile,
-              // Read the throwaway repo's config rather than the host
-              // checkout's, which already carries `core.hooksPath`.
-              GIT_DIR: configRepoGitDir,
+              // Read and write the throwaway trees' own config rather than the
+              // host checkout's, which already carries `core.hooksPath`.
               GIT_CONFIG_COUNT: '0',
               GIT_CONFIG_GLOBAL: emptyConfig,
               GIT_CONFIG_SYSTEM: emptyConfig,
@@ -371,45 +407,86 @@ describe('package scripts', () => {
           },
         );
       };
-      const sharedHooksPath = () =>
-        spawnSync('git', ['config', '--get', 'core.hooksPath'], {
-          cwd: configRepo,
-          encoding: 'utf8',
-          env: sharedConfigEnv,
-        }).status === 0;
+      const hooksPathIsSet = (checkout) =>
+        git(['config', '--get', 'core.hooksPath'], checkout).status === 0;
+      const resetPrimaryHooks = () => {
+        git(['config', '--unset', 'core.hooksPath'], primary);
+        rmSync(path.join(primary, '.husky'), { recursive: true, force: true });
+      };
 
       // A linked worktree with the key unset must not let husky add it to the
       // config every worktree of the repository shares.
-      const linked = runSetup({ ownsConfig: false, stubSetsHooksPath: true });
-      expect(linked.status).toBe(0);
-      expect(linked.stdout).toContain('skipping Husky');
-      expect(readFileSync(logFile, 'utf8').trim()).toBe(
-        '1 1 pnpm install --frozen-lockfile --offline',
-      );
-      expect(sharedHooksPath()).toBe(false);
+      const linkedRun = runSetup(linked, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(linkedRun.status).toBe(0);
+      expect(linkedRun.stdout).toContain('skipping Husky');
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(installLine);
+      expect(hooksPathIsSet(primary)).toBe(false);
+      expect(existsSync(path.join(linked, '.husky'))).toBe(false);
 
       // The primary checkout owns the config husky writes, so the same unset
       // key installs hooks there.
-      const primary = runSetup({ ownsConfig: true, stubSetsHooksPath: true });
-      expect(primary.status).toBe(0);
+      const primaryRun = runSetup(primary, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(primaryRun.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
-        '1 1 pnpm install --frozen-lockfile --offline',
-        '1 1 pnpm exec husky',
+        installLine,
+        huskyLine,
       ]);
-      expect(sharedHooksPath()).toBe(true);
+      expect(hooksPathIsSet(primary)).toBe(true);
+      expect(existsSync(path.join(primary, '.husky', '_', 'pre-commit'))).toBe(
+        true,
+      );
 
-      // A husky that exits 0 without configuring the hooks path fails closed
-      // instead of shipping a checkout with no hooks.
-      expect(
-        spawnSync('git', ['config', '--unset', 'core.hooksPath'], {
-          cwd: configRepo,
-          encoding: 'utf8',
-          env: sharedConfigEnv,
-        }).status,
-      ).toBe(0);
-      const hookless = runSetup({ ownsConfig: true, stubSetsHooksPath: false });
+      // A `.git` file does not by itself mean another root owns the config: a
+      // `--separate-git-dir` clone owns its own, so hooks install there.
+      const separateRun = runSetup(separate, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(separateRun.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        installLine,
+        huskyLine,
+      ]);
+      expect(hooksPathIsSet(separate)).toBe(true);
+
+      // With no repository at all there is no config to write, so husky is
+      // skipped rather than run into its `.git can't be found` soft failure.
+      const noRepoRun = runSetup(noRepo, {
+        setsHooksPath: true,
+        writesHooks: true,
+      });
+      expect(noRepoRun.status).toBe(0);
+      expect(noRepoRun.stdout).toContain('skipping Husky');
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(installLine);
+      expect(existsSync(path.join(noRepo, '.husky'))).toBe(false);
+
+      // A husky that configures the hooks path but writes no wrappers still
+      // ships a hook-less checkout, so the on-disk half fires on its own.
+      resetPrimaryHooks();
+      const configOnly = runSetup(primary, { setsHooksPath: true });
+      expect(configOnly.status).toBe(1);
+      expect(configOnly.stderr).toContain('Husky did not install hooks');
+
+      // A husky that exits 0 having written nothing fails closed too.
+      resetPrimaryHooks();
+      const hookless = runSetup(primary);
       expect(hookless.status).toBe(1);
       expect(hookless.stderr).toContain('Husky did not install hooks');
+
+      // A husky that fails outright decides the exit code, not the install
+      // result that preceded it.
+      const failing = runSetup(primary, { exit: '7' });
+      expect(failing.status).toBe(7);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        installLine,
+        huskyLine,
+      ]);
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
@@ -510,20 +587,24 @@ describe('package scripts', () => {
         {
           cwd: root,
           encoding: 'utf8',
+          // `PATH` holds only the stub directory, so the fallback stays pinned
+          // as needing no ambient tooling: with no git to resolve a repository
+          // the hook step reports itself skipped rather than failing an install
+          // that succeeded.
           env: {
             ...process.env,
-            ...huskyTestEnv,
-            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            HUSKY: '1',
+            PATH: binDir,
             WORKTREE_SETUP_LOG: logFile,
           },
         },
       );
 
       expect(result.status).toBe(0);
+      expect(result.stdout).toContain('skipping Husky');
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         '1 1 pnpm install --frozen-lockfile --offline',
         '1 1 pnpm install --frozen-lockfile --prefer-offline',
-        '1 1 pnpm exec husky',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });

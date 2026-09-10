@@ -5,7 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,15 +75,21 @@ function getHooksPath() {
 }
 
 // Husky runs `git config core.hooksPath .husky/_` with no --worktree, so the
-// value always lands in the config of the root that owns `.git` while the
-// `.husky/_` wrappers are created in the working directory it was invoked from.
-// Those are the same root here unless `.git` is a file, which is how git marks
-// a linked worktree pointing at the primary's `.git/worktrees/<name>`.
-function ownsRepositoryConfig() {
-  const gitEntry = statSync(resolve(rootDir, '.git'), {
-    throwIfNoEntry: false,
-  });
-  return gitEntry === undefined || gitEntry.isDirectory();
+// value always lands in the config of the root that owns the repository while
+// the `.husky/_` wrappers are created in the working directory it was invoked
+// from. Git names that root: `--git-dir` differs from `--git-common-dir` only
+// in a linked worktree, whose config every sibling worktree shares. The shape
+// of `.git` is no proxy for it — a file also means a `--separate-git-dir` clone
+// or a submodule, which own their config, and no `.git` means no repository.
+function repositoryConfigOwnership() {
+  const probe = spawnSync(
+    'git',
+    ['rev-parse', '--git-dir', '--git-common-dir'],
+    { cwd: rootDir, env, encoding: 'utf8' },
+  );
+  if (probe.status !== 0) return 'none';
+  const [gitDir, commonDir] = probe.stdout.trim().split(/\r?\n/);
+  return gitDir === commonDir ? 'owns' : 'linked';
 }
 
 function install(cacheMode) {
@@ -96,22 +102,36 @@ function install(cacheMode) {
     ) {
       exitWithResult(result);
     }
-    // With the key unset, husky's write would add it to the config shared by
-    // every worktree of this repository while only this checkout receives
-    // `.husky/_`, silently repointing hook resolution for roots that never got
-    // the wrappers. Leave that config alone and say so instead. `prepare.js`'s
-    // `run('husky')` needs no such guard: it installs the checkout that owns
-    // the config it writes.
-    if (hooksPath === undefined && !ownsRepositoryConfig()) {
+    // Without a repository there is no config for husky to write. With the key
+    // unset in a linked worktree, husky's write would add it to the config
+    // every worktree of this repository shares while only this checkout
+    // receives `.husky/_`, silently repointing hook resolution for roots that
+    // never got the wrappers. Leave both alone and say so instead.
+    const ownership = repositoryConfigOwnership();
+    if (
+      ownership === 'none' ||
+      (hooksPath === undefined && ownership === 'linked')
+    ) {
       console.log(
-        'worktree setup: core.hooksPath is unset and this linked worktree does ' +
-          'not own the repository config; skipping Husky so the hooks path is ' +
-          'not rewritten for every other worktree.',
+        ownership === 'none'
+          ? 'worktree setup: git could not resolve a repository for this ' +
+              'checkout; skipping Husky because there is no repository config ' +
+              'for it to write.'
+          : 'worktree setup: core.hooksPath is unset and this checkout does not ' +
+              'own the repository config; skipping Husky so the hooks path is ' +
+              'not rewritten for every other worktree.',
       );
       exitWithResult(result);
     }
+    // Husky exits 0 on every soft failure (`.git can't be found`, a refused
+    // `git config` write), so success takes both proofs: the config value says
+    // git will use the hooks, and a wrapper on disk says husky wrote them here.
     const husky = runPnpm(['exec', 'husky']);
-    if (husky.status === 0 && getHooksPath() !== '.husky/_') {
+    if (
+      husky.status === 0 &&
+      (getHooksPath() !== '.husky/_' ||
+        !existsSync(resolve(rootDir, '.husky', '_', 'pre-commit')))
+    ) {
       console.error('worktree setup failed: Husky did not install hooks');
       process.exit(1);
     }
