@@ -6822,7 +6822,9 @@ describe('createAcpSessionBridge', () => {
     );
     expect(frame).toBeDefined();
     expect(JSON.stringify(frame?.data)).toContain('Run command');
-    expect(JSON.stringify(frame?.data)).toContain('allow');
+    // 'allow' alone would be satisfied by the option's kind ("allow_once")
+    // even if its optionId were stripped — match the frame's own spelling.
+    expect(JSON.stringify(frame?.data)).toContain('"optionId":"allow"');
     const frameRequestId = (frame?.data as { requestId?: string } | undefined)
       ?.requestId;
     expect(frameRequestId).toBeDefined();
@@ -6882,7 +6884,9 @@ describe('createAcpSessionBridge', () => {
       ],
       waitFlag: 'isWaitingForPermission' as const,
       voteOptionId: 'allow',
-      payloadMarks: ['Run command', 'allow'],
+      // 'allow' alone would be satisfied by the option kind ("allow_once");
+      // match the frame's own spelling so a stripped optionId fails here.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
     },
   ])(
     'stops refetching the persisted page when a $label arrives mid-fetch',
