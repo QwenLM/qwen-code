@@ -144,7 +144,7 @@ async function restoreState() {
   for (const tabId of [...derivedTabParents.keys()]) {
     if (!existingIds.has(tabId)) derivedTabParents.delete(tabId);
   }
-  await Promise.all(
+  await Promise.allSettled(
     tabs
       .filter((tab) => typeof tab.id === 'number' && agentOwnedTabs.has(tab.id))
       .map((tab) => groupAgentOwnedTab(tab, connectionGeneration)),

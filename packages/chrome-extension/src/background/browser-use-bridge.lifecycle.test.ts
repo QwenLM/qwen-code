@@ -114,9 +114,10 @@ async function fixture(
   });
   vm.runInContext(source, context);
   const api = vm.runInContext(
-    '({dispatch, attachedTabs, agentOwnedTabs, derivedTabParents})',
+    '({dispatch, restoreState, attachedTabs, agentOwnedTabs, derivedTabParents})',
     context,
   ) as {
+    restoreState(): Promise<void>;
     dispatch(
       method: string,
       params?: Record<string, unknown>,
@@ -128,6 +129,47 @@ async function fixture(
   await vi.advanceTimersByTimeAsync(0);
   return { ...api, chromeApi, tabs, attached, saved, alarms, emit, port };
 }
+
+test.each(['group', 'title'])(
+  'persists pruned restored state when %s setup fails',
+  async (stage) => {
+    const f = await fixture();
+    Object.assign(f.saved, {
+      agentOwnedTabs: [1, 99],
+      derivedTabParents: [[99, 1]],
+    });
+    if (stage === 'group')
+      f.chromeApi.tabs.group.mockRejectedValueOnce(new Error('group failed'));
+    else
+      f.chromeApi.tabGroups.update.mockRejectedValueOnce(
+        new Error('title failed'),
+      );
+
+    await expect(f.restoreState()).resolves.toBeUndefined();
+
+    expect(f.saved.agentOwnedTabs).toEqual([1]);
+    expect(f.saved.derivedTabParents).toEqual([]);
+    expect(f.tabs.has(1)).toBe(true);
+  },
+);
+
+test('restores the remaining owned tabs after one grouping failure', async () => {
+  const f = await fixture();
+  f.tabs.set(3, {
+    id: 3,
+    url: 'https://example.test/other',
+    windowId: 2,
+    groupId: -1,
+  });
+  Object.assign(f.saved, { agentOwnedTabs: [1, 3, 99] });
+  f.chromeApi.tabs.group.mockRejectedValueOnce(new Error('group failed'));
+
+  await expect(f.restoreState()).resolves.toBeUndefined();
+
+  expect(f.chromeApi.tabs.group).toHaveBeenCalledWith({ tabIds: [3] });
+  expect(f.tabs.get(3)?.groupId).toBe(10);
+  expect(f.saved.agentOwnedTabs).toEqual([1, 3]);
+});
 
 test('detach and reattach wait for Chrome to actually release its debugger', async () => {
   const f = await fixture();

@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest';
 import { encodeFrame, FrameDecoder } from '../transport/framing.js';
+import { encodeNativeMessagingOutput } from './native-messaging-output.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-host-'));
 const hostPath = path.join(root, 'host.cjs');
@@ -176,6 +177,59 @@ test.skipIf(process.platform === 'win32').each(['eof', 'malformed'])(
       { timeout: 10_000 },
     );
     await closed;
+  },
+  15_000,
+);
+
+test.skipIf(process.platform === 'win32').each(['backend', 'stdin'])(
+  'drains a complete large response before exiting on %s close',
+  async (source) => {
+    const server = await backend(path.join(root, `drain-${source}`));
+    const child = startHost(server.socketPath);
+    const exited = once(child, 'close');
+    child.stdin.write(encodeFrame({ type: 'hello' }));
+    await vi.waitFor(() => expect(server.received).toHaveLength(1), {
+      timeout: 10_000,
+    });
+    const message = {
+      type: 'response',
+      id: 'large',
+      result: 'x'.repeat(2_000_000),
+    };
+    const readable = once(child.stdout, 'readable');
+    const backendClosed = once(sockets[0]!, 'close');
+    if (source === 'backend') sockets[0]!.end(encodeFrame(message));
+    else sockets[0]!.write(encodeFrame(message));
+    await readable;
+    if (source === 'stdin') child.stdin.end();
+    await backendClosed;
+
+    const output: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => output.push(chunk));
+    child.stdout.resume();
+    expect((await exited)[0]).toBe(0);
+    const actual = Buffer.concat(output);
+    const expected = Buffer.concat(encodeNativeMessagingOutput(message, '1'));
+    expect(actual.length).toBe(expected.length);
+    expect(actual.equals(expected)).toBe(true);
+  },
+  15_000,
+);
+
+test.skipIf(process.platform === 'win32')(
+  'bounds shutdown when Chrome stops reading queued output',
+  async () => {
+    const server = await backend(path.join(root, 'blocked-reader'));
+    const child = startHost(server.socketPath);
+    child.stdin.write(encodeFrame({ type: 'hello' }));
+    await vi.waitFor(() => expect(server.received).toHaveLength(1), {
+      timeout: 10_000,
+    });
+    const readable = once(child.stdout, 'readable');
+    sockets[0]!.write(encodeFrame({ result: 'x'.repeat(2_000_000) }));
+    await readable;
+    child.stdin.end();
+    await vi.waitFor(() => expect(child.exitCode).toBe(0), { timeout: 5_000 });
   },
   15_000,
 );

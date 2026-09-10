@@ -19,10 +19,16 @@ const queued: unknown[] = [];
 let latestHello: unknown;
 let socket: Socket | undefined;
 let outputSequence = 0;
+let closing = false;
 
-function shutdown(code = 0): never {
+function shutdown(code = 0): void {
+  if (closing) return;
+  closing = true;
+  process.exitCode = code;
   socket?.destroy();
-  process.exit(code);
+  process.stdin.destroy();
+  // Let queued stdout writes drain, but do not hang if Chrome stops reading.
+  setTimeout(() => process.exit(code), 2_000).unref();
 }
 
 async function connectBackend(): Promise<void> {
@@ -30,7 +36,9 @@ async function connectBackend(): Promise<void> {
     await verifySocketPeerPath(socketPath);
   } catch {
     shutdown();
+    return;
   }
+  if (closing) return;
   const candidate = connect(socketPath);
   socket = candidate;
   candidate.once('connect', () => {
