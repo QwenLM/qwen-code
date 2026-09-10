@@ -372,6 +372,19 @@ export function normalizeDaemonEvent(
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
 
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
+
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
 
