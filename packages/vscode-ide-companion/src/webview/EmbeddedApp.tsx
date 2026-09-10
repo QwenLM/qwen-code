@@ -419,7 +419,6 @@ export function EmbeddedApp() {
   const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
-  const previousActiveFilePathRef = useRef<string | undefined>(undefined);
   const daemonBaseUrl = runtime?.baseUrl;
   const daemonToken = runtime?.token;
   const daemonClient = useMemo(
@@ -954,16 +953,8 @@ export function EmbeddedApp() {
             filePath: data.filePath,
             selection: data.selection,
           });
-          // The host fires this on every selection change, including plain
-          // cursor moves; only an actual file change may re-arm inclusion,
-          // or a click silently undoes the user's explicit exclusion.
-          if (previousActiveFilePathRef.current !== data.filePath) {
-            setIncludeActiveFile(true);
-          }
-          previousActiveFilePathRef.current = data.filePath;
         } else {
           setActiveFile(undefined);
-          previousActiveFilePathRef.current = undefined;
         }
       } else if (
         message.type === 'modeChanged' ||
