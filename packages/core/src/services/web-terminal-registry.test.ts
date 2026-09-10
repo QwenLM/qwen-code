@@ -6,14 +6,25 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawn, getPty, spawnSync } = vi.hoisted(() => ({
+const { spawn, getPty, spawnSync, osPlatform } = vi.hoisted(() => ({
   spawn: vi.fn(),
   getPty: vi.fn(),
   spawnSync: vi.fn(),
+  osPlatform: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
+// Only conpty-host reads os.platform(); killPtyTree branches on
+// process.platform, so this steers the ConPTY release without touching it.
+// Windows CI is skipped on PRs, so the win32 path has to be reachable here.
+// Everything else passes through -- Storage (via debugLogger) needs the real
+// os.homedir()/os.tmpdir().
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const patched = { ...actual, platform: osPlatform };
+  return { ...patched, default: patched };
+});
 
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
@@ -27,6 +38,8 @@ describe('WebTerminalRegistry', () => {
   let write: ReturnType<typeof vi.fn>;
   let resize: ReturnType<typeof vi.fn>;
   let kill: ReturnType<typeof vi.fn>;
+  let nativeKill: ReturnType<typeof vi.fn>;
+  let conoutDispose: ReturnType<typeof vi.fn>;
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
 
@@ -35,14 +48,25 @@ describe('WebTerminalRegistry', () => {
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
+    nativeKill = vi.fn();
+    conoutDispose = vi.fn();
     disposeData = vi.fn();
     disposeExit = vi.fn();
     spawnSync.mockReturnValue({ stdout: '' });
+    osPlatform.mockReturnValue(process.platform);
     spawn.mockReturnValue({
       pid: 1,
       write,
       resize,
       kill,
+      // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
+      // directly instead of going through kill(). See #11303.
+      _agent: {
+        _pty: 42,
+        _useConptyDll: false,
+        _ptyNative: { kill: nativeKill },
+        _conoutSocketWorker: { dispose: conoutDispose },
+      },
       onData: vi.fn((listener) => {
         onData = listener;
         return { dispose: disposeData };
@@ -240,6 +264,146 @@ describe('WebTerminalRegistry', () => {
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
+  });
+
+  it("releases an exited session's conout worker, never by signalling the pid", async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited',
+      workspaceCwd: '/workspace',
+    });
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited')).toBe(true);
+    // The shell is gone, so nothing may signal its (possibly recycled) pid:
+    // no taskkill, no process-group kill, and no ptyProcess.kill() either --
+    // node-pty's kill() force-terminates the console process list. See #11303.
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    // node-pty releases neither the ConPTY host nor its conout worker on a
+    // natural exit, so the release goes at the agent directly. Only the worker
+    // half actually lands: nativeKill is a stub here, and the real one no-ops
+    // after a natural exit. See releaseConPtyHost.
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
+  });
+
+  it('releases a live session whose kill was deferred before its first byte', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-live-deferred',
+      workspaceCwd: '/workspace',
+    });
+    // node-pty's WindowsTerminal.kill() queues its teardown while _isReady is
+    // false — a terminal released before the shell's first output byte. No
+    // onExit fired, so the session is still live.
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+
+    expect(registry.release('terminal:release-live-deferred')).toBe(true);
+    expect(kill).toHaveBeenCalledOnce();
+    // The deferred kill tore nothing down and is still queued in node-pty's
+    // _deferreds; when it eventually runs it closes the pseudo-console. So
+    // releaseHost must dispose the worker now (the one resource a never-run
+    // deferred kill would strand) WITHOUT closing the pseudo-console itself —
+    // a native close here plus the queued kill's later close would double-free
+    // the same HPCON.
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+  });
+
+  it('still completes a deferred release when the conout worker dispose throws', async () => {
+    osPlatform.mockReturnValue('win32');
+    // The throw guard inside disposeConoutWorker — the twin of the one in
+    // releaseConPtyHost. release() calls session.pty.releaseHost?.() bare,
+    // after the session is already deleted from the map, and dispose()'s loop
+    // has no per-iteration guard, so a throw escaping the worker dispose would
+    // abort the teardown of every session still queued behind it.
+    conoutDispose.mockImplementation(() => {
+      throw new Error('dispose boom');
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-deferred-throws',
+      workspaceCwd: '/workspace',
+    });
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+
+    // Remove the try/catch around _conoutSocketWorker.dispose() in
+    // disposeConoutWorker and this throws out of release() instead of
+    // returning true.
+    expect(registry.release('terminal:release-deferred-throws')).toBe(true);
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    // The queued kill() is still the single closer.
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledOnce();
+  });
+
+  it('releases an exited session that never became ready through the deferred arm', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited-deferred',
+      workspaceCwd: '/workspace',
+    });
+    // The shell exits before its first output byte — COMSPEC resolving to a
+    // binary that quits immediately, or a releaseWorkspace drain racing pwsh
+    // startup. That is session.exited === true AND _isReady === false, so
+    // release()'s exited arm routes into releaseHost's deferred branch.
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited-deferred')).toBe(true);
+    // Nothing may signal an exited shell's possibly-recycled pid, and the
+    // native baton is already erased — so no kill and no native close on this
+    // arm. (Asserting the host WAS released is forbidden; see conpty-host.ts.)
+    expect(kill).not.toHaveBeenCalled();
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    // The conout worker is still freed: the one resource node-pty strands on a
+    // natural exit, which is the whole point of the else branch in release().
+    expect(conoutDispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not double-close a live session whose kill already closed it', async () => {
+    osPlatform.mockReturnValue('win32');
+    // Model node-pty's real WindowsTerminal.kill(): when ready it closes the
+    // HPCON and disposes the worker. The wrapper notes the close, so the
+    // releaseHost below must not add a second native kill (double-free).
+    kill.mockImplementation(() => {
+      nativeKill(42, false);
+      conoutDispose();
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-live-ready',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(registry.release('terminal:release-live-ready')).toBe(true);
+    expect(kill).toHaveBeenCalledOnce();
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+  });
+
+  it('leaves an exited session alone off Windows', async () => {
+    osPlatform.mockReturnValue('linux');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited-posix',
+      workspaceCwd: '/workspace',
+    });
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited-posix')).toBe(true);
+    // No ConPTY host and no conout worker to release, and UnixTerminal.kill()
+    // would signal an already-exited, possibly recycled pid.
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(conoutDispose).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it('forwards live output and bounds unacknowledged PTY input', async () => {

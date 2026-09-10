@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { tokenPlanProvider, type Config } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { effortCommand } from './effort-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
@@ -102,6 +102,32 @@ describe('effortCommand', () => {
     expect(getReasoningEffort).toHaveBeenCalled();
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
+
+  it.each(['high', 'max', 'low'] as const)(
+    'reports the effective state for saved %s without changing settings',
+    async (effort) => {
+      const spec = tokenPlanProvider.models!.find(
+        (m) => m.id === 'qwen3.8-max',
+      )!;
+      Object.assign(context.services.config!, {
+        getModel: () => spec.id,
+        getAuthType: () => 'openai',
+        getResolvedModelConfig: () => spec,
+      });
+      getReasoningEffort.mockReturnValue(effort);
+      const res = await effortCommand.action!(
+        { ...context, executionMode: 'non_interactive' },
+        '',
+      );
+      expect((res as { content: string }).content).toContain(
+        effort === 'low'
+          ? 'Current reasoning effort:'
+          : 'using the model/provider default',
+      );
+      expect(setValue).not.toHaveBeenCalled();
+      expect(setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
 
   it('sets and persists a valid tier', async () => {
     const res = await effortCommand.action!(context, 'high');

@@ -256,9 +256,10 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
 - [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
 - [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
-- [155. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-155)
-- [156. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-156)
-- [157. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-157)
+- [155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-155)
+- [156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…](#af-156)
+- [157. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-157)
+- [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
 
 ---
 
@@ -3010,6 +3011,23 @@ its own verdict. The trusted PATH is recorded before any branch
 code runs, so a $GITHUB_ENV-planted PATH/preload cannot swap the
 sha256sum/bash/git the steps resolve (that would defeat the digest
 gate itself).
+
+The gate's two verification passes decide whether the PAT push runs,
+and the first pass executes the branch's own build/test on the host
+before the second — so the staged runner's digest (recorded in
+GITHUB_OUTPUT, unreachable from a disk write) is verified before
+execution, or a mid-run overwrite lets the branch define its own
+verdict. Every command word in the digest check is an absolute path:
+bare names — even builtins like echo, export, or unset — are shadowed
+by $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at bash
+STARTUP even under --norc, ahead of builtins and PATH (R6-4; a
+shadowed echo prints any digest line, blinding the check to a mid-run
+overwrite of the staged runner, and a shadowed export/unset arms a
+DEBUG trap that swaps the staged runner AFTER the digest passes and
+BEFORE the launch executes it, R8-1). The body therefore carries no
+in-shell pin of its own: PATH reaches the child through the allowlist,
+and the preload channels are closed by the step-level LD_* pins, the
+env execve prefix, and env -i.
 ```
 
 <a id="af-112"></a>
@@ -3995,6 +4013,37 @@ keyword itself (the R6-4 doctrine). `builtin kill` is
 sound only inside the env -i clean child (finalize); in
 the outer shell kill is /usr/bin/kill, the same procps
 already relied on for pkill.
+
+The finalize-side kill runs in its step's OUTER shell, which
+inherits every $GITHUB_ENV plant earlier steps left — a
+BASH_FUNC_cat%% import shadows cat at bash startup and forges
+the /proc/<pid>/stat line (the matching start time sits in that
+step's own env), passing the lifecycle check on a REUSED pid so
+the real kill TERMs an unrelated process, its group and session;
+a planted kill or a PATH-planted pkill no-ops the delivery
+instead, leaving the loop holding the PAT alive to its age cap
+(R17-4). The kill target travels through expression context — a
+pid read from a WORKDIR file would be an untrusted kill target
+(WORKDIR is sandbox-writable) — and the whole PAT-touching body
+runs in the gate's env -i clean-child form, re-declaring only
+what it needs from the step-level pins and expression context:
+a BASH_FUNC_<name>%% import loads as a function at bash STARTUP
+even under --norc, ahead of builtins and PATH, under
+attacker-chosen names no step-level pin can enumerate
+(probe-verified: plants shadowing set/export/builtin/gh each
+hijacked the step's former inline body), so the class is closed
+by construction rather than enumerated.
+
+The terminal flip's stamp drain reads the tick's start-epoch file:
+a stamp older than 65s proves its request committed or died, no
+stamp means nothing in flight, and the read is bounded in time AND
+bytes — a planted FIFO must not stall the step, and a symlink to an
+endless non-NUL target (/dev/urandom, a fed FIFO) would otherwise
+stream into the substitution buffer GB-scale and kill the clean
+child before the terminal PATCH (R17-3); a valid stamp is ≤ ~20
+bytes, so the 64-byte cap covers it. A planted fresh stamp costs at
+most the 65s bound; a planted deletion reopens only the cosmetic
+overwrite.
 ```
 
 <a id="af-150"></a>
@@ -4226,7 +4275,142 @@ notice is still the scan's job.
 
 <a id="af-155"></a>
 
-### 155. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
+### 155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+The scan's dispatch gate (#8888/#8899) already refuses to start a round
+while review-pr is live, but the loop had one more head-moving write
+outside that hold: this step's stale-base retry calls update-branch at
+REPORT time, hours after the dispatch gate last looked. A review can
+start in that window — a human /review comment, a bot re-request, or a
+run the scan's fail-open probe missed — and the merge push would then
+supersede a lifecycle review run mid-flight (#10110; before the salvage
+threshold that discards its work exactly as the old cancel did), or
+invalidate a command run's posting: every review pins the head it
+reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
+final post when the head moved, so even the uncancellable per-run-group
+reviews lose their whole run to a head move.
+
+So the retry probes for a live review first, with the scan gate's probe
+pair: the statusCheckRollup filter (any live review-pr check from the
+review workflow), then the runs-API fallback for runs still parked in
+the 10-minute delay window with no check-run yet. The probe sees
+LIFECYCLE runs only: a command-triggered run executes against the base
+branch, so its review-pr check attaches to main's commit and never
+shows under the PR's rollup (the review ack comment says the same), and
+the runs fallback is event-scoped to pull_request_target exactly like
+the scan gate's (af-099). An in-flight command review therefore does
+NOT hold the refresh, and the merge push can still invalidate its
+posting — the second hazard named above, still open. Giving command
+runs a PR-head-visible signal (a pending check posted at the ack step,
+matched here) is the mechanism fix; it is deliberately deferred — it
+needs a completion/TTL story for stranded pendings and a lockstep
+decision with the scan gate, whose exclusion of command runs (R2-1)
+this probe copies — so this text scopes the hold to what it actually
+sees.
+On a live review the update is DEFERRED, not skipped: the same 9999
+sentinel MARK_TS the retry branch uses keeps the feedback live, the
+next scan re-runs the round (itself held while the review is still in
+flight), and that round's report step performs the refresh once the
+review has landed. One extra round of latency, bounded by MAX_ROUNDS,
+against hours of discarded review work. At the cap itself (MARK_ROUND ==
+MAX_ROUNDS) the hold yields to the refresh: no later round exists to
+inherit it, and a deferral there would promise a retry the scan's round
+gate forbids — so the last permitted round refreshes the base exactly as
+it did before #10110 (R32-1).
+
+Fail-open on probe errors, deliberately: the probe is an optimization,
+and failing closed would wedge stale-base recovery — the path that
+un-sticks red PRs — on any transient API error. A probe error therefore
+reads as "no review live" and the update proceeds, which is exactly the
+pre-#10110 behavior. The deferred headline joins CONSEC_FAIL's
+streak-reset needles ("deferred a stale-base refresh"): like the
+updated-a-stale-base round it defers to, the round's failure is not
+evidence about the PR, and counting it toward the cap would park a PR
+for having been reviewed at the wrong moment.
+```
+
+<a id="af-156"></a>
+
+### 156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…
+
+In `review-address` · `Triage and address` (arm), `Verification gate` (record), `Push and report` (marker).
+
+````text
+Measured on the takeover fleet on 2026-09-10 (40 PRs, 79 acted rounds,
+1369 inline findings, each blamed at its review head): after a round
+pushes, 73% of the next review's new Criticals and 93% of its
+Suggestions sit on that round's own delta (44/90 on the delta lines,
+15/90 on earlier bot rounds, 7 more within five lines of a delta hunk);
+54% of those reviews had EVERY new finding on the delta, and 62% would
+have posted nothing under the critical floor. Each pushed round costs a
+full cycle of 870 minutes median (118 agent + 289 review turnaround +
+348 idle to the next round). A fresh adversarial pass over the delta
+before the push therefore has the right scope, and its ceiling is that
+54-62%.
+
+The same measurement fixes the shape. Critical density on bot deltas is
+0.53 per 100 changed lines against 0.52 on human deltas, ~2 new
+Criticals per review whoever pushed, with no decay across rounds — the
+reviewer's yield on a fresh delta is the invariant, not the fixer's
+code. A pass that fixes findings produces a new delta with the same
+yield, so "review until clean" cannot converge inside a round; it only
+relocates the churn into a step with a hard agent budget whose overrun
+counts toward CONSECUTIVE_FAILURE_CAP and TIMEOUT_WINDOW_CAP. So the
+pass is ONE bounded delta review (--effort high: medium skips the
+reverse-audit depth where fix-of-fix Criticals first appear), a
+60-minute wait cap, and a skip below 150 changed lines (0.7 Criticals
+per review there, 89% of those reviews already delta-only).
+
+Mechanism. SELF_REVIEW (repo variable QWEN_AUTOFIX_SELF_REVIEW:
+off|ab|on) is resolved to an arm per PR in the address step — 'ab'
+splits on PR parity — and reaches the skill as three Invocation lines:
+`Self-review: on|off`, `Self-review CLI: node <workspace>/dist/cli.js`
+(the host's qwen wrapper is not on PATH inside the sandbox), and
+`Round deadline (UTC)`. An armed round's agent budget is
+SELF_REVIEW_TIMEOUT_MS (180m default) under a per-arm step cap
+(`timeout-minutes` = 190 armed, 130 unarmed), the unarmed 120m/130m
+margin rule unchanged. The 345-minute job bound cannot hold the armed
+cap AND the 70+60 same-run repair chain, and a GitHub-hosted job is cut
+at 360 whatever the bound says — so the arm is resolved once in prepare
+(never on a github-hosted runner: the hosted fallback runs the control
+shape), and an armed round skips the same-run repair (its `if:` excludes
+the arm; the repair fired on 7/79 = 9% of acted rounds in the sample), a
+deterministic rejection staying retryable for the next round as it was
+before the repair existed. The A/B must read gate rejections per arm
+beside the round counts, since the treatment arm pays a full cycle where
+the control arm pays a 60-minute repair. The skill runs the review
+command inside the session's own sandbox with QWEN_REVIEW_SANDBOX=off:
+the outer boundary is the operator's, and the review's own container
+would be a container inside it that no runtime can answer. After its
+commit the agent writes self-review.json (status, passes, dispositions,
+minutes, and the tree id of its commit). The gate validates the shape,
+compares that id with the tree of the head about to be pushed
+(bound=true|false — a tree id rather than a diff text, so git version
+skew between the sandbox and the host cannot fake a mismatch), and
+publishes one token string as the
+self_review output — advisory only, nothing rejects. Finalize
+verification selects it with the outcome exactly like audit_verdict,
+and Push and report renders it as
+`<!-- autofix-self-review arm=… status=… passes=… act=… declined=…
+deferred=… minutes=… bound=… -->` on the round report, so the A/B reads
+from the PR thread: pushed rounds to convergence, on-delta Criticals in
+the review after each armed push (baseline 73%), and round wall-clock,
+treatment arm against control.
+
+Known limits, deliberate. The record is agent-authored except for its
+binding hash and grammar; a missing or malformed file only marks the
+round (status=missing|invalid). The three Invocation lines are the only
+channel: a repo variable cannot smuggle prose (run-agent pins the CLI to
+a plain path and the deadline to an ISO instant). Whether the nested
+`review run` resolves its model credentials inside the sandbox is a
+runner fact the first armed round has to prove; the skill treats a
+failed or incomplete pass as review-failed and pushes regardless.
+<a id="af-157"></a>
+
+### 157. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -4341,70 +4525,11 @@ the recovery is automatic, since a clean push resets it. What
 the round itself can tell is already told: a push carrying a
 conflict or salvage merge stamps `pre=none`, because its head
 did not start from the head prepare classified.
-```
+````
 
-<a id="af-156"></a>
+<a id="af-158"></a>
 
-### 156. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.
-
-In `review-address` · `Report dry-run / failure`.
-
-```text
-The scan's dispatch gate (#8888/#8899) already refuses to start a round
-while review-pr is live, but the loop had one more head-moving write
-outside that hold: this step's stale-base retry calls update-branch at
-REPORT time, hours after the dispatch gate last looked. A review can
-start in that window — a human /review comment, a bot re-request, or a
-run the scan's fail-open probe missed — and the merge push would then
-supersede a lifecycle review run mid-flight (#10110; before the salvage
-threshold that discards its work exactly as the old cancel did), or
-invalidate a command run's posting: every review pins the head it
-reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
-final post when the head moved, so even the uncancellable per-run-group
-reviews lose their whole run to a head move.
-
-So the retry probes for a live review first, with the scan gate's probe
-pair: the statusCheckRollup filter (any live review-pr check from the
-review workflow), then the runs-API fallback for runs still parked in
-the 10-minute delay window with no check-run yet. The probe sees
-LIFECYCLE runs only: a command-triggered run executes against the base
-branch, so its review-pr check attaches to main's commit and never
-shows under the PR's rollup (the review ack comment says the same), and
-the runs fallback is event-scoped to pull_request_target exactly like
-the scan gate's (af-099). An in-flight command review therefore does
-NOT hold the refresh, and the merge push can still invalidate its
-posting — the second hazard named above, still open. Giving command
-runs a PR-head-visible signal (a pending check posted at the ack step,
-matched here) is the mechanism fix; it is deliberately deferred — it
-needs a completion/TTL story for stranded pendings and a lockstep
-decision with the scan gate, whose exclusion of command runs (R2-1)
-this probe copies — so this text scopes the hold to what it actually
-sees.
-On a live review the update is DEFERRED, not skipped: the same 9999
-sentinel MARK_TS the retry branch uses keeps the feedback live, the
-next scan re-runs the round (itself held while the review is still in
-flight), and that round's report step performs the refresh once the
-review has landed. One extra round of latency, bounded by MAX_ROUNDS,
-against hours of discarded review work. At the cap itself (MARK_ROUND ==
-MAX_ROUNDS) the hold yields to the refresh: no later round exists to
-inherit it, and a deferral there would promise a retry the scan's round
-gate forbids — so the last permitted round refreshes the base exactly as
-it did before #10110 (R32-1).
-
-Fail-open on probe errors, deliberately: the probe is an optimization,
-and failing closed would wedge stale-base recovery — the path that
-un-sticks red PRs — on any transient API error. A probe error therefore
-reads as "no review live" and the update proceeds, which is exactly the
-pre-#10110 behavior. The deferred headline joins CONSEC_FAIL's
-streak-reset needles ("deferred a stale-base refresh"): like the
-updated-a-stale-base round it defers to, the round's failure is not
-evidence about the PR, and counting it toward the cap would park a PR
-for having been reviewed at the wrong moment.
-```
-
-<a id="af-157"></a>
-
-### 157. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…
+### 158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…
 
 In `review-address` · `Stage trusted test-surface instrument`.
 

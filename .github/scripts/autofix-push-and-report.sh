@@ -103,6 +103,16 @@ CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
 # round can report under a stale WINDOW after a re-arm).
+# In-round self-review record (af-156): the gate-published token string
+# Finalize verification selected, never a re-read of the branch-writable
+# self-review.json. The grammar is re-pinned at the render site so a forged
+# step output can never close the marker early.
+emit_self_review_marker() {
+  local SELF_REVIEW_RE='^[a-z0-9=. -]+$'
+  if [[ "${SELF_REVIEW:-}" =~ ${SELF_REVIEW_RE} ]]; then
+    echo "<!-- autofix-self-review ${SELF_REVIEW} -->"
+  fi
+}
 # Full rationale → qwen-autofix.md#af-131
 emit_growth_audit_marker() {
   local allow_rearm="${1:-false}"
@@ -671,7 +681,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
-    # Regression accounting (af-155). Two distinct facts, both keyed to the
+    # Regression accounting (af-157). Two distinct facts, both keyed to the
     # eval marker's window so the consecutive-failure walk reads them with
     # the same filter it already applies to the eval markers:
     #   autofix-push       — what THIS round pushed, and whether the head it
@@ -695,6 +705,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     # that run's latest attempt).
     echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     emit_growth_audit_marker true
+    emit_self_review_marker
   } > "${WORKDIR}/report.md"
   STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
 else
@@ -747,6 +758,7 @@ else
     # that run's latest attempt).
     echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     emit_growth_audit_marker true
+    emit_self_review_marker
   } > "${WORKDIR}/report.md"
   STATUS="no action needed"
 fi
@@ -763,11 +775,11 @@ for attempt in 1 2 3; do
   fi
   if [[ "${attempt}" == 3 ]]; then
     echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
-    # The report is the only carrier of this round's af-155 state, and no
+    # The report is the only carrier of this round's af-157 state, and no
     # other step re-posts the report of a round that reached this script:
     # the handoff comment the workflow can still post is gated on an
     # outcome that is neither `fixed` nor `noop`. So whenever THIS round
-    # authored af-155 state -- a push whose head a later round can charge,
+    # authored af-157 state -- a push whose head a later round can charge,
     # an observation it made about the PRIOR round, or both -- a
     # marker-only note carries it. Best-effort, and deliberately not
     # gated on the outcome: a no-op round pushes nothing, but the

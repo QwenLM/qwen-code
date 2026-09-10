@@ -41,6 +41,11 @@ const subprocessTimeoutMs = Number(
 );
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// The review bot's fixed-ruling NOTE shape, defined ONCE at the workflow
+// level and handed to every jq site as `--arg frf` (#9940 review, rounds
+// 28-29); the runners below pass it exactly as the workflow does.
+const fixedRulingShape =
+  workflow.match(/^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m)?.[1] ?? '';
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
 // than a code line) read it here.
@@ -347,6 +352,24 @@ function evalGhaExpression(expression, facts) {
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+}
+
+// A step's timeout-minutes, per self-review arm (af-156): a plain number
+// applies to both arms; the address step carries the one per-arm expression
+// the workflow uses, `${{ steps.prepare.outputs.self_review_arm == 'on' &&
+// <armed> || <unarmed> }}`.
+function stepCapsOf(step) {
+  const plain = step.match(/\n {8}timeout-minutes: (\d+)\n/)?.[1];
+  if (plain !== undefined) {
+    return { armed: Number(plain), unarmed: Number(plain) };
+  }
+  const perArm = step.match(
+    /\n {8}timeout-minutes: "\$\{\{ steps\.prepare\.outputs\.self_review_arm == 'on' && (\d+) \|\| (\d+) \}\}"\n/,
+  );
+  return {
+    armed: perArm ? Number(perArm[1]) : Number.NaN,
+    unarmed: perArm ? Number(perArm[2]) : Number.NaN,
+  };
 }
 
 function withRunnerDir(fn) {
@@ -7161,6 +7184,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -7432,7 +7458,7 @@ exit 1
     expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--arg frf "\$\{FIXED_RULING_FILTER\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
     const countDeferredInline = (over = []) =>
@@ -7456,6 +7482,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -9823,7 +9852,7 @@ exit 1
     // the "Failed checks" rendering, and the "Still-red checks" rendering
     // share the address-check carve-out (the autofix workflow's OTHER
     // lanes failing is the loop's own business, not actionable feedback).
-    // The regression classifier (af-155) deliberately does NOT share it:
+    // The regression classifier (af-157) deliberately does NOT share it:
     // the charge verdict excludes ALL own-lane checks via the canonical
     // five-name filter — a failed or in-flight own run is feedback or
     // observer noise, not a red the loop may charge to its own push. The
@@ -9853,6 +9882,236 @@ exit 1
     expect(routeStep).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}',
     );
+  });
+
+  it("does not count the review bot's fixed-ruling replies as feedback — matched by their posted shape, so a Critical quoting the marker still counts (#9940 review, round 28)", () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // The thread lifecycle replies `R<id> fixed by <what> <marker>` into a
+    // thread — the review bot's first inline reply class that is NOT a
+    // finding (FIXED_RULING_MARKER in lib/review-footer.ts). Counting it
+    // selected a just-approved PR for a review-address round with nothing
+    // to address. The filter matches the posted SHAPE anchored at the
+    // start: a real Critical that quotes the marker leads with its
+    // severity marker and keeps counting.
+    // Defined once, at the workflow level; the scan step no longer spells
+    // its own copy. An `--arg` value reaches jq verbatim, so the `[^\n]`
+    // class carries ONE backslash — the `[^\\n]` a jq string literal needs
+    // compiled, as a shell value, to "neither backslash nor n" and let a
+    // `by` clause with an `n` in it count (#9940 review, round 29).
+    const shape = fixedRulingShape;
+    expect(shape).toBeTruthy();
+    expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
+    // The `by` class names every line break BOTH dialects must agree on:
+    // jq's `[^\n]` admits `\r`/U+2028/U+2029 and JS's `.` does not, so the
+    // census dropped comments the TypeScript side counted (#9940 review,
+    // round 31 reverse audit).
+    expect(shape).toContain('(?: by [^\\r\\n\\x{2028}\\x{2029}]*)?');
+    // Anchored over the WHOLE body: a real note is the note and, under
+    // attribution on, its footer — anything carrying further prose fails
+    // closed toward COUNTING (#9940 review, round 31).
+    // Spelled out, not `\s`: Oniguruma's `\s` matches U+0085 and JS's does
+    // not (and JS's matches U+FEFF while Oniguruma's does not), so a note
+    // with either byte on the end was a note to one engine and a finding
+    // to the other (#9940 review, round 31 reverse audit).
+    // The two whitespace runs after the marker must not OVERLAP: a
+    // `[ \t]*` followed by a `[ \t\r\n]*` gives a run of spaces no
+    // unique split, which is quadratic — real jq aborts the scan step with
+    // `retry-limit-in-match` and `set -e` fails the whole job (#9940
+    // review, round 31 reverse audit). The trailing run therefore starts
+    // at a LINE BREAK.
+    expect(shape).toMatch(/\(\[\\r\\n\]\[ \\t\\r\\n\]\*\)\?\$$/);
+    expect(shape).not.toContain('\\s');
+    expect(shape).not.toContain('\\\\');
+    expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
+    const program = reviewScanStep.match(
+      /--arg frf "\$\{FIXED_RULING_FILTER\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(program).toBeTruthy();
+    const run = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-09-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'frf',
+          shape,
+          program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(comments) },
+      ).trim();
+    const after = { created_at: '2026-09-02T00:00:00Z' };
+    const bot = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+    };
+    const marker = '<!-- qwen-review-fixed-ruling -->';
+    // The ruling note, with and without a `by`, attribution on and off.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-2 fixed by the guard rewrite ${marker}\n\n_— m via Qwen Code /review (v1)_`,
+        },
+        { ...after, ...bot, in_reply_to_id: 1, body: `R1-3 fixed ${marker}` },
+        // A `by` clause with an `n` in it — the double-backslash class let
+        // this one count (#9940 review, round 29).
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-4 fixed by the new parser ${marker}`,
+        },
+      ]),
+    ).toBe('0');
+    // A Critical that QUOTES the marker — a review of the file defining it
+    // — is a finding: root, carried re-post reply, marker in a code block.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-1: the census filter \`${marker}\` is substring-anywhere`,
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `**[Critical]** R3-1: still stands — \`${marker}\``,
+        },
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-2: quoted\n\n    R1-2 fixed by x ${marker}`,
+        },
+      ]),
+    ).toBe('3');
+    // Attribution off strips the severity marker, so a Critical's own
+    // claim line can OPEN with a quoted ruling — the start anchor alone
+    // dropped it from the census (#9940 review, round 30).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by the guard ${marker} is the shape this filter matches, and it is anchored at both ends`,
+        },
+      ]),
+    ).toBe('1');
+    // …and a comment that quotes the whole note on its first line and
+    // states its finding underneath is a finding, not a note: anchoring
+    // the LINE dropped that comment wholesale, the live Critical with it
+    // (#9940 review, round 31).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n**[Critical]** R3-4: the census drops this whole comment`,
+        },
+      ]),
+    ).toBe('1');
+    // The tail after the marker is the CANONICAL footer, not "any italic
+    // line": a comment whose own second paragraph is italic prose is a
+    // finding, and a permissive tail read it as a note (#9940 review,
+    // round 31 reverse audit).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n_— **[Critical]** R3-4: the auth check is still missing_`,
+        },
+      ]),
+    ).toBe('1');
+    // …and the same body under a long run of horizontal whitespace still
+    // COUNTS, in bounded time. jq aborts a quadratic match rather than
+    // returning false, and the scan step runs under `set -e`, so the
+    // overlap cost the whole census, not one row (#9940 review, round 31
+    // reverse audit).
+    for (const pad of [' '.repeat(20000), '\t'.repeat(20000)]) {
+      const t0 = Date.now();
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${pad}x` }]),
+      ).toBe('1');
+      expect(Date.now() - t0).toBeLessThan(10000);
+    }
+    // Real jq, real Oniguruma: `\s` is not the same set in the two engines
+    // — it matches U+0085 here and not in JS, and U+00A0/U+FEFF in JS and
+    // not here — so the shape spells its whitespace out. Each of these
+    // must COUNT: dropping a comment the TypeScript side counts is the
+    // direction that loses a finding (#9940 review, round 31 reverse
+    // audit).
+    for (const tail of ['\u0085', '\u00a0', '\ufeff']) {
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${tail}` }]),
+      ).toBe('1');
+      expect(
+        run([
+          {
+            ...after,
+            ...bot,
+            body: `R1-2 fixed by x ${marker}\n${tail}_— m via Qwen Code /review (v1)_`,
+          },
+        ]),
+      ).toBe('1');
+    }
+    // Every other reply and root keeps counting: a carried re-post, a
+    // bot reply in prose, a human reply, a human quoting the shape.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: '**[Critical]** R1-2: still stands at HEAD',
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: 'The assertion should cover the fallback path too.',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          in_reply_to_id: 1,
+          body: 'looks fine',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          body: `R1-2 fixed by me ${marker}`,
+        },
+      ]),
+    ).toBe('4');
+    // The scan count, the two digest legs over $comments[] whose rows
+    // survive to the rendering, and the prepare job's LIVE_NEW revalidation
+    // apply the ONE shape, each handed the env value as `--arg frf` (the
+    // OVER_BUDGET leg drops every bot row later anyway); no site spells a
+    // copy of its own.
+    expect(workflow.split('test($frf)').length - 1).toBe(4);
+    expect(
+      workflow.split('--arg frf "${FIXED_RULING_FILTER}"').length - 1,
+    ).toBe(4);
+    expect(workflow.split('qwen-review-fixed-ruling -->').length - 1).toBe(1);
   });
 
   it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
@@ -12351,6 +12610,7 @@ exit 1
       'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       'WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}"',
       'WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}"',
+      'SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"',
       'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     ];
     const gateLaunchPin = new RegExp(
@@ -16998,7 +17258,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff self-review.json heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -18868,7 +19128,7 @@ exit 1
       consec: 3,
       terminal: false,
     });
-    // A push that turned the checks red is NOT progress (af-155). Before
+    // A push that turned the checks red is NOT progress (af-157). Before
     // this, "pushed something" was the whole reset test, so a PR could
     // alternate regress / repair forever and every brake read it as
     // converging: the red it created came back as the next round's input
@@ -21054,20 +21314,40 @@ exit 1
     );
     // Primary + repair agent steps and their two verification gates.
     expect(longSteps).toHaveLength(4);
-    const stepCaps = longSteps.map((b) =>
-      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
-    );
+    const stepCaps = longSteps.map((b) => stepCapsOf(b));
     for (const cap of stepCaps) {
-      expect(Number.isFinite(cap)).toBe(true);
+      expect(Number.isFinite(cap.armed)).toBe(true);
+      expect(Number.isFinite(cap.unarmed)).toBe(true);
     }
     // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
     // runtime — this reserve is an ASSUMPTION that they stay under 25m
     // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
     // of them can still eat the job timeout.
     const SETUP_AND_REPORT_MIN = 25;
-    const worstCaseMin =
-      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
-    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    // Two round shapes (af-156). Unarmed: every long step at its cap.
+    // Armed: the address step at its armed cap, and the repair chain does
+    // not run — its `if:` excludes the arm, and the repair gate only runs
+    // after an attempted repair — so only the first gate follows it.
+    const unarmedWorstMin =
+      stepCaps.reduce((a, b) => a + b.unarmed, 0) + SETUP_AND_REPORT_MIN;
+    expect(unarmedWorstMin).toBeLessThanOrEqual(jobCapMin);
+    const repairStep = longSteps.find((b) =>
+      b.startsWith("'Repair deterministic rejection'"),
+    );
+    const repairGate = longSteps.find((b) =>
+      b.startsWith("'Repair verification gate'"),
+    );
+    expect(repairStep).toBeTruthy();
+    expect(repairGate).toBeTruthy();
+    expect(repairStep).toContain(
+      "steps.prepare.outputs.self_review_arm != 'on'",
+    );
+    expect(repairGate).toContain("steps.repair.outputs.attempted == 'true'");
+    const armedWorstMin =
+      longSteps
+        .filter((b) => b !== repairStep && b !== repairGate)
+        .reduce((a, b) => a + stepCapsOf(b).armed, 0) + SETUP_AND_REPORT_MIN;
+    expect(armedWorstMin).toBeLessThanOrEqual(jobCapMin);
     expect(jobCapMin).toBeLessThanOrEqual(360);
 
     // The pending-check staleness bound (review-scan) must sit ABOVE this job
@@ -21093,7 +21373,7 @@ exit 1
     // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
     // timeout is only a backstop. Derive both from the workflow and assert
     // the margin so the pair cannot drift silently.
-    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const stepCapMin = stepCapsOf(addressStep).unarmed;
     const budgetMs = Number(
       addressStep.match(
         /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
@@ -24294,6 +24574,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(step).toContain(
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
+      expect(step).toContain('SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"');
     }
     // The review stage step records HOME before any branch code runs — the
     // trusted_path doctrine — and only it: the issue job's stage has no
@@ -29598,7 +29879,7 @@ describe('count-test-surface: the declared test surface of a test file', () => {
   });
 });
 
-describe('review-address: regression accounting (af-155)', () => {
+describe('review-address: regression accounting (af-157)', () => {
   // The loop had no notion of a regression at all: the consecutive-failure
   // brake counts "rounds that pushed nothing", so a round that pushed a fix
   // and turned CI red counted as a SUCCESS and reset the counter. The gate
@@ -30033,7 +30314,7 @@ describe('review-address: regression accounting (af-155)', () => {
     expect(pushAndReportScript).toContain(
       'gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/push-marker.md"',
     );
-    // ...and the fallback is gated on the af-155 state the round AUTHORED,
+    // ...and the fallback is gated on the af-157 state the round AUTHORED,
     // never on its outcome: a no-op round pushes nothing, but the
     // regression it observed about the PRIOR round is just as
     // unrecoverable once its report is lost, because the marker it read is
@@ -30717,7 +30998,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     ).toBe('true');
     // Completed runs, non-lifecycle events, and unrelated runs do not
     // hold. The command-event exclusion is a DELIBERATE scope, not coverage
-    // (af-156): the hold does not see command runs, and the design doc must
+    // (af-155): the hold does not see command runs, and the design doc must
     // say so instead of claiming a trigger-independent probe.
     expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
     expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
@@ -30729,9 +31010,9 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   });
 
   it('documents the hold in the design doc', () => {
-    // af-156 is the hold's own entry (af-149 predates it: pinning that
+    // af-155 is the hold's own entry (af-149 predates it: pinning that
     // anchor let the section be removed or renumbered with the suite green).
-    expect(designDoc).toContain('<a id="af-156"></a>');
+    expect(designDoc).toContain('<a id="af-155"></a>');
     expect(designDoc).toContain(
       'Hold the stale-base refresh while a review-pr is in flight',
     );
@@ -30746,7 +31027,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     // deferred headline must scope the hold to what it sees, so no reader
     // relies on protection for command runs that does not exist; the
     // mechanism fix (a PR-head-visible signal posted by command runs) is
-    // deliberately deferred (af-156).
+    // deliberately deferred (af-155).
     expect(designDoc).not.toContain('trigger-independent');
     expect(designDoc).toContain('The probe sees');
     expect(designDoc).toContain('LIFECYCLE runs only');
@@ -30754,7 +31035,311 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
       'but a lifecycle review of this PR is still in flight',
     );
     expect(reviewAddressReportStep).toContain(
-      'Command-triggered reviews are invisible to this probe (af-156)',
+      'Command-triggered reviews are invisible to this probe (af-155)',
     );
+  });
+});
+
+describe('in-round self-review A/B (af-156)', () => {
+  const skill = readAutofixSkill();
+  const pushAndReport = readFileSync(pushAndReportScriptPath, 'utf8');
+  // The review lane's step: the issue lane has a 'Verification gate' of its
+  // own earlier in the file, so the end anchor is searched from the start.
+  const prepareStart = workflow.indexOf(
+    "      - name: 'Prepare branch and feedback'",
+  );
+  const addressStart = workflow.indexOf("      - name: 'Triage and address'");
+  const prepareStep = workflow.slice(prepareStart, addressStart);
+  const addressStep = workflow.slice(
+    addressStart,
+    workflow.indexOf("      - name: 'Verification gate'", addressStart),
+  );
+  const gateSection = reviewVerificationRunner.slice(
+    reviewVerificationRunner.indexOf("SELF_REVIEW_RECORD='arm=off'"),
+    reviewVerificationRunner.indexOf(
+      '# A conflict verdict must STOP BLOCKED: completing as fixed',
+    ),
+  );
+
+  it('arms the pass from the repo variable and hands the runner the arm, CLI entry and deadline', () => {
+    expect(workflow).toContain(
+      `SELF_REVIEW: "\${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"`,
+    );
+    // Resolved once in prepare; the address cap, the repair skip and the
+    // gate record all read that one output.
+    expect(prepareStep).toContain(
+      'echo "self_review_arm=${SELF_REVIEW_ARM}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(addressStep).toContain(
+      `SELF_REVIEW_ARM: "\${{ steps.prepare.outputs.self_review_arm || 'off' }}"`,
+    );
+    expect(addressStep).toContain(
+      `timeout-minutes: "\${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"`,
+    );
+    expect(workflow).toContain(
+      "steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}",
+    );
+    expect(addressStep).toContain('--self-review "${SELF_REVIEW_ARM}"');
+    expect(addressStep).toContain(
+      '--self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js"',
+    );
+    expect(addressStep).toContain('--deadline "${ROUND_DEADLINE}"');
+    // An armed round's budget stays under the step backstop with the same
+    // margin rule the unarmed budget follows.
+    const stepCapMin = stepCapsOf(addressStep).armed;
+    expect(addressStep).toContain('BUDGET_CAP_MS=10800000');
+    expect(10800000 / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    expect(7200000 / 60000).toBeLessThanOrEqual(
+      stepCapsOf(addressStep).unarmed - 1,
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'",
+    );
+    // Replay the arm block: the split runs on the PR number alone.
+    const armBlock = prepareStep.match(
+      /SELF_REVIEW_ARM='off'\n[\s\S]*?esac\n[ \t]*fi\n/,
+    )?.[0];
+    expect(armBlock).toBeTruthy();
+    const armFor = (mode, pr, runnerEnvironment = 'self-hosted') =>
+      execFileSync(
+        'bash',
+        ['-c', `${armBlock}\nprintf '%s' "$SELF_REVIEW_ARM"`],
+        {
+          env: {
+            ...process.env,
+            SELF_REVIEW: mode,
+            PR: pr,
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // GitHub-hosted jobs are capped at 360 minutes whatever timeout-minutes
+    // says; the armed worst case only fits on the self-hosted pool.
+    expect(armFor('on', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291')).toBe('on');
+    expect(armFor('ab', '11290')).toBe('off');
+    expect(armFor('ab', '11291x')).toBe('off');
+    expect(armFor('on', '11290')).toBe('on');
+    expect(armFor('off', '11291')).toBe('off');
+    expect(armFor('', '11291')).toBe('off');
+  });
+
+  it('prints the three self-review lines and refuses values that could carry prose', () => {
+    const prompt = (extra) =>
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          '/tmp/autofix-review-5678',
+          ...extra,
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+    const off = prompt([]);
+    expect(off).toContain('\nSelf-review: off\n');
+    expect(off).toContain('\nSelf-review CLI: qwen\n');
+    expect(off).toContain('\nRound deadline (UTC): unknown\n');
+    const on = prompt([
+      '--self-review',
+      'on',
+      '--self-review-cli',
+      'node /work/dist/cli.js',
+      '--deadline',
+      '2026-09-10T12:00:00Z',
+    ]);
+    expect(on).toContain('\nSelf-review: on\n');
+    expect(on).toContain('\nSelf-review CLI: node /work/dist/cli.js\n');
+    expect(on).toContain('\nRound deadline (UTC): 2026-09-10T12:00:00Z\n');
+    const refused = (args) =>
+      runAutofixRunner(['--mode', 'address-review', ...args, '--print-prompt'])
+        .stderr;
+    expect(refused(['--self-review', 'maybe'])).toContain(
+      '--self-review must be on or off',
+    );
+    expect(refused(['--self-review-cli', 'qwen; rm -rf /'])).toContain(
+      '--self-review-cli must be a plain command path',
+    );
+    expect(refused(['--deadline', 'soon'])).toContain(
+      '--deadline must be an ISO-8601 UTC instant',
+    );
+  });
+
+  it('spells the one-pass rule in the skill and carves the CLI exception for it alone', () => {
+    expect(skill).toContain('### In-round self-review');
+    expect(skill).toContain(
+      'Only when the Invocation block says `Self-review: on`.',
+    );
+    expect(skill).toContain(
+      'QWEN_REVIEW_SANDBOX=off <cli> review run --approval-mode auto --effort high --json --quiet',
+    );
+    expect(skill).toContain('No `QWEN_SANDBOX=true` and no `env -u SANDBOX`');
+    expect(skill).toMatch(/and stop: no\s+second pass/);
+    expect(skill).toContain('`skipped-small`');
+    expect(skill).toContain('`skipped-deadline`');
+    expect(skill).toContain('the round is never blocked on its own audit');
+    expect(skill).toContain('write `<workdir>/self-review.json`');
+    expect(skill).toMatch(
+      /The one\s+CLI exception is the in-round self-review command/,
+    );
+    expect(skill).toContain(
+      'run the in-round self-review when the Invocation block arms it',
+    );
+  });
+
+  it('validates the record in the gate, binds it to the pushed delta, and renders it as a marker', () => {
+    expect(gateSection).toContain(
+      'IN("converged", "findings-fixed", "deadline", "review-failed", "skipped-small", "skipped-deadline")',
+    );
+    expect(gateSection).toContain(
+      'ACTUAL_TREE="$(git rev-parse \'HEAD^{tree}\' 2> /dev/null)"',
+    );
+    // Advisory only: no reject_fix on this path, and the record is
+    // published on the fixed path beside the other gate outputs.
+    expect(gateSection).not.toContain('reject_fix');
+    expect(reviewVerificationRunner).toContain(
+      'echo "self_review=${SELF_REVIEW_RECORD}" >> "${GITHUB_OUTPUT}"',
+    );
+    // Every gate launch carries the arm; Finalize selects the record with
+    // the outcome; the report renders the selected record, not the file.
+    const launches =
+      workflow.match(
+        /bash --norc "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
+      ) ?? [];
+    const armed =
+      workflow.match(/SELF_REVIEW_ARM="\$\{SELF_REVIEW_ARM:-off\}" \\/g) ?? [];
+    expect(launches.length).toBeGreaterThan(0);
+    expect(armed.length).toBe(launches.length);
+    expect(workflow).toContain(
+      'SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"',
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW: '${{ steps.final_verify.outputs.self_review }}'",
+    );
+    expect(pushAndReport).toContain(
+      'echo "<!-- autofix-self-review ${SELF_REVIEW} -->"',
+    );
+    // Replay the render guard: a forged output cannot close the marker early.
+    const renderBlock = pushAndReport.match(
+      /local SELF_REVIEW_RE='[^\n]*'\n\s*if \[\[ "\$\{SELF_REVIEW:-\}" =~ \$\{SELF_REVIEW_RE\} \]\]; then\n\s*echo "<!-- autofix-self-review \$\{SELF_REVIEW\} -->"\n\s*fi/,
+    )?.[0];
+    // Both acted-report shapes render it.
+    expect(pushAndReport.match(/^\s*emit_self_review_marker$/gm)).toHaveLength(
+      2,
+    );
+    expect(renderBlock).toBeTruthy();
+    const render = (value) =>
+      execFileSync('bash', ['-c', renderBlock.replace(/^\s*local /, '')], {
+        env: { ...process.env, SELF_REVIEW: value },
+        encoding: 'utf8',
+      });
+    expect(
+      render(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true',
+      ),
+    ).toBe(
+      '<!-- autofix-self-review arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true -->\n',
+    );
+    expect(render('arm=on --> <script>')).toBe('');
+    expect(render('')).toBe('');
+  });
+
+  it('runs the gate record section against real files: missing, malformed, skipped, unbound', () => {
+    withRunnerDir((dir) => {
+      const workdir = join(dir, 'work');
+      mkdirSync(workdir, { recursive: true });
+      const gateLog = join(workdir, 'gate-output.log');
+      const run = (arm) =>
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            // The section tees its log line to stdout; only the record is
+            // under test here.
+            `set -eo pipefail\nGATE_LOG=${JSON.stringify(gateLog)}\n: > "$GATE_LOG"\nBRANCH=nope\n{\n${gateSection}\n} > /dev/null\nprintf '%s' "$SELF_REVIEW_RECORD"`,
+          ],
+          {
+            env: { ...process.env, WORKDIR: workdir, SELF_REVIEW_ARM: arm },
+            encoding: 'utf8',
+            cwd: dir,
+          },
+        ).trim();
+      const record = (doc) =>
+        writeFileSync(join(workdir, 'self-review.json'), doc);
+      const findings = { act: 0, declined: 0, deferred: 0 };
+      expect(run('off')).toBe('arm=off');
+      expect(existsSync(join(workdir, 'gate-advisories.md'))).toBe(false);
+      expect(run('on')).toBe('arm=on status=missing');
+      record('not json');
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'skipped-small',
+          passes: 0,
+          findings,
+          minutes: 0,
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=skipped-small passes=0 act=0 declined=0 deferred=0 minutes=0',
+      );
+      // A status that claims a pass needs a tree id; no git repository
+      // answers here, so the binding resolves to bound=false, never a crash.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: 1,
+          findings,
+          minutes: 41.9,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=false',
+      );
+      // Grammar: a status outside the vocabulary or a field that is not a
+      // non-negative integer is invalid — never rendered.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged -->',
+          passes: 1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: -1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      expect(
+        readFileSync(join(workdir, 'gate-advisories.md'), 'utf8'),
+      ).toContain('in-round self-review');
+    });
+  });
+
+  it('documents the arm in the design doc', () => {
+    expect(designDoc).toContain('<a id="af-156"></a>');
+    expect(designDoc).toContain('(#af-156)');
   });
 });

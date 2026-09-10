@@ -12,15 +12,10 @@ name: 'Qwen Autofix'
 # qwen-autofix.md#af-001.
 #
 # SIZE IS A HARD CONSTRAINT, NOT A STYLE PREFERENCE. GitHub refuses to start
-# runs for a workflow file over 500 KB (512,000 bytes), and it fails SILENTLY:
-# schedule ticks stop firing, dispatches sit 'queued' forever with zero jobs,
-# and only PR-event runs keep working — those resolve the workflow from the
-# PR's own branch, so an older, smaller copy of this file runs and the loop
-# looks half-alive. That is precisely what happened on 2026-08-19: this file
-# crossed the limit at 512,782 bytes and the loop went dark for a day while
-# `pull_request_review` runs kept reporting success. Prose belongs in
-# qwen-autofix.md and long steps belong in .github/scripts/ — that is what
-# keeps this file runnable at all.
+# runs for a workflow file over 500 KB, and it fails SILENTLY (2026-08-19 this
+# file crossed it and the loop went dark for a day). Prose belongs in
+# qwen-autofix.md and long steps belong in .github/scripts/.
+# Full rationale → qwen-autofix.md (its own header carries the size doctrine)
 on:
   issues:
     types:
@@ -91,9 +86,31 @@ env:
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
   # Every lane this loop owns whose check runs attach to the PR head:
   # excluded from the head-state classifiers (charge + wake) by name, or
-  # the loop reads its own red as the round's regression (af-155, R27-23).
+  # the loop reads its own red as the round's regression (af-157, R27-23).
   # A test pins the names against the workflows' `name:` lines.
   LOOP_OWNED_LANES: '["Qwen Autofix","🧐 Qwen Pull Request Review","Qwen CI Failure Patrol","Qwen Autofix Fork Bridge","Qwen Autofix Fork Signal","Qwen Triage","Qwen Triage Finalize","PR self-report label","Qwen PR Safety Precheck","Comment Attachment Guard","PR Asset Branch Cleanup"]'
+  # The review bot's thread lifecycle replies `R<id> fixed by <what>` into a
+  # thread — a NOTE, never a finding: it carries its own marker
+  # (FIXED_RULING_MARKER in lib/review-footer.ts) at the end of its first
+  # line, and counting it selected a just-approved PR for a round with
+  # nothing to address (#9940 review, round 28). Matched by its posted SHAPE,
+  # anchored at the start, so a real Critical that QUOTES the marker (a
+  # review of the file defining it) leads with its severity marker and keeps
+  # counting — and so does one whose first line QUOTES a whole ruling and
+  # then carries on, which the start anchor alone let through under
+  # attribution off, where no severity marker leads the post (#9940
+  # review, round 30). The anchor spans the WHOLE body: a comment that
+  # quotes the note in full and then states its own finding underneath was
+  # dropped from the census wholesale, the live Critical with it — a real
+  # note is the note and, under attribution on, its footer, and anything
+  # carrying further prose fails closed toward COUNTING (#9940 review,
+  # round 31). `lib/review-footer.ts` exports the same shape as
+  # FIXED_RULING_SHAPE_RE for the TypeScript readers. Defined ONCE and handed to every jq site as `--arg frf`: an
+  # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
+  # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
+  # shell value, to "neither backslash nor n" and let a `by` clause with an
+  # `n` in it count (#9940 review, round 29).
+  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\r\n\x{2028}\x{2029}]*)? <!-- qwen-review-fixed-ruling -->[ \t]*(\r?\n[ \t\r\n]*_— ((?! via Qwen Code /review)[^\r\n\x{2028}\x{2029}])* via Qwen Code /review( \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_[ \t]*)?([\r\n][ \t\r\n]*)?$'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
@@ -203,6 +220,12 @@ env:
   # in the posted ledger marker; a test pins this list inside it.
   # 'land-and-defer' is deliberately absent — see af-151.
   CONVERGENCE_SIGNAL_CODES: '["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'
+  # In-round self-review A/B: off (default) | ab (odd PRs armed) | on —
+  # ONE bounded delta review before the round's commit, never a loop.
+  # Full rationale → qwen-autofix.md#af-156
+  SELF_REVIEW: "${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"
+  # Agent budget (ms) for an ARMED round; clamped in the address step.
+  SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -3161,21 +3184,9 @@ jobs:
               fleet_row "${PR}" 'conflict-parked' 'conflict handoff pending — no stale-base head move while parked'
             fi
             # Convergence-signal circuit breaker (#10107): the verdict is
-            # derived HERE, above the stale-base update, and the update's
-            # gate refuses a parked PR beside the conflict park: a base
-            # merge into a parked PR re-fires every synchronize-triggered
-            # workflow on the new head, and the base-merge round reviews
-            # an unchanged diff — its clean marker resets the streak,
-            # silently lifting the park with zero human activity (af-108's
-            # exact hazard, the one the conflict park above was added
-            # for). The notice's promise that base conflicts stay
-            # unhandled while paused only holds with this guard. The
-            # verdict and the park action BOTH sit above the idle
-            # fast-path (an idle parked PR must still reach its notice),
-            # and BOTH stale-base gates reuse this one derivation, so the
-            # reads cannot drift. Mirrored live in prepare; keep in
-            # lockstep.
-            # Full rationale → qwen-autofix.md#af-152
+            # derived HERE, above the stale-base update; BOTH stale-base
+            # gates reuse this one derivation, mirrored live in prepare —
+            # keep in lockstep. Full rationale → qwen-autofix.md#af-152
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
               | jq -s 'add // []' > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
@@ -3413,12 +3424,15 @@ jobs:
             # extends that window. The scan still selects later feedback so
             # prepare can record and watermark its deferral; only the address
             # job filters what may drive code changes.
+            # The review bot's fixed-ruling NOTE is not feedback — matched by
+            # the workflow-level FIXED_RULING_FILTER shape (see env).
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg frf "${FIXED_RULING_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not) ] | length' \
               "${WORKDIR}/rc.json")"
             # Issue-level PR comments are also actionable feedback. Exclude the
             # bot's own eval markers, and known non-actionable bot comments
@@ -3699,6 +3713,8 @@ jobs:
     # Secret-bearing and executes PR code, but every target is live-gated to
     # write+ (internal) authors at scan AND address time. That is an
     # Full rationale → qwen-autofix.md#af-038
+    # 345 holds both shapes under the 25m reserve: unarmed 130+60+70+60,
+    # armed 190+60 with the repair chain skipped (af-156).
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 345
     permissions:
@@ -4060,7 +4076,7 @@ jobs:
           git config core.hooksPath .husky
 
       # The test-weakening gate's instrument, staged trusted and digested.
-      # Full rationale → qwen-autofix.md#af-157
+      # Full rationale → qwen-autofix.md#af-158
       - name: 'Stage trusted test-surface instrument'
         id: 'stage_surface'
         run: |-
@@ -4127,6 +4143,21 @@ jobs:
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          # Self-review arm (af-156), resolved ONCE for the step cap, the
+          # repair skip and the gate record; never on a github-hosted
+          # runner (cut at 360 minutes). PR must be numeric, nothing else.
+          SELF_REVIEW_ARM='off'
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            case "${SELF_REVIEW}" in
+              on) SELF_REVIEW_ARM='on' ;;
+              ab)
+                if [[ "${PR}" =~ ^[0-9]+$ ]] && (( 10#${PR} % 2 == 1 )); then
+                  SELF_REVIEW_ARM='on'
+                fi
+                ;;
+            esac
+          fi
+          echo "self_review_arm=${SELF_REVIEW_ARM}" >> "${GITHUB_OUTPUT}"
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
           # drop any planted token BEFORE the gh calls below, so a GH_HOST
           # reroute cannot spoof the eligibility re-check and a planted
@@ -4318,7 +4349,7 @@ jobs:
             | jq -s 'add // []' > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             | jq -s 'add // []' > "${WORKDIR}/ic.json"
-          # headRefOid rides the same read as the rollup (af-155).
+          # headRefOid rides the same read as the rollup (af-157).
           PR_ROLLUP="$(gh pr view "${PR}" --repo "${REPO}" \
             --json statusCheckRollup,headRefOid 2> /dev/null || echo '{}')"
           jq '.statusCheckRollup // []' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json" 2> /dev/null \
@@ -4419,14 +4450,15 @@ jobs:
               || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg frf "${FIXED_RULING_FILTER}" '
               (.[0] | map(select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
               + (.[1] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)) | length)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)) | length)
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
@@ -4764,7 +4796,7 @@ jobs:
           # ---- regression accounting ------------------------------------
           # Classify the live head: a push onto a fully GREEN head that
           # leaves it red introduced the red.
-          # Full rationale → qwen-autofix.md#af-155
+          # Full rationale → qwen-autofix.md#af-157
           CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" \
             --argjson looplanes "${LOOP_OWNED_LANES}" '
             [ .[] | select((((.workflowName // "")
@@ -4883,6 +4915,7 @@ jobs:
                 "${WORKDIR}/rv.json"
               jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
+                --arg frf "${FIXED_RULING_FILTER}" \
                 --slurpfile reviews "${WORKDIR}/rv.json" '
                 def leading_critical:
                   gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
@@ -4892,6 +4925,7 @@ jobs:
                 | $comments[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
+                | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((
                     ((.body // "") | leading_critical)
@@ -5003,7 +5037,7 @@ jobs:
             echo "## Inline comments"
             jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
-              --argjson over "${OVER_BUDGET_AUTHORS}" \
+              --argjson over "${OVER_BUDGET_AUTHORS}" --arg frf "${FIXED_RULING_FILTER}" \
               --slurpfile reviews "${WORKDIR}/rv.json" '
               def leading_critical:
                 gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
@@ -5013,6 +5047,7 @@ jobs:
               | $comments[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
+              | select((((.user.login // "") == $rb) and ((.body // "") | test($frf))) | not)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
@@ -5307,8 +5342,12 @@ jobs:
         # Bound the agent below the job timeout so a runaway agent fails THIS
         # step (not the whole job), leaving the always() verify and report
         # Full rationale → qwen-autofix.md#af-050
-        timeout-minutes: 130
+        # Per arm (af-156): 180m + 10m armed, 120m + 10m unarmed. The job
+        # bound cannot hold the armed cap AND the repair chain (skipped).
+        timeout-minutes: "${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"
         env:
+          # The arm prepare resolved (af-156); the clamp reads it.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           DOCKER_HOST: ''
           DOCKER_CONTEXT: 'default'
@@ -5320,7 +5359,7 @@ jobs:
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           # The primary attempt's real budget: 120m, with a 10-minute margin
-          # under the 130-minute step backstop above.
+          # under the 130-minute step backstop above (180m/190m armed).
           # Full rationale → qwen-autofix.md#af-125
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
@@ -5370,10 +5409,16 @@ jobs:
           # Full rationale → qwen-autofix.md#af-126
           git config core.hooksPath .husky
           # Clamp the override to the budget ceiling: a repo variable past
-          # 7,200,000 ms (120m) would arm the timer past the 130-minute step
+          # 7,200,000 ms (120m; 10,800,000 ms armed) would arm the timer past
+          # the 130-minute (190-minute armed) step
           # Full rationale → qwen-autofix.md#af-051
           BUDGET_CAP_MS=7200000
           BUDGET_FLOOR_MS=60000
+          if [[ "${SELF_REVIEW_ARM:-off}" == 'on' ]]; then
+            # One delta review's worth: 180m under the 190-minute step.
+            BUDGET_CAP_MS=10800000
+            QWEN_TIMEOUT_MS="${SELF_REVIEW_TIMEOUT_MS:-10800000}"
+          fi
           if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] ||
              (( 10#${QWEN_TIMEOUT_MS} < BUDGET_FLOOR_MS )) ||
              (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
@@ -5381,15 +5426,22 @@ jobs:
             QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
           fi
           export QWEN_TIMEOUT_MS
+          # When the agent's budget expires — the skill's deadline rule.
+          ROUND_DEADLINE="$(date -u -d "@$(( $(date +%s) + 10#${QWEN_TIMEOUT_MS} / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)"
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
+          # Self-review CLI by absolute path: the host's qwen wrapper is
+          # not on PATH inside the sandbox.
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
-            --base "${BASE}"
+            --base "${BASE}" \
+            --self-review "${SELF_REVIEW_ARM}" \
+            --self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js" \
+            --deadline "${ROUND_DEADLINE}"
 
       - name: 'Verification gate'
         id: 'verify'
@@ -5451,6 +5503,8 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Self-review arm (af-156); the gate records only when 'on'.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           # Growth-audit rounds must carry a valid growth-audit.json verdict;
           # the gate enforces presence + shape before any push decision.
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
@@ -5490,23 +5544,10 @@ jobs:
             /usr/bin/kill "${HB_PID}" 2> /dev/null || true
             /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
           fi
-          # The gate decides whether the PAT push runs, and the first pass
-          # executes the branch's own build/test on the host before the
-          # second — so verify the staged runner's digest (recorded in
-          # GITHUB_OUTPUT, unreachable from a disk write) before executing,
-          # or a mid-run overwrite lets the branch define its own verdict.
-          # Every command word below is called by absolute path: bare names
-          # — even builtins like echo, export, or unset — are shadowed by
-          # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
-          # bash STARTUP even under --norc, ahead of builtins and PATH
-          # (R6-4; a shadowed echo prints any digest line, blinding the
-          # check to a mid-run overwrite of the staged runner, and a
-          # shadowed export/unset arms a DEBUG trap that swaps the staged
-          # runner AFTER the digest passes and BEFORE the launch executes
-          # it, R8-1). The body therefore carries no in-shell pin of its
-          # own: PATH reaches the child through the allowlist below, and
-          # the preload channels are closed by the step-level LD_* pins
-          # above, the env execve prefix, and env -i.
+          # The gate decides whether the PAT push runs: verify the staged
+          # runner's digest before executing it (a mid-run overwrite would
+          # let the branch define its own verdict); absolute-path command
+          # words only. Full rationale → qwen-autofix.md#af-111
           /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant
@@ -5527,15 +5568,19 @@ jobs:
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
             WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}" \
             WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}" \
+            SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
+        # An armed self-review round skips this chain: the job bound cannot
+        # hold it beside the 190-minute step; the rejection stays retryable
+        # for the next round. Measured 7/79 rounds repaired → af-156.
         # The outcome check fails closed: a FAILED resolver leaves the image
         # binding below empty, and an empty QWEN_SANDBOX_IMAGE relaunches
         # the CLI without any sandbox (#9527 review).
         if: |-
-          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
+          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}
         # 70m: the 60-minute budget below plus the same 10-minute margin the
         # primary attempt keeps under its own backstop, so the internal kill
         # path still writes `agent-timeout` before the step cap fires.
@@ -5753,29 +5798,18 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Self-review arm (af-156); the gate records only when 'on'.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           # The control bit arrives through the FIRST gate's defended
           # output (recorded before any check ran, re-appended at every
           # exit); the prepare copy is only the fallback for a first pass
           # that died before recording it.
           KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
         run: |-
-          # The gate decides whether the PAT push runs, and the first pass
-          # executes the branch's own build/test on the host before the
-          # second — so verify the staged runner's digest (recorded in
-          # GITHUB_OUTPUT, unreachable from a disk write) before executing,
-          # or a mid-run overwrite lets the branch define its own verdict.
-          # Every command word below is called by absolute path: bare names
-          # — even builtins like echo, export, or unset — are shadowed by
-          # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
-          # bash STARTUP even under --norc, ahead of builtins and PATH
-          # (R6-4; a shadowed echo prints any digest line, blinding the
-          # check to a mid-run overwrite of the staged runner, and a
-          # shadowed export/unset arms a DEBUG trap that swaps the staged
-          # runner AFTER the digest passes and BEFORE the launch executes
-          # it, R8-1). The body therefore carries no in-shell pin of its
-          # own: PATH reaches the child through the allowlist below, and
-          # the preload channels are closed by the step-level LD_* pins
-          # above, the env execve prefix, and env -i.
+          # The gate decides whether the PAT push runs: verify the staged
+          # runner's digest before executing it (a mid-run overwrite would
+          # let the branch define its own verdict); absolute-path command
+          # words only. Full rationale → qwen-autofix.md#af-111
           /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant
@@ -5796,6 +5830,7 @@ jobs:
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
             WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}" \
             WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}" \
+            SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
@@ -5814,6 +5849,8 @@ jobs:
           REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
           FIRST_AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict }}'
           REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
+          FIRST_SELF_REVIEW: '${{ steps.verify.outputs.self_review }}'
+          REPAIR_SELF_REVIEW: '${{ steps.verify_repair.outputs.self_review }}'
           # The pass conclusions are the tamper-evident seal on the output
           # claims below: a gate that reached fixed/noop EXITED 0, and a
           # step killed mid-check (whose output file stays discoverable and
@@ -5827,6 +5864,7 @@ jobs:
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
           AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
+          SELF_REVIEW="${FIRST_SELF_REVIEW}"
           KISS_AUDIT="${FIRST_KISS_AUDIT}"
           PASS_CONCLUSION="${FIRST_CONCLUSION}"
           # The flag travels WITH the attempt whose outcome is selected: the
@@ -5854,6 +5892,7 @@ jobs:
             # unconditionally dropped it.
             # Full rationale → qwen-autofix.md#af-128
             AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
+            SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"
             KISS_AUDIT="${REPAIR_KISS_AUDIT:-${FIRST_KISS_AUDIT}}"
             PASS_CONCLUSION="${REPAIR_CONCLUSION}"
           fi
@@ -5867,6 +5906,7 @@ jobs:
             COMMITTED=''
             VERIFIED_HEAD=''
             AUDIT_VERDICT=''
+            SELF_REVIEW=''
             KISS_AUDIT=''
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
@@ -5878,6 +5918,9 @@ jobs:
           fi
           if [[ -n "${AUDIT_VERDICT}" ]]; then
             echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${SELF_REVIEW}" ]]; then
+            echo "self_review=${SELF_REVIEW}" >> "${GITHUB_OUTPUT}"
           fi
           if [[ -n "${KISS_AUDIT}" ]]; then
             echo "kiss_audit=${KISS_AUDIT}" >> "${GITHUB_OUTPUT}"
@@ -5901,7 +5944,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff self-review.json heartbeat.log; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent/reviewer-written content: both workflow-command syntaxes
@@ -5945,7 +5988,7 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
-          # Regression accounting (af-155).
+          # Regression accounting (af-157).
           CHECK_STATE: '${{ steps.prepare.outputs.check_state }}'
           REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
@@ -5984,6 +6027,8 @@ jobs:
           # to the first pass's validated verdict. Empty when no gate
           # validated a verdict; the marker then stays absent.
           AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
+          # Self-review record Finalize selected like AUDIT_VERDICT (af-156).
+          SELF_REVIEW: '${{ steps.final_verify.outputs.self_review }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'
         run: |-
@@ -6029,7 +6074,7 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
-          # Regression accounting (af-155).
+          # Regression accounting (af-157).
           REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           # This step also posts a round report (timeout / gate-rejection /
           # abort), so it writes the per-round growth-now marker too — else an
@@ -6391,8 +6436,8 @@ jobs:
                         # check never shows under this PR's rollup, and the
                         # runs fallback is event-scoped exactly like the scan
                         # gate's (af-099) — an in-flight command review does
-                        # NOT hold the refresh (af-156).
-                        # Full rationale → qwen-autofix.md#af-156
+                        # NOT hold the refresh (af-155).
+                        # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '
                           [ .[]
@@ -6442,7 +6487,7 @@ jobs:
                   # live, the next round re-runs, and ITS report step performs
                   # the base refresh once the review has landed.
                   MARK_TS='9999-12-31T23:59:59Z'
-                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a lifecycle review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). Command-triggered reviews are invisible to this probe (af-156). The refresh and this item's retry move to the next scan."
+                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a lifecycle review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). Command-triggered reviews are invisible to this probe (af-155). The refresh and this item's retry move to the next scan."
                   HEADLINE_ZH="🤖 AutoFix 暂缓了一次过期 base 刷新 —— 修复未通过验证且本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，但该 PR 上仍有一轮生命周期评审在运行，现在合入 main 会取消该评审或使其发布失效（#10110）。命令触发的评审对本探测不可见（af-156）。base 刷新与此项的重试推迟到下次扫描。"
                 else
                   # Say what actually happens next. The old "A human should
@@ -6520,7 +6565,7 @@ jobs:
                          | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
-              # Rounds later measured as regressing (af-155).
+              # Rounds later measured as regressing (af-157).
               REGRESSED_ROUNDS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
                 [ .[] | select((.user.login // "") == $ab) | (.body // "")
                   | [ scan("<!-- autofix-regression round=([0-9]+) key=([^ ]+) -->") ] | .[]
@@ -6532,7 +6577,7 @@ jobs:
                 [[ -n "${H}" ]] || continue
                 if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* || "${H}" == *"deferred a stale-base refresh"* ]]; then
                   # A push that turned the checks red is not progress.
-                  # Full rationale → qwen-autofix.md#af-155
+                  # Full rationale → qwen-autofix.md#af-157
                   H_ROUND=''
                   [[ "${H}" =~ \(round\ ([0-9]+)/ ]] && H_ROUND="${BASH_REMATCH[1]}"
                   if [[ -n "${H_ROUND}" && " ${REGRESSED_ROUNDS} " == *" ${H_ROUND} "* ]]; then
@@ -6717,7 +6762,7 @@ jobs:
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               fi
               # A failed round still records the PRIOR round's regression
-              # (af-155).
+              # (af-157).
               if [[ -n "${REGRESSED_ROUND:-}" ]]; then
                 echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
               fi
@@ -6845,22 +6890,9 @@ jobs:
           HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
           HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
-          # This step holds the PAT, and its shell inherits every
-          # $GITHUB_ENV plant earlier steps left — including
-          # BASH_FUNC_<name>%% imports, which bash loads as functions at
-          # STARTUP even under --norc, ahead of builtins and PATH, under
-          # attacker-chosen names no step-level pin can enumerate
-          # (probe-verified: plants shadowing set/export/builtin/gh each
-          # hijacked this step's former inline body). Close the class,
-          # not the enumeration: the whole PAT-touching body runs in the
-          # gate's env -i clean-child form, re-declaring only what it
-          # needs from the step-level pins above and expression context.
-          # PATH reaches the child through the allowlist, so the body
-          # carries no in-shell pin of its own; inside the clean child
-          # no import survives, so bare and builtin words resolve
-          # soundly again. The kill target travels through expression
-          # context — a pid read from a WORKDIR file would be an
-          # untrusted kill target (WORKDIR is sandbox-writable).
+          # This step holds the PAT: the body runs in the gate's env -i
+          # clean-child form (no $GITHUB_ENV plant survives it), and the
+          # kill target travels through expression context.
           # Full rationale → qwen-autofix.md#af-149
           LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
             /usr/bin/env -i \
@@ -6882,18 +6914,8 @@ jobs:
             PR="${PR}" \
             bash --norc -c '
               set -uo pipefail
-              # Stop the round heartbeat BEFORE flipping this comment
-              # to its terminal text, and DRAIN it first: killing the
-              # client cannot cancel a PATCH the server already
-              # ACCEPTED, so the terminal PATCH must wait the last
-              # in-flight tick request out (the stamp drain below).
-              # The kill is lifecycle-confirmed: the gate killed this
-              # loop long before this step, and by now the pid
-              # recorded at launch can be REUSED — TERMing it would
-              # kill an unrelated process, its group and session. A
-              # failed check means the loop is already gone, so
-              # killing nothing is right; the stop marker ends it on
-              # its next self-check even if the kills miss.
+              # Stop the round heartbeat BEFORE the terminal text, and
+              # DRAIN it first; the kill is lifecycle-confirmed.
               # Full rationale → qwen-autofix.md#af-149
               /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
               HB_FIELDS=()
@@ -6907,20 +6929,10 @@ jobs:
                 builtin kill "${HB_PID}" 2>/dev/null || true
                 /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
               fi
-              # Drain the last in-flight tick before the terminal
-              # PATCH: each tick stamps its start epoch around its gh
-              # call (bounded to 60s), so a stamp older than 65s
-              # proves its request committed or died, and no stamp
-              # means nothing is in flight. The loop is dead by here,
-              # so no new stamp can appear. The read is bounded in
-              # time AND bytes (a planted FIFO must not stall this
-              # step, and a symlink to an endless non-NUL target —
-              # /dev/urandom or a fed FIFO — would otherwise stream
-              # into the substitution buffer GB-scale and kill this
-              # clean child before the terminal PATCH, R17-3); a
-              # valid stamp is ≤ ~20 bytes, so 64 covers it. A
-              # planted fresh stamp costs at most the 65s bound, a
-              # planted deletion reopens only the cosmetic overwrite.
+              # Drain the last in-flight tick before the terminal PATCH:
+              # a stamp older than 65s proves its request committed or
+              # died; the read is bounded in time AND bytes (R17-3).
+              # Full rationale → qwen-autofix.md#af-149
               DRAIN_END=$(( $(date +%s) + 65 ))
               while :; do
                 NOW_S="$(date +%s)"
@@ -6999,24 +7011,10 @@ jobs:
           HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
           HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
-          # Last heartbeat kill (the gate and finalize already did this on
-          # their paths) from the expression-context pid — never from a
-          # WORKDIR file, which is sandbox-writable. Lifecycle-confirmed
-          # like its twins and stalest of all: signal only a pid whose
-          # /proc/<pid>/stat start time still matches the launch
-          # capture, kill nothing otherwise. The session kill covers
-          # the mid-tick subtree, same as its twins.
-          # ABSOLUTE-PATH-ONLY command words, the gate twin's form:
-          # this block runs in the step's OUTER shell, which inherits
-          # every $GITHUB_ENV plant earlier steps left — a
-          # BASH_FUNC_cat%% import shadows cat at bash startup and
-          # forges the stat line (the matching start time sits in
-          # this step's own env), passing the lifecycle check on a
-          # REUSED pid so the real kill TERMs an unrelated process,
-          # its group and session; a planted kill or PATH-planted
-          # pkill no-ops the delivery instead, leaving the loop
-          # holding the PAT alive to its age cap (R17-4).
-          # Full rationale → qwen-autofix.md#af-149
+          # Last heartbeat kill from the expression-context pid —
+          # lifecycle-confirmed, session-wide, absolute-path command
+          # words only (this outer shell inherits every $GITHUB_ENV
+          # plant). Full rationale → qwen-autofix.md#af-149
           HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''

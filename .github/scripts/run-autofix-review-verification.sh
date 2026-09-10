@@ -1963,6 +1963,56 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   fi
 fi
 assert_verification_tree
+# In-round self-review record (A/B arm, advisory — af-156). Runs after the
+# tree assertion above so HEAD is the proven verification head, never a
+# bite-check detach that failed to restore. Prepare resolved the arm per
+# PR and it arrives as SELF_REVIEW_ARM; an armed agent writes
+# <workdir>/self-review.json after its commit. The gate trusts none of the
+# file's claims: it validates the shape, binds the record to the tree id
+# of the commit about to be pushed (a tree id, not a diff text — the same
+# on every git version, inside the sandbox or out), and publishes ONE
+# token string the report renders as the autofix-self-review marker.
+# Every token is [a-z0-9=.-]+, so the record can carry neither a marker
+# terminator nor a forged field, and nothing here rejects: the A/B
+# measures, it does not enforce.
+SELF_REVIEW_RECORD='arm=off'
+if [[ "${SELF_REVIEW_ARM:-off}" == 'on' ]]; then
+  SELF_REVIEW_RECORD='arm=on status=missing'
+  if [[ -s "${WORKDIR}/self-review.json" ]]; then
+    SELF_REVIEW_RECORD="$(jq -r '
+      select(type == "object" and .version == 1)
+      | select((.status // "") | IN("converged", "findings-fixed", "deadline", "review-failed", "skipped-small", "skipped-deadline"))
+      | select(.passes | type == "number" and . >= 0 and . == floor)
+      | select((.findings | type) == "object"
+          and all(.findings.act, .findings.declined, .findings.deferred;
+                  type == "number" and . >= 0 and . == floor))
+      | select(.minutes | type == "number" and . >= 0)
+      | select(((.status // "") | startswith("skipped-"))
+          or ((.tree // "") | type == "string" and test("^[0-9a-f]{40}$")))
+      | "arm=on status=\(.status) passes=\(.passes) act=\(.findings.act) declined=\(.findings.declined) deferred=\(.findings.deferred) minutes=\(.minutes | floor)"
+    ' "${WORKDIR}/self-review.json" 2> /dev/null)" || SELF_REVIEW_RECORD=''
+    SELF_REVIEW_RE='^arm=on status=[a-z-]+ passes=[0-9]+ act=[0-9]+ declined=[0-9]+ deferred=[0-9]+ minutes=[0-9]+$'
+    if [[ ! "${SELF_REVIEW_RECORD}" =~ ${SELF_REVIEW_RE} ]]; then
+      SELF_REVIEW_RECORD='arm=on status=invalid'
+    elif [[ "${SELF_REVIEW_RECORD}" != *' status=skipped-'* ]]; then
+      # Binding: the tree id the skill recorded after its commit must be
+      # the tree of what is about to be pushed. A mismatch is not a
+      # rejection — it marks the record so the A/B can discount a pass
+      # whose record does not describe the pushed commit.
+      CLAIMED_TREE="$(jq -r '.tree // ""' "${WORKDIR}/self-review.json" 2> /dev/null || true)"
+      ACTUAL_TREE="$(git rev-parse 'HEAD^{tree}' 2> /dev/null)" || ACTUAL_TREE=''
+      if [[ -n "${ACTUAL_TREE}" && "${CLAIMED_TREE}" == "${ACTUAL_TREE}" ]]; then
+        SELF_REVIEW_RECORD="${SELF_REVIEW_RECORD} bound=true"
+      else
+        SELF_REVIEW_RECORD="${SELF_REVIEW_RECORD} bound=false"
+      fi
+    fi
+  fi
+  {
+    echo "🪞 **Gate advisory — in-round self-review** (machine-read, not agent prose): \`${SELF_REVIEW_RECORD}\`. \`bound=false\` means the record does not describe the commit being pushed. · 轮内自审（门自动读取，非 agent 文本）：\`${SELF_REVIEW_RECORD}\`。\`bound=false\` 表示该记录描述的不是本次推送的提交。"
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🪞 self-review record: ${SELF_REVIEW_RECORD}" | tee -a "${GATE_LOG}"
+fi
 # A conflict verdict must STOP BLOCKED: completing as fixed would push the
 # contested code under the PAT while the report posts the park marker —
 # the exact outcome the routing check above exists to prevent. The routing
@@ -1974,6 +2024,8 @@ fi
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
 echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+# Published only on the fixed path: the marker measures pushed rounds.
+echo "self_review=${SELF_REVIEW_RECORD}" >> "${GITHUB_OUTPUT}"
 if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
   echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
 fi
