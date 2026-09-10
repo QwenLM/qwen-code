@@ -20,10 +20,7 @@ import type {
   ChannelSettingsUpsertOptions,
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
-import {
-  channelSelectionNames,
-  isAllChannelSelectionName,
-} from './channel-selection.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
@@ -31,7 +28,6 @@ import type {
   ChannelWorkerRequiredOwner,
 } from './channel-worker-manager.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
-import type { ServeChannelSelection } from './types.js';
 
 export interface ChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -159,9 +155,6 @@ export interface CreateChannelManagementServiceOptions {
   workspaceCwd: string;
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
-  getStartupFailure?: () =>
-    | { selection: ServeChannelSelection; error: string }
-    | undefined;
 }
 
 export class ChannelManagementError extends Error {
@@ -249,17 +242,6 @@ export function createChannelManagementService(
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
     if (!workspaceCommittedNames().includes(name)) {
-      const startupFailure = opts.getStartupFailure?.();
-      if (
-        startupFailure &&
-        (startupFailure.selection.mode === 'all' ||
-          startupFailure.selection.names.includes(name))
-      ) {
-        return {
-          state: 'error',
-          lastError: diagnostic(startupFailure.error),
-        };
-      }
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
@@ -349,20 +331,13 @@ export function createChannelManagementService(
   const listFrom = async (
     persisted: ChannelSettingsSnapshot,
   ): Promise<DaemonChannelsSnapshot> => {
-    const startupFailure = opts.getStartupFailure?.();
-    const startupNames = startupFailure
-      ? channelSelectionNames(startupFailure.selection)
-      : persisted.startupNames;
-    const channels = { ...persisted.channels };
-    if (startupFailure?.selection.mode === 'names') {
-      for (const name of startupFailure.selection.names) {
-        channels[name] ??= {};
-      }
-    }
     const entries = await Promise.all(
-      Object.entries(channels).map(
+      Object.entries(persisted.channels).map(
         async ([name, config]) =>
-          [name, await instanceFrom(name, config, startupNames)] as const,
+          [
+            name,
+            await instanceFrom(name, config, persisted.startupNames),
+          ] as const,
       ),
     );
     return {

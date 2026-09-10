@@ -155,6 +155,28 @@ describe('WorkspaceChannelSettingsStore', () => {
     fs.rmSync(testRoot, { recursive: true, force: true });
   });
 
+  it.each([false, true])(
+    'preserves distinct padded identities when removing a startup entry (other enabled: %s)',
+    async (otherEnabled) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: { ' bot': { type: 'telegram' }, bot: { type: 'telegram' } },
+          serve: { channels: otherEnabled ? [' bot', 'bot'] : [' bot'] },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const after = await store.remove(' bot', {
+        expectedRevision: store.snapshot().revision,
+      });
+      expect(after.channels).toHaveProperty('bot');
+      expect(after.channels).not.toHaveProperty(' bot');
+      expect(after.startupNames).toEqual(otherEnabled ? ['bot'] : []);
+      expect(readWorkspaceSettings()['serve']).toEqual({
+        channels: otherEnabled ? ['bot'] : [],
+      });
+    },
+  );
+
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const first = store.snapshot();
@@ -1829,17 +1851,6 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(store.snapshot().startupNames).toEqual([]);
   });
 
-  it('normalizes stored startup names before reporting them', () => {
-    writeWorkspaceSettings(`{
-  "channels": { "bot": { "type": "telegram" } },
-  "serve": { "channels": [" bot ", "bot"] }
-}\n`);
-
-    expect(
-      new WorkspaceChannelSettingsStore(workspace).snapshot().startupNames,
-    ).toEqual(['bot']);
-  });
-
   it('ignores invalid stored channel values in snapshots', () => {
     writeWorkspaceSettings(`{
   "channels": {
@@ -1997,7 +2008,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.startupNames).toEqual([]);
   });
 
-  it('does not report invalid all plus named startup selection', async () => {
+  it('canonicalizes a whitespace all sentinel when removing its legacy config', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
   "channels": {
@@ -2015,7 +2026,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.channels).toEqual({
       bot: { type: 'telegram', token: '$BOT_TOKEN' },
     });
-    expect(next.startupNames).toEqual([]);
+    expect(next.startupNames).toEqual(['all']);
   });
 
   it('clears a whitespace all sentinel when no selectable configs remain', async () => {

@@ -3,7 +3,6 @@ import {
   channelSelectionNames,
   isAllChannelSelectionName,
   normalizeServeChannelSelection,
-  normalizeStoredServeChannelNames,
 } from './channel-selection.js';
 
 describe('normalizeServeChannelSelection', () => {
@@ -31,39 +30,16 @@ describe('normalizeServeChannelSelection', () => {
     );
   });
 
+  it('identifies invalid persisted selections without changing CLI errors', () => {
+    expect(() =>
+      normalizeServeChannelSelection(['all', 'bot'], 'serve.channels'),
+    ).toThrow('serve.channels all cannot be combined with channel names.');
+  });
+
   it('rejects all mixed with explicit channel names', () => {
     expect(() => normalizeServeChannelSelection(['all', 'telegram'])).toThrow(
       '--channel all cannot be combined with channel names.',
     );
-  });
-
-  it.each(['\u001b[31m', '\u009b31m', '\u202eabc', '\u2028', '\ufe0f'])(
-    'rejects unsafe channel name %j with a single-line diagnostic',
-    (name) => {
-      expect(() => normalizeServeChannelSelection([name])).toThrow(
-        '--channel channel name',
-      );
-      try {
-        normalizeServeChannelSelection([name]);
-      } catch (error) {
-        expect(String(error)).not.toContain(name);
-        expect(String(error)).not.toContain('\u001b');
-      }
-    },
-  );
-
-  it('uses the caller label without rewriting the error text', () => {
-    expect(() =>
-      normalizeServeChannelSelection(['all', 'telegram'], {
-        label: 'serve.channels',
-      }),
-    ).toThrow('serve.channels all cannot be combined with channel names.');
-  });
-
-  it('drops unsafe stored names while preserving valid names', () => {
-    expect(
-      normalizeStoredServeChannelNames([' ', '--insecure', ' telegram ']),
-    ).toEqual({ names: ['telegram'], rejected: [' ', '--insecure'] });
   });
 });
 

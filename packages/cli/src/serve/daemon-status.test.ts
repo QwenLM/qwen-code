@@ -1376,25 +1376,6 @@ describe('buildDaemonStatusResponse', () => {
     expect(without.runtime.metrics).toBeUndefined();
   });
 
-  it('reports a configured channel restore failure as a warning', async () => {
-    const response = await buildDaemonStatusResponse(
-      'summary',
-      makeOptions({ channelStartupFailure: 'worker failed before ready' }),
-    );
-
-    expect(response).toMatchObject({
-      status: 'warning',
-      issues: expect.arrayContaining([
-        {
-          code: 'channel_startup_not_restored',
-          severity: 'warning',
-          message: 'worker failed before ready',
-          section: 'runtime.channelWorker',
-        },
-      ]),
-    });
-  });
-
   it('reports permanently failed channel worker snapshots as errors', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
@@ -2167,7 +2148,6 @@ interface MakeOptionsInput {
   hooksStatus?: unknown;
   extensionsStatus?: unknown;
   channelWorkerSnapshot?: ChannelWorkerSnapshot;
-  channelStartupFailure?: string;
   perfSnapshot?: {
     eventLoop: { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
     promptQueueWait: {
@@ -2280,9 +2260,6 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     sessionShellCommandEnabled: false,
     ...(input.channelWorkerSnapshot
       ? { getChannelWorkerSnapshot: () => input.channelWorkerSnapshot! }
-      : {}),
-    ...(input.channelStartupFailure
-      ? { getChannelStartupFailure: () => input.channelStartupFailure }
       : {}),
     ...(input.perfSnapshot
       ? { getPerfSnapshot: () => input.perfSnapshot! }

@@ -47,7 +47,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
-  serve?: Pick<NonNullable<Settings['serve']>, 'channels'>;
+  serve?: { channels?: unknown };
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -646,11 +646,6 @@ function pickFastPathSettings(
   const serve = value['serve'];
   if (includeServe && isPlainObject(serve)) {
     const channels = serve['channels'];
-    if (channels !== undefined && !isStringArray(channels)) {
-      throw new Error(
-        'Serve fast path settings serve.channels must be a string array.',
-      );
-    }
     if (channels !== undefined) {
       out.serve = { channels };
     }
@@ -742,6 +737,11 @@ export function loadServeFastPathSettings(
     realWorkspaceDir,
   );
   const isTrusted = trustDecision ?? true;
+  const startupChannelsTrusted =
+    isWorkspaceTrustedFastPath(
+      mergeFastPathSettings(systemDefaults, user, system),
+      realWorkspaceDir,
+    ) === true;
   let realHomeDir = resolvedHomeDir;
   try {
     realHomeDir = fs.realpathSync(resolvedHomeDir);
@@ -756,14 +756,14 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath, trustDecision === true)
+    ? readSettingsSummary(workspaceSettingsPath, startupChannelsTrusted)
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
-  if (trustDecision === true && workspaceFromDisk.serve) {
+  if (startupChannelsTrusted && workspaceFromDisk.serve) {
     merged.serve = {
-      channels: [...(workspaceFromDisk.serve.channels ?? [])],
+      channels: workspaceFromDisk.serve.channels,
     };
   }
   return resolveEnvVarsInObject(

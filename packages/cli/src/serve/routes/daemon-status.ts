@@ -50,7 +50,6 @@ interface RegisterDaemonStatusRoutesDeps {
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
-  getChannelStartupFailure?: () => string | undefined;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -91,7 +90,6 @@ export function registerDaemonStatusRoutes(
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
           getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
-          getChannelStartupFailure: deps.getChannelStartupFailure,
           getPerfSnapshot: deps.getPerfSnapshot,
           getMetricsSeries: deps.getMetricsSeries,
           getTotalSessionAdmissionSnapshot:

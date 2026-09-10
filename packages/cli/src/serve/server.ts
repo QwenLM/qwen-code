@@ -554,7 +554,6 @@ export interface ServeAppDeps {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
-  getChannelStartupFailure?: () => string | undefined;
   getChannelWorkerControl?: () => ChannelWorkerControlState;
   isChannelControlDraining?: () => boolean;
   isChannelControlInitializing?: () => boolean;
@@ -2253,7 +2252,6 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
-    getChannelStartupFailure: deps.getChannelStartupFailure,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:

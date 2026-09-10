@@ -774,10 +774,7 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`,
-`channel_worker_partial_connect`, `channel_startup_not_restored`, and
-`workspace_status_unavailable`. `channel_startup_not_restored` is a warning in
-section `runtime.channelWorker`: the configured primary-workspace selection
-was not restored, but the daemon remains available for runtime recovery. During
+`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
 the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
@@ -803,11 +800,27 @@ and then exits, `/daemon/status` keeps the daemon online and reports warning
 issue code `channel_worker_exited`.
 
 Daemon-managed channel worker startup from an explicit `qwen serve --channel
-...` remains fail-fast. A flagless boot instead restores `serve.channels` from
-the trusted primary workspace; failure to restore that setting emits
-`channel_startup_not_restored` and keeps the daemon healthy. Secondary
-workspaces do not independently restore their own `serve.channels`. With no
-explicit or primary-workspace selection, channel runtime loading stays lazy.
+...` remains fail-fast and takes precedence over persisted startup settings.
+A flagless boot restores `serve.channels` from the trusted primary workspace.
+Secondary workspaces do not independently restore their own `serve.channels`.
+With no explicit or primary-workspace selection, channel runtime loading stays
+lazy.
+
+Stored startup names must be non-empty, have no leading or trailing whitespace,
+and contain no unsafe control or invisible characters. Invalid entries are
+skipped individually and logged by array index; startup does not trim them into
+other instance names or rewrite settings. Worker arguments use
+`--channel=<value>`, preserving a leading dash as part of the name.
+
+An invalid startup field or a validation or lease error before workers start
+skips the automatic restore, with a log identifying `serve.channels`, while
+unrelated settings remain in effect. A failed worker startup allows the daemon
+to continue after cleanup succeeds. Global runtime startup timeouts and
+unconfirmed worker stops follow the existing startup-failure path; the lease
+remains held while worker termination is unconfirmed. Inspect daemon logs for
+skipped or failed restores. Channel management reports persisted startup
+settings and actual runtime state.
+
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
 window, with 1s, 5s, then 15s backoff. The worker sends IPC heartbeats every
@@ -924,10 +937,11 @@ For `502 channel_worker_start_failed`, the response may also include
 trusted `workspaceCwd` of the attempted worker. These fields describe the
 failed transaction, while `state` describes the current state after rollback;
 a later GET does not retain the failed attempt. A partially connected worker
-instead returns success and exposes its failures in the worker snapshot. Boot-
-time all-failure aborts `qwen serve` only for an explicit `--channel` selection;
-a settings-derived failure remains queryable through daemon status and channel
-management.
+instead returns success and exposes its failures in the worker snapshot. An
+explicit `--channel` boot with no connected adapter fails startup. A settings-
+derived startup failure is logged and allows the daemon to continue after
+cleanup succeeds, subject to the global runtime startup timeout. Failure to
+confirm cleanup retains the normal startup-failure behavior and service lease.
 
 `qwen channel status` without `--daemon-url` continues to read pidfile metadata;
 with `--daemon-url` it reads `GET /workspace/channel`. During a restart

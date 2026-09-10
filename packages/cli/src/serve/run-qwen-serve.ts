@@ -227,7 +227,6 @@ import {
 import {
   channelSelectionNames,
   normalizeServeChannelSelection,
-  normalizeStoredServeChannelNames,
 } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -3998,27 +3997,12 @@ async function runQwenServeImpl(
   });
   loggerLifecycle.initialized(daemonLog);
   let channelSelectionFromSettings = false;
-  let configuredChannelStartupFailure:
-    | {
-        workspaceCwd: string;
-        selection?: ServeChannelSelection;
-        error: string;
-      }
-    | undefined;
-  const reportConfiguredChannelStartupFailure = (
-    error: unknown,
-    selection = opts.channelSelection,
-  ): void => {
+  const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       error instanceof Error ? error.message : String(error),
       512,
     );
     const detail = /[.!?]$/.test(message) ? message : `${message}.`;
-    configuredChannelStartupFailure = {
-      workspaceCwd: boundWorkspace,
-      ...(selection ? { selection } : {}),
-      error: message,
-    };
     writeStderrLine(
       `qwen serve: workspace serve.channels was not restored: ${detail} ` +
         `Continuing without channels.`,
@@ -4027,19 +4011,31 @@ async function runQwenServeImpl(
       `workspace serve.channels was not restored: ${detail} Continuing without channels`,
     );
   };
-  if (!opts.channelSelection && bootSettings?.serve?.channels) {
-    const { names: configuredChannels, rejected } =
-      normalizeStoredServeChannelNames(bootSettings.serve.channels);
-    for (const raw of rejected) {
-      const rendered = sanitizeLogText(JSON.stringify(raw), 256);
-      const message = `ignored unsafe workspace serve.channels name ${rendered}`;
-      writeStderrLine(`qwen serve: ${message}`);
-      daemonLog.warn(message);
-    }
+  if (!opts.channelSelection && bootSettings?.serve?.channels !== undefined) {
     try {
+      const rawChannels = bootSettings.serve.channels;
+      if (
+        !Array.isArray(rawChannels) ||
+        !rawChannels.every((name): name is string => typeof name === 'string')
+      ) {
+        throw new Error('serve.channels must be a string array.');
+      }
+      const configuredChannels = rawChannels.filter((name, index) => {
+        if (
+          !name ||
+          name !== name.trim() ||
+          sanitizeLogText(name, name.length) !== name
+        ) {
+          daemonLog.warn(
+            `ignored invalid workspace serve.channels entry at index ${index}`,
+          );
+          return false;
+        }
+        return true;
+      });
       opts.channelSelection = normalizeServeChannelSelection(
         configuredChannels,
-        { label: 'serve.channels' },
+        'serve.channels',
       );
       if (opts.channelSelection) {
         channelSelectionFromSettings = true;
@@ -4048,14 +4044,10 @@ async function runQwenServeImpl(
           channels: channelSelectionNames(opts.channelSelection),
           workspaceCwd: boundWorkspace,
         });
-      } else if (rejected.length > 0) {
-        reportConfiguredChannelStartupFailure(
-          new Error('all configured channel names were invalid or unsafe'),
-        );
       }
     } catch (error) {
       opts.channelSelection = undefined;
-      reportConfiguredChannelStartupFailure(error, undefined);
+      reportConfiguredChannelStartupFailure(error);
     }
   }
   daemonLog.info('project memory scope resolved', {
@@ -7572,16 +7564,6 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
-          getStartupFailure: () => {
-            const failure = configuredChannelStartupFailure;
-            if (
-              !failure?.selection ||
-              failure.workspaceCwd !== targetRuntime.workspaceCwd
-            ) {
-              return undefined;
-            }
-            return { selection: failure.selection, error: failure.error };
-          },
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
@@ -7672,7 +7654,6 @@ async function runQwenServeImpl(
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
-      getChannelStartupFailure: () => configuredChannelStartupFailure?.error,
       getChannelWorkerControl,
       isChannelControlDraining: () => channelControlDraining,
       isChannelControlInitializing: () =>
@@ -8256,15 +8237,10 @@ async function runQwenServeImpl(
       },
     });
     if (!grouping.ok) {
-      throw Object.assign(
-        new Error(sanitizeLogText(grouping.error.message, 512)),
-        {
-          code: grouping.error.code,
-          ...(grouping.error.channel
-            ? { channel: grouping.error.channel }
-            : {}),
-        },
-      );
+      throw Object.assign(new Error(grouping.error.message), {
+        code: grouping.error.code,
+        ...(grouping.error.channel ? { channel: grouping.error.channel } : {}),
+      });
     }
     return grouping.groups;
   };
@@ -8628,7 +8604,6 @@ async function runQwenServeImpl(
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
-      let configuredChannelStartupInProgress = false;
       let runtimeStartAfterHealthTimer: NodeJS.Timeout | undefined;
       let runtimeStartFallbackTimer: NodeJS.Timeout | undefined;
       const runtimeStartupTimeoutMs = resolveRuntimeStartupTimeoutMs(
@@ -8752,20 +8727,6 @@ async function runQwenServeImpl(
           const timeoutError = new Error(
             `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
           );
-          if (
-            channelSelectionFromSettings &&
-            configuredChannelStartupInProgress &&
-            runtimeApp
-          ) {
-            const selection = opts.channelSelection;
-            opts.channelSelection = undefined;
-            reportConfiguredChannelStartupFailure(timeoutError, selection);
-            runtimeStartupSettled = true;
-            clearRuntimeStartupTimer();
-            markServeAppStartupReady();
-            void publishLiveDiscovery(runtimeApp).finally(markRuntimeReady);
-            return;
-          }
           void failRuntimeStartup(timeoutError);
         }, runtimeStartupTimeoutMs);
         runtimeStartupTimer.unref();
@@ -8836,15 +8797,12 @@ async function runQwenServeImpl(
           },
         });
         if (!grouping.ok) {
-          throw Object.assign(
-            new Error(sanitizeLogText(grouping.error.message, 512)),
-            {
-              code: grouping.error.code,
-              ...(grouping.error.channel
-                ? { channel: grouping.error.channel }
-                : {}),
-            },
-          );
+          throw Object.assign(new Error(grouping.error.message), {
+            code: grouping.error.code,
+            ...(grouping.error.channel
+              ? { channel: grouping.error.channel }
+              : {}),
+          });
         }
         return grouping.groups;
       };
@@ -9029,7 +8987,6 @@ async function runQwenServeImpl(
             },
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
-              configuredChannelStartupFailure = undefined;
               channelWorkspaceGroups = groups;
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
@@ -9066,32 +9023,25 @@ async function runQwenServeImpl(
           | undefined;
         acpHandle?.attachServer?.(server);
         if (opts.channelSelection) {
-          closeServerAfterChannelWorkerStartupFailure =
-            !channelSelectionFromSettings;
+          closeServerAfterChannelWorkerStartupFailure = true;
           let manager: ChannelWorkerManager | undefined;
-          configuredChannelStartupInProgress = channelSelectionFromSettings;
           try {
             manager = await ensureChannelWorkerManager!();
             await manager.startInitial(opts.channelSelection);
           } catch (error) {
-            if (!channelSelectionFromSettings) throw error;
-            if (manager) {
-              await manager.stopSelection().catch((cleanupError) => {
-                daemonLog.warn(
-                  `failed to clean up configured channel startup: ${sanitizeLogText(
-                    cleanupError instanceof Error
-                      ? cleanupError.message
-                      : String(cleanupError),
-                    512,
-                  )}`,
-                );
-              });
+            if (!channelSelectionFromSettings || runtimeStartupSettled) {
+              throw error;
             }
-            const selection = opts.channelSelection;
+            if (manager) {
+              await manager.stopSelection();
+            } else {
+              removeCurrentServePidfile();
+              if (channelPidfileReserved) {
+                throw new Error('Failed to release the channel service lease.');
+              }
+            }
             opts.channelSelection = undefined;
-            reportConfiguredChannelStartupFailure(error, selection);
-          } finally {
-            configuredChannelStartupInProgress = false;
+            reportConfiguredChannelStartupFailure(error);
           }
           if (runtimeStartupSettled) return;
         }

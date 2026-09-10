@@ -1,5 +1,7 @@
 # Daemon Channel Runtime Control
 
+[English](daemon-channel-runtime-control.md) | [简体中文](daemon-channel-runtime-control.zh-CN.md)
+
 ## Summary
 
 Add runtime desired-state control for daemon-managed channel workers. A daemon
@@ -64,12 +66,31 @@ daemon status continues to emit `channel_worker_partial_connect`.
 ## Compatibility
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
-reservation and ready-before-success behavior. On a flagless boot, a trusted
-primary workspace's `serve.channels` is restored; a restore failure degrades
-only that selection and leaves the daemon queryable. Secondary workspaces do
-not independently restore their own setting. Without an explicit or persisted
+reservation and ready-before-success behavior. On a flagless boot, the daemon
+restores `serve.channels` from the trusted primary workspace. The startup
+selection uses persisted folder-trust settings; workspace ownership and trust
+are checked again before workers start. Secondary workspaces do not
+independently restore their own setting. Without an explicit or persisted
 selection, the daemon does not reserve the channel service or load the heavy
 channel runtime until the first runtime mutation.
+
+Stored startup names must be non-empty, have no leading or trailing whitespace,
+and contain no unsafe control or invisible characters. Invalid entries are
+skipped individually and logged by array index. Startup does not trim them into
+other instance names or rewrite the stored configuration. Workers receive each
+name as `--channel=<value>`, so a leading dash remains part of the value.
+
+An invalid startup field or a validation or lease error before workers start
+skips the automatic restore with a log identifying `serve.channels`; unrelated
+settings remain in effect. A failed worker startup allows the daemon to
+continue only after cleanup succeeds. Global runtime startup timeouts and
+unconfirmed worker stops retain the existing startup-failure behavior. The
+service lease remains held while worker termination is unconfirmed.
+
+Channel management reports persisted startup settings and actual runtime state.
+Skipped or failed automatic restores are diagnosed through the daemon log;
+they do not replace the configured instances or startup toggles with a retained
+boot-failure snapshot.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain
