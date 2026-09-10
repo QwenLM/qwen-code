@@ -109,7 +109,7 @@ describe('DingTalk mention body preservation', () => {
   });
 
   it.each(['/new', '/stop', '/help'])(
-    'omits an identified leading bot entity for %s and retains its display text',
+    'retains a leading bot entity even when its identity matches for %s',
     (command) => {
       const envelope = receive({
         msgtype: 'richText',
@@ -120,39 +120,29 @@ describe('DingTalk mention body preservation', () => {
           ],
         },
       });
-      expect(envelope.text).toBe(command);
-      expect(envelope.displayText).toBe(`@Qwen ${command}`);
+      expect(envelope.text).toBe(`@Qwen ${command}`);
     },
   );
 
   it.each([
-    { name: 'another member', atUserId: 'other-user', overrides: {} },
-    { name: 'unknown identity', atUserId: undefined, overrides: {} },
     {
-      name: 'missing bot identity',
-      atUserId: 'test-bot',
-      overrides: { chatbotUserId: undefined },
+      name: 'explicit text',
+      part: { type: 'at', text: '@Someone ', atName: 'unused' },
+      expected: '@Someone /stop',
     },
     {
-      name: 'private conversation',
-      atUserId: 'test-bot',
-      overrides: { conversationType: '1' },
+      name: 'ID without a display name',
+      part: { type: 'at', atUserId: 'test-bot' },
+      expected: '@test-bot /stop',
     },
-    {
-      name: 'unmentioned group',
-      atUserId: 'test-bot',
-      overrides: { isInAtList: false },
-    },
-  ])('retains an at entity for $name', ({ atUserId, overrides }) => {
+  ])('retains an at entity with $name', ({ part, expected }) => {
     const envelope = receive({
       msgtype: 'richText',
       content: {
-        richText: [{ type: 'at', atName: 'Qwen', atUserId }, { text: '/stop' }],
+        richText: [part, { text: '/stop' }],
       },
-      ...overrides,
     });
-    expect(envelope.text).toBe('@Qwen /stop');
-    expect(envelope.displayText).toBe('@Qwen /stop');
+    expect(envelope.text).toBe(expected);
   });
 
   it('preserves a bot entity inside prose instead of joining text into a command', () => {
@@ -169,7 +159,7 @@ describe('DingTalk mention body preservation', () => {
     expect(envelope.text).toBe('/@Qwen stop');
   });
 
-  it('does not treat a bot entity after a picture as a leading mention', () => {
+  it('retains a bot entity after a picture', () => {
     const envelope = receive({
       msgtype: 'richText',
       content: {
@@ -191,7 +181,7 @@ describe('DingTalk mention body preservation', () => {
     expect(envelope.text).toBe('@/new');
   });
 
-  it('applies a configured prefix after an identified bot entity with a spaced name', () => {
+  it('does not strip a bot entity to match a configured prefix', () => {
     const envelope = receive(
       {
         msgtype: 'richText',
@@ -203,9 +193,17 @@ describe('DingTalk mention body preservation', () => {
         },
       },
       '/review',
+      false,
+    );
+    expect(envelope.text).toBe('@Qwen Code /review inspect this');
+  });
+
+  it('matches a configured prefix when the callback already omits the mention', () => {
+    const envelope = receive(
+      { text: { content: ' /review inspect this' } },
+      '/review',
     );
     expect(envelope.text).toBe('inspect this');
-    expect(envelope.displayText).toBe('inspect this');
   });
 
   it.each(['@Qwen /review inspect', '@Qwen正文\n/review inspect'])(
@@ -242,6 +240,5 @@ describe('DingTalk mention body preservation', () => {
       },
     });
     expect(envelope.text).toBe('@Qwen第一段\n第二段');
-    expect(envelope.displayText).toBe(envelope.text);
   });
 });

@@ -4007,7 +4007,6 @@ export class DingtalkChannel extends ChannelBase {
    */
   private extractContent(data: DingTalkMessageData): {
     text: string;
-    displayText?: string;
     downloadCodes: string[];
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
@@ -4022,44 +4021,20 @@ export class DingtalkChannel extends ChannelBase {
         return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
-      let displayText = '';
-      let isLeading = true;
       const codes: string[] = [];
       for (const part of richText) {
         const partType = part.type || 'text';
         if (partType === 'text' && part.text) {
           text += part.text;
-          displayText += part.text;
-          isLeading &&= !part.text.trim();
         } else if (partType === 'at') {
           const label = part.text || `@${part.atName || part.atUserId || ''} `;
-          const mention = label.startsWith('@') ? label : `@${label} `;
-          displayText += mention;
-          // isInAtList alone provides neither the bot's name nor its span.
-          // Only a leading, identified entity is safe to omit for commands.
-          if (
-            !(
-              data.conversationType === '2' &&
-              data.isInAtList &&
-              typeof data.chatbotUserId === 'string' &&
-              data.chatbotUserId &&
-              part.atUserId === data.chatbotUserId &&
-              isLeading
-            )
-          ) {
-            text += mention;
-            isLeading = false;
-          }
-        } else {
-          isLeading = false;
-          if (partType === 'picture' && part.downloadCode) {
-            codes.push(part.downloadCode);
-          }
+          text += label.startsWith('@') ? label : `@${label} `;
+        } else if (partType === 'picture' && part.downloadCode) {
+          codes.push(part.downloadCode);
         }
       }
       return {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
-        displayText: displayText.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
         syntheticText: text.trim().length === 0 && codes.length > 0,
@@ -4363,13 +4338,8 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        // The prefix filter replaces displayText within text before dispatch.
-        text: messagePrefix
-          ? (content.displayText ?? content.text)
-          : content.text,
-        ...(content.displayText !== undefined
-          ? { displayText: content.displayText }
-          : {}),
+        text: content.text,
+        // Prevent the shared prefix filter from stripping mention text.
         ...(messagePrefix
           ? {
               messagePrefixText: startsWithMessagePrefix(
