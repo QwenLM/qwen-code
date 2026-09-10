@@ -45,3 +45,17 @@ export {
 
 // Project auto-skill lifecycle maintenance
 export * from './skill-curator.js';
+
+// The bundled authoring reference for the Workflow tool, reachable outside
+// the Skill tool: the Workflow tool inlines it when the skill cannot be
+// loaded, and the `workflow` keyword trigger injects it into the turn.
+export {
+  isWorkflowAuthoringSkillAvailable,
+  readWorkflowAuthoringReference,
+  resolveWorkflowAuthoringAutoload,
+  WORKFLOW_AUTHORING_SKILL_NAME,
+} from './workflow-authoring-skill.js';
+export type {
+  WorkflowAuthoringAutoload,
+  WorkflowAuthoringReference,
+} from './workflow-authoring-skill.js';

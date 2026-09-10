@@ -50,11 +50,6 @@ import {
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import {
-  DEFAULT_STALL_MS,
-  MAX_STALL_ATTEMPTS,
-  MAX_WORKFLOW_STALL_MS_ENV,
-} from '../../agents/runtime/workflow-stall.js';
-import {
   MAX_TOKENS_PER_WORKFLOW_ENV,
   resolveMaxTokensPerWorkflow,
 } from '../../agents/runtime/workflow-budget.js';
@@ -72,6 +67,11 @@ import type {
   WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
+import {
+  isWorkflowAuthoringSkillAvailable,
+  readWorkflowAuthoringReference,
+  WORKFLOW_AUTHORING_SKILL_NAME,
+} from '../../skills/workflow-authoring-skill.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -134,75 +134,18 @@ const WORKFLOW_PARAM_SCHEMA = {
     script: {
       type: 'string',
       description:
-        'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
-        'May call the injected globals `phase(title)`, `log(msg)`, ' +
-        '`agent(prompt, opts?)`, and read `args`. ' +
-        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
-        '`schema` (JSON Schema object): the subagent must deliver its result ' +
-        'by calling `structured_output` with arguments matching the schema; ' +
-        'agent() resolves to the validated object. After two in-conversation ' +
-        'nudges without a valid result, it resolves to null and the failure is ' +
-        'recorded as "subagent completed without calling StructuredOutput ' +
-        '(after 2 in-conversation nudges)"; check for null. ' +
-        '`agentType` (string): resolves against the declarative-agents registry ' +
-        '(`.qwen/agents/<name>.md`, project then user then built-in). Unresolved ' +
-        'names make the admitted agent() resolve to null and record "agent({agentType}): agent type ' +
-        "'X'" +
-        ' not found"; check for null. ' +
-        '`model` (string): per-call model override; routes provider correctly ' +
-        'via the subagent runtime view. ' +
-        '`isolation`: `' +
-        "'worktree'" +
-        '` provisions a fresh git worktree under ' +
-        '`<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed ' +
-        'if no changes, otherwise the path and branch are returned alongside the ' +
-        "result. `'remote'` makes the admitted agent() resolve to null and records " +
-        '"agent({isolation:\'remote\'}) is not available in this build" ' +
-        '(parity with upstream). isolation=worktree also resolves to null and ' +
-        'records a refusal when the parent working tree has uncommitted changes ' +
-        '(the subagent would see a stale HEAD). ' +
-        '`workingDir` (string): pin the subagent to an EXISTING git worktree of ' +
-        'this repository that the caller owns — nothing is created and nothing ' +
-        'is removed. Use it when the directory the agent must work in already ' +
-        'exists and its uncommitted state is the point (a review worktree, a ' +
-        'checkout a previous step provisioned) — exactly the case isolation ' +
-        'cannot serve. Mutually exclusive with `isolation`. The path must ' +
-        'be a linked worktree of this repository registered via ' +
-        '`git worktree add` (it may live anywhere on disk) — the main ' +
-        'checkout is not eligible. ' +
-        '`stallMs` (number, ms): a no-progress watchdog, not a wall-clock cap. ' +
-        'The dispatch is aborted and retried (up to ' +
-        `${MAX_STALL_ATTEMPTS} attempts total) after this many milliseconds ` +
-        'with no observable subagent progress — including before the first ' +
-        'response arrives; the timer is suspended while a tool is in flight, ' +
-        'so a legitimately slow tool is not a stall. ' +
-        `Default ${DEFAULT_STALL_MS} (override via \`${MAX_WORKFLOW_STALL_MS_ENV}\`, whole seconds); \`0\` disables the watchdog. Wall time ` +
-        'per attempt is bounded separately. ' +
-        'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
-        'in their disallowed-tool floor regardless of agentType. ' +
-        'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
-        'through a shared per-run window (default ' +
-        '`max(2, min(16, cpus-2))` agents in flight; override via ' +
-        `\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`) and resolves to a ` +
-        'position-aligned array — a thunk that throws, or resolves to a ' +
-        'non-JSON-serializable value, becomes `null` at its index ' +
-        '(errors-as-data); parallel() itself rejects on invalid arguments, ' +
-        'abort, or a run-level token/agent-cap refusal. ' +
-        '`pipeline(items, ...stages)` runs each item ' +
-        'through the stages (staggered, no inter-stage barrier); an ordinary ' +
-        'stage error, `null`, or non-JSON-serializable value drops that item ' +
-        'to `null`, while a run-level refusal rejects the batch. A bare ' +
-        'sequential `await agent()` ' +
-        'follows the same rule: an agent that fails on its own terms ' +
-        'resolves to `null` there too, so the fan-out and the sequential ' +
-        'form never disagree about what a broken agent means. Pass ' +
-        'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
-        'not `parallel([agent(...)])`. At most ' +
-        `${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run ` +
-        `(override via \`${MAX_WORKFLOW_AGENTS_ENV}\`). ` +
-        '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
-        'must be deterministic for resume. ' +
-        '`export const meta = {...}` declarations are stripped before execution.',
+        'JavaScript source of the workflow, wrapped as an async IIFE: ' +
+        'top-level `await` and `return` are both legal, and a trailing ' +
+        'expression is NOT a return value. Uses the injected globals ' +
+        '`phase()`, `log()`, `agent()`, `parallel()`, `pipeline()`, ' +
+        '`workflow()`, `args` and `budget`, and cannot import anything. ' +
+        'May start with a literal `export const meta = {...}` ' +
+        '(stripped before execution). ' +
+        '`Date.now()` and `Math.random()` both throw — a script must be ' +
+        'deterministic for resume. Pass THUNKS to parallel(), not eager ' +
+        'calls: `parallel([() => agent(...)])`, not `parallel([agent(...)])`. ' +
+        'agent() options and orchestration patterns are in the ' +
+        `\`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill.`,
     },
     scriptPath: {
       type: 'string',
@@ -567,6 +510,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         this.params.args,
         logs,
         !cancelled,
+        !cancelled,
       );
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
@@ -650,6 +594,7 @@ function buildRunTrailer(
   args: unknown,
   logs?: string[],
   includeResume = true,
+  authoringHint = false,
 ): string {
   const lines = [
     '--- workflow run ---',
@@ -719,6 +664,18 @@ function buildRunTrailer(
     if (hasUninlinableResumeArgs({ runId: handle.runId, args })) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  }
+  // A script that threw is a script that has to be rewritten, and the model
+  // may well have written it without ever reading the reference — the tool
+  // description only points at it. Say so here rather than letting a second
+  // attempt repeat the first one's mistake. Omitted when the reference is
+  // inlined in the description, where "load the skill" would be wrong advice.
+  if (authoringHint) {
+    lines.push(
+      isWorkflowAuthoringSkillAvailable(config)
+        ? `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill for the script reference if you have not, fix the script, and retry.`
+        : "hint: See the authoring reference in this tool's description, fix the script, and retry.",
+    );
   }
   const tail = (logs ?? []).slice(-TRAILER_LOG_LINES);
   if (tail.length > 0) {
@@ -1126,30 +1083,25 @@ function safeStringifyDisplayPayload(payload: unknown): string {
 }
 
 /**
- * The tool description the model reads before deciding to orchestrate. The
- * capability half (globals, limits, per-call options) is only half the job:
- * without the policy half, the same runtime reliably produces the naive
- * shape — everything through one `parallel()` barrier, first answer taken at
- * face value. The prose below is therefore load-bearing, not documentation.
- * `script`'s own description carries the exact authoring contract (error
- * strings, serialization rules). Every cap and env knob is interpolated
- * from exported constants, so raising a cap moves every model-visible copy
- * at once — there is no prose to hand-sync. In both halves:
- * `DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
- * `MAX_WORKFLOW_CONCURRENCY_ENV` (orchestrator exports). Runtime half only:
- * the four subagent-bound constants `DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS`,
- * `WORKFLOW_SUBAGENT_MAX_TURNS_ENV`,
- * `DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES`,
- * `WORKFLOW_SUBAGENT_MAX_MINUTES_ENV` (orchestrator exports). Script half
- * only: `DEFAULT_STALL_MS`, `MAX_STALL_ATTEMPTS`,
- * `MAX_WORKFLOW_STALL_MS_ENV` (workflow-stall exports).
- * The wall-clock cap is the one exception: `DEFAULT_MAX_WALL_CLOCK_MS` is
- * private to `workflow-sandbox.ts`, so "30-minute" is still a literal here
- * and has to be edited alongside it. The output-token budget and the
- * one-level `workflow()` nesting limit appear ONLY here, so this text is
- * their model-visible source of truth.
+ * Everything the model needs to decide WHETHER to call this tool, and the
+ * runtime facts it has to plan around — but not how to write the script.
+ *
+ * The authoring contract (agent() options, orchestration patterns, resume
+ * mechanics, a worked example) lives in the bundled `workflow-authoring`
+ * skill instead. It is roughly three times this text and is needed only on
+ * the turn that actually writes a script, while a tool description is paid
+ * for on every turn of every session. `buildWorkflowToolDescription` inlines
+ * it for the builds that cannot reach the skill.
+ *
+ * Every cap and env knob here is interpolated from the exported runtime
+ * constants, so raising a cap moves the model-visible copy at once — there is
+ * no prose to hand-sync. The wall-clock cap is the one exception:
+ * `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
+ * "30-minute" is a literal here and has to be edited alongside it. The skill
+ * repeats these numbers for the authoring turn and its own test pins them to
+ * the same constants.
  */
-const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates subagents deterministically.
+const WORKFLOW_TOOL_DESCRIPTION_BASE = `Execute a workflow script that orchestrates subagents deterministically.
 
 **Only on an explicit request**
 
@@ -1165,37 +1117,43 @@ Otherwise do not call it, however well the task would parallelize. Do the work i
 
 **What a workflow is for**
 
-Reach for one to be comprehensive (decompose the work and cover every part in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold — migrations, audits, broad sweeps. The script is where that structure is encoded: what fans out, what verifies, what synthesizes. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.
+Reach for one to be comprehensive (cover every part of the work in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.
 
-**Runtime** — see the \`script\` parameter for the detailed authoring contract.
+**Runtime**
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script inside either of them or inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree — where a tool emitting a one-run script writes it; never a slash command, never resolvable by name); a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — raise them for legitimately long work. \`agent()\` resolves to \`null\` when that admitted agent fails on its own — including turn/time caps, model or setup errors, missing structured output, and exhausted stall retries — and it does so for a bare \`await agent()\` exactly as it does inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result. Call-shape validation failures — such as an empty prompt, an unsupported option combination, or an invalid option value — reject a bare call; inside \`parallel()\`/\`pipeline()\`, the surrounding ordinary thunk or stage rejection becomes a position-aligned \`null\`. Run-level rejections no later call could survive — the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, and cancellation — throw and end a \`parallel()\`/\`pipeline()\` batch. An admitted agent that fails and settles to \`null\` still counts as dispatched and is named, with its error, in the run's failures list; a \`null\` returned by an ordinary thunk or stage is not an agent dispatch. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one result line per completed agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope); \`scriptPath\` additionally accepts a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree), and a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one line per agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
 
-**Scout first, then orchestrate**
+/**
+ * Sentence that replaces the authoring reference when the model can load it
+ * on its own. Names what is in there, so the model can tell whether it needs
+ * it for this particular request.
+ */
+const WORKFLOW_AUTHORING_POINTER = `**Writing the script**
 
-The strongest pattern is hybrid: discover the work list in the main loop (list the files, scope the diff, read the failing test), then hand that list to a workflow. You do not need to know the shape of the work before the task — only before the orchestration step. When the work has distinct phases, run several small workflows across turns and read each result before choosing the next, rather than authoring one large script that runs unattended.
+Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill — the authoring reference: the sandbox contract, agent() options, \`pipeline()\` vs \`parallel()\`, verification and convergence patterns, resume, and a worked example.`;
 
-Common single-phase shapes: understand (parallel readers over subsystems, merged into one map), design (independent approaches, judged, then synthesized), review (dimensions, find, verify each finding), research (broad sweep, deep read, synthesis), migrate (discover sites, transform each under \`isolation: 'worktree'\`, verify).
-
-**Default to \`pipeline()\`**
-
-\`pipeline()\` runs each item through every stage independently — item A can be in stage 3 while item B is still in stage 1 — so wall-clock is the slowest single chain. \`parallel()\` is a barrier: it waits for every thunk before anything moves on, so it costs the slowest item of every stage.
-
-A barrier is right only when a stage genuinely needs cross-item context: deduplicating or merging across the full result set before expensive downstream work, exiting early when the total count is zero, or a prompt that compares one finding against all the others. It is not justified by needing to flatten, map, or filter between stages (do that inside a pipeline stage), by two stages being conceptually separate, or by the code reading more tidily. Smell test: \`parallel()\` → a pure transform → \`parallel()\` is a pipeline someone wrote with an unnecessary barrier. When in doubt, \`pipeline()\`.
-
-**Verify before believing**
-
-A subagent's answer is a claim, not a result. For findings that matter, spawn independent verifiers prompted to *refute*, and drop what a majority refutes. When a claim can be wrong in several different ways, give each verifier a distinct lens (correctness, security, performance, does it actually reproduce) — diversity catches what repetition cannot. For a wide solution space, generate several independent attempts, judge them in parallel, and synthesize from the winner while grafting the best ideas from the rest.
-
-**Converge deliberately**
-
-For discovery of unknown size, keep running finders until some number of consecutive rounds turn up nothing new; a fixed round count stops partway into the tail. Deduplicate each round against everything already seen, never against only what survived judging — otherwise rejected findings reappear every round and the loop never terminates. A closing pass that asks what is still missing (a search angle never run, a claim never verified, a file never read) usually produces the next round of real work.
-
-**Report honestly**
-
-Scale the fleet to what was actually asked: a quick check gets a few agents and one verification pass; an explicit request to be thorough or exhaustive earns a larger pool and a multi-vote adversarial round. Whenever a run bounds its own coverage — top-N, sampling, no retry — \`log()\` what was dropped. Silent truncation reads as full coverage, which is worse than a smaller honest result.
-
-These shapes are a starting point, not a menu; compose the harness the task actually needs.`;
+/**
+ * The tool description for this session.
+ *
+ * Two shapes. When the bundled reference is reachable through the Skill tool
+ * the description points at it, which is the whole reason the reference was
+ * moved out. When it is not — skills disabled, the Skill tool denied, this
+ * skill turned off — the reference is inlined instead: a model told to load a
+ * skill it cannot reach would be left writing scripts against nothing.
+ *
+ * Falls back to the pointer if the reference itself cannot be read, on the
+ * grounds that a dangling pointer is a recoverable failed call while a
+ * description missing both is not recoverable at all.
+ */
+export function buildWorkflowToolDescription(config: Config): string {
+  if (isWorkflowAuthoringSkillAvailable(config)) {
+    return `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+  }
+  const reference = readWorkflowAuthoringReference();
+  return reference
+    ? `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n---\n\n${reference.body.trim()}`
+    : `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+}
 
 export class WorkflowTool extends BaseDeclarativeTool<
   WorkflowParams,
@@ -1208,7 +1166,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      WORKFLOW_TOOL_DESCRIPTION,
+      buildWorkflowToolDescription(config),
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,

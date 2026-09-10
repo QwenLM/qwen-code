@@ -187,10 +187,7 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import {
-  detectWorkflowKeyword,
-  buildWorkflowSteeringNotice,
-} from './utils/workflow-keyword.js';
+import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
@@ -3160,14 +3157,22 @@ export const AppContainer = (props: AppContainerProps) => {
         // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
         // break the BTW routing check below (which tests `submittedValue`),
         // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText) &&
-        detectWorkflowKeyword(userPromptText)
+        !isBtwCommand(userPromptText)
       ) {
-        setWorkflowKeywordActive(true);
-        logWorkflowKeyword(config, new WorkflowKeywordEvent());
-        submittedValue =
-          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
-          submittedValue;
+        // Detection, the authoring-reference decision and the reminder text
+        // all live in `buildWorkflowKeywordPrefix` so they stay testable
+        // without a TUI; a `null` result means the keyword was absent.
+        const triggered = buildWorkflowKeywordPrefix(config, userPromptText);
+        if (triggered) {
+          setWorkflowKeywordActive(true);
+          logWorkflowKeyword(
+            config,
+            new WorkflowKeywordEvent({
+              skill_autoloaded: triggered.autoloaded,
+            }),
+          );
+          submittedValue = triggered.prefix + submittedValue;
+        }
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
