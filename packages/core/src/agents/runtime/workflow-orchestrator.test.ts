@@ -2634,6 +2634,20 @@ describe('createProductionDispatch', () => {
     }
   });
 
+  it('fast-path dispatch carries host review bounds into the agent', async () => {
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      { max_turns: 500, max_time_minutes: 100 },
+    )('review', {});
+    expect(created[0]!.runConfig).toEqual({
+      max_turns: 500,
+      max_time_minutes: 100,
+    });
+  });
+
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
   // contracts.
   it('disallows workflow-only floor tools for workflow subagents', async () => {
@@ -4132,6 +4146,23 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
       else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
     }
+  });
+
+  it('override dispatch carries host review bounds into the agent', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(
+      helper.config,
+      undefined,
+      undefined,
+      undefined,
+      { max_turns: 500, max_time_minutes: 100 },
+    )('review', { model: 'qwen3-max' });
+    expect(helper.calls[0]!.options?.runConfigOverrides).toEqual({
+      max_turns: 500,
+      max_time_minutes: 100,
+    });
   });
 
   it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
