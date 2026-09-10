@@ -3150,7 +3150,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ...nextContext,
                     recovery: recoverySnapshotCurrent
                       ? context?.recovery
-                      : (current.context?.recovery ??
+                      : ((current.context?.sessionId === activeSession.sessionId
+                          ? current.context.recovery
+                          : undefined) ??
                         (context?.recovery
                           ? { ...context.recovery, canContinue: false }
                           : undefined)),
@@ -4577,8 +4579,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         },
         onContinuationAdmitted: (owner, promptId) => {
-          if (sessionRef.current === owner)
-            turnNotifications.admit(owner, promptId);
+          turnNotifications.admit(owner, promptId);
+          const active = activePromptsRef.current.get(owner.sessionId);
+          if (active?.promptId !== promptId) return;
+          const terminal = active.replayedTurnEvents?.get(promptId);
+          delete active.replayedTurnEvents;
+          if (terminal) {
+            settleActivePromptFromTurnEvent(
+              activePromptsRef.current,
+              settledPromptsRef.current,
+              owner.sessionId,
+              terminal,
+              store,
+              setPromptStatus,
+              passiveAssistantDoneTimerRef,
+              { requireBoundPromptId: true },
+            );
+            turnNotifications.observe(owner, terminal, true);
+          }
         },
         onPromptRemoved: (owner, promptId) => {
           if (sessionRef.current === owner)
@@ -5018,6 +5036,9 @@ function settleActivePromptFromTurnEvent(
   const active = activePrompts.get(sessionId);
   if (!active) return false;
   if (opts.requireBoundPromptId && active.promptId === undefined) {
+    // A continuation ACK may arrive after the reconnect snapshot. Keep its
+    // terminal until the server-issued prompt ID can identify the right turn.
+    active.replayedTurnEvents?.set(promptId, event);
     return false;
   }
   if (active.promptId !== undefined && active.promptId !== promptId) {

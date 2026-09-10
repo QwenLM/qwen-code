@@ -15943,6 +15943,75 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it.each(['closing', 'authorizing-close'] as const)(
+      'rejects a continuation when %s overtakes its precheck',
+      async (mode) => {
+        const entered = deferred<void>();
+        const precheck = deferred<Record<string, unknown>>();
+        const closeEntered = deferred<void>();
+        const closeResponse = deferred<Record<string, unknown>>();
+        let conditionalClose: unknown;
+        const handle = makeChannel({
+          initializeImpl: () => activeWorkInitializeResponse(),
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+              entered.resolve(undefined);
+              return precheck.promise;
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              conditionalClose = params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM];
+              closeEntered.resolve(undefined);
+              return closeResponse.promise;
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        let closeFinished: Promise<unknown> | undefined;
+        try {
+          const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await sendActiveWorkSnapshot(handle, 1, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          const pending = bridge.continueSession(session.sessionId, {
+            promptId: `probe-${mode}`,
+          });
+          await entered.promise;
+          closeFinished =
+            mode === 'closing'
+              ? bridge.closeSession(session.sessionId)
+              : bridge.detachClient(session.sessionId, session.clientId);
+          await closeEntered.promise;
+          expect(conditionalClose === true).toBe(mode === 'authorizing-close');
+          precheck.resolve({
+            accepted: true,
+            interruption: 'interrupted_prompt',
+          });
+          const decision = await pending;
+          const summary = bridge
+            .getDaemonStatusSnapshot()
+            .sessions.find((entry) => entry.sessionId === session.sessionId);
+          expect(handle.agent.promptCalls).toHaveLength(0);
+          expect(summary?.pendingPromptCount).toBe(0);
+          expect(decision).toEqual({
+            accepted: false,
+            interruption: 'interrupted_prompt',
+          });
+        } finally {
+          precheck.resolve({
+            accepted: true,
+            interruption: 'interrupted_prompt',
+          });
+          closeResponse.resolve({ closed: true, holds: [] });
+          await closeFinished;
+          await bridge.shutdown();
+        }
+      },
+    );
+
     it('rejects continueSession for a nonexistent session', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });

@@ -12835,6 +12835,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (
         liveEntry !== entry ||
         liveEntry.cancelGeneration !== cancelGeneration ||
+        isClosingOrAuthorizingClose(liveEntry) ||
         liveEntry.pendingPromptCount > 0 ||
         liveEntry.promptActive ||
         liveEntry.goalTurnActive

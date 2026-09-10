@@ -1298,9 +1298,19 @@ export function createDaemonSessionActions({
         );
       }
       const ctrl = new AbortController();
+      const sessionLoadId = pendingSessionLoadIdRef.current;
+      const isCurrentConversation = () =>
+        pendingSessionLoadIdRef.current === sessionLoadId &&
+        getConnection().sessionId === sessionId &&
+        getConnection().workspaceCwd === connection.workspaceCwd &&
+        (sessionRef.current?.sessionId === sessionId ||
+          activePromptsRef.current.get(sessionId)?.controller === ctrl);
       let admitted = false;
       let refreshRecovery = false;
-      activePromptsRef.current.set(sessionId, { controller: ctrl });
+      activePromptsRef.current.set(sessionId, {
+        controller: ctrl,
+        replayedTurnEvents: new Map(),
+      });
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('waiting');
       advanceSessionRecoveryGeneration(sessionRecoveryGeneration, session);
@@ -1324,8 +1334,15 @@ export function createDaemonSessionActions({
         const accepted = await session.continueSession(ctrl.signal);
         admitted = accepted.accepted;
         refreshRecovery = !admitted;
-        if (!accepted.accepted || sessionRef.current !== session) return;
-        onContinuationAdmitted?.(session, accepted.promptId);
+        if (!accepted.accepted || !isCurrentConversation()) return;
+        const active = activePromptsRef.current.get(sessionId);
+        if (active?.controller === ctrl) {
+          active.promptId = accepted.promptId;
+        }
+        onContinuationAdmitted?.(
+          sessionRef.current ?? session,
+          accepted.promptId,
+        );
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -1342,7 +1359,7 @@ export function createDaemonSessionActions({
           error instanceof DaemonHttpError &&
           error.status >= 400 &&
           error.status < 500;
-        if (sessionRef.current !== session) throw error;
+        if (!isCurrentConversation()) throw error;
         if (isAbortError(error)) {
           store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
           return;
@@ -1358,14 +1375,20 @@ export function createDaemonSessionActions({
           'continue_session',
         );
       } finally {
+        const currentConversation = isCurrentConversation();
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (sessionRef.current === session && !hasSessionActivePrompt()) {
+        if (currentConversation && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
-        if (sessionRef.current === session && refreshRecovery) {
-          await refreshSessionRecovery(session);
+        const currentSession = sessionRef.current;
+        if (
+          currentConversation &&
+          currentSession?.sessionId === sessionId &&
+          refreshRecovery
+        ) {
+          await refreshSessionRecovery(currentSession);
         }
       }
     },

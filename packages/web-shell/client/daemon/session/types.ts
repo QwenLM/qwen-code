@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonCapabilities,
+  DaemonEvent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
@@ -705,6 +706,7 @@ export interface DaemonWorkspaceEventSignals {
 export interface ActivePrompt {
   controller: AbortController;
   promptId?: string;
+  replayedTurnEvents?: Map<string, DaemonEvent>;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
 }

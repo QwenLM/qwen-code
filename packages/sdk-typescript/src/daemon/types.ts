@@ -2771,7 +2771,7 @@ export type DaemonContinueSessionResult =
       interruption: 'interrupted_prompt' | 'interrupted_turn';
       promptId: string;
       lastEventId: number;
-      eventEpoch: string;
+      eventEpoch?: string;
     }
   | {
       accepted: false;

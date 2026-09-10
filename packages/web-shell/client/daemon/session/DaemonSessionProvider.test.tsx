@@ -20133,32 +20133,52 @@ describe('DaemonSessionProvider', () => {
       },
     );
 
-    it.each(['turn_complete', 'turn_error'] as const)(
-      'notifies accepted continuation after replay-only %s',
-      async (terminalType) => {
-        const sessionId = `recovery-replay-${terminalType}`;
-        const resync = createDeferred<void>();
-        const reloaded = createDeferred<void>();
-        const notify = vi.fn();
-        const observer = createTurnNotificationObserver(notify);
-        const context = {
-          v: 1 as const,
-          sessionId,
-          workspaceCwd: '/mock-workspace',
-          state: {},
-          recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
-        };
-        const continued = vi.fn(async () => ({
+    it.each(
+      (
+        [
+          'before-resync',
+          'during-reconnect',
+          'after-snapshot',
+          'after-history',
+        ] as const
+      ).flatMap((timing) =>
+        (['turn_complete', 'turn_error'] as const).map((terminalType) => ({
+          timing,
+          terminalType,
+        })),
+      ),
+    )(
+      'settles and notifies continuation with $timing admission and $terminalType',
+      async ({ timing, terminalType }) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        const sessionId = `notification-probe-${timing}-${terminalType}`;
+        const accepted = {
           accepted: true as const,
           interruption: 'interrupted_prompt' as const,
           promptId: 'continued',
-          lastEventId: 0,
+          lastEventId: 10,
           eventEpoch: 'epoch-1',
-        }));
-        sdkMocks.capabilities.mockResolvedValue({
+        };
+        const admission = createDeferred<typeof accepted>();
+        const resync = createDeferred<void>();
+        const reloadStarted = createDeferred<void>();
+        const allowReload = createDeferred<void>();
+        const reloaded = createDeferred<void>();
+        const liveTerminal = createDeferred<void>();
+        const notify = vi.fn();
+        const observer = createTurnNotificationObserver(notify);
+        const admitted = vi.spyOn(observer, 'admit');
+        const context: DaemonSessionContextStatus = {
+          v: 1,
+          sessionId,
           workspaceCwd: '/mock-workspace',
-          features: ['session_turn_navigation'],
-        });
+          state: {},
+          recovery: { kind: 'interrupted_prompt', canContinue: true },
+        };
+        const continued = vi.fn(() => admission.promise);
         const terminal = (promptId: string, id: number): DaemonEvent => ({
           v: 1,
           id,
@@ -20170,88 +20190,347 @@ describe('DaemonSessionProvider', () => {
             message: 'interrupted',
           },
         });
-        sdkMocks.sessions.push(
-          Object.assign(
-            createMockSession({
-              sessionId,
-              context: vi.fn(async () => context),
-              async *events() {
-                await resync.promise;
-                yield {
-                  v: 1,
-                  id: 1,
-                  type: 'state_resync_required',
-                  data: { reason: 'epoch_reset' },
-                };
-              },
-            }),
-            { continueSession: continued },
-          ),
+        const firstSession = Object.assign(
           createMockSession({
             sessionId,
-            context: vi.fn(async () => ({
-              ...context,
-              recovery: { kind: 'clean' as const, canContinue: false },
-            })),
-            replaySnapshot: {
-              compactedReplay: [
-                terminal('history', 2),
-                terminal('continued', 3),
-                terminal('continued', 4),
-              ],
-              liveJournal: [],
+            lastEventId: 10,
+            context: vi.fn(async () => ({ ...context })),
+            async *events(opts) {
+              yield {
+                v: 1,
+                type: 'replay_complete',
+                data: { sessionId, lastEventId: 10 },
+              };
+              await resync.promise;
+              if (opts?.signal?.aborted) return;
+              yield {
+                v: 1,
+                type: 'state_resync_required',
+                data: {
+                  reason: 'ring_evicted',
+                  lastDeliveredId: 10,
+                  earliestAvailableId: 12,
+                },
+              };
             },
-            events: createPendingEvents(reloaded),
           }),
+          { continueSession: continued },
         );
+        const secondSession = createMockSession({
+          sessionId,
+          lastEventId: 14,
+          hasActivePrompt: false,
+          context: vi.fn(async () => ({
+            ...context,
+            recovery:
+              terminalType === 'turn_complete'
+                ? { kind: 'clean' as const, canContinue: false }
+                : { kind: 'interrupted_prompt' as const, canContinue: true },
+          })),
+          replaySnapshot: {
+            compactedReplay: [
+              terminal('history', 12),
+              ...(timing === 'after-history'
+                ? []
+                : [terminal('continued', 13), terminal('continued', 14)]),
+            ],
+            liveJournal: [],
+          },
+          async *events(opts) {
+            reloaded.resolve();
+            await liveTerminal.promise;
+            if (opts?.signal?.aborted) return;
+            yield terminal('continued', 15);
+            yield terminal('continued', 16);
+            yield* createIdleEvents()(opts);
+          },
+        });
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/mock-workspace',
+          features: ['session_turn_navigation'],
+        });
+        sdkMocks.sessions.push(firstSession);
         let actions: DaemonSessionActions | undefined;
+        let connection: DaemonConnectionState | undefined;
+        let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
         let store: DaemonTranscriptStore | undefined;
         let navigation: DaemonTurnNavigationSnapshot | undefined;
+        let result: 'pending' | 'resolved' | 'rejected' = 'pending';
+        let errorMessage: string | undefined;
+        let pending: Promise<void> | undefined;
         function Harness() {
           actions = useDaemonActions();
+          connection = useDaemonConnection();
+          streaming = useDaemonStreamingState();
           store = useDaemonTranscriptStore();
           navigation = useDaemonTurnNavigationState();
-          return null;
+          return (
+            <I18nProvider language="en">
+              <SessionRecoveryBanner />
+            </I18nProvider>
+          );
         }
-        await renderWithProvider(
-          <Harness />,
-          { autoConnect: true, reconnectDelayMs: 1, maxReconnectDelayMs: 1 },
-          observer,
-        );
-        expect(navigation?.mode).toBe('ready');
-        const appendUser = vi.spyOn(store!, 'appendLocalUserMessage');
-        let pending!: Promise<unknown>;
-        await act(async () => {
-          pending = requireActions(actions)
-            .continueSession()
-            .catch((error: unknown) => error);
-          await flushPromises();
-        });
-        expect(continued).toHaveBeenCalledOnce();
-        expect(notify).not.toHaveBeenCalled();
-        expect(appendUser).not.toHaveBeenCalled();
-        expect(navigation?.provisionalTurns).toEqual([]);
-        expect(navigation?.effectiveTurnCount).toBe(0);
-        await act(async () => {
-          resync.resolve();
-          await reloaded.promise;
+        try {
+          await renderWithProvider(
+            <Harness />,
+            { autoConnect: true, reconnectDelayMs: 1, maxReconnectDelayMs: 1 },
+            observer,
+          );
+          expect(container!.querySelector('button')?.textContent).toBe(
+            'Continue execution',
+          );
+          const appendUser = vi.spyOn(store!, 'appendLocalUserMessage');
+          sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+            async () => {
+              reloadStarted.resolve();
+              await allowReload.promise;
+              secondSession.client = firstSession.client;
+              return secondSession;
+            },
+          );
+          await act(async () => {
+            pending = requireActions(actions)
+              .continueSession()
+              .then(
+                () => {
+                  result = 'resolved';
+                },
+                (error: unknown) => {
+                  result = 'rejected';
+                  errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                },
+              );
+            await flushPromises();
+            if (timing === 'before-resync') {
+              admission.resolve(accepted);
+              await flushPromises();
+            }
+          });
+          expect(continued).toHaveBeenCalledOnce();
+          await act(async () => {
+            resync.resolve();
+            await reloadStarted.promise;
+            await flushPromises();
+          });
+          expect(connection?.status).toBe('connecting');
+          if (timing === 'during-reconnect') {
+            await act(async () => {
+              admission.resolve(accepted);
+              await flushPromises();
+            });
+          }
+          await act(async () => {
+            allowReload.resolve();
+            await reloaded.promise;
+            await flushPromises();
+          });
+          expect(secondSession.consumeReplaySnapshot).toHaveBeenCalledOnce();
+          if (timing === 'after-snapshot' || timing === 'after-history') {
+            await act(async () => {
+              admission.resolve(accepted);
+              await flushPromises();
+            });
+          }
+          if (timing === 'after-history') {
+            expect(result).toBe('pending');
+            expect(streaming).toBe('responding');
+            expect(notify).not.toHaveBeenCalled();
+            await act(async () => {
+              liveTerminal.resolve();
+              await flushPromises();
+            });
+          }
+          expect(appendUser).not.toHaveBeenCalled();
+          expect(firstSession.submitPrompt).not.toHaveBeenCalled();
+          expect(secondSession.submitPrompt).not.toHaveBeenCalled();
+          expect(navigation?.provisionalTurns).toEqual([]);
+          expect(continued).toHaveBeenCalledOnce();
+          expect(admitted).toHaveBeenCalledOnce();
+          expect(errorMessage).toBe(
+            terminalType === 'turn_error' ? 'interrupted' : undefined,
+          );
+          expect(result).toBe(
+            terminalType === 'turn_complete' ? 'resolved' : 'rejected',
+          );
+          expect(streaming).toBe('idle');
+          expect(notify).toHaveBeenCalledOnce();
+          expect(notify).toHaveBeenCalledWith(
+            expect.objectContaining({
+              outcome:
+                terminalType === 'turn_complete' ? 'completed' : 'failed',
+            }),
+          );
+          expect(JSON.parse(notify.mock.calls[0]![0].key)[1]).toBe('continued');
+        } finally {
+          await act(async () => {
+            if (result === 'pending') await requireActions(actions).cancel();
+            root?.unmount();
+            root = null;
+            resync.resolve();
+            allowReload.resolve();
+            liveTerminal.resolve();
+            admission.resolve(accepted);
+            await flushPromises();
+          });
           await pending;
-          await flushPromises();
-        });
-        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2);
-        expect(appendUser).not.toHaveBeenCalled();
-        expect(navigation?.provisionalTurns).toEqual([]);
-        expect(notify).toHaveBeenCalledOnce();
-        expect(notify).toHaveBeenCalledWith(
-          expect.objectContaining({
-            outcome: terminalType === 'turn_complete' ? 'completed' : 'failed',
-          }),
-        );
-        expect(notify.mock.calls[0]?.[0].key).toContain('continued');
-        expect(notify.mock.calls[0]?.[0].key).not.toContain('history');
+        }
       },
     );
   });
+
+  it.each(['no-resync', 'after-reattach', 'during-reconnect'] as const)(
+    'settles a continuation failure at %s without a phantom active turn',
+    async (timing) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      const sessionId = `reconnect-probe-${timing}`;
+      const admission = createDeferred<never>();
+      const resync = createDeferred<void>();
+      const reloadStarted = createDeferred<void>();
+      const allowReload = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const initial: DaemonSessionContextStatus = {
+        v: 1,
+        sessionId,
+        workspaceCwd: '/mock-workspace',
+        state: {},
+        recovery: { kind: 'interrupted_prompt', canContinue: true },
+      };
+      const firstContext = vi.fn(async () => ({ ...initial }));
+      const nextContext = vi.fn(async () => ({ ...initial }));
+      const continued = vi.fn(() => admission.promise);
+      const firstSession = Object.assign(
+        createMockSession({
+          sessionId,
+          lastEventId: 10,
+          context: firstContext,
+          async *events(opts) {
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { sessionId, lastEventId: 10 },
+            };
+            await resync.promise;
+            if (opts?.signal?.aborted) return;
+            yield {
+              v: 1,
+              type: 'state_resync_required',
+              data: {
+                reason: 'ring_evicted',
+                lastDeliveredId: 10,
+                earliestAvailableId: 12,
+              },
+            };
+          },
+        }),
+        { continueSession: continued },
+      );
+      const secondSession = createMockSession({
+        sessionId,
+        lastEventId: 12,
+        hasActivePrompt: false,
+        context: nextContext,
+        async *events(opts) {
+          yield {
+            v: 1,
+            type: 'replay_complete',
+            data: { sessionId, lastEventId: 12 },
+          };
+          reloaded.resolve();
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(firstSession);
+      let connection: DaemonConnectionState | undefined;
+      let notices: ReturnType<typeof useDaemonSessionNotices> | undefined;
+      let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        notices = useDaemonSessionNotices();
+        streaming = useDaemonStreamingState();
+        return (
+          <I18nProvider language="en">
+            <SessionRecoveryBanner />
+          </I18nProvider>
+        );
+      }
+      try {
+        await renderWithProvider(<Harness />, {
+          autoConnect: true,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 1,
+        });
+        expect(container!.querySelector('button')?.textContent).toBe(
+          'Continue execution',
+        );
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          async () => {
+            reloadStarted.resolve();
+            await allowReload.promise;
+            secondSession.client = firstSession.client;
+            return secondSession;
+          },
+        );
+        await act(async () => {
+          container!.querySelector('button')!.click();
+          await flushPromises();
+        });
+        expect(continued).toHaveBeenCalledOnce();
+        if (timing !== 'no-resync') {
+          await act(async () => {
+            resync.resolve();
+            await reloadStarted.promise;
+            if (timing === 'after-reattach') {
+              allowReload.resolve();
+              await reloaded.promise;
+            }
+            await flushPromises();
+          });
+        }
+        await act(async () => {
+          admission.reject(new TypeError('Admission response lost'));
+          await flushPromises();
+        });
+        if (timing === 'during-reconnect') {
+          await act(async () => {
+            allowReload.resolve();
+            await reloaded.promise;
+            await flushPromises();
+          });
+        }
+        expect(streaming).toBe('idle');
+        expect(notices?.notices).toEqual([
+          expect.objectContaining({
+            operation: 'continue_session',
+            severity: 'error',
+          }),
+        ]);
+        expect(connection?.status).toBe('connected');
+        expect(continued).toHaveBeenCalledOnce();
+        expect(firstSession.submitPrompt).not.toHaveBeenCalled();
+        expect(secondSession.submitPrompt).not.toHaveBeenCalled();
+        if (timing !== 'no-resync') {
+          expect(container!.querySelector('button')?.textContent).toBe(
+            'Continue execution',
+          );
+        } else {
+          expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+        }
+      } finally {
+        await act(async () => {
+          root?.unmount();
+          root = null;
+          resync.resolve();
+          allowReload.resolve();
+          admission.reject(new TypeError('probe cleanup'));
+          await flushPromises();
+        });
+      }
+    },
+  );
 
   describe('continuation recovery ordering', () => {
     beforeEach(() => {
@@ -20260,6 +20539,99 @@ describe('DaemonSessionProvider', () => {
         vi.fn(async () => new Response(null, { status: 204 })),
       );
     });
+
+    it.each([true, false])(
+      'does not copy recovery from another session when a terminal races metadata (%s)',
+      async (immediateTerminal) => {
+        const first: DaemonSessionContextStatus = {
+          v: 1,
+          sessionId: 'recoverable-session',
+          workspaceCwd: '/mock-workspace',
+          state: {},
+          recovery: { kind: 'interrupted_prompt', canContinue: true },
+        };
+        const second: DaemonSessionContextStatus = {
+          ...first,
+          sessionId: 'completed-session',
+          recovery: { kind: 'clean', canContinue: false },
+        };
+        const terminalRead = createDeferred<DaemonSessionContextStatus>();
+        const context = vi
+          .fn()
+          .mockResolvedValueOnce(second)
+          .mockImplementation(() => terminalRead.promise);
+        const continued = vi.fn();
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: first.sessionId,
+            context: vi.fn(async () => first),
+          }),
+          Object.assign(
+            createMockSession({
+              sessionId: second.sessionId,
+              lastEventId: 10,
+              context,
+              async *events(opts) {
+                if (immediateTerminal) {
+                  yield {
+                    v: 1,
+                    id: 11,
+                    type: 'turn_complete',
+                    data: {
+                      sessionId: second.sessionId,
+                      promptId: 'completed',
+                      stopReason: 'end_turn',
+                    },
+                  };
+                }
+                yield {
+                  v: 1,
+                  type: 'replay_complete',
+                  data: { sessionId: second.sessionId },
+                };
+                yield* createIdleEvents()(opts);
+              },
+            }),
+            { continueSession: continued },
+          ),
+        );
+        let actions: DaemonSessionActions | undefined;
+        let connection: DaemonConnectionState | undefined;
+        function Harness() {
+          actions = useDaemonActions();
+          connection = useDaemonConnection();
+          return (
+            <I18nProvider language="en">
+              <SessionRecoveryBanner />
+            </I18nProvider>
+          );
+        }
+        try {
+          await renderWithProvider(<Harness />, { autoConnect: true });
+          expect(container!.querySelector('button')?.textContent).toBe(
+            'Continue execution',
+          );
+          let switched!: Promise<void>;
+          await act(async () => {
+            switched = requireActions(actions).loadSession(second.sessionId);
+            await flushPromises();
+          });
+          await switched;
+          expect(context).toHaveBeenCalledTimes(immediateTerminal ? 2 : 1);
+          expect(connection?.context?.sessionId).toBe(second.sessionId);
+          expect(connection?.context?.recovery).toEqual(second.recovery);
+          expect(
+            container!.querySelector('[data-testid="session-recovery-banner"]'),
+          ).toBeNull();
+          expect(continued).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => {
+            terminalRead.resolve(second);
+            await flushPromises();
+          });
+        }
+      },
+    );
 
     it('retains reconnect recovery while approval configuration is pending', async () => {
       const sessionId = 'recovery-reconnect-config';

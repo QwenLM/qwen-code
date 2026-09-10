@@ -2710,36 +2710,113 @@ describe('createDaemonSessionActions', () => {
       expect(getConnection().context?.recovery?.canContinue).toBe(false);
     });
 
-    it('does not change a replacement session when admission finishes late', async () => {
+    it.each(['session-a', 'session-b'])(
+      'does not change explicitly loaded %s when admission finishes late',
+      async (nextSessionId) => {
+        const session = createMockSession('session-a');
+        const admission = createDeferred<DaemonContinueSessionResult>();
+        session.continueSession.mockReturnValueOnce(admission.promise);
+        const restartEventStream = vi.fn();
+        const onContinuationAdmitted = vi.fn();
+        const {
+          actions,
+          sessionRef,
+          replaceConnection,
+          getConnection,
+          store,
+          pendingSessionLoadRef,
+        } = createActionsHarness({
+          session,
+          connection: connection(),
+          restartEventStream,
+          onContinuationAdmitted,
+        });
+        const pending = actions.continueSession();
+        const reloading = actions.loadSession(nextSessionId);
+        sessionRef.current = createMockSession(
+          nextSessionId,
+        ) as unknown as DaemonSessionClient;
+        const replacement = { ...connection(), sessionId: nextSessionId };
+        replaceConnection(replacement);
+        admission.resolve({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'continue-1',
+          lastEventId: 7,
+          eventEpoch: 'epoch-1',
+        });
+
+        await expect(pending).resolves.toBeUndefined();
+        expect(getConnection()).toBe(replacement);
+        expect(restartEventStream).not.toHaveBeenCalled();
+        expect(onContinuationAdmitted).not.toHaveBeenCalled();
+        expect(store.dispatch).not.toHaveBeenCalled();
+        expect(session.context).not.toHaveBeenCalled();
+        pendingSessionLoadRef.current!.resolve();
+        await reloading;
+      },
+    );
+
+    it('tracks an admission accepted after automatic same-session reattach', async () => {
       const session = createMockSession('session-a');
       const admission = createDeferred<DaemonContinueSessionResult>();
       session.continueSession.mockReturnValueOnce(admission.promise);
+      const replacement = createMockSession('session-a');
       const restartEventStream = vi.fn();
-      const { actions, sessionRef, replaceConnection, getConnection, store } =
+      const { actions, sessionRef, activePromptsRef, setPromptStatus } =
         createActionsHarness({
           session,
           connection: connection(),
           restartEventStream,
         });
-      const pending = actions.continueSession();
-      sessionRef.current = createMockSession(
-        'session-a',
-      ) as unknown as DaemonSessionClient;
-      const replacement = connection();
-      replaceConnection(replacement);
+      let settled = false;
+      const pending = actions.continueSession().then(() => {
+        settled = true;
+      });
+      expect(setPromptStatus).toHaveBeenCalledWith('waiting');
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
       admission.resolve({
         accepted: true,
         interruption: 'interrupted_prompt',
-        promptId: 'continue-1',
+        promptId: 'continue-reattached',
         lastEventId: 7,
         eventEpoch: 'epoch-1',
       });
+      await vi.waitFor(() =>
+        expect(activePromptsRef.current.get('session-a')?.promptId).toBe(
+          'continue-reattached',
+        ),
+      );
+      expect(settled).toBe(false);
+      expect(restartEventStream).toHaveBeenCalledWith('session-a');
+      const active = activePromptsRef.current.get('session-a')!;
+      activePromptsRef.current.delete('session-a');
+      active.resolve?.({ stopReason: 'end_turn' });
+      await pending;
+      expect(setPromptStatus).toHaveBeenLastCalledWith('idle');
+    });
 
-      await expect(pending).resolves.toBeUndefined();
-      expect(getConnection()).toBe(replacement);
-      expect(restartEventStream).not.toHaveBeenCalled();
-      expect(store.dispatch).not.toHaveBeenCalled();
+    it('refreshes definite rejection through the reattached session', async () => {
+      const session = createMockSession('session-a');
+      const admission = createDeferred<DaemonContinueSessionResult>();
+      session.continueSession.mockReturnValueOnce(admission.promise);
+      const replacement = createMockSession('session-a');
+      replacement.context.mockResolvedValue(connection().context!);
+      const addNotice = vi.fn();
+      const { actions, sessionRef, getConnection, setPromptStatus } =
+        createActionsHarness({ session, connection: connection(), addNotice });
+      const pending = actions.continueSession();
+      sessionRef.current = replacement as unknown as DaemonSessionClient;
+      admission.reject(new DaemonHttpError(409, {}, 'Busy'));
+
+      await expect(pending).rejects.toThrow('Busy');
       expect(session.context).not.toHaveBeenCalled();
+      expect(replacement.context).toHaveBeenCalledOnce();
+      expect(getConnection().context?.recovery?.canContinue).toBe(true);
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'continue_session' }),
+      );
+      expect(setPromptStatus).toHaveBeenLastCalledWith('idle');
     });
   });
 

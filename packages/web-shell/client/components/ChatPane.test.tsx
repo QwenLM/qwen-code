@@ -3398,6 +3398,7 @@ describe('ChatPane continuation errors', () => {
         sessionRef,
         activePromptsRef: { current: new Map() },
         settledPromptsRef: { current: new Map() },
+        pendingSessionLoadIdRef: { current: 0 },
         sessionRecoveryGeneration: new WeakMap(),
         passiveAssistantDoneTimerRef: { current: undefined },
         getConnection: () => connectionState,

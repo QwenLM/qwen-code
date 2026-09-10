@@ -36,12 +36,14 @@ Consumers are ACP context status, daemon bridge/HTTP context forwarding, the
 daemon SDK context type, Web Shell connection state, and the recovery banner.
 
 The daemon SDK exposes a REST continuation method and a session-bound wrapper.
+The accepted response permits an absent event epoch from older daemons.
 Web Shell integrates acceptance with its existing prompt tracking, event cursor
 and epoch handling, terminal events, cancellation, and session-switch guards.
 It does not send synthetic user text or insert an optimistic user message.
 Concurrent continuation requests are checked against bridge admission state so
 only an idle session can admit a continuation. Cancellation invalidates an
-outstanding continuation precheck before it can start work.
+outstanding continuation precheck before it can start work. Closing or awaiting
+close authorization also blocks admission after that precheck.
 After a successful cancellation, the current cancellation owner refreshes
 recovery without waiting for a cancellation event, since repeated idle
 cancellation events may be suppressed. This read does not delay cancellation.
@@ -54,12 +56,20 @@ states do not offer the button. Submission disables it immediately. Recovery
 metadata is refreshed after settling and invalidated across new work and
 session changes. Delayed responses cannot update a different conversation or
 overwrite recovery status from a newer event-stream subscription after reconnect.
+Recovery merges retain cached metadata only from the same session, including
+when a terminal event overtakes the initial metadata read after a session switch.
 Metadata, terminal events, and definite rejection refreshes share recovery read
 ordering per session. Local continuation and new activity invalidate older reads.
 Configuration refreshes preserve cached recovery; configuration changes cannot
-discard a valid recovery refresh. Continuations acknowledged before a reload
-register for existing terminal notifications, including snapshot replay, without
-adding a user turn or navigation entry.
+discard a valid recovery refresh. Continuations register for existing terminal notifications, including snapshot
+replay, without adding a user turn or navigation entry. If a reload snapshot
+arrives before admission is acknowledged, its terminal events stay with that
+local continuation until the accepted prompt ID identifies the matching event;
+unrelated historical turns cannot settle it or notify. Admission during the
+reattach gap also retains notification registration.
+An automatic same-session reattach preserves continuation tracking and failure
+settlement. Explicit session loads invalidate that ownership; definite rejection
+refreshes use the current attachment, with its own recovery-read ordering.
 
 Failure feedback captures the session and recovery generation when its error
 callback runs. Later recovery reads or activity invalidate that feedback, even
