@@ -691,7 +691,14 @@ describe('ExportTranscriptDocument browser gate', () => {
     for (const rendererBody of [null, 'throw new Error("broken renderer");']) {
       const page = await browser.newPage();
       await page.route('**/*', async (route) => {
-        if (rendererBody && route.request().url() === RENDERER_URL) {
+        const url = route.request().url();
+        if (url === RENDERER_CSS_URL) {
+          await route.fulfill({
+            body: rendererCssAsset,
+            contentType: 'text/css',
+            headers: { 'access-control-allow-origin': '*' },
+          });
+        } else if (rendererBody && url === RENDERER_URL) {
           await route.fulfill({
             body: rendererBody,
             contentType: 'text/javascript',

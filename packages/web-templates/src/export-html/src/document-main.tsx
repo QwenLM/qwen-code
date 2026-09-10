@@ -242,11 +242,7 @@ function DocumentApp({ value }: { value: ExportTranscriptDocument }) {
   useEffect(() => {
     document.title = value.metadata.title || 'Qwen Code Chat Export';
     requestAnimationFrame(() => {
-      // An asset or runtime failure may mark the body 'error' after React
-      // mounts; don't overwrite that status with a successful render.
-      if (document.body.dataset.renderComplete !== 'error') {
-        document.body.dataset.renderComplete = 'true';
-      }
+      document.body.dataset.renderComplete = 'true';
     });
   }, [value.metadata.title]);
 

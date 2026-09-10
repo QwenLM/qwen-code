@@ -141,9 +141,6 @@ and the CSS is fetched, parsed and cached separately.
 
 ### 3. `packages/web-templates/src/export-html/src/document-main.tsx`
 
-- Guard the render-success marker so a stylesheet load failure is not
-  overwritten: only set `document.body.dataset.renderComplete = 'true'` when it
-  is not already `'error'`.
 - Guard the mount itself at module scope: `createRoot` / `root.render` only run
   when `document.body.dataset.renderComplete !== 'error'`. This is the guard
   that decides whether the transcript renders at all after an asset failed to

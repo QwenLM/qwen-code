@@ -118,8 +118,6 @@ transcript 组件样式表以 `const __qwenWebShellCss="…"` 字符串字面量
 
 ### 3. `packages/web-templates/src/export-html/src/document-main.tsx`
 
-- 为渲染成功标记加保护，避免覆盖样式表加载失败：仅当
-  `document.body.dataset.renderComplete` 还不是 `'error'` 时才置为 `'true'`。
 - 在模块作用域为挂载本身加保护：只有当
   `document.body.dataset.renderComplete !== 'error'` 时才执行 `createRoot` /
   `root.render`。资产加载失败后，真正决定 transcript 是否渲染的是这条守卫 —— 它保留

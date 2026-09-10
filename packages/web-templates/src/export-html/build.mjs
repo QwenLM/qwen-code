@@ -184,40 +184,9 @@ const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
 );
 const rendererVersionPlaceholder = '__QWEN_RENDERER_BUILD_ID__';
 
-// Delegate the *document's* renderer to an already-published version (#11096).
-//
-// Since #9812 an exported file loads the renderer from
-// unpkg.com/@qwen-code/qwen-code@<version>, and document-main.tsx refuses to
-// render unless the envelope's `rendererVersion` equals the identity compiled
-// into the asset it just loaded. Both derive from the root package.json
-// version, so any build of a version that is not on npm yet — every source
-// build, every fork, every pre-publish CI job — produces a file whose renderer
-// URL 404s. `latest` is 0.23.0, published before #9812, which is the state of
-// main today.
-//
-// Publishing fixes the steady state. These two variables are how a build that
-// cannot wait for a release points its documents at a version that *is*
-// published. Set both or neither:
-//
-//   QWEN_EXPORT_RENDERER_IDENTITY   the `<version>+<buildId>` string the
-//                                   published asset announces, read out of the
-//                                   asset itself.
-//   QWEN_EXPORT_RENDERER_INTEGRITY  `sha384-<base64>` over that asset's bytes:
-//                                   openssl dgst -sha384 -binary <file> |
-//                                   openssl base64 -A
-//
-// The URL, the envelope identity and the SRI hash then all describe the same
-// published bytes, which is the only combination that renders. The asset built
-// here keeps its own true identity and is still what this version publishes;
-// only the generated document points elsewhere.
-//
-// Deliberately NOT wired into CI. The only lane that opens an exported document
-// is the transcript browser gate, and it fulfils the renderer request itself
-// from this build's `dist/` — it never reaches the CDN, so delegating there
-// buys nothing and actively breaks it: the envelope would announce the
-// delegated identity while the asset running in the page announces its own, and
-// `document-main.tsx` fails closed on exactly that mismatch. This knob is for a
-// human who needs a source build's exports to open before the release lands.
+// Source builds may delegate generated documents to a version that already
+// publishes both renderer assets. All three values are required; CI serves the
+// local assets and intentionally leaves delegation disabled.
 const rendererDelegateIdentity =
   process.env.QWEN_EXPORT_RENDERER_IDENTITY?.trim() || undefined;
 const rendererDelegateIntegrity =
@@ -377,8 +346,7 @@ const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${render
 if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
   throw new Error('Document renderer build identity placeholder is missing.');
 }
-// The asset always announces the bytes it actually is. Delegation is usable
-// only after the target version publishes both renderer assets.
+// Delegation changes generated documents, not the identity of this asset.
 const documentJs = documentJsBundle.text.replaceAll(
   rendererVersionPlaceholder,
   localRendererVersion,

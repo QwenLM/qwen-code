@@ -265,7 +265,7 @@ const MAX_DOCUMENT_RUNTIME_BYTES = 19_000_000;
 ```
 
 These were set against the `9515e5b78d` baseline of 17,963,937 and are now far above the
-real size. Once you have the measured `Document export runtime is N bytes` from §3:
+real size. Once you have the measured `Document export renderer JS is N bytes` from §3:
 
 - `MAX_DOCUMENT_RUNTIME_BYTES` → roughly `N * 1.05`, rounded up to a readable number
 - `DOCUMENT_RUNTIME_WARNING_BYTES` → roughly `N * 1.02`
