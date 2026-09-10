@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -546,9 +546,7 @@ describe('FeishuChannel', () => {
       contentJson: string,
     ) => {
       text: string;
-      imageKey?: string;
-      fileKey?: string;
-      fileName?: string;
+      resources: Array<{ type: string; key: string; fileName?: string }>;
     };
 
     beforeEach(() => {
@@ -559,9 +557,7 @@ describe('FeishuChannel', () => {
           contentJson: string,
         ) => {
           text: string;
-          imageKey?: string;
-          fileKey?: string;
-          fileName?: string;
+          resources: Array<{ type: string; key: string; fileName?: string }>;
         }
       >(channel, 'extractContent').bind(channel);
     });
@@ -596,7 +592,7 @@ describe('FeishuChannel', () => {
         JSON.stringify({ image_key: 'img_key_123' }),
       );
       expect(result.text).toBe('(image)');
-      expect(result.imageKey).toBe('img_key_123');
+      expect(result.resources).toEqual([{ type: 'image', key: 'img_key_123' }]);
     });
 
     it('handles file messages', () => {
@@ -605,8 +601,9 @@ describe('FeishuChannel', () => {
         JSON.stringify({ file_key: 'file_key_456', file_name: 'doc.pdf' }),
       );
       expect(result.text).toBe('(file: doc.pdf)');
-      expect(result.fileKey).toBe('file_key_456');
-      expect(result.fileName).toBe('doc.pdf');
+      expect(result.resources).toEqual([
+        { type: 'file', key: 'file_key_456', fileName: 'doc.pdf' },
+      ]);
     });
 
     it('handles audio messages', () => {
@@ -620,8 +617,9 @@ describe('FeishuChannel', () => {
         JSON.stringify({ file_key: 'vid_key', file_name: 'video.mp4' }),
       );
       expect(result.text).toBe('(video)');
-      expect(result.fileKey).toBe('vid_key');
-      expect(result.fileName).toBe('video.mp4');
+      expect(result.resources).toEqual([
+        { type: 'video', key: 'vid_key', fileName: 'video.mp4' },
+      ]);
     });
 
     it('returns empty text for unknown types', () => {
@@ -7237,6 +7235,398 @@ describe('FeishuChannel', () => {
       expect(msgToSenderName.has('msg_collect')).toBe(true);
       expect(msgToSenderId.has('msg_collect')).toBe(true);
       expect(cardSessions.has('msg_collect')).toBe(false);
+    });
+  });
+});
+
+describe('Feishu rich content resources (#11554)', () => {
+  function parse(type: string, body: unknown) {
+    const channel = createChannel();
+    return getPrivateMethod<
+      (
+        type: string,
+        body: string,
+      ) => {
+        text: string;
+        resources?: Array<{ type: string; key: string; fileName?: string }>;
+        userAuthoredText: boolean;
+      }
+    >(channel, 'extractContent').call(channel, type, JSON.stringify(body));
+  }
+
+  it('retains every distinct image in an image-only post', () => {
+    const result = parse('post', {
+      title: '',
+      content: [
+        [{ tag: 'img', image_key: 'img_first' }],
+        [{ tag: 'img', image_key: 'img_second' }],
+        [{ tag: 'img', image_key: 'img_first' }],
+      ],
+    });
+    expect(result.resources).toEqual([
+      { type: 'image', key: 'img_first' },
+      { type: 'image', key: 'img_second' },
+    ]);
+    expect(result.text.trim()).not.toBe('');
+    expect(result.userAuthoredText).toBe(false);
+  });
+
+  it('preserves code, named links and video resources without a title', () => {
+    const result = parse('post', {
+      content: [
+        [{ tag: 'a', text: 'spec', href: 'https://example.com/spec' }],
+        [{ tag: 'code_block', language: 'SQL', text: 'select 42;' }],
+        [{ tag: 'media', file_key: 'file_video', image_key: 'img_cover' }],
+      ],
+    });
+    expect(result.text).toContain('[spec](https://example.com/spec)');
+    expect(result.text).toContain('```SQL\nselect 42;\n```');
+    expect(result.resources).toEqual([{ type: 'video', key: 'file_video' }]);
+    expect(result.userAuthoredText).toBe(true);
+  });
+
+  it('prefers native Markdown while retaining its inline image resources', () => {
+    const result = parse('post', {
+      title: '',
+      content: [
+        [{ tag: 'text', text: 'flattened' }],
+        [{ tag: 'img', image_key: 'img_native' }],
+      ],
+      content_v2: [
+        [{ tag: 'md', text: '> quoted\n\n**bold** ![photo](img_native)' }],
+      ],
+    });
+    expect(result.text).toContain('> quoted');
+    expect(result.text).toContain('**bold**');
+    expect(result.text).not.toContain('flattened');
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_native' }]);
+  });
+
+  it('falls back from empty content_v2 and ignores image syntax inside code', () => {
+    const result = parse('post', {
+      title: '',
+      content_v2: [],
+      content: [
+        [{ tag: 'code_block', text: '![not an image](img_code)' }],
+        [{ tag: 'text', text: 'fallback' }],
+      ],
+    });
+    expect(result.text).toContain('fallback');
+    expect(result.resources).toEqual([]);
+  });
+
+  it('treats a Markdown bot mention plus an image as media-only', () => {
+    const result = parse('post', {
+      title: '',
+      content_v2: [
+        [
+          {
+            tag: 'md',
+            text: '<at user_id="ou_bot"></at> ![photo](img_only)',
+          },
+        ],
+      ],
+    });
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_only' }]);
+    expect(result.userAuthoredText).toBe(false);
+  });
+
+  it('keeps Unicode filenames and gives audio a downloadable resource', () => {
+    expect(
+      parse('file', { file_key: 'file_doc', file_name: '报告.pdf' }).resources,
+    ).toEqual([{ type: 'file', key: 'file_doc', fileName: '报告.pdf' }]);
+    expect(
+      parse('audio', { file_key: 'file_audio', duration: 2000 }).resources,
+    ).toEqual([{ type: 'audio', key: 'file_audio' }]);
+  });
+});
+
+describe('Feishu inbound media delivery (#11554)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function setup(config: Partial<ChannelConfig> = {}) {
+    const bridge = createMockBridge();
+    const channel = new ObservedContactFeishuChannel(
+      'media-test',
+      createConfig(config),
+      bridge,
+    );
+    Object.assign(channel, {
+      tokenCache: { token: 'test_token', expiresAt: Date.now() + 60000 },
+    });
+    const receive = (type: string, body: unknown, parentId?: string) => {
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        {
+          message: {
+            message_id: 'om_current',
+            chat_id: 'oc_dm',
+            chat_type: 'p2p',
+            message_type: type,
+            content: JSON.stringify(body),
+            parent_id: parentId,
+          },
+          sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+        },
+      );
+    };
+    return { bridge, channel, receive };
+  }
+
+  it.each([
+    ' /review inspect',
+    '\n![photo](img_only)',
+    ' /review ![photo](img_only)',
+  ])('delivers content_v2 after a bot mention: %s', async (body) => {
+    const { bridge, channel } = setup({ messagePrefix: '/review' });
+    Object.assign(channel, { botOpenId: 'ou_bot' });
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) =>
+      String(input).includes('/resources/')
+        ? new Response('image-bytes', {
+            headers: { 'content-type': 'image/png' },
+          })
+        : jsonResponse({ code: 0 }),
+    );
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'om_v2',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'post',
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Bot' },
+          ],
+          content: JSON.stringify({
+            title: '',
+            content_v2: [
+              [
+                {
+                  tag: 'md',
+                  text: `<at user_id="ou_bot"></at>${body}`,
+                },
+              ],
+            ],
+          }),
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(args[1]).not.toContain('<at');
+    if (body.includes('img_only')) {
+      expect(args[2]).toMatchObject({
+        images: [
+          {
+            data: Buffer.from('image-bytes').toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      });
+    } else {
+      expect(args[1]).toContain('inspect');
+    }
+  });
+
+  it('does not download resources from a sender denied by preflight', async () => {
+    const { bridge, channel, receive } = setup({
+      senderPolicy: 'allowlist',
+      allowedUsers: ['ou_allowed'],
+    });
+    const preflight = vi.spyOn(channel as never, 'preflightInbound');
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(jsonResponse({ code: 0 }));
+    receive('post', {
+      title: '',
+      content: [[{ tag: 'img', image_key: 'img_private' }]],
+    });
+    await vi.waitFor(() => expect(preflight).toHaveBeenCalled());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(
+      fetchSpy.mock.calls.some(([url]) => String(url).includes('/resources/')),
+    ).toBe(false);
+  });
+
+  it('delivers both images from an image-only post with a message prefix configured', async () => {
+    const { bridge, receive } = setup({ messagePrefix: '/review' });
+    const downloads: string[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/resources/')) {
+        downloads.push(url);
+        return new Response(
+          url.includes('img_one') ? 'first-image' : 'second-image',
+          { headers: { 'content-type': 'image/png' } },
+        );
+      }
+      return jsonResponse({ code: 0 });
+    });
+    receive('post', {
+      title: '',
+      content: [
+        [{ tag: 'img', image_key: 'img_one' }],
+        [{ tag: 'img', image_key: 'img_two' }],
+      ],
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(args[2]).toMatchObject({
+      images: [
+        {
+          data: Buffer.from('first-image').toString('base64'),
+          mimeType: 'image/png',
+        },
+        {
+          data: Buffer.from('second-image').toString('base64'),
+          mimeType: 'image/png',
+        },
+      ],
+    });
+    expect(downloads).toEqual([
+      'https://open.feishu.cn/open-apis/im/v1/messages/om_current/resources/img_one?type=image',
+      'https://open.feishu.cn/open-apis/im/v1/messages/om_current/resources/img_two?type=image',
+    ]);
+  });
+
+  it('downloads a quoted file using its parent ID and passes readable bytes to the agent', async () => {
+    const { bridge, receive } = setup();
+    const downloads: string[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/resources/')) {
+        downloads.push(url);
+        return new Response('the answer is 42', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
+      if (url.includes('/messages/om_parent?'))
+        return jsonResponse({
+          code: 0,
+          data: {
+            items: [
+              {
+                message_id: 'om_parent',
+                msg_type: 'file',
+                sender: { sender_type: 'user' },
+                body: {
+                  content: JSON.stringify({
+                    file_key: 'file_report',
+                    file_name: '报告.txt',
+                  }),
+                },
+              },
+            ],
+          },
+        });
+      return jsonResponse({ code: 0 });
+    });
+    receive('text', { text: 'summarize this file' }, 'om_parent');
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = vi.mocked(bridge.prompt).mock.calls[0]![1];
+    expect(prompt).toContain('报告.txt');
+    expect(prompt).toContain('om_parent');
+    const path = prompt.match(/saved to: ([^\n]+)/)?.[1];
+    expect(path).toBeDefined();
+    expect(readFileSync(path!, 'utf8')).toBe('the answer is 42');
+    expect(downloads).toEqual([
+      'https://open.feishu.cn/open-apis/im/v1/messages/om_parent/resources/file_report?type=file',
+    ]);
+  });
+
+  it('delivers a current file and quoted image together with their own resource IDs', async () => {
+    const { bridge, receive } = setup();
+    const downloads: string[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/resources/')) {
+        downloads.push(url);
+        return new Response(
+          url.includes('img_parent') ? 'parent-image' : 'current-file',
+          {
+            headers: {
+              'content-type': url.includes('img_parent')
+                ? 'image/png'
+                : 'text/plain',
+            },
+          },
+        );
+      }
+      if (url.includes('/messages/om_parent?')) {
+        return jsonResponse({
+          code: 0,
+          data: {
+            items: [
+              {
+                msg_type: 'image',
+                sender: { sender_type: 'user' },
+                body: { content: JSON.stringify({ image_key: 'img_parent' }) },
+              },
+            ],
+          },
+        });
+      }
+      return jsonResponse({ code: 0 });
+    });
+    receive(
+      'file',
+      { file_key: 'file_current', file_name: 'current.txt' },
+      'om_parent',
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(args[1]).toContain('current.txt');
+    expect(args[1]).toContain('om_parent');
+    const path = args[1].match(/saved to: ([^\n]+)/)?.[1];
+    expect(path).toBeDefined();
+    expect(readFileSync(path!, 'utf8')).toBe('current-file');
+    expect(args[2]).toMatchObject({
+      images: [
+        {
+          data: Buffer.from('parent-image').toString('base64'),
+          mimeType: 'image/png',
+        },
+      ],
+    });
+    expect(downloads).toEqual([
+      'https://open.feishu.cn/open-apis/im/v1/messages/om_current/resources/file_current?type=file',
+      'https://open.feishu.cn/open-apis/im/v1/messages/om_parent/resources/img_parent?type=image',
+    ]);
+  });
+
+  it('keeps successful media and tells the agent which resource failed', async () => {
+    const { bridge, receive } = setup();
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/resources/img_good'))
+        return new Response('good-image', {
+          headers: { 'content-type': 'image/png' },
+        });
+      if (url.includes('/resources/img_bad'))
+        return new Response('unavailable', { status: 403 });
+      return jsonResponse({ code: 0 });
+    });
+    receive('post', {
+      title: '',
+      content: [
+        [{ tag: 'text', text: 'compare' }],
+        [{ tag: 'img', image_key: 'img_good' }],
+        [{ tag: 'img', image_key: 'img_bad' }],
+      ],
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const args = vi.mocked(bridge.prompt).mock.calls[0]!;
+    expect(args[1]).toMatch(/unavailable.*img_bad/i);
+    expect(args[2]).toMatchObject({
+      images: [
+        {
+          data: Buffer.from('good-image').toString('base64'),
+          mimeType: 'image/png',
+        },
+      ],
     });
   });
 });
