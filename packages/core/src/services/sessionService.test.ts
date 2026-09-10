@@ -1105,6 +1105,7 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages).toHaveLength(2);
       expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+        { onIncompleteRead: expect.any(Function) },
       );
       expect(statSyncSpy).toHaveBeenCalledTimes(1);
     });

@@ -145,7 +145,8 @@ async function historyScenario(
     } else await route.fallback();
   });
   await page.goto(`/session/${sessionId}`);
-  await daemon.sse.waitForConnection(sessionId);
+  // CPU-throttled browser startup can exceed the transport's default 10s.
+  await daemon.sse.waitForConnection(sessionId, { timeout: 30_000 });
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId, replayedCount: live.length }),
   );
