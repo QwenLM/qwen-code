@@ -13383,6 +13383,7 @@ export class Session implements SessionContext {
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
+                this.config.getShellExecutionConfig(),
               );
               executeReturned = true;
               try {
