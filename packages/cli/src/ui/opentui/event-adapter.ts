@@ -290,6 +290,12 @@ export function renderResultDisplay(display: unknown): string {
         .map((line) => line.map((t) => t.text ?? '').join(''))
         .join('\n');
     }
+    if (
+      o['type'] === 'ask_user_question_answers' &&
+      typeof o['text'] === 'string'
+    ) {
+      return o['text'];
+    }
     // Structured displays ink's classifyDisplay handles individually.
     if (o['type'] === 'plan_summary') {
       const message = typeof o['message'] === 'string' ? o['message'] : '';

@@ -817,3 +817,6 @@ export {
   type StartupEventSink,
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
+
+export * from './services/session-sources.js';
+export { RecordSourceTool } from './tools/record-source.js';
