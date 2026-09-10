@@ -74,6 +74,22 @@ describe('ListAgentsTool', () => {
     );
   });
 
+  it('reads its own identity from the record this session registered under', async () => {
+    // A daemon-hosted session owns a minted record; its process holds no
+    // `<pid>.json` at all. Reading the shared path instead would return
+    // null, and the listing would be silently empty for exactly the
+    // sessions this path exists to serve.
+    const hosted = new ListAgentsTool({
+      getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () => null,
+      getSessionRegistrySlot: () => 'a1b2c3d4',
+    } as unknown as Config);
+
+    await hosted.validateBuildAndExecute({}, new AbortController().signal);
+
+    expect(getOwnPeerIdentity).toHaveBeenCalledWith('a1b2c3d4');
+  });
+
   it('states the Agent Team boundary in the tool description', () => {
     expect(tool.description).toContain(
       'Named Agent Team teammates are NOT listed here',
