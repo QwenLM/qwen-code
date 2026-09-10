@@ -2628,6 +2628,59 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('rejects a pre-aborted queued request without waiting for the active batch', async () => {
+    let resolveFirstCall: (result: ToolResult) => void;
+    const firstCallPromise = new Promise<ToolResult>((resolve) => {
+      resolveFirstCall = resolve;
+    });
+    const tool = new MockTool({
+      name: 'read_file',
+      execute: vi.fn().mockReturnValue(firstCallPromise),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[tool.name, tool]]),
+    });
+    const firstSchedule = scheduler.schedule(
+      [
+        {
+          callId: 'active-call',
+          name: tool.name,
+          args: { file_path: 'a.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-active',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'executing');
+
+    const queuedController = new AbortController();
+    queuedController.abort();
+    const queuedSchedule = scheduler.schedule(
+      [
+        {
+          callId: 'pre-aborted-call',
+          name: tool.name,
+          args: { file_path: 'b.ts' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-pre-aborted',
+        },
+      ],
+      queuedController.signal,
+    );
+    const result = await Promise.race([
+      queuedSchedule.then(() => 'resolved').catch(() => 'rejected'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('pending'), 50),
+      ),
+    ]);
+
+    expect(result).toBe('rejected');
+    resolveFirstCall!({ llmContent: 'done', returnDisplay: 'done' });
+    await firstSchedule;
+  });
+
   it('propagates a tool rejection even when timeout is active', async () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '5000';
@@ -7126,6 +7179,35 @@ describe('CoreToolScheduler', () => {
   });
 
   describe('getToolSuggestion', () => {
+    it('does not suggest a tool that is unavailable for the current turn', () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['propose_goal', 'read_file'],
+        isToolDeclared: (name: string) => name !== 'propose_goal',
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => false,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // @ts-expect-error accessing private method
+      const suggestion = scheduler.getToolSuggestion('propose_goals');
+
+      expect(suggestion).not.toContain('propose_goal');
+      expect(suggestion).toContain('read_file');
+    });
+
     it('should suggest the top N closest tool names for a typo', () => {
       // Create mocked tool registry
       const mockToolRegistry = {

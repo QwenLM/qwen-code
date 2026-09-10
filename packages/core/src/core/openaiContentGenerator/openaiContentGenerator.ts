@@ -14,6 +14,7 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isAbortError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+import { extractTextFromContents } from '../../utils/extract-text-from-contents.js';
 
 const debugLogger = createDebugLogger('OPENAI');
 
@@ -80,37 +81,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    // Extract text from contents
-    let text = '';
-    if (Array.isArray(request.contents)) {
-      text = request.contents
-        .map((content) => {
-          if (typeof content === 'string') return content;
-          if ('parts' in content && content.parts) {
-            return content.parts
-              .map((part) =>
-                typeof part === 'string'
-                  ? part
-                  : 'text' in part
-                    ? (part as { text?: string }).text || ''
-                    : '',
-              )
-              .join(' ');
-          }
-          return '';
-        })
-        .join(' ');
-    } else if (request.contents) {
-      if (typeof request.contents === 'string') {
-        text = request.contents;
-      } else if ('parts' in request.contents && request.contents.parts) {
-        text = request.contents.parts
-          .map((part) =>
-            typeof part === 'string' ? part : 'text' in part ? part.text : '',
-          )
-          .join(' ');
-      }
-    }
+    const text = extractTextFromContents(request.contents);
 
     try {
       const embedding = await this.pipeline.client.embeddings.create({
