@@ -1158,6 +1158,27 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
+### `GET /brand`
+
+The Web Shell's product branding, for hosts that want to white-label the shell. Resolved from `ui.brand` in the operator settings scopes. Gated by the `web_shell_brand` feature tag; a daemon without the route answers 404.
+
+```json
+{
+  "name": "QiuQiu Code",
+  "logoDataUri": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E"
+}
+```
+
+> **Both fields are optional, and `{}` is a normal response.** An absent field means "use the client's built-in brand" — the Web Shell renders its own name and inline logo. Clients must not treat an empty body as an error.
+
+> **The handler always answers 200, even when the configured logo was rejected.** A missing file, a symlink, a hard-linked file, a directory, a non-SVG document, or content over 32 KiB yields a body with no `logoDataUri`, and the reason is written to the daemon's stderr as `qwen serve: GET /brand: ui.brand.logoPath …`. A client therefore cannot distinguish "no brand configured" from "the operator's logo was refused"; the operator-facing channel is the daemon log. One advisory is softer than a rejection, and there are two: a root `<svg>` with no usable `viewBox` and no positive, non-percentage `width`/`height` (a malformed or zero-area viewBox counts as unusable), which the browser may render blank at the sidebar's fixed size; and a prefix-bound root whose unprefixed elements lack a default-namespace binding, which renders them invisible. Middleware in front of the handler answers before it ever runs — `401` when bearer auth is required and absent, `429` when the optional rate limiter is engaged. A draining daemon does not reject this route: the rate limiter is permissive while draining, so the handler keeps answering 200 until the listener closes and the client sees a connection failure instead. Startup is not a 503 on this route: on the default deferred-runtime path the request is _held_ until the runtime is ready and then answered 200, so a short client timeout is what can fire early. A 503 with `code: "daemon_runtime_starting"` reaches this route only on configurations that answer before the runtime is ready (e.g. `--open`) and is retryable; a 503 with `code: "daemon_runtime_failed"` is terminal until the daemon restarts and carries no `Retry-After` — do not retry it.
+
+> **Workspace settings never contribute.** The route loads settings with `skipWorkspaceSettings`, so a repository's `.qwen/settings.json` cannot rename the product or name a file for the daemon to read and inline into every connected browser. Only System Defaults, User and System are read, in that precedence. For the same reason, a brand value is refused with a warning on the daemon's stderr whenever placeholder substitution would change it: substitution draws from the process-wide environment, which a workspace's `.qwen/.env` or `env` block populates first at boot. An unresolvable placeholder (the variable is unset) is kept verbatim, so a typo'd variable shows as literal text rather than silently falling back.
+
+> **`logoDataUri` must be rendered as an image, never injected as markup.** The daemon does not sanitize the SVG it read. SVG loaded through an `img` src or a favicon href cannot execute script; SVG injected into the document can. The Web Shell only ever assigns it to an image context, and that invariant is what makes the absence of a sanitizer safe.
+
+> **Process-global.** The route takes no workspace selector and no session id: the value derives from user-global configuration, so it is the same for every workspace the daemon serves. It is registered after `bearerAuth` and the rate limiter, and before the Web Shell SPA fallback, so it answers JSON for any `Accept` header.
+
 ### `POST /workspaces`
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
@@ -2793,17 +2814,43 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
-`cancelled`, `max_tokens`, `error`, or `length`.
+`turn_error` by `promptId`.
+
+`turn_complete.data.stopReason` carries the ACP `StopReason` the agent
+returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
+`cancelled`. The daemon can also emit `cancelled` for a prompt aborted without
+the agent running it, including queued-prompt removal, caller disconnect, or
+drain/teardown; that value does not prove the agent ran the prompt. **Treat the
+field as an open string**: it is typed `string` on the wire, the ACP set can
+grow, and a client that exhaustively switches on it will break on the next
+addition.
+
+Two daemon-side outcomes do **not** arrive on this field. A turn that fails
+inside the daemon — deadline expiry, teardown flush, child crash — is published
+as a `turn_error` event, never as a `turn_complete` stopReason. Its `data`
+always carries `message`; `code` is present only when the daemon classified the
+failure (deadline expiry → `prompt_deadline_exceeded`, teardown flush →
+`channel_closed`, `session_closed`, `session_killed` or `daemon_shutdown`), and
+the frame for a prompt rejected because the ACP child died mid-request carries
+neither `code` nor `errorKind`. Treat both as optional and branch on `message`.
+
+A turn recovered from persisted history after a restart is not re-published on
+the stream at all; it surfaces in `promptTerminals[]` in the
+`POST /session/:id/load` response body — as
+`{ terminal: "completed", stopReason: "reconstructed_from_transcript" }` when
+the persisted tail shows the turn finished, or
+`{ terminal: "interrupted", code: "daemon_lost" }` with **no** `stopReason` when
+the daemon died mid-turn. Match the entry by `promptId` and branch on
+`terminal`; `promptTerminals` is omitted from the response entirely when the
+ledger holds no evidence for the session.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
-without killing the agent; if the agent later settles, turn-status polls for
-that `promptId` return the settled transcript outcome instead of the deadline
-error.
+`code: "prompt_deadline_exceeded"`. The deadline releases the caller without
+killing the agent; if the agent later settles, turn-status polls for that
+`promptId` return the settled transcript outcome instead of the deadline error.
 
 ### `POST /session/:id/cancel`
 
