@@ -19,7 +19,7 @@ Web Shell already sends workspace, session, file, SSE, and WebSocket requests th
 ## Non-goals
 
 - Desktop integration, managed SSH, daemon installation, discovery, relay, federation, or virtual filesystems.
-- Aggregating more than one daemon in a single Web Shell instance.
+- Simultaneous session streams or execution across multiple daemons.
 - Starting or stopping an externally managed daemon.
 
 ## Design
@@ -30,7 +30,9 @@ The standalone Web Shell reads the `daemon` query parameter and passes that orig
 
 The pre-connection gate always exposes a daemon address and optional token form, including when the URL contains an invalid target. Once connected, the existing Daemon Status overview shows the current target and connection state and provides the same switch controls. Switching performs a full page navigation, clears the selected session, workspace, and context from the URL, and creates a fresh SDK client for the new daemon. It does not probe or fall back to another runtime.
 
-The existing sidebar remains the workspace and session management UI. Workspace registration uses typed absolute paths and daemon-provided directory suggestions; native folder selection remains hidden for remote daemons. Session discovery, transcript loading, file references, terminal traffic, and execution require no parallel remote-specific implementations because they already use the selected SDK client.
+The standalone sidebar keeps a browser-local catalog of local and remote projects, keyed by daemon origin and workspace ID. Only project identity and display names are stored in localStorage, never tokens. Choosing a project navigates to its daemon and workspace; only the active daemon supplies live sessions. Unreachable hosts do not remove the saved projects, and the connection gate offers a return to local or another saved host. Embedded consumers retain their existing single-provider interface.
+
+Adding a workspace starts with a local/remote choice. Local means the daemon serving the page (the local Vite proxy in development), not browser filesystem access. Remote accepts an HTTP(S) origin and an optional origin-scoped token. Changing hosts navigates first, so the new document receives the selected daemon's CSP; an `addWorkspace` continuation flag reopens the directory step after authentication and is then removed. This avoids granting arbitrary connection origins. Directory suggestions and registration use that daemon. Already-registered directories are selected instead of registered again. Native folder selection is available only for the local target when advertised by its capabilities. Sessions, files, terminals and execution continue through the selected SDK client.
 
 Bearer tokens remain in per-tab `sessionStorage`, but are keyed by daemon origin. The legacy unqualified key is used only for same-origin connections. Selecting a remote daemon never reuses a token stored for the page's own daemon or another remote daemon.
 
@@ -55,9 +57,12 @@ Disconnecting or closing the browser only disposes the client connection. It doe
 
 ## Acceptance Criteria
 
+The standalone add flow shows a persistent directory list, a parent-folder action and an explicit “Use this folder” confirmation before adding. The folder basename is suggested as the display-name placeholder. Supplying a name for an already-registered folder updates its display name before opening it. Cancellation after changing hosts returns to the original same-origin page, including its session and workspace; successful addition does not trigger this cancellation navigation. Remote projects use server icons, project action menus stay discoverable, and the chat view shows the active daemon and working directory. Existing removal confirmation continues to explain that files and session history are not deleted.
+
 - A Web Shell page can connect directly to a configured remote daemon origin.
 - An invalid or unavailable target can be replaced from the connection gate, and a connected target can be switched from Daemon Status.
 - Workspace and session discovery and file/terminal operations use the selected daemon through the existing SDK.
 - Credentials are never reused across daemon origins.
 - Remote selection survives navigation and refresh.
+- Adding a remote project keeps local projects available, and both can be selected from the same sidebar.
 - Invalid addresses and daemon policy/authentication failures are explicit and do not fall back to another runtime.

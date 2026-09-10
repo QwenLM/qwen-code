@@ -28,9 +28,13 @@ export interface WorkspacePathSuggestions {
 }
 
 interface AddWorkspaceDialogProps {
+  browseDirectories?: boolean;
+  onBack?: () => void;
+  initialPath?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
+  daemonAddress?: string;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -51,15 +55,20 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
+  browseDirectories = false,
+  onBack,
+  initialPath = '',
   onClose,
   onAdd,
   displayNameEnabled = false,
+  daemonAddress,
   onSuggest,
   onPick,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
-  const [path, setPath] = useState('');
+  const [path, setPath] = useState(initialPath);
+  const [confirmedPath, setConfirmedPath] = useState<string>();
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -245,6 +254,7 @@ export function AddWorkspaceDialog({
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (browseDirectories && confirmedPath !== path) return;
       const trimmed = path.trim();
       if (!trimmed) return;
       if (!isAbsoluteLike(trimmed)) {
@@ -272,6 +282,8 @@ export function AddWorkspaceDialog({
       }
     },
     [
+      browseDirectories,
+      confirmedPath,
       path,
       displayName,
       displayNameEnabled,
@@ -284,7 +296,7 @@ export function AddWorkspaceDialog({
     ],
   );
 
-  const showList = listOpen && suggestions.length > 0;
+  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
 
   return (
     <DialogShell
@@ -313,6 +325,7 @@ export function AddWorkspaceDialog({
                   onKeyDown={handleInputKeyDown}
                   onFocus={cancelBlurDismiss}
                   onBlur={() => {
+                    if (browseDirectories) return;
                     // Delay so a mousedown on a suggestion wins over blur.
                     cancelBlurDismiss();
                     blurTimeoutRef.current = setTimeout(() => {
@@ -362,7 +375,7 @@ export function AddWorkspaceDialog({
                   id={LISTBOX_ID}
                   role="listbox"
                   aria-label={t('sidebar.addWorkspaceSuggestions')}
-                  className="absolute inset-x-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+                  className={`${browseDirectories ? 'relative' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
                 >
                   {suggestions.map((suggestion, index) => (
                     <li
@@ -383,6 +396,10 @@ export function AddWorkspaceDialog({
                       }}
                       onMouseEnter={() => setHighlight(index)}
                     >
+                      <FolderOpenIcon
+                        className="mr-2 inline size-4"
+                        aria-hidden="true"
+                      />
                       {suggestion.name}
                       <span className="text-muted-foreground">{hostSep}</span>
                     </li>
@@ -390,8 +407,41 @@ export function AddWorkspaceDialog({
                 </ul>
               )}
             </div>
+            {browseDirectories && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={submitting}
+                  onClick={() => {
+                    const trimmed = path.replace(/[\\/]+$/, '');
+                    const index = trimmed.lastIndexOf(hostSep);
+                    setPath(index >= 0 ? trimmed.slice(0, index + 1) : hostSep);
+                  }}
+                >
+                  {t('workspaceHost.parent')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={submitting || !isAbsoluteLike(path)}
+                  onClick={() => setConfirmedPath(path)}
+                >
+                  {t('workspaceHost.chooseFolder')}
+                </Button>
+                {confirmedPath === path && (
+                  <span className="text-sm text-muted-foreground">
+                    {t('workspaceHost.selectedFolder')} {path}
+                  </span>
+                )}
+              </div>
+            )}
             <FieldDescription id={HINT_ID}>
-              {t('sidebar.addWorkspaceHint')}
+              {daemonAddress
+                ? t('sidebar.addWorkspaceDaemonHint', {
+                    address: daemonAddress,
+                  })
+                : t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
@@ -404,6 +454,11 @@ export function AddWorkspaceDialog({
                 id="add-workspace-display-name"
                 type="text"
                 value={displayName}
+                placeholder={
+                  browseDirectories
+                    ? path.split(/[\\/]/).filter(Boolean).pop()
+                    : undefined
+                }
                 onChange={(event) => setDisplayName(event.target.value)}
                 disabled={submitting}
                 maxLength={256}
@@ -435,6 +490,16 @@ export function AddWorkspaceDialog({
           )}
         </FieldGroup>
         <div className="flex justify-end gap-2">
+          {onBack && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onBack}
+              disabled={submitting}
+            >
+              {t('workspaceHost.back')}
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
@@ -443,10 +508,21 @@ export function AddWorkspaceDialog({
           >
             {t('sidebar.addWorkspaceCancel')}
           </Button>
-          <Button type="submit" disabled={submitting || !path.trim()}>
+          <Button
+            type="submit"
+            disabled={
+              submitting ||
+              !path.trim() ||
+              (browseDirectories && confirmedPath !== path)
+            }
+          >
             {submitting
               ? t('sidebar.addWorkspaceAdding')
-              : t('sidebar.addWorkspaceRegister')}
+              : t(
+                  browseDirectories
+                    ? 'sidebar.addWorkspaceTitle'
+                    : 'sidebar.addWorkspaceRegister',
+                )}
           </Button>
         </div>
       </form>

@@ -8,9 +8,14 @@ import {
 import AppStyles from '../App.module.css';
 import {
   getAllowedDaemonOrigin,
+  getDaemonToken,
   navigateToDaemon,
   persistDaemonToken,
 } from '../config/daemon';
+import {
+  openHostedWorkspace,
+  readWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -51,6 +56,7 @@ interface AuthCopy {
   connect: string;
   retry: string;
   hint: string;
+  local: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
@@ -72,6 +78,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     addressLabel: 'Daemon address',
     tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
+    local: 'Return to local workspaces',
     retry: 'Retry',
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
@@ -90,6 +97,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     addressLabel: 'Daemon 地址',
     tokenLabel: 'Bearer token（可选）',
     connect: '连接',
+    local: '返回本地工作区',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
@@ -130,6 +138,7 @@ export function StandaloneAuth({
 }) {
   const copy = COPY[language] ?? COPY.en;
   const [address, setAddress] = useState(initialAddress);
+  const [hosts] = useState(readWorkspaceHosts);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
   const [status, setStatus] = useState(
@@ -303,7 +312,10 @@ export function StandaloneAuth({
                 return;
               }
               if (changingTarget) {
-                onChangeTarget(normalizedAddress, token.trim());
+                onChangeTarget(
+                  normalizedAddress,
+                  token.trim() || getDaemonToken(normalizedAddress),
+                );
                 return;
               }
               operatorProbeRef.current = true;
@@ -321,7 +333,10 @@ export function StandaloneAuth({
               placeholder="https://daemon.example.com:4170"
               className="h-11 font-mono"
               value={address}
-              onChange={(event) => setAddress(event.target.value)}
+              onChange={(event) => {
+                setAddress(event.target.value);
+                setToken('');
+              }}
             />
             <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
             <Input
@@ -349,6 +364,31 @@ export function StandaloneAuth({
                     : copy.retry}
             </Button>
           </form>
+          <div className="flex flex-col gap-2">
+            {(invalidTarget || baseUrl !== window.location.origin) && (
+              <Button
+                variant="outline"
+                onClick={() => openHostedWorkspace(window.location.origin)}
+              >
+                {copy.local}
+              </Button>
+            )}
+            {hosts
+              .filter(
+                (host) =>
+                  host.origin !== baseUrl &&
+                  host.origin !== window.location.origin,
+              )
+              .map((host) => (
+                <Button
+                  key={host.origin}
+                  variant="outline"
+                  onClick={() => openHostedWorkspace(host.origin)}
+                >
+                  {host.origin}
+                </Button>
+              ))}
+          </div>
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

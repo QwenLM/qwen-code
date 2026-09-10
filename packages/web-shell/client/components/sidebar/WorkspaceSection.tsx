@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -20,10 +21,13 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   CalendarClockIcon,
+  Server,
   FolderClosedIcon,
   FolderOpenIcon,
 } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
+import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
+import { getDaemonBaseUrl } from '../../config/daemon';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
@@ -88,7 +92,14 @@ function getSessionLabel(session: DaemonSessionSummary): string {
 }
 
 function WorkspaceFolderIcon({ open }: { open: boolean }) {
-  const Icon = open ? FolderOpenIcon : FolderClosedIcon;
+  const hosted = useContext(WorkspaceHostsEnabled);
+  const origin = hosted ? getDaemonBaseUrl() : '';
+  const Icon =
+    origin && origin !== window.location.origin
+      ? Server
+      : open
+        ? FolderOpenIcon
+        : FolderClosedIcon;
   return (
     <Icon
       className={styles.folderIcon}

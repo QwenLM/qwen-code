@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -11,6 +12,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import { WorkspaceHostProjects } from '../workspaces/WorkspaceHostProjects';
+import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
 import {
   useActions,
   useChannels,
@@ -954,6 +957,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const hostedWorkspaces = useContext(WorkspaceHostsEnabled);
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -5818,6 +5822,7 @@ export function WebShellSidebar({
                 </div>
               </div>
             )}
+            {!hideProjectHeader && <WorkspaceHostProjects />}
             {searchOpen && !hideProjectHeader && (
               <div className={styles.projectSearch}>
                 <SearchIcon aria-hidden="true" />
@@ -6138,7 +6143,9 @@ export function WebShellSidebar({
                                     }
                                     style={{
                                       visibility:
-                                        visible || openWorkspaceMenuId === ws.id
+                                        hostedWorkspaces ||
+                                        visible ||
+                                        openWorkspaceMenuId === ws.id
                                           ? 'visible'
                                           : 'hidden',
                                     }}

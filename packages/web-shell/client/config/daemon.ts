@@ -202,6 +202,8 @@ export function buildDaemonConnectionUrl(
   url.pathname = buildSessionPathname(url.pathname, undefined);
   url.searchParams.delete('workspace');
   url.searchParams.delete('context');
+  url.searchParams.delete('addWorkspace');
+  url.searchParams.delete('workspaceReturn');
   url.searchParams.delete('token');
   if (daemonOrigin === url.origin) {
     url.searchParams.delete('daemon');

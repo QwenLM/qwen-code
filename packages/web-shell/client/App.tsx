@@ -1,9 +1,13 @@
 import './styles/globals.css';
+import { WorkspaceHostsEnabled } from './config/workspace-hosts';
+import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
+import { AddHostedWorkspaceDialog } from './components/dialogs/AddHostedWorkspaceDialog';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import {
   forwardRef,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -3385,6 +3389,7 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -3424,7 +3429,11 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
+    () =>
+      workspaceHostsEnabled &&
+      new URLSearchParams(window.location.search).has('addWorkspace'),
+  );
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -8188,7 +8197,7 @@ export function App({
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
     if (!projectFeaturesAvailable) setShowMemoryDialog(false);
-    setShowAddWorkspaceDialog(false);
+    if (!workspaceHostsEnabled) setShowAddWorkspaceDialog(false);
     setGitDialog(undefined);
     if (
       !projectFeaturesAvailable &&
@@ -8213,6 +8222,7 @@ export function App({
     modelDialogMode,
     projectFeaturesAvailable,
     workspaceContextActive,
+    workspaceHostsEnabled,
   ]);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -16677,13 +16687,22 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && workspaceHostsEnabled && (
+            <AddHostedWorkspaceDialog
+              onClose={() => setShowAddWorkspaceDialog(false)}
+            />
+          )}
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && !workspaceHostsEnabled && (
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
+              daemonAddress={workspace.baseUrl || window.location.origin}
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
-                nativeDirectoryPickerSupported
+                nativeDirectoryPickerSupported &&
+                (!workspace.baseUrl ||
+                  new URL(workspace.baseUrl, window.location.origin).origin ===
+                    window.location.origin)
                   ? async () => {
                       const result =
                         await workspaceActions.pickWorkspaceDirectory();
@@ -16964,6 +16983,9 @@ export function App({
                 .join(' ')}
               aria-hidden={artifactPanelFullscreen || undefined}
             >
+              {workspaceHostsEnabled && !activePanel && mainView === 'chat' && (
+                <WorkspaceLocation cwd={connection.workspaceCwd} />
+              )}
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&

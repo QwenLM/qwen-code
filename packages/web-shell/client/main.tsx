@@ -1,4 +1,5 @@
 import React from 'react';
+import { WorkspaceHostsEnabled } from './config/workspace-hosts';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -206,46 +207,48 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
       )}
     >
       <BrowserTurnNotifications language={language}>
-        <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-          <WorkspaceSessionProvider
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            sessionContext={sessionContext}
-            webShellProps={{
-              theme,
-              onThemeChange: handleThemeChange,
-              language,
-              onLanguageChange: handleLanguageChange,
-              onSessionIdChange: handleSessionIdChange,
-              sidebar: { enabled: true, showLive: true },
-              header: {
-                items: [
-                  'title',
-                  'environment',
-                  'rightPanel',
-                  'tokenUsage',
-                  'contextUsage',
-                ],
-              },
-              rightPanel: {
-                items: ['review', 'sideTask', 'terminal'],
-              },
-              environmentPanel: {
-                items: [
-                  'environment',
-                  'subagents',
-                  'backgroundTasks',
-                  'attachments',
-                  'artifacts',
-                ],
-              },
-              compactThinking: true,
-              markdownTableMode: 'advanced',
-              composerToolbarAdditionalActions:
-                STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-            }}
-          />
-        </DaemonWorkspaceProvider>
+        <WorkspaceHostsEnabled.Provider value={true}>
+          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+            <WorkspaceSessionProvider
+              sessionId={sessionId}
+              workspaceId={workspaceId}
+              sessionContext={sessionContext}
+              webShellProps={{
+                theme,
+                onThemeChange: handleThemeChange,
+                language,
+                onLanguageChange: handleLanguageChange,
+                onSessionIdChange: handleSessionIdChange,
+                sidebar: { enabled: true, showLive: true },
+                header: {
+                  items: [
+                    'title',
+                    'environment',
+                    'rightPanel',
+                    'tokenUsage',
+                    'contextUsage',
+                  ],
+                },
+                rightPanel: {
+                  items: ['review', 'sideTask', 'terminal'],
+                },
+                environmentPanel: {
+                  items: [
+                    'environment',
+                    'subagents',
+                    'backgroundTasks',
+                    'attachments',
+                    'artifacts',
+                  ],
+                },
+                compactThinking: true,
+                markdownTableMode: 'advanced',
+                composerToolbarAdditionalActions:
+                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+              }}
+            />
+          </DaemonWorkspaceProvider>
+        </WorkspaceHostsEnabled.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
   );

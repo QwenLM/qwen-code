@@ -19,7 +19,7 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 ## 非目标
 
 - 桌面端集成、托管 SSH、daemon 安装、发现、中继、联邦或虚拟文件系统。
-- 在一个 Web Shell 实例中聚合多个 daemon。
+- 同时连接多个 daemon 的会话流或同时跨 daemon 执行。
 - 启动或停止由外部管理的 daemon。
 
 ## 设计
@@ -30,7 +30,9 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 连接前页面始终提供 daemon 地址和可选 token 表单，包括 URL 中目标无效的情况。连接成功后，现有 Daemon 状态概览会显示当前目标和连接状态，并提供相同的切换控件。切换目标时执行完整页面导航，清除 URL 中已选的 session、workspace 和 context，并为新 daemon 创建全新的 SDK client。此过程不会探测或回退到其他 runtime。
 
-现有侧边栏继续作为 workspace 和 session 管理界面。workspace 注册使用手工输入的绝对路径和 daemon 返回的目录建议；连接远程 daemon 时继续隐藏原生目录选择器。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
+独立页面的侧边栏保留浏览器本地的本地与远程项目目录，以 daemon origin 和 workspace ID 区分身份。localStorage 只保存项目身份和显示名称，不保存 token。选择项目时导航到对应 daemon 和 workspace；只有当前 daemon 提供实时会话。主机不可达不会删除已保存的项目，连接页提供返回本地或其他已保存主机的入口。嵌入式消费者保留原来的单 provider 界面。
+
+添加工作区先选择本地或远程。本地指提供页面服务的 daemon（开发时为本地 Vite 代理），不是浏览器文件系统权限。远程填写 HTTP(S) origin 和可选的按 origin 隔离的 token。更换主机时先导航，使新文档获得所选 daemon 的 CSP；认证后通过 `addWorkspace` 续接标记重新打开目录步骤，然后移除标记，不需要放开任意连接源。目录建议与注册均请求该 daemon。已注册的目录直接选中，不再重复注册。只有本地目标且 capability 支持时提供原生目录选择器。会话、文件、终端与执行继续通过所选 SDK client。
 
 Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键按 daemon origin 区分。旧的无限定存储键只用于同源连接。选择远程 daemon 时绝不会复用页面自身 daemon 或另一个远程 daemon 的 token。
 
@@ -55,9 +57,12 @@ Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键�
 
 ## 验收标准
 
+独立页面的添加流程提供常驻目录列表、上一级操作，以及添加前明确的“使用此目录”确认。显示名称输入框以文件夹名作为占位提示。为已注册目录填写名称时，先更新显示名称再打开该工作区。跨主机添加后取消，会返回原来的同源页面，包括原 session 和 workspace；添加成功不触发取消导航。远程项目使用服务器图标，项目操作菜单保持可见，对话界面显示当前 daemon 和工作目录。移除操作继续通过已有确认弹窗说明文件与会话历史不会被删除。
+
 - Web Shell 页面可以直接连接显式配置的远程 daemon origin。
 - 无效或不可达的目标可以在连接页替换；已连接的目标可以在 Daemon 状态中切换。
 - workspace/session 发现以及文件/终端操作通过现有 SDK 使用所选 daemon。
 - 凭据绝不会跨 daemon origin 复用。
 - 远程选择在导航和刷新后仍然保留。
+- 添加远程项目后本地项目仍然保留，二者均可从同一侧栏选择。
 - 无效地址以及 daemon 的策略/认证失败会明确显示，并且不会回退到其他 runtime。
