@@ -92,6 +92,29 @@ export function describeExternalAction(
 }
 
 /**
+ * R3-1: the executor spawn is POSIX-only in this release. On Windows an
+ * npm-installed launcher resolves to a `.cmd`/`.bat`, which libuv's PATH search
+ * never finds (bare name + `.exe` only) and which Node >= 18.20.2 refuses to
+ * spawn without a shell — and the process-tree reaping (detached process-group
+ * SIGTERM/SIGKILL) is POSIX-specific. Rather than let the spawn fail with a
+ * misleading `spawn <cmd> ENOENT` (reporting an installed adapter as missing),
+ * fail closed here with a clear, actionable message. Windows support (a
+ * cross-spawn-style PATHEXT resolution + quoted `cmd.exe` arm) is a tracked
+ * follow-up.
+ */
+export function assertExternalAgentSpawnPlatformSupported(
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32') {
+    throw new Error(
+      'External ACP agents are not supported on Windows in this release: the executor spawn is POSIX-only. ' +
+        'An npm-installed adapter resolves to a `.cmd` launcher that cannot be spawned without a shell, and the process-tree reaping is POSIX-specific. ' +
+        'Run the external agent on macOS/Linux (or WSL). Windows support is a tracked follow-up.',
+    );
+  }
+}
+
+/**
  * The host approval policy as a peer-vocabulary-independent token. Peer ACP mode
  * ids differ per peer (Claude: `acceptEdits` / `bypassPermissions`; qwen:
  * `auto-edit` / `auto` / `yolo`), so resolvePermissionMode maps the host policy
@@ -338,6 +361,12 @@ class AcpSubagentExecutor implements SubagentExecutor {
   static async create(
     params: ExternalAgentExecutorParams,
   ): Promise<AcpSubagentExecutor> {
+    // Fail closed with a clear message on Windows rather than letting the spawn
+    // below fail with a misleading `spawn <cmd> ENOENT` (an npm-installed
+    // launcher resolves to a `.cmd`, which libuv's PATH search never finds and
+    // Node refuses to spawn without a shell). The executor's spawn and its
+    // process-tree reaping are POSIX-only in this release. (R3-1)
+    assertExternalAgentSpawnPlatformSupported();
     if (params.runConfig.max_turns !== undefined) {
       throw new Error('External ACP agents cannot enforce max_turns.');
     }
@@ -791,6 +820,15 @@ class AcpSubagentExecutor implements SubagentExecutor {
   setExternalMessageProvider(provider: () => AgentExternalInput[]): void {
     this.provider = provider;
   }
+  // This executor deliberately does NOT implement `setExternalMessageWaiter` /
+  // `setExternalMessageWaitPredicate`: ACP v1 has no mid-turn injection
+  // primitive (no `session/steer`), so input that arrives while a prompt is in
+  // flight cannot be delivered until that prompt resolves. Queued input is
+  // drained between prompts via the provider above (next-turn-boundary
+  // delivery). Implementing true mid-turn steering would require cancel +
+  // re-prompt — re-billing the whole in-flight turn — which is a protocol/billing
+  // decision, not a safe default. The delegation result surfaces this
+  // limitation (see agent.ts EXTERNAL_MID_TURN_INPUT_NOTICE). (R3-6)
   getExecutionSummary(): AgentStatsSummary {
     return {
       rounds: this.round,

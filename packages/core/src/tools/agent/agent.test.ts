@@ -6168,6 +6168,30 @@ describe('AgentTool', () => {
       expect(failureMessage).toContain('token usage and cost are unavailable');
     });
 
+    it('surfaces that mid-turn input is unavailable for a background external agent (R3-6)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        executor: { kind: 'acp', command: 'claude' },
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'External task',
+        prompt: 'Do the task',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      });
+      await invocation.execute();
+      await vi.waitFor(() => expect(mockRegistry.complete).toHaveBeenCalled());
+      const completionText = mockRegistry.complete.mock.calls[0]?.[1] as string;
+      // ACP v1 has no mid-turn injection primitive, so a steer sent while a turn
+      // is running reaches the peer only at the next turn boundary. The result
+      // must say so, not present a queued steer as delivered mid-turn. Dropping
+      // EXTERNAL_MID_TURN_INPUT_NOTICE turns the second assertion red.
+      expect(completionText).toContain('token usage and cost are unavailable');
+      expect(completionText).toContain('next turn boundary');
+    });
+
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');

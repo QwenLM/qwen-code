@@ -17,6 +17,7 @@ import {
 import { Config, InputFormat } from '@qwen-code/qwen-code-core';
 import {
   acpExternalAgentExecutor,
+  assertExternalAgentSpawnPlatformSupported,
   externalModelLabel,
   isExpectedExternalAgentCleanupExit,
   isUnprovenExternalAgentTreeExit,
@@ -356,6 +357,33 @@ describe('cleanup-exit classification', () => {
 // signalCode null, which dispose() surfaces as an unclean-exit error — the same
 // exposure the repo's other real-process suites gate (process-registry.process,
 // hook-runner.process). The pure-function suites above run on every platform.
+describe('spawn platform guard (R3-1)', () => {
+  it('refuses with a clear POSIX-only error on win32, allows POSIX', () => {
+    // The guard throws BEFORE any spawn, so on win32 a user gets a clear
+    // "POSIX-only" refusal instead of a misleading `spawn <cmd> ENOENT` (an
+    // npm-installed launcher resolving to a `.cmd` libuv never finds).
+    // Removing the win32 throw turns the first assertion red.
+    expect(() => assertExternalAgentSpawnPlatformSupported('win32')).toThrow(
+      /POSIX-only/,
+    );
+    expect(() =>
+      assertExternalAgentSpawnPlatformSupported('darwin'),
+    ).not.toThrow();
+    expect(() =>
+      assertExternalAgentSpawnPlatformSupported('linux'),
+    ).not.toThrow();
+  });
+
+  it('create() rejects on win32 without spawning', async () => {
+    const realPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      await expect(create(params())).rejects.toThrow(/POSIX-only/);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform });
+    }
+  });
+});
 describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
   it('returns method-not-found -32601 across the real extension request wire', async () => {
     const executor = await create(params('unsupported-extension'));

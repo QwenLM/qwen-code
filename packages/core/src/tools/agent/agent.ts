@@ -137,6 +137,13 @@ import type { AuthOverrides } from '../../models/content-generator-config.js';
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
 
+// ACP v1 has no mid-turn injection primitive, so an external agent cannot be
+// steered while a prompt is in flight — queued input is delivered at the next
+// turn boundary. Surface that on the result so a caller does not read a queued
+// steer as having been delivered mid-turn. (R3-6)
+const EXTERNAL_MID_TURN_INPUT_NOTICE =
+  '\n\n[External agents receive queued input only between turns; a message sent while a turn is running is delivered at the next turn boundary, not mid-turn.]';
+
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
@@ -3593,7 +3600,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // path already appends it after its fallbacks; mirror that.
               const externalSuffix =
                 subagentConfig.executor !== undefined
-                  ? EXTERNAL_USAGE_NOTICE
+                  ? EXTERNAL_USAGE_NOTICE + EXTERNAL_MID_TURN_INPUT_NOTICE
                   : '';
               const modelVisibleText = toModelVisibleSubagentResult(
                 subagentRawText,
