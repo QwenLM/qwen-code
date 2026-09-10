@@ -222,6 +222,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  'QWEN_SERVE_MAX_WORKSPACES',
   // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
   // every workspace's session attachments. A project `.env` redirecting it
   // would capture uploads for ALL workspaces the daemon serves — and reads

@@ -27,6 +27,7 @@ import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import { isSameFile } from './lib/same-file.js';
+import { untrustedGitfile } from './lib/worktree.js';
 import {
   isSafeRepositoryRelativePath,
   MAX_IDENTITY_BYTES,
@@ -396,6 +397,23 @@ export function runRepoContext(
       );
     }
     throw err;
+  }
+  // Every read below — `rev-parse --git-common-dir`, `cat-file -e`, `ls-tree`,
+  // `show <base>:<path>` — resolves the repository through this worktree's own
+  // `.git`, which sits inside the directory the review sandbox hands the
+  // reviewed code read-write. The identity files this command extracts are the
+  // ones the trust boundary exists to take from the MERGE BASE rather than
+  // from the PR head; read through a rewritten pointer they come from a
+  // repository the PR author planted, and the whole boundary is decorative.
+  // Same gate, same reason, as the writes in `scratch-tree` and `fetch-pr`.
+  const untrusted = untrustedGitfile(worktree);
+  if (untrusted !== null) {
+    throw new Error(
+      `repo-context: refusing to read the repository context — ${untrusted}. ` +
+        `The merge-base identity files would come from whichever repository ` +
+        `that pointer names. Sweep the tree (\`qwen review cleanup\`) and ` +
+        `re-fetch before re-running.`,
+    );
   }
 
   // The plan's identity, captured BEFORE the provider work. The providers

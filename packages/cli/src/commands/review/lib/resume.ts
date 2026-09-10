@@ -39,7 +39,8 @@ export type ResumeRefusal =
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'head-moved' // the PR head advanced — the once-per-review restart case
   | 'profile-not-resumable' // a focused-profile run starts fresh by design
-  | 'resume-cap'; // this review has already resumed RESUME_MAX times
+  | 'resume-cap' // this review has already resumed RESUME_MAX times
+  | 'worktree-untrusted'; // the tree's gitfile no longer resolves to its own admin entry
 
 export type ResumeAssessment =
   | { ok: true }

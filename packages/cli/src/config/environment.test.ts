@@ -92,6 +92,7 @@ const TRACKED_ENV = [
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
+  'QWEN_SERVE_MAX_WORKSPACES',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
   'tmpdir',
@@ -243,6 +244,34 @@ describe('update download source environment', () => {
         QWEN_UPDATE_BASE_URL: trustedUrl,
       });
       expect(snapshot.effectiveEnv['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+    },
+  );
+});
+
+describe('daemon registration capacity environment', () => {
+  it.each([undefined, '32'])(
+    'keeps project files from overriding operator capacity %s',
+    (inherited) => {
+      const workspace = makeWorkspace();
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_SERVE_MAX_WORKSPACES=256\n',
+      );
+      const settings = testSettings({
+        env: { QWEN_SERVE_MAX_WORKSPACES: '2' },
+      });
+      if (inherited !== undefined)
+        process.env['QWEN_SERVE_MAX_WORKSPACES'] = inherited;
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_SERVE_MAX_WORKSPACES']).toBe(inherited);
+      reloadEnvironment(settings, workspace);
+      expect(process.env['QWEN_SERVE_MAX_WORKSPACES']).toBe(inherited);
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {
+        QWEN_SERVE_MAX_WORKSPACES: inherited,
+      });
+      expect(snapshot.effectiveEnv['QWEN_SERVE_MAX_WORKSPACES']).toBe(
+        inherited,
+      );
     },
   );
 });
