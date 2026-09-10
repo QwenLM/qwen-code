@@ -1356,28 +1356,6 @@ describe('lease acquisition is atomic (#9205)', () => {
     expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('prompt-b');
   });
 
-  it("keeps the lease's mtime across a same-session refresh — the run identity (R3-resume)", () => {
-    // The review pipeline keys the base-tree trust file's run identity on
-    // the lease's mtime: a resumed run re-acquires here, and a moved mtime
-    // would rotate the trust state and discard the standing base tree,
-    // defeating fetch-pr's preserved plan epoch. The refresh rewrites the
-    // content (the prompt id moves) while the mtime stands.
-    const root = createRepository();
-    createReviewWorktreeLease(leaseParams(root));
-    const path = reviewLeasePath(root, 'pr-1');
-    // Stand the first acquisition clearly in the past: without the preserve
-    // the refresh moves the mtime to now — the gap, not wall-clock luck, is
-    // what discriminates.
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(path, past, past);
-    const before = lstatSync(path).mtimeMs;
-    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
-    expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('prompt-b');
-    // `utimesSync` restores through the filesystem's own granularity, so
-    // the compare carries the same 1 ms tolerance the identity read does.
-    expect(Math.abs(lstatSync(path).mtimeMs - before)).toBeLessThanOrEqual(1);
-  });
-
   it('heals an unreadable lease file instead of wedging on it', () => {
     // Every reader treats a torn/unparseable lease as no lease, so the
     // writer rewriting it is self-heal, not clobber.

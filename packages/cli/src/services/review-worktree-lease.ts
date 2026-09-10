@@ -11,7 +11,6 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -217,33 +216,9 @@ export function createReviewWorktreeLease(params: {
     // Same-session re-fetch refreshes the lease (ownership is per session,
     // not per prompt). An unreadable file is already read as no lease by
     // every reader, so rewriting it heals a torn write instead of wedging.
-    // The refresh must not move the file's mtime: the review pipeline keys
-    // run identity on it (base-tree's trust file adopts it), and a resumed
-    // run — which re-acquires here — would otherwise rotate the trust state
-    // and discard the standing base tree, defeating the resume's preserved
-    // plan epoch.
-    const keepMtime = readTrustMtime(path);
     writeFileSync(path, data, 'utf8');
-    if (keepMtime !== null) {
-      try {
-        const at = new Date(keepMtime);
-        utimesSync(path, at, at);
-      } catch {
-        // A filesystem that declines utimes takes the moved mtime; the
-        // rotation that follows is the honest answer, not a wedge.
-      }
-    }
   }
   mirrorLeaseAtLegacyPath(legacy, data, params.sessionId, params.target);
-}
-
-/** A lease file's mtime, or null when it cannot be read. */
-function readTrustMtime(path: string): number | null {
-  try {
-    return lstatSync(path).mtimeMs;
-  } catch {
-    return null;
-  }
 }
 
 /**
