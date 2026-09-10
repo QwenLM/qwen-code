@@ -1,29 +1,93 @@
 import { useContext, useEffect } from 'react';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { Folder, Laptop, Server } from 'lucide-react';
 import { getDaemonToken } from '../../config/daemon';
 import {
   WorkspaceHostsEnabled,
-  rememberWorkspaceHost,
   openHostedWorkspace,
+  rememberWorkspaceHost,
   useWorkspaceHosts,
+  type WorkspaceHost,
 } from '../../config/workspace-hosts';
 import { useI18n } from '../../i18n';
-import { Laptop, Folder, Server } from 'lucide-react';
+import sectionStyles from '../sidebar/WorkspaceSection.module.css';
 
-export function WorkspaceHostProjects() {
-  const enabled = useContext(WorkspaceHostsEnabled);
-  return enabled ? <HostProjects /> : null;
-}
+const GROUP_LABEL_CLASS =
+  'flex w-full min-w-0 items-center gap-1.5 px-2 pb-1 pt-3 text-left text-[11px] font-medium text-muted-foreground';
 
-function HostProjects() {
+function useCurrentHostOrigin(): string {
   const workspace = useWorkspace();
-  const { t } = useI18n();
-  const origin = new URL(
+  return new URL(
     workspace.baseUrl || window.location.origin,
     window.location.origin,
   ).origin;
-  const hosts = useWorkspaceHosts();
+}
+
+/**
+ * Saved hosts other than the connected one. While a remote host is connected
+ * the page's own daemon is always listed, so there is a way back to it.
+ */
+function useOtherHosts(origin: string): WorkspaceHost[] {
+  const others = useWorkspaceHosts().filter((host) => host.origin !== origin);
+  if (
+    origin !== window.location.origin &&
+    !others.some((host) => host.origin === window.location.origin)
+  ) {
+    others.unshift({ origin: window.location.origin, workspaces: [] });
+  }
+  return others;
+}
+
+function HostLabel({ origin }: { origin: string }) {
+  const { t } = useI18n();
+  const local = origin === window.location.origin;
+  const Icon = local ? Laptop : Server;
+  return (
+    <>
+      <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">
+        {local ? t('workspaceHost.local') : new URL(origin).host}
+      </span>
+    </>
+  );
+}
+
+/**
+ * Names the connected host above its live project list. Until another host is
+ * saved there is nothing to tell apart, so the plain list stays unlabeled.
+ */
+export function WorkspaceHostHeading() {
+  const enabled = useContext(WorkspaceHostsEnabled);
+  return enabled ? <CurrentHostHeading /> : null;
+}
+
+function CurrentHostHeading() {
+  const origin = useCurrentHostOrigin();
+  const others = useOtherHosts(origin);
+  if (others.length === 0) return null;
+  return (
+    <div className={GROUP_LABEL_CLASS} title={origin}>
+      <HostLabel origin={origin} />
+    </div>
+  );
+}
+
+/**
+ * Saved projects on the other hosts, grouped by host below the live list.
+ * Only the connected host is live; choosing one of these reloads the page
+ * against its host.
+ */
+export function OtherHostProjects() {
+  const enabled = useContext(WorkspaceHostsEnabled);
+  return enabled ? <OtherHosts /> : null;
+}
+
+function OtherHosts() {
+  const workspace = useWorkspace();
+  const { t } = useI18n();
+  const origin = useCurrentHostOrigin();
+  const others = useOtherHosts(origin);
   useEffect(() => {
     if (workspace.capabilities?.workspaces) {
       rememberWorkspaceHost(
@@ -56,66 +120,51 @@ function HostProjects() {
       cancelled = true;
     };
   }, [origin]);
-  const otherHosts = hosts.filter((host) => host.origin !== origin);
-  // Until another host is saved there is nowhere else to go, so a browser that
-  // only uses the page's own daemon keeps the plain project list.
-  if (origin === window.location.origin && otherHosts.length === 0) {
-    return null;
-  }
-  if (
-    origin !== window.location.origin &&
-    !otherHosts.some((host) => host.origin === window.location.origin)
-  ) {
-    otherHosts.unshift({ origin: window.location.origin, workspaces: [] });
-  }
+  if (others.length === 0) return null;
   return (
-    <div className="px-3 py-2 text-sm">
-      {otherHosts.map((host) => (
-        <div key={host.origin} className="mb-3">
-          <button
-            type="button"
-            className="w-full truncate text-left text-xs text-muted-foreground"
-            onClick={() => openHostedWorkspace(host.origin)}
-          >
-            {host.origin === window.location.origin ? (
-              <Laptop className="mr-2 inline size-4" aria-hidden="true" />
-            ) : (
-              <Server className="mr-2 inline size-4" aria-hidden="true" />
-            )}
-            {host.origin === window.location.origin
-              ? t('workspaceHost.local')
-              : host.origin}
-          </button>
-          {host.workspaces.map((project) => (
+    <div data-testid="other-host-projects">
+      {others.map((host) => {
+        const ProjectIcon =
+          host.origin === window.location.origin ? Folder : Server;
+        return (
+          <div key={host.origin}>
             <button
-              key={project.id}
               type="button"
-              className="block w-full truncate rounded px-2 py-1 text-left hover:bg-accent"
-              title={`${host.origin} — ${project.cwd}`}
-              onClick={() => openHostedWorkspace(host.origin, project.id)}
+              className={`${GROUP_LABEL_CLASS} hover:text-foreground`}
+              title={t('workspaceHost.openHost', { host: host.origin })}
+              onClick={() => openHostedWorkspace(host.origin)}
             >
-              {host.origin === window.location.origin ? (
-                <Folder className="mr-2 inline size-4" aria-hidden="true" />
-              ) : (
-                <Server className="mr-2 inline size-4" aria-hidden="true" />
-              )}
-              {project.displayName ||
-                project.cwd.split(/[\\/]/).filter(Boolean).pop() ||
-                project.cwd}
+              <HostLabel origin={host.origin} />
             </button>
-          ))}
-        </div>
-      ))}
-      <div className="truncate text-xs text-muted-foreground" title={origin}>
-        {origin === window.location.origin ? (
-          <Laptop className="mr-2 inline size-4" aria-hidden="true" />
-        ) : (
-          <Server className="mr-2 inline size-4" aria-hidden="true" />
-        )}
-        {origin === window.location.origin
-          ? t('workspaceHost.local')
-          : `${t('workspaceHost.remote')} · ${origin}`}
-      </div>
+            {host.workspaces.map((project) => (
+              <div key={project.id} className={sectionStyles.headerRow}>
+                <button
+                  type="button"
+                  className={sectionStyles.header}
+                  title={`${host.origin} — ${project.cwd}`}
+                  onClick={() => openHostedWorkspace(host.origin, project.id)}
+                >
+                  <span className={sectionStyles.chevron}>
+                    <ProjectIcon
+                      className={sectionStyles.folderIcon}
+                      size={14}
+                      strokeWidth={1.4}
+                      aria-hidden="true"
+                    />
+                  </span>
+                  <span className={sectionStyles.headerContent}>
+                    <span className={sectionStyles.name}>
+                      {project.displayName ||
+                        project.cwd.split(/[\\/]/).filter(Boolean).pop() ||
+                        project.cwd}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

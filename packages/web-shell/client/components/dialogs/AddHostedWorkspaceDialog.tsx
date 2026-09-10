@@ -22,7 +22,13 @@ import {
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { Label } from '../ui/label';
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from '../ui/field';
 import { Laptop, Server } from 'lucide-react';
 
 export function AddHostedWorkspaceDialog({
@@ -153,7 +159,7 @@ export function AddHostedWorkspaceDialog({
           '/'
         }
         daemonAddress={
-          kind === 'local' ? t('workspaceHost.local') : target.origin
+          kind === 'local' ? t('workspaceHost.thisComputer') : target.origin
         }
         onSuggest={suggest}
         onPick={
@@ -222,6 +228,9 @@ export function AddHostedWorkspaceDialog({
         }}
       />
     );
+  const knownHosts = hosts.filter(
+    (host) => host.origin !== window.location.origin,
+  );
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
@@ -229,92 +238,138 @@ export function AddHostedWorkspaceDialog({
       size="md"
     >
       <form
-        className="flex flex-col gap-5"
+        className="flex flex-col gap-6"
         onSubmit={(event) => {
           event.preventDefault();
           void connect();
         }}
       >
-        <fieldset disabled={busy} className="grid grid-cols-2 gap-3">
-          <legend className="mb-3">{t('workspaceHost.location')}</legend>
-          {(['local', 'remote'] as const).map((value) => (
-            <label
-              key={value}
-              className={`cursor-pointer rounded-lg border p-4 ${kind === value ? 'border-primary bg-accent' : 'border-border'}`}
-            >
-              <input
-                type="radio"
-                name="workspace-host-kind"
-                value={value}
-                checked={kind === value}
-                onChange={() => {
-                  setKind(value);
+        <FieldGroup>
+          <fieldset disabled={busy} className="m-0 min-w-0 border-0 p-0">
+            <legend className="mb-3 p-0 text-sm font-medium">
+              {t('workspaceHost.location')}
+            </legend>
+            <div className="grid grid-cols-2 gap-3">
+              {(['local', 'remote'] as const).map((value) => {
+                const Icon = value === 'local' ? Laptop : Server;
+                return (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring/50 ${
+                      kind === value
+                        ? 'border-primary bg-accent'
+                        : 'border-border hover:bg-accent/50'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="workspace-host-kind"
+                      value={value}
+                      checked={kind === value}
+                      onChange={() => {
+                        setKind(value);
+                        setToken('');
+                        setError('');
+                      }}
+                      className="sr-only"
+                    />
+                    <Icon
+                      className="mt-0.5 size-5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                    <span className="flex min-w-0 flex-col gap-1">
+                      <span className="text-sm font-medium">
+                        {t(`workspaceHost.${value}`)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {t(`workspaceHost.${value}Hint`)}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+          {kind === 'remote' && (
+            <Field>
+              <FieldLabel htmlFor="workspace-host-address">
+                {t('workspaceHost.server')}
+              </FieldLabel>
+              <Input
+                id="workspace-host-address"
+                placeholder="https://server.example.com:4170"
+                value={address}
+                disabled={busy}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => {
+                  setAddress(event.target.value);
                   setToken('');
-                  setError('');
                 }}
-                className="mr-2"
+                required
               />
-              {t(`workspaceHost.${value}`)}
-              {value === 'local' ? (
-                <Laptop className="mt-3 size-6" aria-hidden="true" />
-              ) : (
-                <Server className="mt-3 size-6" aria-hidden="true" />
+              {knownHosts.length > 0 && (
+                <div
+                  role="group"
+                  aria-label={t('workspaceHost.recentServers')}
+                  className="flex flex-wrap gap-2"
+                >
+                  {knownHosts.map((host) => (
+                    <Button
+                      key={host.origin}
+                      type="button"
+                      size="sm"
+                      variant={
+                        address.trim() === host.origin ? 'secondary' : 'outline'
+                      }
+                      disabled={busy}
+                      title={host.origin}
+                      onClick={() => {
+                        setAddress(host.origin);
+                        setToken('');
+                      }}
+                    >
+                      <Server aria-hidden="true" />
+                      {new URL(host.origin).host}
+                    </Button>
+                  ))}
+                </div>
               )}
-              <p className="mt-2 text-sm text-muted-foreground">
-                {t(`workspaceHost.${value}Hint`)}
-              </p>
-            </label>
-          ))}
-        </fieldset>
-        {kind === 'remote' && (
-          <>
-            <Label htmlFor="workspace-host-address">
-              {t('workspaceHost.server')}
-            </Label>
-            <Input
-              id="workspace-host-address"
-              list="workspace-known-hosts"
-              placeholder="https://server.example.com"
-              value={address}
-              disabled={busy}
-              onChange={(event) => {
-                setAddress(event.target.value);
-                setToken('');
-              }}
-              required
-            />
-            <datalist id="workspace-known-hosts">
-              {hosts
-                .filter((host) => host.origin !== window.location.origin)
-                .map((host) => (
-                  <option key={host.origin} value={host.origin} />
-                ))}
-            </datalist>
-          </>
-        )}
-        {(kind === 'remote' || error) && (
-          <>
-            <Label htmlFor="workspace-host-token">
-              {t('workspaceHost.token')}
-            </Label>
-            <Input
-              id="workspace-host-token"
-              type="password"
-              autoComplete="off"
-              value={token}
-              disabled={busy}
-              onChange={(event) => setToken(event.target.value)}
-            />
-          </>
-        )}
-        {error && (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        )}
-        <Button type="submit" disabled={busy}>
-          {t(busy ? 'workspaceHost.connecting' : 'workspaceHost.next')}
-        </Button>
+            </Field>
+          )}
+          {(kind === 'remote' || error) && (
+            <Field>
+              <FieldLabel htmlFor="workspace-host-token">
+                {t('workspaceHost.token')}
+              </FieldLabel>
+              <Input
+                id="workspace-host-token"
+                type="password"
+                autoComplete="off"
+                value={token}
+                disabled={busy}
+                onChange={(event) => setToken(event.target.value)}
+              />
+              <FieldDescription>
+                {t('workspaceHost.tokenHint')}
+              </FieldDescription>
+            </Field>
+          )}
+          {error && <FieldError>{error}</FieldError>}
+        </FieldGroup>
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={close}
+            disabled={busy}
+          >
+            {t('sidebar.addWorkspaceCancel')}
+          </Button>
+          <Button type="submit" disabled={busy}>
+            {t(busy ? 'workspaceHost.connecting' : 'workspaceHost.next')}
+          </Button>
+        </div>
       </form>
     </DialogShell>
   );

@@ -13,7 +13,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
-import { FolderOpenIcon } from 'lucide-react';
+import { ArrowLeftIcon, CornerLeftUpIcon, FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -68,7 +68,6 @@ export function AddWorkspaceDialog({
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState(initialPath);
-  const [confirmedPath, setConfirmedPath] = useState<string>();
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -246,15 +245,24 @@ export function AddWorkspaceDialog({
         // Enter accepts the highlighted directory instead of submitting.
         event.preventDefault();
         acceptSuggestion(suggestions[highlight]);
+        return;
+      }
+      // While browsing, the path field navigates and only the add button adds,
+      // so a stray Enter cannot register a half-typed folder.
+      if (
+        event.key === 'Enter' &&
+        browseDirectories &&
+        !event.nativeEvent.isComposing
+      ) {
+        event.preventDefault();
       }
     },
-    [listOpen, suggestions, highlight, acceptSuggestion],
+    [listOpen, suggestions, highlight, acceptSuggestion, browseDirectories],
   );
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (browseDirectories && confirmedPath !== path) return;
       const trimmed = path.trim();
       if (!trimmed) return;
       if (!isAbsoluteLike(trimmed)) {
@@ -282,8 +290,6 @@ export function AddWorkspaceDialog({
       }
     },
     [
-      browseDirectories,
-      confirmedPath,
       path,
       displayName,
       displayNameEnabled,
@@ -357,6 +363,33 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
+                {browseDirectories && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={submitting}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      const trimmed = path.replace(/[\\/]+$/, '');
+                      // A drive root is its own parent; `hostSep` is only
+                      // known once suggestions arrive, so split on either.
+                      if (/^[A-Za-z]:$/.test(trimmed)) {
+                        setPath(`${trimmed}\\`);
+                        return;
+                      }
+                      const index = Math.max(
+                        trimmed.lastIndexOf('/'),
+                        trimmed.lastIndexOf('\\'),
+                      );
+                      setPath(
+                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
+                      );
+                    }}
+                  >
+                    <CornerLeftUpIcon aria-hidden="true" />
+                    {t('workspaceHost.parent')}
+                  </Button>
+                )}
                 {onPick && (
                   <Button
                     type="button"
@@ -407,44 +440,6 @@ export function AddWorkspaceDialog({
                 </ul>
               )}
             </div>
-            {browseDirectories && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={submitting}
-                  onClick={() => {
-                    const trimmed = path.replace(/[\\/]+$/, '');
-                    // A drive root is its own parent; `hostSep` is only known
-                    // once suggestions arrive, so split on either separator.
-                    if (/^[A-Za-z]:$/.test(trimmed)) {
-                      setPath(`${trimmed}\\`);
-                      return;
-                    }
-                    const index = Math.max(
-                      trimmed.lastIndexOf('/'),
-                      trimmed.lastIndexOf('\\'),
-                    );
-                    setPath(index >= 0 ? trimmed.slice(0, index + 1) : hostSep);
-                  }}
-                >
-                  {t('workspaceHost.parent')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={submitting || !isAbsoluteLike(path)}
-                  onClick={() => setConfirmedPath(path)}
-                >
-                  {t('workspaceHost.chooseFolder')}
-                </Button>
-                {confirmedPath === path && (
-                  <span className="text-sm text-muted-foreground">
-                    {t('workspaceHost.selectedFolder')} {path}
-                  </span>
-                )}
-              </div>
-            )}
             <FieldDescription id={HINT_ID}>
               {daemonAddress
                 ? t('sidebar.addWorkspaceDaemonHint', {
@@ -498,41 +493,37 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex justify-end gap-2">
+        <div className="flex items-center gap-2">
           {onBack && (
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               onClick={onBack}
               disabled={submitting}
             >
+              <ArrowLeftIcon aria-hidden="true" />
               {t('workspaceHost.back')}
             </Button>
           )}
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onClose}
-            disabled={submitting}
-          >
-            {t('sidebar.addWorkspaceCancel')}
-          </Button>
-          <Button
-            type="submit"
-            disabled={
-              submitting ||
-              !path.trim() ||
-              (browseDirectories && confirmedPath !== path)
-            }
-          >
-            {submitting
-              ? t('sidebar.addWorkspaceAdding')
-              : t(
-                  browseDirectories
-                    ? 'sidebar.addWorkspaceTitle'
-                    : 'sidebar.addWorkspaceRegister',
-                )}
-          </Button>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onClose}
+              disabled={submitting}
+            >
+              {t('sidebar.addWorkspaceCancel')}
+            </Button>
+            <Button type="submit" disabled={submitting || !path.trim()}>
+              {submitting
+                ? t('sidebar.addWorkspaceAdding')
+                : t(
+                    browseDirectories
+                      ? 'workspaceHost.addFolder'
+                      : 'sidebar.addWorkspaceRegister',
+                  )}
+            </Button>
+          </div>
         </div>
       </form>
     </DialogShell>

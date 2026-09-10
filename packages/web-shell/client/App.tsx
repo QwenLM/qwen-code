@@ -17182,9 +17182,16 @@ export function App({
                 .join(' ')}
               aria-hidden={artifactPanelFullscreen || undefined}
             >
-              {workspaceHostsEnabled && !activePanel && mainView === 'chat' && (
-                <WorkspaceLocation cwd={connection.workspaceCwd} />
-              )}
+              {workspaceHostsEnabled &&
+                !activePanel &&
+                mainView === 'chat' &&
+                (!chatHeaderEnabled || isChatEmptyState) && (
+                  // With a chat header the label sits beside its actions; the
+                  // empty state has none, so it gets a slim row of its own.
+                  <div className="flex px-4 pt-3 empty:hidden">
+                    <WorkspaceLocation cwd={connection.workspaceCwd} />
+                  </div>
+                )}
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
@@ -17256,6 +17263,11 @@ export function App({
                     </div>
                   ) : (
                     <ChatContextHeader
+                      location={
+                        workspaceHostsEnabled && mainView === 'chat' ? (
+                          <WorkspaceLocation cwd={connection.workspaceCwd} />
+                        ) : undefined
+                      }
                       content={
                         titleHeaderItemVisible
                           ? (sessionDisplayName ?? t('session.new'))

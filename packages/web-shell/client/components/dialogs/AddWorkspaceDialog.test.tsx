@@ -990,7 +990,7 @@ describe('AddWorkspaceDialog', () => {
         (button) => button.textContent === name,
       )!;
 
-    it('adds only the folder the user explicitly chose', async () => {
+    it('adds the folder shown in the path field from the add button', async () => {
       const onAdd = vi.fn().mockResolvedValue(undefined);
       mount(
         <AddWorkspaceDialog
@@ -1001,14 +1001,8 @@ describe('AddWorkspaceDialog', () => {
         />,
       );
 
-      expect(submitButton().disabled).toBe(true);
-      act(() => buttonNamed('Use this folder').click());
-      expect(submitButton().disabled).toBe(false);
-
-      // Editing the path after choosing withdraws the choice.
+      expect(submitButton().textContent).toBe('Add this folder');
       type('/repo/other');
-      expect(submitButton().disabled).toBe(true);
-      act(() => buttonNamed('Use this folder').click());
       submit();
       await act(async () => {
         await Promise.resolve();

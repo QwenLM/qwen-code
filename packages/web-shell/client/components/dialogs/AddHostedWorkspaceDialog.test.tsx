@@ -136,7 +136,6 @@ describe('AddHostedWorkspaceDialog', () => {
     await flush();
     expect(sdk.constructed.map((options) => options.baseUrl)).toEqual([PAGE]);
 
-    act(() => buttonNamed('Use this folder').click());
     act(() => submitButton().click());
     await flush();
 
@@ -185,7 +184,6 @@ describe('AddHostedWorkspaceDialog', () => {
     await flush();
 
     typeInto('#add-workspace-path', '/repo/app/');
-    act(() => buttonNamed('Use this folder').click());
     typeInto('#add-workspace-display-name', 'Renamed');
     act(() => submitButton().click());
     await flush();

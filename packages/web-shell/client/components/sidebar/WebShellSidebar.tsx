@@ -12,7 +12,10 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import { WorkspaceHostProjects } from '../workspaces/WorkspaceHostProjects';
+import {
+  OtherHostProjects,
+  WorkspaceHostHeading,
+} from '../workspaces/WorkspaceHostProjects';
 import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
 import {
   useActions,
@@ -5846,7 +5849,6 @@ export function WebShellSidebar({
                 </div>
               </div>
             )}
-            {!hideProjectHeader && <WorkspaceHostProjects />}
             {searchOpen && !hideProjectHeader && (
               <div className={styles.projectSearch}>
                 <SearchIcon aria-hidden="true" />
@@ -5866,6 +5868,7 @@ export function WebShellSidebar({
               </div>
             )}
             <div hidden={!projectsExpanded}>
+              {!hideProjectHeader && <WorkspaceHostHeading />}
               <div className={styles.workspacePicker}>
                 <div className={styles.workspaceList}>
                   {standaloneSessionsVisible &&
@@ -6282,6 +6285,7 @@ export function WebShellSidebar({
                     </Fragment>
                   ))}
                 </div>
+                {!hideProjectHeader && <OtherHostProjects />}
               </div>
             </div>
             {archivedSection}
