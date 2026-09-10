@@ -410,6 +410,87 @@ describe('resumeHistoryUtils', () => {
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text }]);
     });
+
+    it('strips the envelope from a winning displayText source', () => {
+      // `displayText` wins the resolution chain and can itself carry the
+      // envelope (it is the model-facing request text whenever submitted
+      // provenance was unavailable), so the strip must apply to the
+      // resolved value, not only to the parts fallback.
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }] },
+        systemPayload: {
+          displayText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+          hookContext: 'ctx',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('strips the envelope from an at-command userText', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText:
+                '<system-reminder>\nnotice\n</system-reminder>\n\nmy @file prompt',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: { parts: [{ text: 'expanded model prompt' }] },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('my @file prompt');
+    });
+
+    it('strips the envelope from a lone at-command record', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText:
+                '<system-reminder>\nnotice\n</system-reminder>\n\nmy @file prompt',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('my @file prompt');
+    });
+
+    it('keeps an envelope-only prompt as its own row, matching the live path', () => {
+      // The live path keeps the raw text when stripping would leave
+      // nothing; resume must not silently drop the row the live transcript
+      // showed.
+      const text = '<system-reminder>\nnotice\n</system-reminder>';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text }]);
+    });
   });
 
   describe('UserPromptSubmit hook context provenance', () => {

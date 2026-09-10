@@ -893,6 +893,53 @@ describe('useLlmStream', () => {
     }
   });
 
+  it('keeps an envelope-only submission visible on every read-back surface', async () => {
+    const mockLogMessage = vi.fn();
+    const cancelSubmitSpy = vi.fn();
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })(),
+    );
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      cancelSubmitSpy,
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>';
+
+    await act(async () => {
+      result.current.submitQuery(modelText, SendMessageType.UserQuery);
+    });
+
+    // Stripping would leave nothing, so the raw text stands: no surface may
+    // hide the submission by turning it into an empty string.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      modelText,
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+
+    // The cancel-restore handoff keeps the raw text too.
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    expect(cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem).toEqual({
+      id: expect.any(Number),
+      text: modelText,
+      modelText,
+    });
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -12549,10 +12596,13 @@ describe('useLlmStream', () => {
       // ended up true depends on whether the stream's mock yielded
       // content before cancel; that's covered by a separate test below.)
       // `text` mirrors the history item, so it drops the injected
-      // `<system-reminder>` envelope the model text carries.
+      // `<system-reminder>` envelope; `modelText` keeps the enveloped
+      // original so an unedited resubmit can replay it.
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
         text: 'what time is it?',
+        modelText:
+          '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
         submittedPrompt: 'what time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
@@ -12672,6 +12722,7 @@ describe('useLlmStream', () => {
       expect(firstCall?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
         text: 'first prompt',
+        modelText: 'first prompt',
       });
 
       // Retry the same prompt. Retry bypasses prepareQueryForLlm's
@@ -18218,6 +18269,8 @@ describe('useLlmStream', () => {
         ).toEqual({
           id: expect.any(Number),
           text: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
           submittedPrompt: 'First query',
         });
         expect(
@@ -18312,6 +18365,8 @@ describe('useLlmStream', () => {
         ).toEqual({
           id: expect.any(Number),
           text: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
           submittedPrompt: 'First query',
         });
       } finally {

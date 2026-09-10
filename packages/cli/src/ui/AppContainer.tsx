@@ -282,6 +282,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  stripLeadingSystemReminders,
 } from './utils/historyUtils.js';
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
@@ -1480,10 +1481,12 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<Pick<
-    QueuedUserSubmission,
-    'modelText' | 'submittedPrompt'
-  > | null>(null);
+  const restoredSubmissionRef = useRef<
+    | (Pick<QueuedUserSubmission, 'modelText' | 'submittedPrompt'> & {
+        resubmitModelText?: string;
+      })
+    | null
+  >(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -2612,6 +2615,27 @@ export const AppContainer = (props: AppContainerProps) => {
     [config],
   );
 
+  // A restored submission shows the user-visible text in the composer, but
+  // an unedited resubmit must replay the exact model text: a one-shot
+  // reminder envelope it carried was consumed on the first attempt and no
+  // injector can re-arm it. `modelText` stays the identity token that
+  // handleBufferChange/handleFinalSubmit compare the buffer against.
+  const stashRestoredSubmission = useCallback(
+    (submission: { modelText: string; submittedPrompt?: string }): string => {
+      const displayText = stripLeadingSystemReminders(submission.modelText);
+      restoredSubmissionRef.current = {
+        modelText: displayText,
+        ...(submission.submittedPrompt === undefined
+          ? {}
+          : { submittedPrompt: submission.submittedPrompt }),
+        resubmitModelText: submission.modelText,
+      };
+      submittedPromptProvenanceUnavailableRef.current = false;
+      return displayText;
+    },
+    [],
+  );
+
   const popAllQueuedMessages = useCallback((): string | null => {
     const goalTurnKeys = removeGoalTurns();
     if (goalTurnKeys.length > 0) {
@@ -2619,10 +2643,13 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     const submission = popAllMessages();
     if (submission === null) return null;
-    restoredSubmissionRef.current = submission;
-    submittedPromptProvenanceUnavailableRef.current = false;
-    return submission.modelText;
-  }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
+    return stashRestoredSubmission(submission);
+  }, [
+    popAllMessages,
+    releaseQueuedGoalReservations,
+    removeGoalTurns,
+    stashRestoredSubmission,
+  ]);
 
   useEffect(() => {
     const host: GoalTurnHost = {
@@ -3061,6 +3088,15 @@ export const AppContainer = (props: AppContainerProps) => {
             : restoredSubmission.modelText === submittedValue
               ? restoredSubmission.submittedPrompt
               : undefined;
+      // Unedited resubmit of a restored prompt: replay the exact model text
+      // of the first attempt below, after the injectors ran. Their one-shot
+      // latches were consumed back then, so without the replay the model
+      // would never see the reminder the cancelled attempt carried.
+      const restoredModelText =
+        restoredSubmission !== null &&
+        restoredSubmission.modelText === submittedValue
+          ? restoredSubmission.resubmitModelText
+          : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }
@@ -3168,6 +3204,9 @@ export const AppContainer = (props: AppContainerProps) => {
         submittedValue =
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
+      }
+      if (restoredModelText !== undefined) {
+        submittedValue = restoredModelText;
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
@@ -3397,13 +3436,12 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
-        restoredSubmissionRef.current = popped;
-        submittedPromptProvenanceUnavailableRef.current = false;
+        const poppedDisplayText = stashRestoredSubmission(popped);
         const currentText = buffer.text;
         buffer.setText(
           currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
+            ? `${poppedDisplayText}\n${currentText}`
+            : poppedDisplayText,
         );
       }
 
@@ -3464,14 +3502,17 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       const restoreCancelledPrompt = () => {
-        restoredSubmissionRef.current = {
-          modelText: cancelledTurnUserItem.text,
-          ...(cancelledTurnUserItem.submittedPrompt === undefined
-            ? {}
-            : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
-        };
-        submittedPromptProvenanceUnavailableRef.current = false;
-        buffer.setText(cancelledTurnUserItem.text);
+        // `text` is the display text (stripped of any injected envelope) and
+        // stays the identity token; `modelText` is the enveloped original the
+        // model must see again on an unedited resubmit.
+        buffer.setText(
+          stashRestoredSubmission({
+            modelText: cancelledTurnUserItem.modelText,
+            ...(cancelledTurnUserItem.submittedPrompt === undefined
+              ? {}
+              : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
+          }),
+        );
       };
 
       if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
@@ -3586,6 +3627,7 @@ export const AppContainer = (props: AppContainerProps) => {
       logger,
       llmClient,
       refreshStatic,
+      stashRestoredSubmission,
       pendingSlashCommandHistoryItems,
       pendingLlmHistoryItems,
     ],

@@ -13,6 +13,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  stripLeadingSystemReminders,
 } from './historyUtils.js';
 
 const mk = (
@@ -274,5 +275,45 @@ describe('realUserPromptTexts', () => {
       mk({ type: 'user', text: 'valid' }, 3),
     ];
     expect(realUserPromptTexts(h)).toEqual(['valid']);
+  });
+});
+describe('stripLeadingSystemReminders', () => {
+  it('strips a single leading envelope', () => {
+    expect(
+      stripLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\nmy prompt',
+      ),
+    ).toBe('my prompt');
+  });
+
+  it('strips stacked envelopes', () => {
+    expect(
+      stripLeadingSystemReminders(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\nreview this',
+      ),
+    ).toBe('review this');
+  });
+
+  it('returns an envelope-only message unchanged rather than empty', () => {
+    const only = '<system-reminder>\nnote\n</system-reminder>';
+    expect(stripLeadingSystemReminders(only)).toBe(only);
+    const stacked =
+      '<system-reminder>one</system-reminder>\n\n<system-reminder>two</system-reminder>';
+    expect(stripLeadingSystemReminders(stacked)).toBe(stacked);
+  });
+
+  it('keeps a mid-message envelope the user pasted', () => {
+    const pasted = 'review <system-reminder>pasted</system-reminder> this';
+    expect(stripLeadingSystemReminders(pasted)).toBe(pasted);
+  });
+
+  it('keeps an unterminated envelope', () => {
+    const unterminated = '<system-reminder>never closed\nreview this';
+    expect(stripLeadingSystemReminders(unterminated)).toBe(unterminated);
+  });
+
+  it('returns the empty string unchanged', () => {
+    expect(stripLeadingSystemReminders('')).toBe('');
   });
 });

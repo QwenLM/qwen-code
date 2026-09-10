@@ -24,6 +24,20 @@ describe('QueuedMessageDisplay', () => {
     expect(output).toContain('First message');
   });
 
+  it('previews a queued message without its injected reminder envelope', () => {
+    const { lastFrame } = render(
+      <QueuedMessageDisplay
+        messageQueue={[
+          '<system-reminder>\n1 background agent was restored.\n</system-reminder>\n\nreview this',
+        ]}
+      />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('review this');
+    expect(output).not.toContain('<system-reminder>');
+  });
+
   it('displays multiple queued messages', () => {
     const messageQueue = [
       'First queued message',

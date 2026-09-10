@@ -164,7 +164,9 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
  * Leading-only on purpose: an envelope the user pasted into the middle of
  * their own message stays visible, so a prompt is never partly hidden. An
  * unterminated envelope stops the scan and is left in place rather than
- * swallowed.
+ * swallowed. And when stripping would leave nothing — a prompt that IS only
+ * envelope(s), e.g. one the user pasted wholesale — the original text is
+ * returned unchanged, so no caller can strip a message out of existence.
  */
 export function stripLeadingSystemReminders(text: string): string {
   let rest = text;
@@ -176,7 +178,7 @@ export function stripLeadingSystemReminders(text: string): string {
     if (close === -1) break;
     rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
   }
-  return rest;
+  return rest === '' ? text : rest;
 }
 
 /**

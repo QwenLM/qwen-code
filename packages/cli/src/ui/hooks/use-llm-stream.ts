@@ -521,6 +521,14 @@ export interface CancelSubmitInfo {
   lastTurnUserItem: {
     id: number;
     text: string;
+    /**
+     * The exact model-bound text of the turn (`text` may have an injected
+     * one-shot reminder envelope stripped for display). The cancel handler
+     * replays this when the restored prompt is resubmitted unedited: the
+     * envelope's latch was consumed by the cancelled attempt, so without
+     * the replay the model would never see the notice at all.
+     */
+    modelText: string;
     submittedPrompt?: string;
   } | null;
   /**
@@ -822,6 +830,7 @@ export const useLlmStream = (
   const lastTurnUserItemRef = useRef<{
     id: number;
     text: string;
+    modelText: string;
     submittedPrompt?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
@@ -1612,9 +1621,10 @@ export const useLlmStream = (
         const trimmedQuery = query.trim();
         // `trimmedQuery` is the model text and may carry an injected one-shot
         // reminder envelope; everything the user reads back (transcript,
-        // ↑-recall, cancel-restore) must use this instead.
-        const userVisibleQuery =
-          stripLeadingSystemReminders(trimmedQuery) || trimmedQuery;
+        // ↑-recall, cancel-restore) must use this instead. The helper never
+        // returns empty for non-empty input, so an envelope-only prompt
+        // stays visible as-is.
+        const userVisibleQuery = stripLeadingSystemReminders(trimmedQuery);
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1760,11 +1770,13 @@ export const useLlmStream = (
           // mismatch makes auto-restore bail correctly in that case.
           // The text must stay identical to the history item's: the
           // cancel handler compares the two, and it is also what gets
-          // restored into the composer.
+          // restored into the composer. `modelText` keeps the enveloped
+          // original so an unedited resubmit can replay it.
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
               text: userVisibleQuery,
+              modelText: trimmedQuery,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             };
           }

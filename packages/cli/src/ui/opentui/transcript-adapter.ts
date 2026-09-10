@@ -20,6 +20,7 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
+import { stripLeadingSystemReminders } from '../utils/historyUtils.js';
 
 interface SessionPart {
   text?: string;
@@ -97,11 +98,14 @@ export function transcribeSession(
       const hasAttachmentReferences =
         Array.isArray(o.systemPayload?.attachmentReferences) &&
         o.systemPayload.attachmentReferences.length > 0;
-      const text =
+      // The same one-shot envelope strip as Ink's resume path: both
+      // renderers replay the same session file and must agree on the row.
+      const text = stripLeadingSystemReminders(
         o.systemPayload?.displayText ||
-        (hasAttachmentReferences
-          ? '[User message with attachments]'
-          : partsText);
+          (hasAttachmentReferences
+            ? '[User message with attachments]'
+            : partsText),
+      );
       if (text) {
         events.push({ type: 'user', text });
         prompts.push(text);

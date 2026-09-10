@@ -7,6 +7,7 @@
 import { useRef } from 'react';
 import { Box, Text } from 'ink';
 import { t } from '../../i18n/index.js';
+import { stripLeadingSystemReminders } from '../utils/historyUtils.js';
 
 const MAX_DISPLAYED_QUEUED_MESSAGES = 3;
 const NUM_TIMES_QUEUE_HINT_SHOWN = 3;
@@ -44,7 +45,12 @@ export const QueuedMessageDisplay = ({
       {messageQueue
         .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)
         .map((message, index) => {
-          const preview = message.replace(/\s+/g, ' ');
+          // Queued model text can carry an injected one-shot reminder
+          // envelope; the preview shows the user-visible text.
+          const preview = stripLeadingSystemReminders(message).replace(
+            /\s+/g,
+            ' ',
+          );
 
           return (
             <Box key={index} paddingLeft={2} width="100%">

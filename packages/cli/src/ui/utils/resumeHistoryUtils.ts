@@ -416,12 +416,14 @@ function convertToHistoryItems(
 
           const payload = pendingAtCommands.shift()!;
           const projection = projectUserTranscriptForDisplay(record);
-          const text =
+          // Strip the resolved value: `userText`/`displayText` win the
+          // chain and both can carry the envelope, so wrapping only the
+          // parts branch would leave the normal path unfiltered.
+          const text = stripLeadingSystemReminders(
             payload.userText ||
-            (projection.displayText ??
-              stripLeadingSystemReminders(
-                extractTextFromParts(projection.parts),
-              ));
+              (projection.displayText ??
+                extractTextFromParts(projection.parts)),
+          );
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -451,13 +453,12 @@ function convertToHistoryItems(
         const hasAttachmentReferences =
           Array.isArray(payload?.attachmentReferences) &&
           payload.attachmentReferences.length > 0;
-        const text =
+        const text = stripLeadingSystemReminders(
           projection.displayText ||
-          (hasAttachmentReferences
-            ? '[User message with attachments]'
-            : stripLeadingSystemReminders(
-                extractTextFromParts(projection.parts),
-              ));
+            (hasAttachmentReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(projection.parts)),
+        );
         if (text) {
           items.push({ type: 'user', text });
         }
@@ -620,7 +621,9 @@ function convertToHistoryItems(
         currentToolGroup = [];
       }
 
-      const text = payload.userText;
+      const text = payload.userText
+        ? stripLeadingSystemReminders(payload.userText)
+        : payload.userText;
       if (text) {
         items.push({ type: 'user', text });
       }

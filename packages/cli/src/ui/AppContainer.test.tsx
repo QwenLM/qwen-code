@@ -3028,14 +3028,19 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.handleFinalSubmit(modelText, {
-        submittedPrompt: modelText,
+      // The composer gets the user-visible text; the envelope stays
+      // model-side.
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      expect(poppedText).toBe('review this');
+      capturedUIActions.handleFinalSubmit(poppedText as string, {
+        submittedPrompt: poppedText as string,
       });
       act(() => {
         onBufferChange?.('');
       });
 
+      // An unedited resubmit replays the exact model text and keeps
+      // provenance.
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
         false,
@@ -3078,49 +3083,57 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      // The ↑/ESC pop puts the user-visible text in the composer; the
+      // enveloped model text rides along only for an unedited resubmit.
+      const pop = () => {
+        const poppedText = capturedUIActions.popAllQueuedMessages();
+        expect(poppedText).toBe('review this');
+        return poppedText as string;
+      };
+
+      const firstPop = pop();
       act(() => {
-        onBufferChange?.(`${modelText} with edits`);
-        onBufferChange?.(modelText);
+        onBufferChange?.('review this with edits');
+        onBufferChange?.('review this');
       });
-      capturedUIActions.handleFinalSubmit(modelText, {
-        submittedPrompt: modelText,
+      capturedUIActions.handleFinalSubmit(firstPop, {
+        submittedPrompt: firstPop,
       });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
-        modelText,
+        'review this',
         false,
         undefined,
       );
 
       mockQueueMessage.mockClear();
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.handleFinalSubmit(`${modelText} with edits`, {
-        submittedPrompt: `${modelText} with edits`,
+      pop();
+      capturedUIActions.handleFinalSubmit('review this with edits', {
+        submittedPrompt: 'review this with edits',
       });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
-        `${modelText} with edits`,
+        'review this with edits',
         false,
         undefined,
       );
 
       mockQueueMessage.mockClear();
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.handleFinalSubmit(`${modelText} `, {
-        submittedPrompt: `${modelText} `,
+      pop();
+      capturedUIActions.handleFinalSubmit('review this ', {
+        submittedPrompt: 'review this ',
       });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
-        `${modelText} `,
+        'review this ',
         false,
         undefined,
       );
 
       mockQueueMessage.mockClear();
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      pop();
       act(() => {
-        onBufferChange?.(`${modelText} with edits`);
+        onBufferChange?.('review this with edits');
         onBufferChange?.('');
         onBufferChange?.('fresh prompt');
       });
@@ -3135,14 +3148,14 @@ describe('AppContainer State Management', () => {
       );
 
       mockQueueMessage.mockClear();
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      pop();
       capturedUIActions.invalidateSubmittedPromptProvenance();
-      capturedUIActions.handleFinalSubmit(modelText, {
-        submittedPrompt: modelText,
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
       });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
-        modelText,
+        'review this',
         false,
         undefined,
       );
@@ -3619,6 +3632,7 @@ describe('AppContainer State Management', () => {
       lastTurnUserItem: {
         id: number;
         text: string;
+        modelText: string;
         submittedPrompt?: string;
       } | null;
       canUndoLastLoggedUserMessage: boolean;
@@ -3633,12 +3647,18 @@ describe('AppContainer State Management', () => {
     // common case (the cancelled turn added the user prompt in the
     // history fixture). Defaults to the fixture's id=1 so the tests
     // that use single-USER history fixtures work without parameterizing.
-    const cancelInfoFor = (text: string, id = 1, submittedPrompt?: string) =>
+    const cancelInfoFor = (
+      text: string,
+      id = 1,
+      submittedPrompt?: string,
+      modelText = text,
+    ) =>
       ({
         pendingItem: null,
         lastTurnUserItem: {
           id,
           text,
+          modelText,
           ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
         },
         canUndoLastLoggedUserMessage: true,
@@ -4200,7 +4220,7 @@ describe('AppContainer State Management', () => {
       });
       mockedUseHistory.mockReturnValue({
         history: [
-          { id: 1, type: 'user', text: modelText },
+          { id: 1, type: 'user', text: 'review this' },
           { id: 2, type: 'info', text: 'Request cancelled.' },
         ],
         addItem: vi.fn(),
@@ -4245,13 +4265,118 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      triggerCancel(cancelInfoFor(modelText, 1, 'review this'));
-      capturedUIActions.handleFinalSubmit(modelText, {
-        submittedPrompt: modelText,
+      triggerCancel(cancelInfoFor('review this', 1, 'review this', modelText));
+      // The composer holds only the typed text…
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+      expect(mockSetText).not.toHaveBeenCalledWith(modelText);
+
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
       });
 
-      expect(mockSetText).toHaveBeenCalledWith(modelText);
+      // …but the unedited resubmit replays the exact model text, envelope
+      // included, with the cancelled turn's provenance.
       expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+      );
+    });
+
+    it('re-delivers a consumed one-shot notice when a cancel-restored prompt is resubmitted unedited', async () => {
+      // Arm a recovered-agents notice. The first submit consumes its latch,
+      // so without the replay the second submit would reach the model with
+      // no envelope at all.
+      const notice = 'Use list_agents to inspect restored agents.';
+      const modelText = `<system-reminder>\n${notice}\n</system-reminder>\n\nreview this`;
+      const consumeSpy = vi
+        .spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
+        .mockReturnValueOnce(notice)
+        .mockReturnValue(null);
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'review this' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // First submit: the injector prepends the armed notice.
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        modelText,
+        false,
+        'review this',
+      );
+
+      // ESC before any output rewinds and restores the composer with the
+      // typed text only.
+      triggerCancel(cancelInfoFor('review this', 1, 'review this', modelText));
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+      expect(mockSetText).not.toHaveBeenCalledWith(modelText);
+
+      // Unedited resubmit: the latch is already consumed, so the injector
+      // adds nothing — the replayed model text must still carry the notice.
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
+      expect(consumeSpy).toHaveBeenCalledTimes(2);
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
         modelText,
         false,
         'review this',
@@ -4392,7 +4517,11 @@ describe('AppContainer State Management', () => {
       // Text mismatch even though id collides — guard bails.
       triggerCancel({
         pendingItem: null,
-        lastTurnUserItem: { id: 1, text: 'a different text' },
+        lastTurnUserItem: {
+          id: 1,
+          text: 'a different text',
+          modelText: 'a different text',
+        },
         canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
@@ -4526,7 +4655,11 @@ describe('AppContainer State Management', () => {
           type: 'gemini_content',
           text: 'partial reply…',
         },
-        lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        lastTurnUserItem: {
+          id: 1,
+          text: 'what time is it?',
+          modelText: 'what time is it?',
+        },
         canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
@@ -4599,7 +4732,11 @@ describe('AppContainer State Management', () => {
       // earlier. Preserve that output while restoring only the prompt text.
       triggerCancel({
         pendingItem: { type: 'gemini_thought', text: 'thinking…' },
-        lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        lastTurnUserItem: {
+          id: 1,
+          text: 'what time is it?',
+          modelText: 'what time is it?',
+        },
         canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: true,
       });
@@ -4675,7 +4812,7 @@ describe('AppContainer State Management', () => {
       // text matches.
       triggerCancel({
         pendingItem: null,
-        lastTurnUserItem: { id: 999, text: 'foo' },
+        lastTurnUserItem: { id: 999, text: 'foo', modelText: 'foo' },
         canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
@@ -4968,6 +5105,117 @@ describe('AppContainer State Management', () => {
       expect(mockSetText).toHaveBeenCalledWith('/model\n\nhi');
       expect(mockSetText).not.toHaveBeenCalledWith('');
       expect(mockClearQueue).not.toHaveBeenCalled();
+    });
+
+    it('restores queued messages on cancel without the injected envelope', async () => {
+      // A prompt queued while a one-shot reminder latch was armed carries
+      // the envelope in its model text. Cancelling must refill the composer
+      // with the user-visible text only…
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockSetText = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue({
+        modelText,
+        submittedPrompt: 'review this',
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [modelText],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: mockPopAllMessages,
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+      expect(mockSetText).not.toHaveBeenCalledWith(modelText);
+    });
+
+    it('replays the enveloped model text when a queue-restored prompt is resubmitted unedited', async () => {
+      // …and resubmitting the restored text without edits must still send
+      // the envelope: its one-shot latch was consumed when the prompt was
+      // first queued.
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [modelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          modelText,
+          submittedPrompt: 'review this',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+      );
     });
 
     it('preserves an in-progress draft when restoring queued messages on cancel', async () => {
