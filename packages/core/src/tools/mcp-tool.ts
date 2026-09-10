@@ -506,7 +506,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * stays untouched.
    */
   private scheduleRecoveryAfterAbort(losingCallError?: unknown): void {
-    if (!this.cliConfig) {
+    // The guard's contract is execution-scoped and this path executes
+    // nothing, but the pre-existing replay path in
+    // `shouldAttemptReconnect` fails closed for guarded invocations;
+    // keeping the same rule here stops a guarded session's cancel from
+    // triggering registry churn and a child spawn / HTTP handshake the
+    // error path would have refused. Optional-chained: some configs do
+    // not carry the guard accessor at all.
+    if (!this.cliConfig || this.cliConfig.getToolInvocationGuard?.()) {
       return;
     }
     if (!this.hasAbortRecoveryEvidence(losingCallError)) {

@@ -2559,6 +2559,56 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
+    it('should not trigger background recovery on a user cancel when the invocation is guarded', async () => {
+      // Mirrors 'does not reconnect a guarded invocation after an ambiguous
+      // connection error' on the abort path: a guarded session cancelling a
+      // call whose transport died (dead-session rejection + recorded
+      // DISCONNECTED + user-cancel abort) must fail closed exactly like the
+      // error path — no purge, no respawn, no reconnect.
+      const params = { param: 'test' };
+      const deadSession = Object.assign(
+        new Error('HTTP 404: session not found'),
+        { code: -32001 },
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(deadSession),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolInvocationGuard: () => vi.fn(),
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toBeTruthy();
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
     it('should not trigger background recovery on abort when no status was ever recorded', async () => {
       // `getMCPServerStatus` defaults unknown names to DISCONNECTED; the
       // recovery gate must require a *recorded* DISCONNECTED so a server
