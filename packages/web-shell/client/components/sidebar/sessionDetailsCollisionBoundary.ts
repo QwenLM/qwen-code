@@ -1,5 +1,9 @@
 export function resolveSessionDetailsCollisionBoundary(
-  sidebar: HTMLElement | null,
+  anchor: HTMLElement | null,
 ): HTMLElement | null {
-  return sidebar?.closest<HTMLElement>('[data-web-shell-root]') ?? sidebar;
+  return (
+    anchor?.closest<HTMLElement>('[data-web-shell-root]') ??
+    anchor?.closest<HTMLElement>('aside') ??
+    null
+  );
 }

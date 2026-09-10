@@ -15,6 +15,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionWriterError,
+  SessionSourceError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -47,6 +48,7 @@ import {
   SessionLimitExceededError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionResetPendingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceInitConflictError,
@@ -67,6 +69,14 @@ import {
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
+import {
+  WorktreeMarkerMissingError,
+  WorktreeResetActiveError,
+  WorktreeResetInterruptedError,
+  WorktreeResetInvalidStateError,
+  WorktreeResetUnsupportedError,
+  WorktreeSessionSupersededError,
+} from './worktree-reset-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -261,6 +271,34 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  const sourceErrorKind =
+    err instanceof SessionSourceError
+      ? err.code
+      : (err as { data?: { errorKind?: unknown } } | null)?.data?.errorKind;
+  const sourceErrorStatus =
+    sourceErrorKind === 'invalid_source'
+      ? 400
+      : sourceErrorKind === 'source_limit_reached'
+        ? 409
+        : sourceErrorKind === 'source_persistence_unavailable'
+          ? 503
+          : sourceErrorKind === 'source_attachment_not_found'
+            ? 404
+            : undefined;
+  if (sourceErrorStatus !== undefined) {
+    const sourceError =
+      err instanceof Error ? err : new Error('Source operation failed');
+    if (sourceErrorStatus >= 500) {
+      reportBridgeError(sourceError, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(sourceError, ctx, daemonLog);
+    }
+    res.status(sourceErrorStatus).json({
+      error: err instanceof Error ? err.message : 'Source operation failed',
+      code: sourceErrorKind,
+    });
+    return;
+  }
   if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
     recordExpectedBridgeError(err, ctx, daemonLog);
     if (ctx?.initPrecedesMutations === true) {
@@ -566,6 +604,67 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'cd_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionResetPendingError) {
+    // The prompt barrier the worktree-reset route arms for the superseded
+    // session. 409 + the shared reset code: callers that know the reset flow
+    // (Channel worker) retry the task; non-Channel callers get a bounded
+    // message with no path or transfer internals.
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeSessionSupersededError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_session_superseded',
+      sessionId: err.sessionId,
+      replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeMarkerMissingError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_marker_missing',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInterruptedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_interrupted',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInvalidStateError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_invalid_state',
       sessionId: err.sessionId,
     });
     return;

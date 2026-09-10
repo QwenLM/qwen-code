@@ -15,25 +15,27 @@ import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import { FindingsDisplay } from '../FindingsDisplay.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   TodoResultDisplay,
   FindingsResultDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
-  AnsiOutput,
   AnsiOutputDisplay,
-  Config,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { AnsiOutput } from '@qwen-code/qwen-code-core/utils/terminalSerializer.js';
 import {
   formatVisionBridgeNoticeDisplay,
-  isTerminalImageDisplay,
   isVisionBridgeNoticeDisplay,
+} from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import {
   ToolNames,
   ToolNamesMigration,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -318,6 +320,17 @@ const useResultDisplayRenderer = (
         type: 'string',
         data: resultDisplay.fallbackText,
       };
+    }
+
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'ask_user_question_answers' &&
+      'text' in resultDisplay &&
+      typeof resultDisplay.text === 'string'
+    ) {
+      return { type: 'string', data: resultDisplay.text };
     }
 
     // Default to string — safeguard against non-string objects

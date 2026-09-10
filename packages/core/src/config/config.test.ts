@@ -24,9 +24,17 @@ import {
   GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  normalizeGoalCheckpointTimeoutSeconds,
+  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import {
+  createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+} from '../goals/goal-checkpoint-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -60,6 +68,7 @@ import {
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -101,6 +110,20 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+
+/**
+ * A settled registration for the shared record, the shape
+ * `registerSession` reports. Every test here models a process holding one
+ * session; the slot only differs for a process hosting several.
+ */
+function sharedRegistration(
+  registered = true,
+): Promise<sessionRegistry.SessionRegistration> {
+  return Promise.resolve({
+    registered,
+    slot: sessionRegistry.SHARED_RECORD_SLOT,
+  });
+}
 import {
   ExtensionManager,
   type Extension,
@@ -109,8 +132,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import { HookSystem } from '../hooks/index.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import { createHookOutput, HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -431,6 +453,16 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
+vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import('../goals/goal-checkpoint-verifier.js')
+    >();
+  return {
+    ...original,
+    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
+  };
+});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -3311,12 +3343,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'first',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(
         config.setPendingGoalProposal({
           objective: 'second',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(false);
       expect(config.hasPendingGoalProposal()).toBe(true);
@@ -3325,6 +3359,8 @@ describe('Server Config (config.ts)', () => {
       expect(config.takePendingGoalProposal('turn-1')).toEqual({
         objective: 'first',
         turnKey: 'turn-1',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
@@ -3333,11 +3369,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'explicitly cleared',
           turnKey: 'turn-3',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(config.takePendingGoalProposal()).toEqual({
         objective: 'explicitly cleared',
         turnKey: 'turn-3',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
     });
@@ -3347,6 +3386,7 @@ describe('Server Config (config.ts)', () => {
       config.setPendingGoalProposal({
         objective: 'stale approval',
         turnKey: 'turn-1',
+        reviewedGoal: null,
       });
 
       config.startNewSession('replacement-session');
@@ -3570,6 +3610,76 @@ describe('Server Config (config.ts)', () => {
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
     });
 
+    it('arms the checkpoint verifier with the configured timeout', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 45,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+
+      config.getGoalRuntime();
+
+      // Assert the call, not only the getter: the options argument is the
+      // one line that carries the setting into the verifier, and the
+      // getter-only checks above stay green if it is dropped.
+      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[0]).toBe(config);
+      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+    });
+
+    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
+      // The checkpoint call is streamed, so past the stream lifetime guard it
+      // is the guard that ends the call and the verifier's own timer never
+      // fires. A cap above it would let the setting validate, and the getter
+      // report, a ceiling no default deployment can reach.
+      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
+      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
+      // The cap is a typo guard, accepted itself and refused one past.
+      expect(
+        normalizeGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ),
+      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
+      expect(
+        isValidGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+        ),
+      ).toBe(false);
+      for (const invalid of [
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        '30',
+        null,
+        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      ]) {
+        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
+        expect(
+          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
+        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
+      }
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 0,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+    });
+
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -3658,6 +3768,115 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringMatching(
+              new RegExp(
+                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
+              ),
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        for (const goalCheckpointTimeoutSeconds of [
+          undefined,
+          1,
+          180,
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ]) {
+          new Config({
+            ...baseParams,
+            sessionId,
+            goalCheckpointTimeoutSeconds,
+          });
+          // Let any fire-and-forget debug write settle before the next case.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes(
+              'Ignoring invalid goalCheckpointTimeoutSeconds',
+            ),
+          ),
+        ).toHaveLength(0);
+
+        // Control case: the channel is live in this test, so the silence
+        // above is meaningful.
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringContaining(
+              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
     it('bills Goal turns through the canonical chat recorder', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const started: GoalTurnPermit[] = [];
@@ -3679,6 +3898,31 @@ describe('Server Config (config.ts)', () => {
       await runtime.finishTurn(permit);
 
       expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
+    });
+
+    it('measures no-progress turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < 3; turn++) {
+        await vi.waitFor(() => expect(started).toHaveLength(turn + 1));
+        const permit = started[turn]!;
+        runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+        await runtime.finishTurn(permit);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        noProgressTurns: 3,
+      });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
@@ -5442,6 +5686,24 @@ describe('Server Config (config.ts)', () => {
         expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
       },
     );
+    it.each(['alwaysAsk', 'disabled'] as const)(
+      'honors %s for an ACP host with explicit Goal proposal support',
+      async (modelProposedGoals) => {
+        const config = new Config({
+          ...baseParams,
+          experimentalZedIntegration: true,
+          modelProposedGoals,
+        });
+        config.setGoalProposalHostSupported(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.PROPOSE_GOAL)).toBe(
+          modelProposedGoals === 'alwaysAsk',
+        );
+      },
+    );
     it('does not register propose_goal when goals.modelProposed is disabled', async () => {
       const config = new Config({
         ...baseParams,
@@ -5883,6 +6145,248 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    describe('bundled review workflow activation', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it.each([undefined, false, true])(
+        'preserves the configured workflow preference %s on review activation',
+        async (workflowsEnabled) => {
+          const config = new Config({ ...baseParams, workflowsEnabled });
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+            ToolNames.WORKFLOW,
+          ]);
+          const getRegistry = vi.spyOn(config, 'getToolRegistry');
+          const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(workflowsEnabled !== false);
+          expect(getRegistry).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+          expect(refresh).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+        },
+      );
+
+      it('restores review auto-activation when an explicit opt-out is removed', async () => {
+        const config = new Config({ ...baseParams, workflowsEnabled: false });
+        await config.initialize();
+        vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        config.setWorkflowsEnabled(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it.each(['registered', 'deferred', 'disabled'] as const)(
+        'uses the existing registry with %s permissions',
+        async (status) => {
+          const config = new Config(baseParams);
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          const names = new Set<string>();
+          vi.spyOn(registry, 'getAllToolNames').mockImplementation(() => [
+            ...names,
+          ]);
+          const eager = vi
+            .spyOn(registry, 'registerFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          const deferred = vi
+            .spyOn(registry, 'registerPermissionDeferredFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          eager.mockClear();
+          deferred.mockClear();
+          vi.spyOn(
+            config.getPermissionManager()!,
+            'getToolRegistrationStatus',
+          ).mockResolvedValue(status);
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          await config.enableReviewWorkflow();
+          expect(config.getToolRegistry()).toBe(registry);
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+          expect(config.isWorkflowsEnabled()).toBe(status !== 'disabled');
+          await config.enableReviewWorkflow();
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+        },
+      );
+
+      it('waits for the live chat tool declarations to refresh', async () => {
+        const config = new Config(baseParams);
+        await config.initialize();
+        const registry = config.getToolRegistry();
+        vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        let release!: () => void;
+        const refresh = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const setTools = vi
+          .spyOn(config.getLlmClient(), 'setTools')
+          .mockReturnValue(refresh);
+        let completed = false;
+        const activation = config.enableReviewWorkflow().then(() => {
+          completed = true;
+        });
+        await vi.waitFor(() => expect(setTools).toHaveBeenCalledOnce());
+        expect(completed).toBe(false);
+        release();
+        await activation;
+        expect(completed).toBe(true);
+      });
+
+      it.each([{ bareMode: true }, { provisionalWorkspace: true }])(
+        'keeps restricted sessions disabled: %j',
+        async (restriction) => {
+          const config = new Config({ ...baseParams, ...restriction });
+          const registration = vi.spyOn(config, 'getPermissionManager');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          expect(registration).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not activate workflows or refresh the parent chat from a subagent', async () => {
+        const config = new Config(baseParams);
+        const registry = vi.spyOn(config, 'getToolRegistry');
+        const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+        await runWithAgentContext('review-child', () =>
+          config.enableReviewWorkflow(),
+        );
+        expect(registry).not.toHaveBeenCalled();
+        expect(refresh).not.toHaveBeenCalled();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('honors the explicit workflow kill switch before registering', async () => {
+        const config = new Config(baseParams);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+        const registration = vi.spyOn(config, 'getPermissionManager');
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        expect(registration).not.toHaveBeenCalled();
+      });
+    });
+
+    it('binds record_source only for a supported top-level session and refreshes it after session rotation', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      const factory = vi.fn(
+        () =>
+          new SessionSourceService({
+            sessionId: config.getSessionId(),
+            workspaceCwd: () => config.getTargetDir(),
+            load: async () => ({}),
+            persist: async () => undefined,
+          }),
+      );
+      config.setSessionSourceServiceFactory(factory);
+      const original = config.getSessionSourceService();
+      await config.initialize();
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.RECORD_SOURCE);
+      const child = Object.create(config) as Config;
+      expect(child.getSessionSourceService()).toBeUndefined();
+      config.startNewSession('replacement-source-session');
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(config.getSessionSourceService()).not.toBe(original);
+    });
+
+    it.each(['registered', 'deferred', 'disabled'] as const)(
+      'registers a source tool bound after initialization with %s permissions',
+      async (status) => {
+        const { SessionSourceService } = await import(
+          '../services/session-sources.js'
+        );
+        const config = new Config({ ...baseParams, sdkMode: false });
+        await config.initialize();
+        const registry = config.getToolRegistry();
+        const existingRegistry = registry;
+        (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+        (
+          ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+        ).mockClear();
+        vi.spyOn(
+          config.getPermissionManager()!,
+          'getToolRegistrationStatus',
+        ).mockResolvedValue(status);
+        config.setSessionSourceServiceFactory(
+          () =>
+            new SessionSourceService({
+              sessionId: config.getSessionId(),
+              workspaceCwd: () => config.getTargetDir(),
+              load: async () => ({}),
+              persist: async () => undefined,
+            }),
+        );
+        await config.registerSessionSourceTool();
+        expect(config.getToolRegistry()).toBe(existingRegistry);
+        const eagerNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        const deferredNames = (
+          ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(eagerNames.includes(ToolNames.RECORD_SOURCE)).toBe(
+          status === 'registered',
+        );
+        expect(deferredNames.includes(ToolNames.RECORD_SOURCE)).toBe(
+          status === 'deferred',
+        );
+      },
+    );
+
+    it('does not register record_source without a bound service or in SDK sessions', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      for (const sdkMode of [false, true]) {
+        (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode,
+        });
+        if (sdkMode)
+          config.setSessionSourceServiceFactory(
+            () =>
+              new SessionSourceService({
+                sessionId: config.getSessionId(),
+                workspaceCwd: () => config.getTargetDir(),
+                load: async () => ({}),
+                persist: async () => undefined,
+              }),
+          );
+        await config.initialize();
+        const names = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(names).not.toContain(ToolNames.RECORD_SOURCE);
+      }
+    });
+
     it('registers report_findings even in headless sessions — review run depends on it', async () => {
       const config = new Config({
         ...baseParams,
@@ -6205,6 +6709,45 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('reasoning effort override', () => {
+    it('reports static overrides for the resolved configured tiered route', () => {
+      const config = new Config({ ...baseParams });
+      const cfg: ContentGeneratorConfig = {
+        model: 'qwen3.8-flash',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        extra_body: { thinking_budget: 4096 },
+      };
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue(cfg);
+      const resolve = vi
+        .spyOn(config, 'getResolvedModelConfig')
+        .mockReturnValue({
+          id: cfg.model,
+          name: cfg.model,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: cfg.baseUrl!,
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'medium', 'xhigh'],
+              defaultEffort: 'xhigh',
+              disableField: 'reasoning_effort',
+            },
+          },
+        });
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      expect(resolve).toHaveBeenCalledWith(
+        cfg.authType,
+        cfg.model,
+        cfg.baseUrl,
+      );
+      resolve.mockReturnValue(undefined);
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -6377,6 +6920,45 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(LlmClient).toHaveBeenCalledWith(config);
     });
+
+    it.each([false, true])(
+      'preserves thinking off through repeated auth with mandatory thinking %s',
+      async (thinkingMandatory) => {
+        const config = new Config({
+          ...baseParams,
+          generationConfig: { reasoning: false },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          () => ({
+            config: {
+              model: 'kimi-k2.6',
+              authType: AuthType.USE_OPENAI,
+              thinkingMandatory,
+              reasoning: { effort: 'high' },
+            },
+            sources: {},
+          }),
+        );
+
+        for (const initial of [true, undefined]) {
+          await config.refreshAuth(AuthType.USE_OPENAI, initial);
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            thinkingMandatory ? { effort: 'high' } : false,
+          );
+        }
+        if (!thinkingMandatory) {
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            false,
+          );
+        }
+
+        config.getModelsConfig().getGenerationConfig().reasoning = undefined;
+        await config.refreshAuth(AuthType.USE_OPENAI);
+        expect(config.getContentGeneratorConfig().reasoning).toEqual({
+          effort: 'high',
+        });
+      },
+    );
 
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
       // Regression: the provider sync (applyResolvedModelDefaults) overwrites
@@ -8050,7 +8632,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -8099,10 +8681,13 @@ describe('Server Config (config.ts)', () => {
     // sessions apart; the switch must reach it (and the directory-derived
     // name) or `qwen sessions ps` keeps showing the folder that was left.
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
       expect(settled).toContain('patch');
     });
     expect(settled[0]).toBe('relocated');
@@ -8120,7 +8705,7 @@ describe('Server Config (config.ts)', () => {
     // state is reachable and the /cd patch must survive it.
     const config = new Config(baseParams);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8141,10 +8726,13 @@ describe('Server Config (config.ts)', () => {
 
     // The patch rides its own fire-and-forget chain; let it settle.
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
     expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
 
@@ -8207,7 +8795,7 @@ describe('Server Config (config.ts)', () => {
     // until process exit.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const writeRuntimeStatusSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockRejectedValue(new Error('read-only project fs'));
@@ -8218,10 +8806,13 @@ describe('Server Config (config.ts)', () => {
     const newSessionId = config.startNewSession('replacement-session');
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
@@ -8231,9 +8822,12 @@ describe('Server Config (config.ts)', () => {
   it('serializes pending registration, transitions, and unregister', async () => {
     const config = new Config(baseParams);
     let finishRegistration!: (registered: boolean) => void;
-    const registration = new Promise<boolean>((resolve) => {
-      finishRegistration = resolve;
-    });
+    const registration = new Promise<sessionRegistry.SessionRegistration>(
+      (resolve) => {
+        finishRegistration = (registered) =>
+          resolve({ registered, slot: sessionRegistry.SHARED_RECORD_SLOT });
+      },
+    );
     let finishPatch!: () => void;
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8256,10 +8850,13 @@ describe('Server Config (config.ts)', () => {
 
     finishRegistration(true);
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
     });
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
 
@@ -8273,7 +8870,7 @@ describe('Server Config (config.ts)', () => {
 
   it('serializes the peer inbox address with session transitions', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
 
     let finishIpcPatch!: () => void;
@@ -8313,7 +8910,7 @@ describe('Server Config (config.ts)', () => {
     // ipcPath, so a patch skipped on transient fd pressure must retry
     // itself or the inbox stays undiscoverable until restart.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8323,10 +8920,54 @@ describe('Server Config (config.ts)', () => {
     await config.updateSessionRegistryIpcPath('/tmp/peer.sock');
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-      ipcPath: '/tmp/peer.sock',
-    });
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+      {
+        ipcPath: '/tmp/peer.sock',
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
+  });
+
+  it('names the minted record a hosted session registered under, on every write', async () => {
+    // A process hosting several sessions owns one record each. Every
+    // patch and the final removal have to name the right one — with the
+    // default slot they would all resolve to a `<pid>.json` that such a
+    // process never wrote, so a hosted session's record would never be
+    // updated and never be removed.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(
+      Promise.resolve({ registered: true, slot: 'a1b2c3d4' }),
+    );
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    expect(config.getSessionRegistrySlot()).toBe('a1b2c3d4');
+
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(true);
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    await config.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      { ipcPath: '/tmp/acp.sock', ipcToken: 'tok' },
+      'a1b2c3d4',
+    );
+
+    config.startNewSession('replacement-session');
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: 'replacement-session' }),
+        'a1b2c3d4',
+      ),
+    );
+
+    await config.unregisterSessionRegistry();
+    expect(unregisterSessionSpy).toHaveBeenCalledWith('a1b2c3d4');
+
+    patchSessionRecordSpy.mockRestore();
+    unregisterSessionSpy.mockRestore();
   });
 
   it('re-asserts the registry record with the current session id, retrying a skipped patch', async () => {
@@ -8334,7 +8975,7 @@ describe('Server Config (config.ts)', () => {
     // record may be the stale side (a /clear patch skipped under fd
     // pressure); re-asserting is the fix, and it retries like the advertise.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8344,16 +8985,19 @@ describe('Server Config (config.ts)', () => {
     await config.reassertSessionRegistryRecord();
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith({
-      sessionId: config.getSessionId(),
-      cwd: config.getTargetDir(),
-    });
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      {
+        sessionId: config.getSessionId(),
+        cwd: config.getTargetDir(),
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
   });
 
   it('bounds the re-assert retry and is a no-op with no registration', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8372,7 +9016,7 @@ describe('Server Config (config.ts)', () => {
 
   it('retries the /clear session-id patch when the registry skips it', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8401,7 +9045,7 @@ describe('Server Config (config.ts)', () => {
     // would publish an address peers cannot authenticate to — sends read as
     // 'sent' and are silently dropped — with the whole suite still green.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8420,7 +9064,7 @@ describe('Server Config (config.ts)', () => {
 
   it('gives up on the peer inbox advertise after a bounded retry', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8440,7 +9084,7 @@ describe('Server Config (config.ts)', () => {
       .spyOn(sessionRegistry, 'unregisterSession')
       .mockResolvedValue(undefined);
 
-    config.trackSessionRegistration(Promise.resolve(false));
+    config.trackSessionRegistration(sharedRegistration(false));
     await config.unregisterSessionRegistry();
 
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
@@ -8453,7 +9097,7 @@ describe('Server Config (config.ts)', () => {
     // surface through relocateWorkingDirectory either.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8473,10 +9117,13 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
@@ -9385,6 +10032,22 @@ describe('Server Config (config.ts)', () => {
         );
       },
     );
+
+    it('only enables dynamic header values for boolean true', () => {
+      for (const value of [undefined, false, 'false', 1, {}, []]) {
+        const outboundCorrelation = {
+          allowDynamicHeaderValues: value,
+        } as unknown as ConfigParameters['outboundCorrelation'];
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundAllowDynamicHeaderValues()).toBe(false);
+      }
+
+      const config = new Config({
+        ...baseParams,
+        outboundCorrelation: { allowDynamicHeaderValues: true },
+      });
+      expect(config.getOutboundAllowDynamicHeaderValues()).toBe(true);
+    });
   });
 
   describe('UseRipgrep Configuration', () => {
@@ -9827,7 +10490,7 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('does not register web_search or push a notice when the feature is disabled', async () => {
+    it('does not register web_search or push a notice when nothing is configured and no provider can back it', async () => {
       const config = new Config(baseParams);
       await config.initialize();
 
@@ -9843,6 +10506,222 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.getWarnings().filter((w) => w.includes('WebSearch')),
       ).toEqual([]);
+    });
+
+    it('registers web_search with no configuration when the primary model runs on a ModelStudio provider', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
+    });
+
+    it('registers web_search for an env-only configuration pointing at a DashScope host', async () => {
+      // No modelProviders entry at all: the endpoint comes from
+      // OPENAI_BASE_URL and the key variable is the auth type's default. The
+      // runtime model snapshot is not captured until after the tool registry
+      // is built, so the gate must read the resolved generation config.
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          // What the CLI resolver produces from OPENAI_BASE_URL /
+          // OPENAI_API_KEY: an endpoint but no key variable name.
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKey: 'sk-env-only',
+          },
+          generationConfigSources: {
+            apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('leaves web_search off for an env-only configuration on a non-DashScope host', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-5',
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-5',
+            baseUrl: 'https://api.openai.com/v1',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not activate a legacy model-only web search configuration', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { model: 'qwen3.6-plus' },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
+    });
+
+    it('leaves web_search off without a notice when the primary model runs on a provider that cannot back it', async () => {
+      process.env['OPENROUTER_API_KEY'] = 'sk-or-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'z-ai/glm-4.5-air:free',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'z-ai/glm-4.5-air:free',
+                baseUrl: 'https://openrouter.ai/api/v1',
+                envKey: 'OPENROUTER_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['OPENROUTER_API_KEY'];
+      }
+    });
+
+    it('does not register web_search when it is turned off explicitly', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { enabled: false },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
     });
 
     it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {
@@ -10785,6 +11664,79 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  describe('DAC plan workflow', () => {
+    it.each([
+      ApprovalMode.DEFAULT,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
+    ])('keeps planning while selecting %s for execution', (mode) => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const revision = config.getApprovalModeRevision();
+
+      config.setPlanMode(true, mode);
+
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(mode);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+      config.setPlanMode(false, mode);
+      expect(config.getApprovalMode()).toBe(mode);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+    });
+
+    it('clears the selected policy on approved or legacy exits', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.YOLO, {
+        fromApprovedPlanExit: true,
+      });
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+    });
+
+    it('rejects privileged policies before changing an untrusted config', () => {
+      const config = new Config(baseParams);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setPlanMode(true, ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.DEFAULT);
+      expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('rejects Plan as an execution policy and isolates derived configs', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setPlanMode(true, ApprovalMode.PLAN)).toThrow(
+        'Plan is not an execution approval mode',
+      );
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const child = deriveConfig(config);
+      expect(child.getPlanExecutionMode()).toBeUndefined();
+      expect(() => child.setPlanMode(false, ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change plan workflow mode',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.YOLO);
+    });
   });
 
   describe('prePlanMode tracking', () => {
@@ -12565,75 +13517,107 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('Stop dispatch through the hook execution bridge', () => {
-    it.each([
-      {
-        name: 'ignores non-blocking outputs',
-        otherOutput: { continue: true },
-        expected: false,
-        expectedReason: undefined,
-      },
-      {
-        name: 'detects another blocking output',
-        otherOutput: {
-          decision: 'block',
-          reason: 'Policy review is still required',
-        },
-        expected: true,
-        expectedReason: 'Policy review is still required',
-      },
-      {
-        name: 'preserves a stop reason',
-        otherOutput: {
-          continue: false,
-          stopReason: 'External stop hook feedback',
-        },
-        expected: true,
-        expectedReason: 'External stop hook feedback',
-      },
-    ])(
-      '$name when a goal hook blocks',
-      async ({ otherOutput, expected, expectedReason }) => {
-        const config = new Config({ ...baseParams });
-        await config.initialize();
-        const goalOutput = {
-          decision: 'block' as const,
-          reason: 'Keep working',
-          hookSpecificOutput: {
-            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
-          },
-        };
-        const fireStopEvent = vi.fn().mockResolvedValue({
-          finalOutput: {
-            ...goalOutput,
-            ...otherOutput,
-          },
-          allOutputs: [goalOutput, otherOutput],
-        });
-        // @ts-expect-error - accessing private for testing
-        config['hookSystem'] = { fireStopEvent };
+    // The goal-specific half of this suite went with the two response fields
+    // it asserted. What remains is the only exercise of the surviving
+    // `case 'Stop':` branch: without it, deleting that branch or throwing
+    // inside it leaves the whole package green while every configured Stop
+    // hook silently stops blocking.
+    it('forwards the request input positionally, wraps the output, and counts the hooks that ran', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
 
-        const response = await config
-          .getMessageBus()!
-          .request<HookExecutionRequest, HookExecutionResponse>(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'Stop',
-              input: {
-                stop_hook_active: true,
-                last_assistant_message: 'last response',
-              },
+      const blockingOutput = {
+        decision: 'block' as const,
+        reason: 'Policy review is still required',
+      };
+      const secondOutput = { continue: true };
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: blockingOutput,
+        allOutputs: [blockingOutput, secondOutput],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const controller = new AbortController();
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: {
+              stop_hook_active: true,
+              last_assistant_message: 'last response',
+              context_limit: 1_000,
+              input_tokens: 250,
             },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-          );
+            signal: controller.signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
 
-        expect(response.error).toBeUndefined();
-        expect(response).toMatchObject({
-          success: true,
-          hasNonGoalBlockingStopHook: expected,
-        });
-        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
-      },
-    );
+      expect(response.error).toBeUndefined();
+      expect(response.success).toBe(true);
+      // Positional, so swapping the two strings is caught here rather than by
+      // a consumer that happens to read only one of them.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        true,
+        'last response',
+        { context_usage: 0.25, context_limit: 1_000, input_tokens: 250 },
+        controller.signal,
+      );
+      // Read off the bridge response rather than through a consumer: both
+      // consumers mask a missing value with `?? 1`, so an assertion made
+      // through them would still pass if the producer stopped setting it.
+      expect(response.stopHookCount).toBe(2);
+      // The `createHookOutput('Stop', ...)` wrap. A plain object would carry
+      // the same fields but none of the methods every consumer calls.
+      // The `createHookOutput('Stop', ...)` wrap, asserted on the call rather
+      // than the result: this file replaces the hooks module with a bare mock,
+      // so the wrap returns undefined here. The call is what matters -- without
+      // it no consumer can ask the output whether it blocks.
+      expect(vi.mocked(createHookOutput)).toHaveBeenCalledWith(
+        'Stop',
+        blockingOutput,
+      );
+    });
+
+    it('reports no output when every Stop hook declines to act', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: undefined,
+        allOutputs: [],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: { stop_hook_active: false },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(response.success).toBe(true);
+      expect(response.output).toBeUndefined();
+      expect(response.stopHookCount).toBe(0);
+      // No final output means nothing to wrap.
+      expect(vi.mocked(createHookOutput)).not.toHaveBeenCalled();
+      // An absent last message is forwarded as the empty string, and usage
+      // figures that cannot be computed are forwarded as undefined.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        false,
+        '',
+        undefined,
+        undefined,
+      );
+    });
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {
