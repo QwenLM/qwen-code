@@ -1155,6 +1155,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
+    capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
       ? 'error'
       : autoConnect
@@ -1547,6 +1548,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
+      // Let StrictMode discard its first effect before starting a session load.
+      if (!runnerSession) {
+        await Promise.resolve();
+        if (disposed) return;
+      }
       const client =
         workspaceClientRef.current ??
         new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
