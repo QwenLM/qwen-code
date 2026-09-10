@@ -213,6 +213,65 @@ describe('assistant turn settlement projection', () => {
     });
   });
 
+  it('does not publish an insight payload-only block as the turn answer', () => {
+    // The renderer strips insight protocol frames, so a block whose only
+    // content is such a frame (`/insight` progress/ready) produces no
+    // assistant text. Publishing its raw text would hand the host protocol
+    // JSON as the turn's final answer, permanently, while the real answer one
+    // slot earlier is never published.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-live',
+      }),
+      assistantBlock(
+        'assistant-2',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        { promptId: 'prompt-live' },
+      ),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
+  });
+
+  it('strips insight frames from a glued final block', () => {
+    // A block carrying an insight frame glued to trailing text renders to just
+    // that trailing text, so the published content must match the renderer's
+    // output rather than carry the raw frame alongside it.
+    harness.blocks = [
+      assistantBlock(
+        'assistant-1',
+        '{"insight_ready":{"path":"/tmp/report.md"}} after',
+        { promptId: 'prompt-live' },
+      ),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'after',
+      isStreaming: false,
+      timestamp: 1,
+    });
+  });
+
   it('omits the message for a settlement from another session', () => {
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {

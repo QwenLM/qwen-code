@@ -1803,6 +1803,26 @@ function splitInsightSegments(text: string): InsightSegment[] | null {
   return segments.length > 0 ? segments : null;
 }
 
+/**
+ * The visible assistant text of a block's text, with insight protocol frames
+ * (`insight_progress` / `insight_ready` / `insight_error`) stripped exactly as
+ * `transcriptBlocksToDaemonMessages` strips them. A payload-only block — one
+ * whose only content is such a frame — renders to no assistant text and
+ * therefore yields an empty string, so callers that publish a turn's final
+ * answer can skip it instead of leaking raw protocol JSON.
+ */
+export function assistantVisibleTextOf(text: string): string {
+  const segments = splitInsightSegments(text);
+  if (!segments) return text.trim();
+  return segments
+    .filter(
+      (segment): segment is { kind: 'text'; text: string } =>
+        segment.kind === 'text',
+    )
+    .map((segment) => segment.text)
+    .join(' ');
+}
+
 function inferToolKind(
   toolName?: string,
   toolKind?: string,

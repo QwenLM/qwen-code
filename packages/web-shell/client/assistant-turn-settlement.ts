@@ -15,6 +15,7 @@ import type {
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnSettledEvent,
 } from './customization.js';
+import { assistantVisibleTextOf } from './adapters/transcriptToMessages.js';
 
 type AssistantTurnSettledHandler = (
   event: WebShellAssistantTurnSettledEvent,
@@ -55,12 +56,17 @@ function getSettledAssistantMessage(
     // Still streaming means "not yet settled", not "keep looking": publishing
     // partial text is unrecoverable, as no corrected callback can follow.
     if (block.streaming) return undefined;
-    // A whitespace-only block renders as nothing, so the substantive answer one
-    // slot earlier is still this turn's final visible message.
-    if (block.text.trim().length === 0) continue;
+    // The renderer strips insight protocol frames from assistant block text,
+    // so the raw `block.text` is not the message a host would see. A
+    // payload-only block (an `/insight` progress/ready frame) renders to no
+    // assistant text, so the substantive answer one slot earlier is still this
+    // turn's final visible message — publishing the raw frame would leak
+    // protocol JSON as the answer.
+    const visibleText = assistantVisibleTextOf(block.text);
+    if (visibleText.length === 0) continue;
     return {
       id: block.id,
-      content: block.text,
+      content: visibleText,
       isStreaming: block.streaming,
       timestamp: block.serverTimestamp ?? block.clientReceivedAt,
     };
