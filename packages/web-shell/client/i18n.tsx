@@ -1313,6 +1313,8 @@ const EN: Messages = {
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
   'scheduledTasks.error.invalidSchedule': 'Invalid schedule',
+  'scheduledTasks.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
@@ -4908,6 +4910,7 @@ const ZH: Messages = {
   'scheduledTasks.creating': '创建中…',
   'scheduledTasks.cancel': '取消',
   'scheduledTasks.error.invalidSchedule': '计划无效',
+  'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,

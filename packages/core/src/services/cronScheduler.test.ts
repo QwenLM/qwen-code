@@ -1659,6 +1659,47 @@ describe('CronScheduler', () => {
       }
     });
 
+    it('delivers a re-enabled dispatch-failed one-shot as missed instead of stranding it', async () => {
+      // The PATCH route deliberately keeps the consumed anchors when a
+      // dispatch-failed one-shot is re-enabled: re-seating would point a
+      // date-pinned cron at its next occurrence (up to a year out), and the
+      // tick's candidate window only spans the jitter around now, so the task
+      // would never fire and never notify. The missed-one-shot pass is the
+      // retry surface instead.
+      const createdAt = Date.now() - 10 * 60_000;
+      const firedSlot = nextFireTime(
+        '* * * * *',
+        new Date(createdAt),
+      ).getTime();
+      await writeCronTasks(tmpDir, [
+        {
+          ...diskTask('once-retry-missed'),
+          recurring: false,
+          createdAt,
+          // Written exactly as the re-enable PATCH leaves the task: enabled,
+          // original anchors, and the dispatch-failed run record.
+          lastFiredAt: firedSlot,
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+          enabled: true,
+          runs: [
+            { at: firedSlot, kind: 'scheduled', sessionDispatchFailed: true },
+          ],
+        },
+      ]);
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      await scheduler.enableDurable('session-1');
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.missed).toBe(true);
+      expect(fired[0]!.prompt).toContain('missed');
+      // Delivery consumes the task, like any missed one-shot.
+      await vi.waitFor(async () => {
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      });
+    });
+
     it('does not restore when a delete removes the task before the fire write', async () => {
       const original: DurableCronTask = {
         ...diskTask('once-delete-first'),
@@ -1936,7 +1977,6 @@ describe('CronScheduler', () => {
         restorablePerRunOneShots: Map<string, unknown>;
         consumedPerRunOneShots: Set<string>;
         consumedPerRunRemovalGenerations: Map<string, unknown>;
-        restoredPerRunOneShots: Set<string>;
         pendingRemoval: Set<string>;
       };
       // The failed restore releases the consumed state symmetrically so the
@@ -1946,7 +1986,6 @@ describe('CronScheduler', () => {
       expect(internals.consumedPerRunRemovalGenerations.has(original.id)).toBe(
         false,
       );
-      expect(internals.restoredPerRunOneShots.has(original.id)).toBe(false);
       // ...while the re-fire guard survives.
       expect(internals.pendingRemoval.has(original.id)).toBe(true);
       // ...and the loss leaves an operator-facing breadcrumb.

@@ -1113,7 +1113,7 @@ export function ScheduledTasksDialog({
 
   const handleSubmit = useCallback(async () => {
     if (formWorkspaceMissing) {
-      setFormError('The selected workspace is unavailable or untrusted');
+      setFormError(t('scheduledTasks.error.workspaceUnavailable'));
       return;
     }
     const cron = buildCron(builder);

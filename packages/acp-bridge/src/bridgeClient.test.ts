@@ -1700,7 +1700,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       client.extMethod(METHOD, {
         prompt: 'x',
         completion: 'sent',
-        groupId: 'g'.repeat(129),
+        groupId: 'g'.repeat(257),
         callerSessionId: 'caller-1',
         ...scheduledSource,
       }),
@@ -1718,7 +1718,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     };
 
     for (const params of [
-      { model: 'm'.repeat(129) },
+      { model: 'm'.repeat(257) },
       { model: 'model\nqwen serve: forged' },
       { groupId: 'group\nqwen serve: forged' },
     ]) {
@@ -1730,7 +1730,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           ...scheduledSource,
           ...params,
         }),
-      ).rejects.toThrow(/control characters|at most 128/i);
+      ).rejects.toThrow(/control characters|at most 256/i);
     }
 
     expect(onCreate).not.toHaveBeenCalled();

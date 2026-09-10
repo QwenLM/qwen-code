@@ -1587,6 +1587,20 @@ function registerScheduledTaskCrudRoutes(
                 patch.recurring === true && current.recurring !== true;
               const becameOneShot =
                 patch.recurring === false && current.recurring !== false;
+              // A bare re-enable of a one-shot whose last run is a failed
+              // dispatch is a RETRY request, not a schedule change: its slot
+              // was already consumed by the fire that failed, and re-seating
+              // the anchor would strand it (a date-pinned cron's next
+              // occurrence is up to a year out, and the tick's candidate
+              // window only spans the jitter around now). Keep the consumed
+              // anchors so the scheduler's missed-one-shot pass delivers it —
+              // the confirm-first notification is the one-shot retry surface.
+              const retryFailedOneShot =
+                !next.recurring &&
+                justReEnabled &&
+                !cronChanged &&
+                !becameOneShot &&
+                current.runs?.at(-1)?.sessionDispatchFailed === true;
               // Re-seated REGARDLESS of enabled: a schedule edit made while the task
               // is paused must not leave a stale anchor that fires retroactively when
               // it's later re-enabled in a SEPARATE request (the re-enable patch has no
@@ -1606,6 +1620,7 @@ function registerScheduledTaskCrudRoutes(
                   next.lastFiredAt = minute;
                 } else if (
                   !next.recurring &&
+                  !retryFailedOneShot &&
                   (justReEnabled || cronChanged || becameOneShot)
                 ) {
                   // A one-shot's anchor is createdAt. Re-seat it on a schedule change
@@ -1652,7 +1667,17 @@ function registerScheduledTaskCrudRoutes(
           throw error;
         }
       }
-      if (missingGroupId !== undefined && (blockedGroupNotFound || !found)) {
+      // The 404 must precede the group check: a PATCH naming a missing group
+      // for a task id that does not exist is a missing TASK, not a bad group.
+      // (`updated` stays unset on every blocked path below, so only `found`
+      // gates here; the !updated backstop stays at the tail.)
+      if (!found) {
+        res
+          .status(404)
+          .json({ error: 'Task not found', code: 'task_not_found' });
+        return;
+      }
+      if (missingGroupId !== undefined && blockedGroupNotFound) {
         res.status(400).json({
           error: `Group not found: ${missingGroupId}`,
           code: 'group_not_found',
@@ -1697,7 +1722,7 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
-      if (!found || !updated) {
+      if (!updated) {
         res
           .status(404)
           .json({ error: 'Task not found', code: 'task_not_found' });

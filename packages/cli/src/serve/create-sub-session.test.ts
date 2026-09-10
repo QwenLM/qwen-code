@@ -668,6 +668,9 @@ describe('sub-session launcher', () => {
       modelApplied: false,
       closeSessionHangs: true,
     });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
@@ -692,7 +695,11 @@ describe('sub-session launcher', () => {
         (error: unknown) => error,
       );
 
+      // The watchdog strictly outlasts the agent-side close timeout: an equal
+      // bound would let it win the race and skip the transcript cleanup.
       await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(30_000);
       expect(settled).toBe(true);
       expect(await rejection).toEqual(
         expect.objectContaining({
@@ -702,7 +709,12 @@ describe('sub-session launcher', () => {
         }),
       );
       expect(fake.closes).toEqual(['sub-1']);
+      // The watchdog path forces the session down and still removes the
+      // orphaned transcript rather than leaking it.
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
     } finally {
+      removeSession.mockRestore();
       vi.useRealTimers();
     }
   });

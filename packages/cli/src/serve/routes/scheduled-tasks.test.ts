@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SessionService,
   SessionOrganizationService,
   Storage,
@@ -618,6 +619,17 @@ describe('scheduled-tasks routes', () => {
     expect(rejected.body.code).toBe('group_not_found');
   });
 
+  it('answers 404, not group_not_found, when the task id does not exist', async () => {
+    // The missing-group probe runs before the mutation, so without an
+    // explicit ordering the handler's own 404 was masked by the 400.
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/no-such-task')
+      .send({ groupId: 'missing-group' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+  });
+
   it('rejects a missing group before creating the task session', async () => {
     const res = await create({
       cron: '0 * * * *',
@@ -648,7 +660,7 @@ describe('scheduled-tasks routes', () => {
       cron: '0 * * * *',
       prompt: 'review the next PR',
       sessionMode: 'per_run',
-      groupId: 'g'.repeat(129),
+      groupId: 'g'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
     });
     const unsafeModel = await create({
       cron: '0 * * * *',
@@ -771,6 +783,63 @@ describe('scheduled-tasks routes', () => {
     expect(rerun.status).toBe(200);
     expect(h.bridge.prompts).toHaveLength(1);
     expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('re-enabling a dispatch-failed one-shot keeps its consumed anchors', async () => {
+    // Re-seating the anchor would point a date-pinned cron at its next
+    // occurrence (up to a year out) and strand the retry — the tick's
+    // candidate window only spans the jitter around now. Keeping the
+    // consumed slot lets the scheduler's missed-one-shot pass deliver the
+    // retry (confirm-first) on the next reload.
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const stored = (await readCronTasks(h.workspace))[0];
+    expect(stored?.enabled).toBe(false);
+    expect(stored?.runs?.[0]?.sessionDispatchFailed).toBe(true);
+
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true });
+
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.enabled).toBe(true);
+    expect(enabled.body.createdAt).toBe(stored?.createdAt);
+    expect(enabled.body.lastFiredAt).toBe(stored?.lastFiredAt);
+  });
+
+  it('a schedule edit alongside the re-enable still re-seats a dispatch-failed one-shot', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const stored = (await readCronTasks(h.workspace))[0];
+
+    const now = Date.now();
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true, cron: '0 9 * * *' });
+
+    // A new schedule is a fresh intent: the task fires at its next
+    // occurrence, not as a missed retry of the consumed slot.
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.createdAt).toBeGreaterThanOrEqual(now - 5_000);
+    expect(enabled.body.createdAt).not.toBe(stored?.createdAt);
   });
 
   it('does not restore a per-run one-shot deleted during failed model selection', async () => {

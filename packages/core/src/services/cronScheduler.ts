@@ -7,7 +7,6 @@
 
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 
 import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
@@ -315,8 +314,6 @@ export class CronScheduler {
     string,
     ReadonlyMap<string, number>
   >();
-  // Restored tasks bypass missed detection until a real fire, delete, or edit.
-  private restoredPerRunOneShots = new Set<string>();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
@@ -596,7 +593,6 @@ export class CronScheduler {
       this.restorablePerRunOneShots.delete(id);
       this.consumedPerRunOneShots.delete(id);
       this.consumedPerRunRemovalGenerations.delete(id);
-      this.restoredPerRunOneShots.delete(id);
       return this.cancelWakeup(id);
     }
 
@@ -614,7 +610,6 @@ export class CronScheduler {
     this.restorablePerRunOneShots.delete(id);
     this.consumedPerRunOneShots.delete(id);
     this.consumedPerRunRemovalGenerations.delete(id);
-    this.restoredPerRunOneShots.delete(id);
     this.armedDurableOneShots.delete(id);
     return true;
   }
@@ -871,14 +866,6 @@ export class CronScheduler {
     const missedOneShots: DurableCronTask[] = [];
     const catchUpIds: string[] = [];
     const finalTasks: DurableCronTask[] = [];
-    for (const id of this.restoredPerRunOneShots) {
-      if (this.consumedPerRunOneShots.has(id)) continue;
-      const task = tasks.find((candidate) => candidate.id === id);
-      const snapshot = this.restorablePerRunOneShots.get(id)?.task;
-      if (!task || !snapshot || !isDeepStrictEqual(task, snapshot)) {
-        this.restoredPerRunOneShots.delete(id);
-      }
-    }
     // Detect missed / catch-up work for the tasks THIS session is responsible
     // for — a scoped pass that now runs regardless of lock ownership. A task
     // bound to this session is caught up here even when another session holds
@@ -902,25 +889,13 @@ export class CronScheduler {
         // watcher) would otherwise read the stale disk lastFiredAt and fire the
         // same slot a second time. (A catch-up merely buffered then dropped is
         // NOT in this set, so it still re-detects from disk — intended recovery.)
-        if (
-          this.firePersistPending.has(t.id) ||
-          this.restoredPerRunOneShots.has(t.id)
-        )
-          continue;
+        if (this.firePersistPending.has(t.id)) continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
           : t.createdAt;
         const nextFire = computeNextFireMs(t.cron, anchor, jitter);
         if (nextFire === null || nextFire >= now) continue;
-        // A failed per-run dispatch restores the one-shot with the consumed
-        // slot stamped on disk, so edits and restarts must not report it missed.
-        if (
-          !t.recurring &&
-          typeof t.lastFiredAt === 'number' &&
-          t.lastFiredAt >= nextFire - jitter
-        )
-          continue;
         // A live scheduler may reload after another one-shot rewrites the shared
         // tasks file but before this armed job's next 1s tick. Leave that brief
         // handoff to the tick, but recover it as missed once the slot is stale.
@@ -1379,11 +1354,9 @@ export class CronScheduler {
       this.restorablePerRunOneShots.delete(taskId);
       this.consumedPerRunOneShots.delete(taskId);
       this.consumedPerRunRemovalGenerations.delete(taskId);
-      this.restoredPerRunOneShots.delete(taskId);
       return false;
     }
     this.armedDurableOneShots.delete(taskId);
-    this.restoredPerRunOneShots.add(taskId);
     let restoreGenerations: ReadonlyMap<string, number> = new Map();
     let restored = false;
     try {
@@ -1432,7 +1405,6 @@ export class CronScheduler {
       this.restorablePerRunOneShots.delete(taskId);
       this.consumedPerRunOneShots.delete(taskId);
       this.consumedPerRunRemovalGenerations.delete(taskId);
-      this.restoredPerRunOneShots.delete(taskId);
       // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silently destroyed one-shot
       console.warn(
         `CronScheduler: could not restore scheduled one-shot task ${taskId} ` +
@@ -1445,7 +1417,6 @@ export class CronScheduler {
       this.restorablePerRunOneShots.delete(taskId);
       this.consumedPerRunOneShots.delete(taskId);
       this.consumedPerRunRemovalGenerations.delete(taskId);
-      this.restoredPerRunOneShots.delete(taskId);
       return false;
     }
     this.pendingRemoval.delete(taskId);
@@ -1793,7 +1764,6 @@ export class CronScheduler {
       return 'none';
     }
 
-    this.restoredPerRunOneShots.delete(job.id);
     job.lastFiredAt = matchedMinuteMs;
 
     // Expiry is evaluated at fire time (claw-code parity): an aged

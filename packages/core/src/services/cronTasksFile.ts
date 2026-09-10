@@ -16,7 +16,10 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
-export const MAX_CRON_TASK_ROUTING_ID_LENGTH = 128;
+// Shared with the daemon's session-creation cap (standalone-sessions.ts uses
+// this constant for its `modelServiceId`) so a model service id accepted for a
+// session is always schedulable, and vice versa.
+export const MAX_CRON_TASK_ROUTING_ID_LENGTH = 256;
 
 export function isValidCronTaskRoutingId(value: unknown): value is string {
   return (
@@ -338,6 +341,30 @@ async function readTaskDeletionGenerations(
   return { generations, watermark };
 }
 
+/**
+ * Best-effort variant of {@link readTaskDeletionGenerations} for
+ * updateCronTasks: a torn or stale sidecar (the atomic write's in-place
+ * fallback can leave one after a crash) must not fail the tasks write it
+ * rides on. Returns undefined for "state unknown" — observers then skip
+ * recording (a cross-process restore declines rather than resurrecting a
+ * deleted task), while a deletion write rebuilds the file from empty.
+ */
+async function readTaskDeletionGenerationsOrUnknown(
+  filePath: string,
+): Promise<CronTaskDeletionState | undefined> {
+  try {
+    return await readTaskDeletionGenerations(filePath);
+  } catch (error) {
+    // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a corrupt sidecar
+    console.warn(
+      `Ignoring unreadable scheduled-task deletion state at ${filePath}.deletions ` +
+        `(${error instanceof Error ? error.message : String(error)}) — task ` +
+        'updates proceed without it; delete the file to rebuild it.',
+    );
+    return undefined;
+  }
+}
+
 async function writeTaskDeletionGenerations(
   filePath: string,
   deletionState: CronTaskDeletionState,
@@ -397,14 +424,34 @@ export async function readCronTasks(
       `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
     );
   }
-  for (const [index, task] of parsed.entries()) {
+  // Tolerate routing fields stranded on a non-per-run task (a version
+  // downgrade, a hand edit): they are inert without per-run dispatch, so strip
+  // them rather than fail the whole file — the same normalization the PATCH
+  // route applies on write. The stripped view reaches the next write through
+  // updateCronTasks, so the file self-heals on the next real mutation.
+  const normalized = parsed.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) return entry;
+    const record = entry as Record<string, unknown>;
+    if (
+      (record['modelServiceId'] !== undefined ||
+        record['groupId'] !== undefined) &&
+      record['sessionMode'] !== 'per_run'
+    ) {
+      const copy = { ...record };
+      delete copy['modelServiceId'];
+      delete copy['groupId'];
+      return copy;
+    }
+    return entry;
+  });
+  for (const [index, task] of normalized.entries()) {
     if (!isValidTask(task)) {
       throw new Error(
         `Invalid task entry at index ${index} in ${filePath} — fix or delete the entry; refusing to drop it from the schedule.`,
       );
     }
   }
-  return parsed;
+  return normalized;
 }
 
 export async function writeCronTasks(
@@ -528,18 +575,35 @@ export async function updateCronTasks(
           : (options.observeDeletionIds ?? []),
       );
       let deletionState: CronTaskDeletionState | undefined;
+      // Loaded lazily, at most once per update: an unreadable sidecar is
+      // reported a single time and remembered as "unknown" (undefined).
+      let deletionStateUnknown = false;
+      const loadDeletionState = async () => {
+        if (deletionState === undefined && !deletionStateUnknown) {
+          const state = await readTaskDeletionGenerationsOrUnknown(filePath);
+          if (state === undefined) {
+            deletionStateUnknown = true;
+          } else {
+            deletionState = state;
+          }
+        }
+        return deletionState;
+      };
       if (observedIds.size > 0) {
-        const observedDeletionState =
-          await readTaskDeletionGenerations(filePath);
-        deletionState = observedDeletionState;
-        options.onDeletionGenerations?.(
-          new Map(
-            [...observedIds].map((id) => [
-              id,
-              observedDeletionState.generations.get(id) ?? 0,
-            ]),
-          ),
-        );
+        const observedDeletionState = await loadDeletionState();
+        if (observedDeletionState !== undefined) {
+          options.onDeletionGenerations?.(
+            new Map(
+              [...observedIds].map((id) => [
+                id,
+                observedDeletionState.generations.get(id) ?? 0,
+              ]),
+            ),
+          );
+        }
+        // Unreadable sidecar: skip the observation entirely so consumers
+        // decline a restore instead of recording a fabricated "never
+        // deleted" generation.
       }
       const next = mutate(tasks);
       const deletionIds =
@@ -547,7 +611,13 @@ export async function updateCronTasks(
           ? options.deletionIds()
           : options.deletionIds;
       if (deletionIds?.length) {
-        deletionState ??= await readTaskDeletionGenerations(filePath);
+        // An unreadable sidecar is rebuilt from empty: the new tombstones
+        // land, and any pre-corruption generation a restore observed can no
+        // longer match, so the restore declines rather than resurrecting.
+        deletionState = (await loadDeletionState()) ?? {
+          generations: new Map(),
+          watermark: 0,
+        };
         for (const id of new Set(deletionIds)) {
           if (deletionState.watermark === Number.MAX_SAFE_INTEGER) {
             throw new Error(
@@ -704,8 +774,6 @@ function isValidTask(value: unknown): value is DurableCronTask {
       isValidCronTaskRoutingId(obj['modelServiceId'])) &&
     (obj['groupId'] === undefined ||
       isValidCronTaskRoutingId(obj['groupId'])) &&
-    ((obj['modelServiceId'] === undefined && obj['groupId'] === undefined) ||
-      obj['sessionMode'] === 'per_run') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );

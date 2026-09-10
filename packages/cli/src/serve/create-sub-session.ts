@@ -114,6 +114,12 @@ const RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS = 30 * 60_000;
 const SENT_COMPLETION_DELIVERY_RETRY_MS = 100;
 const SENT_COMPLETION_DELIVERY_MAX_RETRY_MS = 30_000;
 
+/** The rollback watchdog bounds a closeSession that already gives the agent
+ * ACTIVE_WORK_CLOSE_TIMEOUT_MS to exit, so it must strictly outlast that inner
+ * timeout — two equal timers can fire in either order, and the watchdog
+ * winning would skip the transcript cleanup below entirely. */
+const ROLLBACK_CLOSE_WATCHDOG_SLACK_MS = 5_000;
+
 /** Cap on returned first-turn text so a runaway sub-session can't flood the
  * caller's context. Excess is dropped with a truncation marker. */
 const MAX_RESULT_CHARS = 32_000;
@@ -1215,7 +1221,7 @@ export function createSubSessionLauncher(
                       `Timed out closing rolled-back sub-session ${sessionId}`,
                     ),
                   ),
-                ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+                ACTIVE_WORK_CLOSE_TIMEOUT_MS + ROLLBACK_CLOSE_WATCHDOG_SLACK_MS,
               );
               if (typeof closeTimer.unref === 'function') closeTimer.unref();
             }),
@@ -1225,6 +1231,18 @@ export function createSubSessionLauncher(
           log.debug('sub-session: closeSession threw', sessionId, closeErr);
         } finally {
           if (closeTimer !== undefined) clearTimeout(closeTimer);
+        }
+        if (!sessionClosed) {
+          // The watchdog won, so the abandoned close may never settle: force
+          // the session down before deciding its transcript's fate — the same
+          // killSession fallback the isolated rollback branch uses.
+          try {
+            sessionClosed = await bridge.killSession(sessionId, {
+              requireZeroAttaches: true,
+            });
+          } catch (killErr) {
+            log.debug('sub-session: killSession threw', sessionId, killErr);
+          }
         }
         if (sessionClosed && !promptAdmitted) {
           try {

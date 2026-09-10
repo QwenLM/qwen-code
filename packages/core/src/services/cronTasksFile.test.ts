@@ -281,15 +281,41 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
-    it('rejects routing fields on a persistent task', async () => {
+    it('strips routing fields from a persistent task instead of failing the file', async () => {
+      // A version downgrade or hand edit can strand routing fields on a
+      // non-per-run task. They are inert without per-run dispatch, so read
+      // normalizes them away — the same normalization the PATCH route applies
+      // on write — rather than making the whole schedule unreadable.
       await seedTasksFile(
         tmpDir,
         JSON.stringify([
-          { ...makeTask(), sessionMode: 'persistent', groupId: 'group-1' },
+          {
+            ...makeTask(),
+            sessionMode: 'persistent',
+            modelServiceId: 'qwen-max(openai)',
+            groupId: 'group-1',
+          },
         ]),
       );
 
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).not.toHaveProperty('modelServiceId');
+      expect(tasks[0]).not.toHaveProperty('groupId');
+      expect(tasks[0]?.sessionMode).toBe('persistent');
+    });
+
+    it('accepts a routing id within the shared session cap', async () => {
+      // 129–256 characters: session creation always allowed these, so the
+      // task file must too — otherwise a valid session model id could never
+      // be scheduled.
+      const task = makeTask({
+        sessionMode: 'per_run',
+        modelServiceId: 'm'.repeat(200),
+        groupId: 'g'.repeat(200),
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
     });
 
     it('round-trips the optional runs history', async () => {
@@ -608,18 +634,66 @@ describe('cronTasksFile', () => {
       expect(state.watermark).toBe(3);
     });
 
-    it('rejects a deletion sidecar without a v2 watermark', async () => {
+    it('rebuilds a corrupt deletion sidecar instead of failing the update', async () => {
+      // The tick's fire/removal persist rides on this path, so a torn sidecar
+      // (the atomic write's in-place fallback can leave one after a crash)
+      // must not veto the tasks write — the removal would be lost and the
+      // one-shot would wedge as a zombie. The state is treated as unknown and
+      // rebuilt from empty; a pre-corruption generation an in-flight restore
+      // observed can no longer match, so the restore declines safely.
       const statePath = `${getCronFilePath(tmpDir)}.deletions`;
-      await writeCronTasks(tmpDir, []);
+      await writeCronTasks(tmpDir, [makeTask({ id: 'task-1' })]);
       await fs.mkdir(path.dirname(statePath), { recursive: true });
       await fs.writeFile(
         statePath,
         JSON.stringify({ version: 1, entries: [] }),
       );
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      await expect(removeCronTasks(tmpDir, ['task-1'])).rejects.toThrow(
-        'Invalid scheduled-task deletion state',
-      );
+      try {
+        expect(await removeCronTasks(tmpDir, ['task-1'])).toBe(1);
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('.deletions'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+      const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+        version: number;
+        watermark: number;
+        entries: Array<[string, number]>;
+      };
+      expect(state).toEqual({
+        version: 2,
+        watermark: 1,
+        entries: [['task-1', 1]],
+      });
+    });
+
+    it('skips the deletion observation when the sidecar is unreadable', async () => {
+      // "Unknown" must not be fabricated into "never deleted" (generation 0):
+      // with no observation recorded, a consumer declines to restore.
+      const statePath = `${getCronFilePath(tmpDir)}.deletions`;
+      await writeCronTasks(tmpDir, [makeTask({ id: 'task-1' })]);
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      await fs.writeFile(statePath, '{torn');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const onDeletionGenerations = vi.fn();
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          observeDeletionIds: ['task-1'],
+          onDeletionGenerations,
+        });
+
+        expect(onDeletionGenerations).not.toHaveBeenCalled();
+        // The tasks file itself is untouched and still readable.
+        expect(await readCronTasks(tmpDir)).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('shares deletion generations across module instances', async () => {
