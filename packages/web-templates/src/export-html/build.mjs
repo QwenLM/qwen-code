@@ -377,8 +377,8 @@ const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${render
 if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
   throw new Error('Document renderer build identity placeholder is missing.');
 }
-// The asset always announces the bytes it actually is. Only the document below
-// may point at a different, already-published renderer.
+// The asset always announces the bytes it actually is. Delegation is usable
+// only after the target version publishes both renderer assets.
 const documentJs = documentJsBundle.text.replaceAll(
   rendererVersionPlaceholder,
   localRendererVersion,

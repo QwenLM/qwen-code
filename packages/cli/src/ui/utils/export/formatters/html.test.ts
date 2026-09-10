@@ -83,6 +83,11 @@ describe('HTML export formatter', () => {
     expect(secondNonce).toBeTruthy();
     expect(secondNonce).not.toBe(nonce);
     expect(html).toContain(`nonce="${nonce}"`);
+    const stylesheetLink =
+      html.match(/<link\s+rel="stylesheet"[\s\S]*?\/>/)?.[0] ?? '';
+    expect(stylesheetLink).not.toBe('');
+    expect(stylesheetLink).toContain(`nonce="${nonce}"`);
+    expect(stylesheetLink).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
   });
 
   it('fails closed when the product template loses its document slot', () => {

@@ -505,9 +505,8 @@ describe('ExportTranscriptDocument browser gate', () => {
       await page.evaluate(() => globalThis.document.body.innerText),
     ).toContain('graph TD; A[Export] --> B[Document]');
     expect(await page.locator('.katex').count()).toBeGreaterThan(0);
-    // The split stylesheet must actually load and cascade into the transcript —
-    // not merely be fetched. A non-null `sheet` proves the SRI check passed and
-    // the CSS parsed; the KaTeX font-family comes only from that stylesheet.
+    // Keep a smoke-check for the stylesheet link, while the KaTeX font-family
+    // is the cascade oracle: that rule comes only from the split stylesheet.
     const styled = await page.evaluate(() => {
       const link = document.getElementById(
         'transcript-stylesheet',
@@ -709,7 +708,7 @@ describe('ExportTranscriptDocument browser gate', () => {
         .poll(() => page.locator('body').getAttribute('data-render-complete'))
         .toBe('error');
       expect(await page.getByRole('alert').textContent()).toContain(
-        'Unable to load this chat export',
+        'published renderer or stylesheet',
       );
       await page.close();
     }
@@ -754,7 +753,7 @@ describe('ExportTranscriptDocument browser gate', () => {
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('error');
     expect(await page.getByRole('alert').textContent()).toContain(
-      'Unable to load this chat export',
+      'published renderer or stylesheet',
     );
     await page.close();
   });
