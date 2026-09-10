@@ -921,9 +921,6 @@ describe('Session', () => {
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
-      // runTool passes this through to invocation.execute(), as the TUI
-      // scheduler does; without it a shell tool call is sized by
-      // shellExecutionService's own fallbacks. See #11303.
       getShellExecutionConfig: vi.fn().mockReturnValue({
         terminalWidth: 80,
         terminalHeight: 24,
@@ -2662,10 +2659,8 @@ describe('Session', () => {
     });
   });
 
-  describe('shell execution config plumbing (#11303)', () => {
+  describe('shell execution config plumbing', () => {
     it('passes the config shell execution settings to invocation.execute', async () => {
-      // ACP currently uses Config's defaults; passing them changes the PTY
-      // height from shellExecutionService's fallback of 30 rows to 24.
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'hi',
         returnDisplay: 'hi',

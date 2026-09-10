@@ -13377,8 +13377,6 @@ export class Session implements SessionContext {
             executionStatus = 'error';
             executeAttempted = true;
             try {
-              // Keep ACP dispatch aligned with coreToolScheduler. ACP currently
-              // uses Config's defaults, changing the PTY from 80x30 to 80x24.
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
