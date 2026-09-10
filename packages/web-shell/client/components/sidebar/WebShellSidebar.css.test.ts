@@ -25,6 +25,10 @@ function mediaBlock(query: string): string {
 }
 
 const hoverMedia = mediaBlock('\\(hover: hover\\)');
+const nonHoverCss = sidebarCss.replace(
+  /@media \(hover: hover\) \{[\s\S]*?\n\}/,
+  '',
+);
 // The repo's touch query, matching TOUCH_COMPOSER_QUERY in
 // client/hooks/useIsTouchComposer.ts.
 const touchMedia = mediaBlock('\\(hover: none\\) and \\(pointer: coarse\\)');
@@ -63,6 +67,16 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     // for an overlay.
     expect(touchMedia).not.toMatch(/opacity:\s*0;/);
     expect(touchMedia).not.toMatch(/min-width:\s*var\(--session-actions-width/);
+    for (const marker of [
+      'sessionGitIcon',
+      'sessionLoading',
+      'sessionAttention',
+      'sessionSourceIcon',
+    ]) {
+      expect(nonHoverCss).not.toMatch(
+        new RegExp(`[^{}]*\\.${marker}[^{}]*\\{[^{}]*opacity:\\s*0;`),
+      );
+    }
   });
 
   it('reserves meta slot width only where the overlay can appear', () => {
