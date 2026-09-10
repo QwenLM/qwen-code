@@ -123,11 +123,14 @@ export interface RoundSchedule {
   skipped: RetiredChunk[];
   /**
    * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
-   * delta territory, and the most recent audit on record is a substantive
-   * dry receipt not stale against a yield or uncertified receipt — same
-   * digest, same entries modulo verification tags, or a filed finding the
-   * receipt's list never carried. Unlike a retired chunk they get no
-   * alternating cold check —
+   * delta territory, and the most recent ROUND on record is provably dry —
+   * dry in every member of that round (#10136 R20-2: a filing merges into
+   * the cumulative list before the next round begins, so a dry receipt
+   * beside an uncertified sibling cannot have seen what that sibling
+   * filed), and not stale against an earlier yield or uncertified receipt
+   * (same digest, same entries modulo verification tags, or a filed
+   * finding the receipt's list never carried). Unlike a retired chunk they
+   * get no alternating cold check —
    * on a critical-posture round the wave re-launches the delta territories
    * under the ordinary retirement rules and every non-delta chunk the
    * previous waves could not certify dry: a yield, an uncertified receipt
@@ -674,6 +677,7 @@ function classifyReturn(
     // list cannot be a new finding against it. Skipping costs an audit at
     // most; counting a quotation re-opens the never-retire direction on
     // the loop's most common honest return.
+    //
     // The list's entry lines, read anchored. A NON-EMPTY list no entry
     // extracts from is a shape this reader does not recognise, and
     // narrowing the quotation bar on it would read a genuine quotation as
@@ -847,7 +851,10 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
  *
  * Narrowing (#10104): on a fix-audit round the caller passes the delta
  * territories, and from round 3 a NON-delta chunk leaves the wave after ONE
- * substantive dry audit — no alternating cold check brings it back. That is
+ * substantive dry audit — a round dry in EVERY member, since a filing merges
+ * into the cumulative list before the next round begins and a dry receipt
+ * beside an uncertified sibling cannot have seen what that sibling filed
+ * (#10136 R20-2) — and no alternating cold check brings it back. That is
  * the posture's deliberate recall trade ("re-launch only the chunks that
  * produced findings in the previous wave, plus the delta chunks"), and it
  * narrows the wave's WIDTH instead of lowering the round cap, because the
