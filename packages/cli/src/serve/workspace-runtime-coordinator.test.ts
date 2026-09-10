@@ -17,6 +17,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
+  ENSURE_KEEP_ALIVE_MS,
   getWorkspaceRuntimeCoordinator,
   getWorkspaceRuntimeCoordinatorIfSupported,
   WorkspaceRuntimeCoordinator,
@@ -1817,6 +1818,177 @@ describe('WorkspaceRuntimeCoordinator', () => {
       keepAliveMs: 600_000,
     });
     expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalledOnce();
+  });
+
+  it('skips keep-alive preheat when preparing an already-live runtime', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    harness.getWorkspaceMcpStatus
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'not_started',
+        servers: [],
+      })
+      .mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+      });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({});
+
+    expect(harness.preheat).not.toHaveBeenCalled();
+    expect(harness.initializeWorkspaceMcp).toHaveBeenCalledOnce();
+  });
+
+  it('skips keep-alive preheat when skipKeepAlivePreheat is true', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({ skipKeepAlivePreheat: true });
+
+    expect(harness.preheat).not.toHaveBeenCalled();
+  });
+
+  it('keep-alive preheats a live runtime when skipKeepAlivePreheat is false', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({ skipKeepAlivePreheat: false });
+
+    expect(harness.preheat).toHaveBeenCalledOnce();
+    expect(harness.preheat).toHaveBeenCalledWith({
+      keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+    });
+  });
+
+  it('keep-alive preheats a cold runtime for object-form ensure({})', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 0,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure({});
+
+    expect(harness.preheat).toHaveBeenCalledOnce();
+    expect(harness.preheat).toHaveBeenCalledWith({
+      keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+    });
+  });
+
+  it('reaps a live child before MCP init unless ensure arms a keep-alive hold', async () => {
+    const makeReapingHarness = () => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+      });
+      let keepAliveHold = false;
+      harness.preheat.mockImplementation(
+        async (options?: { keepAliveMs?: number }) => {
+          if ((options?.keepAliveMs ?? 0) > 0) {
+            keepAliveHold = true;
+          }
+        },
+      );
+      harness.getWorkspaceMcpStatus.mockImplementation(async () => {
+        // Default channelIdleTimeoutMs=0 reaps on the first workspace-control
+        // status read unless a keep-alive hold is armed.
+        if (!keepAliveHold) {
+          harness.setSnapshot({
+            state: 'cold',
+            runtimeLive: false,
+            runtimeEpoch: 1,
+          });
+        }
+        return {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          runtimeEpoch: 1,
+          source: 'live' as const,
+          discoveryState:
+            keepAliveHold &&
+            harness.initializeWorkspaceMcp.mock.calls.length > 0
+              ? ('completed' as const)
+              : ('not_started' as const),
+          servers: [],
+        };
+      });
+      return harness;
+    };
+
+    const skipped = makeReapingHarness();
+    await expect(
+      getWorkspaceRuntimeCoordinator(skipped.runtime).ensure({}),
+    ).rejects.toMatchObject({
+      name: 'WorkspaceRuntimeInitializationError',
+    });
+    expect(skipped.preheat).not.toHaveBeenCalled();
+    expect(skipped.initializeWorkspaceMcp).not.toHaveBeenCalled();
+
+    const held = makeReapingHarness();
+    await getWorkspaceRuntimeCoordinator(held.runtime).ensure({
+      keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+    });
+    expect(held.preheat).toHaveBeenCalledWith({
+      keepAliveMs: ENSURE_KEEP_ALIVE_MS,
+    });
+    expect(held.initializeWorkspaceMcp).toHaveBeenCalledOnce();
+  });
+
+  it('does not claim ACP preheat completed when skip-path runtime dies', async () => {
+    const harness = makeRuntime();
+    let snapshotCalls = 0;
+    Object.assign(harness.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: () => {
+        snapshotCalls += 1;
+        return {
+          state: 'idle' as const,
+          runtimeLive: snapshotCalls === 1,
+          runtimeEpoch: 1,
+          activeWork: false,
+        };
+      },
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.ensure({ skipKeepAlivePreheat: true }),
+    ).rejects.toMatchObject({
+      name: 'WorkspaceRuntimeInitializationError',
+      cause: {
+        message: 'Runtime is not live after skipping keep-alive preheat',
+      },
+    });
+    expect(harness.preheat).not.toHaveBeenCalled();
   });
 
   it('reports the bridge lifecycle snapshot without synthesizing state', () => {
