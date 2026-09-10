@@ -5371,7 +5371,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   });
 
   /** Run one --all-chunks round through the real handler; return its stdout. */
-  function runRound(round: number): string {
+  function runRound(round: number, batch = false): string {
     (writeStdoutLine as unknown as Mock).mockClear();
     (writeStderrLine as unknown as Mock).mockClear();
     (agentPromptCommand.handler as (a: unknown) => void)({
@@ -5380,9 +5380,17 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       findings,
       'all-chunks': true,
       round,
+      ...(batch ? { batch: true } : {}),
     });
     const calls = (writeStdoutLine as unknown as Mock).mock.calls;
     return calls.length > 0 ? (calls[0][0] as string) : '';
+  }
+
+  /** Everything the round wrote to stderr, joined — the batch path's notes. */
+  function roundStderr(): string {
+    return (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
   }
 
   /** The record the round's build wrote for one chunk — the launch text. */
@@ -5612,6 +5620,16 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // floor governs posting, never finding (#10136).
     expect(brief).toContain('Fix-audit round (critical posting posture)');
     expect(brief).toContain('the floor governs posting, never');
+
+    // The SAME round through `--batch`, which is how the workflow path
+    // dispatches it: stdout is the manifest, so both notes ride stderr —
+    // and the orchestrator relays them from there. A note built into a
+    // round nobody reads is a reduction nobody disclosed.
+    const manifest = runRound(3, true);
+    expect(manifest.trimStart().startsWith('{')).toBe(true);
+    const err = roundStderr();
+    expect(err).toContain('posture narrowing (#10104)');
+    expect(err).toContain('chunk 14 — not a delta territory, dry in round 2');
   });
 
   it('a reverse-audit brief names a shed census as seam-bounded, and a plain round carries no banner (#10136)', () => {
