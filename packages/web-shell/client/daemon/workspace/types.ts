@@ -83,6 +83,7 @@ import type {
   DaemonSkillMutationResult,
   DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
+  DaemonBrand,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonModelDeleteRequest,
@@ -153,6 +154,29 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  /**
+   * Web Shell branding resolved by the daemon from the operator settings scopes
+   * (system defaults, user, system). Fetched once per client instance beside
+   * capabilities; stays `undefined` while the fetch is in flight and on a
+   * daemon too old to have the route (whose 404 settles the fetch). A daemon
+   * that answered "no brand configured" resolves to an empty object `{}` —
+   * read that as "use the built-in brand", not as "still loading" (the SDK
+   * publishes the same contract). See
+   * {@link DaemonWorkspaceContextValue.brandSettled} to tell "no value yet"
+   * from "the definitive answer arrived" — consumers that clear cached
+   * branding must key on that flag rather than on `brand === undefined`, or
+   * they never fire on the most common deployment.
+   */
+  brand?: DaemonBrand;
+  /**
+   * True once this client's brand fetch has reached a definitive outcome:
+   * the daemon answered (with a brand or `{}`), or answered 404 (no route,
+   * so no brand will ever exist there). A retryable failure — a 503 while
+   * the runtime starts, a 429, a transport error — is unknown rather than
+   * absent and leaves this false, so cached chrome survives a blip.
+   * Per-client: resets to false when the client instance changes.
+   */
+  brandSettled?: boolean;
   getCapabilities?: () => Promise<DaemonCapabilities>;
   /**
    * Force a fresh `/capabilities` fetch and push the result into the
@@ -164,6 +188,17 @@ export interface DaemonWorkspaceContextValue {
    * shows without a full page reload.
    */
   refreshCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Re-issue the brand fetch for the current client, for the recovery path.
+   * A retryable failure (503, 429, transport) leaves the brand unsettled —
+   * without a re-ask, the in-app chrome renders built-in for the page's
+   * lifetime while the tab keeps the cached white-label. A no-op unless the
+   * brand is genuinely missing (`brand === undefined && !brandSettled`), so
+   * an already-resolved brand is never blanked mid-session and a definitive
+   * 404 outcome is not turned back into "loading". The same 404-only settle
+   * rule applies to the retry.
+   */
+  refreshBrand?: () => void;
   actions: DaemonWorkspaceActions;
 }
 

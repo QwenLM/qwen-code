@@ -60,6 +60,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  record_source: 'RecordSource',
   report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
@@ -140,6 +141,41 @@ export function localizeToolDisplayName(
 export function isAskUserQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}
+
+export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
+  return (
+    tool.status === 'completed' && isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
+export function getQuestionAnswerResult(tool: ACPToolCall): {
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+} | null {
+  const output = tool.rawOutput;
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    !('type' in output) ||
+    output.type !== 'ask_user_question_answers' ||
+    !('text' in output) ||
+    typeof output.text !== 'string' ||
+    !('answers' in output) ||
+    !Array.isArray(output.answers) ||
+    !output.answers.every(
+      (entry: unknown): entry is { question: string; answer: string } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        'question' in entry &&
+        typeof entry.question === 'string' &&
+        'answer' in entry &&
+        typeof entry.answer === 'string',
+    )
+  ) {
+    return null;
+  }
+  return { text: output.text, answers: output.answers };
 }
 
 export function truncateText(text: string, max: number): string {

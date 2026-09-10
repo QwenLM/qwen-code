@@ -28,11 +28,13 @@ import {
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 
 const { mockConnectionState } = vi.hoisted(() => {
@@ -105,7 +107,14 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
   };
 });
 
+// The agent imports the peer-messaging transport statically; its own core
+// imports would reach past this suite's exhaustive core mock, and nothing
+// here turns messaging on.
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: { start: vi.fn() },
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -492,7 +501,6 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,

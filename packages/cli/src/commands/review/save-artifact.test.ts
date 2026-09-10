@@ -631,6 +631,52 @@ describe('saveReviewArtifact', () => {
     ).toThrow(/postedFresh/);
   });
 
+  it('PRESERVES an absent or null fixedFindings — "no rulings recorded" is not "recorded: none"', () => {
+    // The field's own distinction, pinned: an artifact written before the
+    // thread lifecycle shipped carries no rulings, and defaulting absence
+    // to `[]` would stamp a claim the older round never made.
+    const paths = fixture();
+    const { fixedFindings: _absent, ...preLifecycle } = verdict as Record<
+      string,
+      unknown
+    >;
+    for (const composed of [
+      preLifecycle,
+      { ...verdict, fixedFindings: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect('fixedFindings' in saved.verdict).toBe(false);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('round-trips a valid fixedFindings list and refuses a malformed one', () => {
+    // One acceptance table for the state JSON and the artifact read-back:
+    // a corrupt artifact must fail loudly here, not feed `submit` rulings
+    // the compose boundary would have refused.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }, { id: 'R2-7' }],
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the guard rewrite' }, { id: 'R2-7' }]);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, {
+      ...verdict,
+      fixedFindings: [{ id: 'not-a-ledger-id' }],
+    });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/fixedFindings/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
     // Null rides the same absence semantics as the sibling deferredCount
     // pair — an undefined-only check would refuse a composed file that
