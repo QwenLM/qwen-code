@@ -82,7 +82,7 @@ import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import {
   workspaceRegistrationId,
-  type WorkspaceRegistrationStore,
+  WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
@@ -4197,7 +4197,7 @@ describe('runQwenServe telemetry validation', () => {
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
       expect(body.features).toContain('scheduled_task_session_reuse');
-      expect(body.limits.maxTotalSessions).toBe(2);
+      expect(body.limits.maxTotalSessions).toBe(800);
       expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
         expect.objectContaining({
@@ -8337,7 +8337,7 @@ describe('runQwenServe runtime startup failures', () => {
         ],
       ]);
       expect(createBridge).toHaveBeenCalledTimes(3);
-      expect(advertisedMaxTotalSessions).toBe(3);
+      expect(advertisedMaxTotalSessions).toBe(800);
       expect(
         stderrWrite.mock.calls.some(([message]) =>
           String(message).includes(
@@ -8431,24 +8431,54 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('skips persisted workspaces after the runtime limit is reached', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-limit-')),
-    );
-    const explicitWorkspaces = Array.from({ length: 25 }, (_, index) => {
-      const workspace = path.join(tmpDir, `explicit-${index}`);
-      fs.mkdirSync(workspace);
-      return workspace;
-    });
-    const overflow = path.join(tmpDir, 'persisted-overflow');
-    fs.mkdirSync(overflow);
-    const canonicalExplicit = explicitWorkspaces.map((workspace) =>
-      canonicalizeWorkspace(workspace),
-    );
-    const canonicalOverflow = canonicalizeWorkspace(overflow);
-    const stderrWrite = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+  it.each([25, undefined])(
+    'rejects a complete restored union over capacity %s without constructing runtimes',
+    async (maxRegisteredWorkspaces) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-limit-')),
+      );
+      const capacity = maxRegisteredWorkspaces ?? 256;
+      const workspaces = Array.from({ length: capacity + 1 }, (_, index) => {
+        const cwd = path.join(tmpDir!, `workspace-${index}`);
+        fs.mkdirSync(cwd);
+        return cwd;
+      });
+      const store = new WorkspaceRegistrationStore(
+        workspaces[0]!,
+        path.join(tmpDir, 'home'),
+      );
+      await store.add(workspaces[capacity]!, 'Saved');
+      const before = fs.readFileSync(store.filePath);
+      const httpServerFactory = vi.fn(() => {
+        throw new Error('listener created');
+      });
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: workspaces.slice(0, capacity),
+            maxRegisteredWorkspaces,
+            serveWebShell: false,
+          },
+          {
+            workspaceRegistrationStore: store,
+            httpServerFactory,
+            daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          },
+        ),
+      ).rejects.toThrow(
+        `${capacity} explicit + 1 restored workspaces exceed the configured limit of ${capacity}`,
+      );
+      expect(fs.readFileSync(store.filePath)).toEqual(before);
+      expect(httpServerFactory).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+    },
+  );
+
+  function stubCapacityRuntimeDeps() {
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -8459,34 +8489,132 @@ describe('runQwenServe runtime startup failures', () => {
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockImplementation(() => makeRuntimeBridge());
-    let restoredCwds: string[] = [];
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeRuntimeBridge(),
+    );
+    const observed: {
+      maxRegisteredWorkspaces?: number;
+      maxTotalSessions?: number;
+      runtimeCount?: number;
+    } = {};
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
-      (_opts, _getPort, deps) => {
-        restoredCwds =
-          deps?.workspaceRegistry
-            ?.list()
-            .map((runtime) => runtime.workspaceCwd) ?? [];
+      (opts, _getPort, deps) => {
+        observed.maxRegisteredWorkspaces = opts.maxRegisteredWorkspaces;
+        observed.maxTotalSessions = opts.maxTotalSessions;
+        observed.runtimeCount = deps?.workspaceRegistry?.list().length;
         return express();
       },
     );
-    const store = {
-      read: vi.fn().mockResolvedValue({
-        schemaVersion: 1,
-        primaryWorkspace: canonicalExplicit[0],
-        workspaces: [canonicalOverflow],
-      }),
-    } as unknown as WorkspaceRegistrationStore;
+    return observed;
+  }
 
+  function makeCapacityWorkspaces(count: number): string[] {
+    return Array.from({ length: count }, (_, index) => {
+      const cwd = path.join(tmpDir!, `workspace-${index}`);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+  }
+
+  it('resolves the registration cap and legacy session default from the launch environment', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-env-capacity-')),
+    );
+    const workspaces = makeCapacityWorkspaces(3);
+    const observed = stubCapacityRuntimeDeps();
+    const boot = (workspace: string | string[]) =>
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+    const original = process.env['QWEN_SERVE_MAX_WORKSPACES'];
+    try {
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '25';
+      const handle = await boot(workspaces[0]!);
+      try {
+        await handle.runtimeReady;
+        expect(observed.maxRegisteredWorkspaces).toBe(25);
+        expect(observed.maxTotalSessions).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '2';
+      await expect(boot(workspaces)).rejects.toThrow(
+        'At most 2 --workspace values may be registered.',
+      );
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = 'abc';
+      await expect(boot(workspaces[0]!)).rejects.toThrow(
+        'Invalid QWEN_SERVE_MAX_WORKSPACES="abc"',
+      );
+    } finally {
+      if (original === undefined) {
+        delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+      } else {
+        process.env['QWEN_SERVE_MAX_WORKSPACES'] = original;
+      }
+    }
+  });
+
+  it('derives the legacy session total from the workspace count at capacity 25', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-legacy-total-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const observed = stubCapacityRuntimeDeps();
     const handle = await runQwenServe(
       {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
-        workspace: explicitWorkspaces,
+        workspace: workspaces,
+        maxRegisteredWorkspaces: 25,
         maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(observed.maxRegisteredWorkspaces).toBe(25);
+      expect(observed.maxTotalSessions).toBe(2);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('admits a restored union exactly at the configured capacity', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-at-limit-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const store = new WorkspaceRegistrationStore(
+      workspaces[0]!,
+      path.join(tmpDir, 'home'),
+    );
+    await store.add(workspaces[1]!, 'Saved');
+    const before = fs.readFileSync(store.filePath);
+    const observed = stubCapacityRuntimeDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces[0]!,
+        maxRegisteredWorkspaces: 2,
         serveWebShell: false,
       },
       {
@@ -8495,16 +8623,10 @@ describe('runQwenServe runtime startup failures', () => {
         resolveOnListen: true,
       },
     );
-
     try {
       await handle.runtimeReady;
-      expect(restoredCwds).toEqual(canonicalExplicit);
-      expect(createBridge).toHaveBeenCalledTimes(25);
-      expect(
-        stderrWrite.mock.calls.some(([message]) =>
-          String(message).includes('workspace limit reached'),
-        ),
-      ).toBe(true);
+      expect(observed.runtimeCount).toBe(2);
+      expect(fs.readFileSync(store.filePath)).toEqual(before);
     } finally {
       await handle.close();
     }
@@ -12581,6 +12703,85 @@ describe('runQwenServe channel worker supervisor', () => {
       removeServeServiceInfo: vi.fn(() => true),
     };
   }
+
+  it.each([25, 26])(
+    'checks %i channel owners before lease reservation with 26 registered workspaces',
+    async (ownerCount) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-capacity-')),
+      );
+      const workspaces = Array.from({ length: 26 }, (_, index) => {
+        const cwd = path.join(tmpDir!, `workspace-${index}`);
+        fs.mkdirSync(cwd);
+        return cwd;
+      });
+      const names = workspaces.map((_, index) => `bot-${index}`);
+      vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+        (workspace) =>
+          ({
+            merged: {
+              channels: {
+                [names[workspaces.indexOf(String(workspace))] ?? 'unknown']: {
+                  type: 'telegram',
+                },
+              },
+            },
+          }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+      );
+      vi.spyOn(
+        trustedFoldersRuntime,
+        'getWorkspaceTrustStatus',
+      ).mockReturnValue({
+        effective: { state: 'trusted' },
+      } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+      vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      const pidfile = makePidfileDeps();
+      const httpServerFactory = vi.fn(() => {
+        throw new Error('listener created');
+      });
+      const workerFactory = vi.fn();
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: workspaces,
+            channelSelection: {
+              mode: 'names',
+              names: names.slice(0, ownerCount),
+            },
+            serveWebShell: false,
+          },
+          {
+            channelServicePidfile: pidfile,
+            channelWorkerSupervisorFactory: workerFactory,
+            httpServerFactory,
+            resolveOnListen: true,
+            deferRuntimeUntilFirstHealth: true,
+            daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          },
+        ),
+      ).rejects.toMatchObject(
+        ownerCount === 26
+          ? { code: 'channel_control_workspace_limit_reached' }
+          : { message: 'listener created' },
+      );
+      expect(httpServerFactory).toHaveBeenCalledTimes(
+        ownerCount === 26 ? 0 : 1,
+      );
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledTimes(
+        ownerCount === 26 ? 0 : 1,
+      );
+      expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
+      expect(workerFactory).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects webhook tasks when the channel worker is disabled', async () => {
     const supervisor = createDisabledChannelWorkerSupervisor();
