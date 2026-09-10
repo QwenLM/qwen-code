@@ -220,6 +220,12 @@ env:
   # in the posted ledger marker; a test pins this list inside it.
   # 'land-and-defer' is deliberately absent — see af-151.
   CONVERGENCE_SIGNAL_CODES: '["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'
+  # In-round self-review A/B: off (default) | ab (odd PRs armed) | on —
+  # ONE bounded delta review before the round's commit, never a loop.
+  # Full rationale → qwen-autofix.md#af-156
+  SELF_REVIEW: "${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"
+  # Agent budget (ms) for an ARMED round; clamped in the address step.
+  SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -3719,6 +3725,8 @@ jobs:
     # Secret-bearing and executes PR code, but every target is live-gated to
     # write+ (internal) authors at scan AND address time. That is an
     # Full rationale → qwen-autofix.md#af-038
+    # 345 holds both shapes under the 25m reserve: unarmed 130+60+70+60,
+    # armed 190+60 with the repair chain skipped (af-156).
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 345
     permissions:
@@ -4133,6 +4141,21 @@ jobs:
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          # Self-review arm (af-156), resolved ONCE for the step cap, the
+          # repair skip and the gate record; never on a github-hosted
+          # runner (cut at 360 minutes). PR must be numeric, nothing else.
+          SELF_REVIEW_ARM='off'
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            case "${SELF_REVIEW}" in
+              on) SELF_REVIEW_ARM='on' ;;
+              ab)
+                if [[ "${PR}" =~ ^[0-9]+$ ]] && (( 10#${PR} % 2 == 1 )); then
+                  SELF_REVIEW_ARM='on'
+                fi
+                ;;
+            esac
+          fi
+          echo "self_review_arm=${SELF_REVIEW_ARM}" >> "${GITHUB_OUTPUT}"
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
           # drop any planted token BEFORE the gh calls below, so a GH_HOST
           # reroute cannot spoof the eligibility re-check and a planted
@@ -5273,8 +5296,12 @@ jobs:
         # Bound the agent below the job timeout so a runaway agent fails THIS
         # step (not the whole job), leaving the always() verify and report
         # Full rationale → qwen-autofix.md#af-050
-        timeout-minutes: 130
+        # Per arm (af-156): 180m + 10m armed, 120m + 10m unarmed. The job
+        # bound cannot hold the armed cap AND the repair chain (skipped).
+        timeout-minutes: "${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"
         env:
+          # The arm prepare resolved (af-156); the clamp reads it.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           DOCKER_HOST: ''
           DOCKER_CONTEXT: 'default'
@@ -5286,7 +5313,7 @@ jobs:
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           # The primary attempt's real budget: 120m, with a 10-minute margin
-          # under the 130-minute step backstop above.
+          # under the 130-minute step backstop above (180m/190m armed).
           # Full rationale → qwen-autofix.md#af-125
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
@@ -5336,10 +5363,16 @@ jobs:
           # Full rationale → qwen-autofix.md#af-126
           git config core.hooksPath .husky
           # Clamp the override to the budget ceiling: a repo variable past
-          # 7,200,000 ms (120m) would arm the timer past the 130-minute step
+          # 7,200,000 ms (120m; 10,800,000 ms armed) would arm the timer past
+          # the 130-minute (190-minute armed) step
           # Full rationale → qwen-autofix.md#af-051
           BUDGET_CAP_MS=7200000
           BUDGET_FLOOR_MS=60000
+          if [[ "${SELF_REVIEW_ARM:-off}" == 'on' ]]; then
+            # One delta review's worth: 180m under the 190-minute step.
+            BUDGET_CAP_MS=10800000
+            QWEN_TIMEOUT_MS="${SELF_REVIEW_TIMEOUT_MS:-10800000}"
+          fi
           if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] ||
              (( 10#${QWEN_TIMEOUT_MS} < BUDGET_FLOOR_MS )) ||
              (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
@@ -5347,15 +5380,22 @@ jobs:
             QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
           fi
           export QWEN_TIMEOUT_MS
+          # When the agent's budget expires — the skill's deadline rule.
+          ROUND_DEADLINE="$(date -u -d "@$(( $(date +%s) + 10#${QWEN_TIMEOUT_MS} / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)"
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
+          # Self-review CLI by absolute path: the host's qwen wrapper is
+          # not on PATH inside the sandbox.
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
-            --base "${BASE}"
+            --base "${BASE}" \
+            --self-review "${SELF_REVIEW_ARM}" \
+            --self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js" \
+            --deadline "${ROUND_DEADLINE}"
 
       - name: 'Verification gate'
         id: 'verify'
@@ -5415,6 +5455,8 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Self-review arm (af-156); the gate records only when 'on'.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           # Growth-audit rounds must carry a valid growth-audit.json verdict;
           # the gate enforces presence + shape before any push decision.
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
@@ -5504,15 +5546,19 @@ jobs:
             CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
+        # An armed self-review round skips this chain: the job bound cannot
+        # hold it beside the 190-minute step; the rejection stays retryable
+        # for the next round. Measured 7/79 rounds repaired → af-156.
         # The outcome check fails closed: a FAILED resolver leaves the image
         # binding below empty, and an empty QWEN_SANDBOX_IMAGE relaunches
         # the CLI without any sandbox (#9527 review).
         if: |-
-          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
+          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}
         # 70m: the 60-minute budget below plus the same 10-minute margin the
         # primary attempt keeps under its own backstop, so the internal kill
         # path still writes `agent-timeout` before the step cap fires.
@@ -5728,6 +5774,8 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Self-review arm (af-156); the gate records only when 'on'.
+          SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           # The control bit arrives through the FIRST gate's defended
           # output (recorded before any check ran, re-appended at every
           # exit); the prepare copy is only the fallback for a first pass
@@ -5769,6 +5817,7 @@ jobs:
             CI="${CI:-true}" \
             KISS_AUDIT="${KISS_AUDIT:-false}" \
             FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}" \
             bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
@@ -5787,6 +5836,8 @@ jobs:
           REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
           FIRST_AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict }}'
           REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
+          FIRST_SELF_REVIEW: '${{ steps.verify.outputs.self_review }}'
+          REPAIR_SELF_REVIEW: '${{ steps.verify_repair.outputs.self_review }}'
           # The pass conclusions are the tamper-evident seal on the output
           # claims below: a gate that reached fixed/noop EXITED 0, and a
           # step killed mid-check (whose output file stays discoverable and
@@ -5800,6 +5851,7 @@ jobs:
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
           AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
+          SELF_REVIEW="${FIRST_SELF_REVIEW}"
           KISS_AUDIT="${FIRST_KISS_AUDIT}"
           PASS_CONCLUSION="${FIRST_CONCLUSION}"
           # The flag travels WITH the attempt whose outcome is selected: the
@@ -5827,6 +5879,7 @@ jobs:
             # unconditionally dropped it.
             # Full rationale → qwen-autofix.md#af-128
             AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
+            SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"
             KISS_AUDIT="${REPAIR_KISS_AUDIT:-${FIRST_KISS_AUDIT}}"
             PASS_CONCLUSION="${REPAIR_CONCLUSION}"
           fi
@@ -5840,6 +5893,7 @@ jobs:
             COMMITTED=''
             VERIFIED_HEAD=''
             AUDIT_VERDICT=''
+            SELF_REVIEW=''
             KISS_AUDIT=''
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
@@ -5851,6 +5905,9 @@ jobs:
           fi
           if [[ -n "${AUDIT_VERDICT}" ]]; then
             echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${SELF_REVIEW}" ]]; then
+            echo "self_review=${SELF_REVIEW}" >> "${GITHUB_OUTPUT}"
           fi
           if [[ -n "${KISS_AUDIT}" ]]; then
             echo "kiss_audit=${KISS_AUDIT}" >> "${GITHUB_OUTPUT}"
@@ -5874,7 +5931,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff self-review.json heartbeat.log; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent/reviewer-written content: both workflow-command syntaxes
@@ -5954,6 +6011,8 @@ jobs:
           # to the first pass's validated verdict. Empty when no gate
           # validated a verdict; the marker then stays absent.
           AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
+          # Self-review record Finalize selected like AUDIT_VERDICT (af-156).
+          SELF_REVIEW: '${{ steps.final_verify.outputs.self_review }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'
         run: |-
