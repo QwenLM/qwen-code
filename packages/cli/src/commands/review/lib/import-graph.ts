@@ -518,11 +518,6 @@ function seamLinesWith(
     const to = lineOf(node.getEnd());
     for (let line = from; line <= to; line++) marked.add(line);
   };
-  // The statement — or the class/interface/object member — a node sits in:
-  // every line it spans is the seam, not the node's own line alone (a
-  // destructuring spread over three lines is one statement), and a member
-  // rather than its whole class (one typed method must not republish the
-  // class around it).
   // A JSDoc tag that DECLARES a name rather than annotating the code below
   // it. `@import`, `@typedef` and `@callback` introduce a local name; what
   // moves with the changed API is that name's USES, which the binding walk
@@ -548,13 +543,20 @@ function seamLinesWith(
     const host = current.parent;
     return host !== undefined && !ts.isSourceFile(host) ? host : null;
   };
+  // The statement — or the class/interface/object member — a node sits in:
+  // every line it spans is the seam, not the node's own line alone (a
+  // destructuring spread over three lines is one statement), and a member
+  // rather than its whole class (one typed method must not republish the
+  // class around it).
   const statementOf = (node: TSNode): TSNode => {
     let current = node;
     while (
       current.parent !== undefined &&
       !ts.isSourceFile(current.parent) &&
       // A node inside a JSDoc comment spans its tag, not the declaration
-      // the comment documents.
+      // the comment documents — which an ANNOTATION also seams, through
+      // `markSeamAt`'s second mark rather than by widening this one
+      // (#10136 R18-1): a declaring tag must keep marking its own lines.
       !ts.isJSDoc(current.parent) &&
       !ts.isBlock(current.parent) &&
       !ts.isModuleBlock(current.parent) &&
