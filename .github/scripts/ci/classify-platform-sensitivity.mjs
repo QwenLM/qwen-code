@@ -49,6 +49,17 @@ const RUNNER_CONFIG = /(?:^|\/)vitest(?:\.[^/]*)?\.config\.[cm]?[jt]s$/i;
 // an optional per-platform dependency changes what each lane executes.
 const MANIFEST = new Set(['package.json', 'package-lock.json']);
 
+// Path/refname handling whose behaviour differs per host: the win32
+// path-spelling carve and the local path-transport probes in the git
+// remotes module are invisible to POSIX-only lanes, so a change to them
+// must be seen by both. Exact paths, not a keyword: the module's name
+// carries no subsystem segment, and a keyword here would re-summon the
+// lanes on unrelated git work.
+const GIT_PATH_HANDLING = new Set([
+  'packages/core/src/utils/git-remotes.ts',
+  'packages/core/src/utils/git-remotes.test.ts',
+]);
+
 // Source subtrees whose subject IS the host.
 //
 // A keyword counts when it NAMES the thing: a whole path segment
@@ -83,6 +94,7 @@ function isSensitivePath(file) {
     SCRIPT_LAYER.test(p) ||
     RUNNER_CONFIG.test(p) ||
     MANIFEST.has(p) ||
+    GIT_PATH_HANDLING.has(p) ||
     SUBSYSTEM_SEGMENT.test(p) ||
     SUBSYSTEM_STEM_HEAD.test(p)
   );
