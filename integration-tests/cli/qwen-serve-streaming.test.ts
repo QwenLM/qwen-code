@@ -63,6 +63,7 @@ import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
+import { countDescendants } from './_daemon-harness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -644,13 +645,11 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
       workspaceCwd: workspaceDir,
     });
 
-    // Find the daemon's direct `--acp` child PID.
-    const childPids = execSync(`pgrep -P ${daemon.pid} -f "qwen.*--acp"`, {
-      encoding: 'utf8',
-    })
-      .trim()
-      .split('\n')
-      .filter(Boolean);
+    if (daemon.pid === undefined) {
+      throw new Error('daemon process did not expose a PID');
+    }
+
+    const { acpChildren: childPids } = countDescendants(daemon.pid);
     expect(childPids.length).toBeGreaterThanOrEqual(1);
 
     const ac = new AbortController();
