@@ -3873,6 +3873,23 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('forwards the daemon idle rejection reason across the actions hop', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockResolvedValueOnce({ accepted: false, reason: 'session_idle' }),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    // The hook decides whether to resubmit on this field alone, and a
+    // narrowing at this hop type-checks because the field is optional — it
+    // would silently restore the race the reason exists to end.
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).resolves.toEqual({ accepted: false, reason: 'session_idle' });
+  });
+
   it('does not mark a stable-id admission started without a session', async () => {
     const onAdmissionStarted = vi.fn();
     const { actions } = createActionsHarness();
