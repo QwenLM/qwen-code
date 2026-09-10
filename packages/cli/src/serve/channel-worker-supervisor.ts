@@ -4,7 +4,10 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { channelSelectionNames } from './channel-selection.js';
+import {
+  channelSelectionNames,
+  normalizeServeChannelSelection,
+} from './channel-selection.js';
 import {
   ExtraCaInspectionError,
   extractCertificateBlocks,
@@ -264,7 +267,13 @@ export interface CreateChannelWorkerSupervisorOptions {
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
-  return channelSelectionNames(selection).flatMap((name) => [
+  const normalized = normalizeServeChannelSelection(
+    channelSelectionNames(selection),
+  );
+  if (!normalized) {
+    throw new Error('--channel requires a non-empty channel name.');
+  }
+  return channelSelectionNames(normalized).flatMap((name) => [
     '--channel',
     name,
   ]);

@@ -13,6 +13,12 @@ import {
 } from '../commands/channel/channel-registry.js';
 import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
+import {
+  channelSelectionNames,
+  isAllChannelSelectionName,
+  normalizeServeChannelSelection,
+  normalizeStoredServeChannelNames,
+} from './channel-selection.js';
 
 export type ChannelSecretUpdate =
   | { operation: 'preserve' }
@@ -86,16 +92,12 @@ function assertSafeChannelName(name: string): void {
 
 function assertUpsertChannelName(name: string): void {
   assertSafeChannelName(name);
-  if (isAllStartupName(name)) {
+  if (isAllChannelSelectionName(name)) {
     throw new ChannelSettingsError(
       'channel_settings_invalid_name',
       `Channel name ${JSON.stringify(name)} is reserved for startup selection.`,
     );
   }
-}
-
-function isAllStartupName(name: string): boolean {
-  return name.trim() === 'all';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -457,12 +459,16 @@ function workspaceValues(workspaceCwd: string): {
         (name): name is string => typeof name === 'string',
       )
     : [];
-  const normalizedStartupNames = [
-    ...new Set(rawStartupNames.map((name) => name.trim()).filter(Boolean)),
-  ];
-  const startupNames = normalizedStartupNames.some(isAllStartupName)
-    ? ['all']
-    : normalizedStartupNames;
+  const { names } = normalizeStoredServeChannelNames(rawStartupNames);
+  let startupNames: string[] = [];
+  try {
+    const selection = normalizeServeChannelSelection(names, {
+      label: 'serve.channels',
+    });
+    startupNames = selection ? channelSelectionNames(selection) : [];
+  } catch {
+    startupNames = [];
+  }
   return { channels, startupNames };
 }
 
@@ -580,10 +586,10 @@ export class WorkspaceChannelSettingsStore {
     const current = this.assertRevision(options.expectedRevision);
     const channels = { ...current.channels };
     delete channels[name];
-    const hasAllSentinel = current.startupNames.some(isAllStartupName);
+    const hasAllSentinel = current.startupNames.some(isAllChannelSelectionName);
     const startupNames = hasAllSentinel
       ? Object.keys(channels).some(
-          (channelName) => !isAllStartupName(channelName),
+          (channelName) => !isAllChannelSelectionName(channelName),
         )
         ? ['all']
         : []

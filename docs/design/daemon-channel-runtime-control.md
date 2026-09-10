@@ -5,7 +5,9 @@
 Add runtime desired-state control for daemon-managed channel workers. A daemon
 may start without `--channel`, then enable, replace, inspect, reload, and stop
 its channel selection without restarting the daemon. Runtime changes are not
-persisted; the next daemon boot still follows `--channel`.
+persisted. The next daemon boot follows an explicit `--channel`, otherwise it
+restores the trusted primary workspace's `serve.channels`; without either it
+remains disabled.
 
 The control layer sits above the workspace-grouped worker implementation. It
 owns the committed selection, serializes lifecycle mutations, preserves the
@@ -62,9 +64,12 @@ daemon status continues to emit `channel_worker_partial_connect`.
 ## Compatibility
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
-reservation and ready-before-success behavior. Without `--channel`, the daemon
-does not reserve the channel service or load the heavy channel runtime until
-the first runtime mutation.
+reservation and ready-before-success behavior. On a flagless boot, a trusted
+primary workspace's `serve.channels` is restored; a restore failure degrades
+only that selection and leaves the daemon queryable. Secondary workspaces do
+not independently restore their own setting. Without an explicit or persisted
+selection, the daemon does not reserve the channel service or load the heavy
+channel runtime until the first runtime mutation.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

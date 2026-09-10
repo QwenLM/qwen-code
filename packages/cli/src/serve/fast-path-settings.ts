@@ -412,7 +412,10 @@ function isWorkspaceTrustedFastPath(
   return isPathTrustedFastPath(realWorkspaceDir);
 }
 
-function readSettingsSummary(filePath: string): ServeFastPathSettings {
+function readSettingsSummary(
+  filePath: string,
+  includeServe = false,
+): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
   let parsed: unknown;
@@ -430,7 +433,7 @@ function readSettingsSummary(filePath: string): ServeFastPathSettings {
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed);
+  return pickFastPathSettings(parsed, includeServe);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -447,6 +450,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 
 function pickFastPathSettings(
   value: Record<string, unknown>,
+  includeServe = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -640,7 +644,7 @@ function pickFastPathSettings(
   }
 
   const serve = value['serve'];
-  if (isPlainObject(serve)) {
+  if (includeServe && isPlainObject(serve)) {
     const channels = serve['channels'];
     if (channels !== undefined && !isStringArray(channels)) {
       throw new Error(
@@ -752,7 +756,7 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath)
+    ? readSettingsSummary(workspaceSettingsPath, trustDecision === true)
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
@@ -761,8 +765,6 @@ export function loadServeFastPathSettings(
     merged.serve = {
       channels: [...(workspaceFromDisk.serve.channels ?? [])],
     };
-  } else {
-    delete merged.serve;
   }
   return resolveEnvVarsInObject(
     merged as Settings,

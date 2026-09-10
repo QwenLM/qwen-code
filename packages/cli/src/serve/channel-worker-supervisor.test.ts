@@ -367,6 +367,21 @@ describe('createChannelWorkerSupervisor', () => {
     ).toBe(false);
   });
 
+  it('rejects an unsafe direct selection before spawning a worker', async () => {
+    const spawnWorker = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram\u202e'] },
+      workerBaseEnv: {},
+      spawnWorker,
+    });
+
+    await expect(supervisor.start()).rejects.toThrow('--channel channel name');
+    expect(spawnWorker).not.toHaveBeenCalled();
+  });
+
   it('injects NODE_EXTRA_CA_CERTS when the daemon serves TLS', async () => {
     const child = new FakeChild();
     const spawnWorker = vi.fn(

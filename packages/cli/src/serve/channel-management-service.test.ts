@@ -40,6 +40,10 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  startupFailure?: {
+    selection: { mode: 'all' } | { mode: 'names'; names: string[] };
+    error: string;
+  };
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -131,12 +135,22 @@ function setup(options: {
       channels: [...names],
     })),
   };
+  let startupFailure = options.startupFailure;
   const service = createChannelManagementService({
     workspaceCwd: WORKSPACE,
     store,
     manager,
+    getStartupFailure: () => startupFailure,
   });
-  return { service, store, manager, persisted: () => persisted };
+  return {
+    service,
+    store,
+    manager,
+    persisted: () => persisted,
+    clearStartupFailure: () => {
+      startupFailure = undefined;
+    },
+  };
 }
 
 function codeOf(result: CreatePairingRequestResult): string {
@@ -175,6 +189,50 @@ describe('createChannelManagementService', () => {
     const result = await service.list();
 
     expect(result.instances['bot']?.startsWithServe).toBe(true);
+  });
+
+  it('reads startup failure lazily and exposes a user-scoped name', async () => {
+    const { service, clearStartupFailure } = setup({
+      snapshot: settingsSnapshot({ channels: {} }),
+      startupFailure: {
+        selection: { mode: 'names', names: ['telegram'] },
+        error: 'worker failed',
+      },
+    });
+
+    expect((await service.list()).instances['telegram']).toMatchObject({
+      startsWithServe: true,
+      runtime: { state: 'error', lastError: 'worker failed' },
+    });
+
+    clearStartupFailure();
+    expect((await service.list()).instances).toEqual({});
+  });
+
+  it('fans an all-selection startup failure out to every configured instance', async () => {
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          first: { type: 'dingtalk' },
+          second: { type: 'telegram' },
+        },
+      }),
+      startupFailure: {
+        selection: { mode: 'all' },
+        error: 'all workers failed',
+      },
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['first']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'all workers failed',
+    });
+    expect(result.instances['second']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'all workers failed',
+    });
   });
 
   it('does not expose config fields from an unmanaged channel type', async () => {

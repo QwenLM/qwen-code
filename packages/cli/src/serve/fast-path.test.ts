@@ -1666,6 +1666,30 @@ describe('serve fast path environment bootstrap', () => {
     });
   });
 
+  it('ignores malformed user startup channels without dropping other scopes', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-user-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        context: { fileName: 'USER.md' },
+        serve: { channels: 'telegram' },
+      }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.context?.fileName).toBe('USER.md');
+    expect(settings.serve).toEqual({ channels: ['telegram'] });
+  });
+
   it('does not load startup channels from a workspace with unknown trust', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1686,7 +1710,7 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
-      JSON.stringify({ serve: { channels: ['telegram'] } }),
+      JSON.stringify({ serve: { channels: 'telegram' } }),
     );
 
     expect(loadServeFastPathSettings(tempWorkspace).serve).toBeUndefined();

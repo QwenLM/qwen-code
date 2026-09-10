@@ -1997,7 +1997,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.startupNames).toEqual([]);
   });
 
-  it('canonicalizes a whitespace all sentinel when removing its legacy config', async () => {
+  it('does not report invalid all plus named startup selection', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
   "channels": {
@@ -2015,7 +2015,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.channels).toEqual({
       bot: { type: 'telegram', token: '$BOT_TOKEN' },
     });
-    expect(next.startupNames).toEqual(['all']);
+    expect(next.startupNames).toEqual([]);
   });
 
   it('clears a whitespace all sentinel when no selectable configs remain', async () => {

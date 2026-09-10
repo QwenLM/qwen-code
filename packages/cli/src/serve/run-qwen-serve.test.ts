@@ -13828,10 +13828,20 @@ describe('runQwenServe channel worker supervisor', () => {
       makeWorker({
         enabled: true,
         state: 'running',
-        channels: ['\u001b[31mRED', '--insecure'],
-        requestedChannels: ['\u001b[31mRED', '--insecure'],
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
       }),
     );
+    const unsafeNames = [
+      '\u001b[31mRED',
+      '\u009b31mC1',
+      '\u202eRLO',
+      '\u2028',
+      '\u2029',
+      '\ufe0f',
+      '--insecure',
+      ' ',
+    ];
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const handle = await runQwenServe(
       {
@@ -13844,7 +13854,7 @@ describe('runQwenServe channel worker supervisor', () => {
       {
         bridge: makeFakeBridge(),
         bootSettings: {
-          serve: { channels: ['\u001b[31mRED', '--insecure'] },
+          serve: { channels: [...unsafeNames, 'telegram'] },
         },
         channelWorkerSupervisorFactory: workerFactory,
         channelServicePidfile: makePidfileDeps(),
@@ -13853,11 +13863,18 @@ describe('runQwenServe channel worker supervisor', () => {
 
     try {
       await handle.runtimeReady;
-      expect(workerFactory).not.toHaveBeenCalled();
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      );
       const written = stderr.mock.calls
         .map(([chunk]) => String(chunk))
         .join('');
       expect(written).not.toContain('\u001b');
+      for (const raw of unsafeNames.slice(0, -2)) {
+        expect(written).not.toContain(raw);
+      }
       expect(written).toContain('"\\u001b[31mRED"');
       expect(written).toContain('"--insecure"');
     } finally {
@@ -13949,13 +13966,30 @@ describe('runQwenServe channel worker supervisor', () => {
         serve: { channels: ['telegram'] },
       }),
     );
-    const worker = makeWorker({
+    const failedWorker = makeWorker({
       enabled: true,
       state: 'failed',
       channels: ['telegram'],
       exitCode: 1,
     });
-    worker.start.mockRejectedValueOnce(new Error('worker failed before ready'));
+    failedWorker.start.mockRejectedValueOnce(
+      new Error('worker failed before ready'),
+    );
+    const recoveredWorker = makeWorker({
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      adapters: [{ name: 'telegram', state: 'connected' }],
+    });
+    const workerFactory = vi
+      .fn((workerOptions: CreateChannelWorkerSupervisorOptions) => {
+        recoveredWorker.start.mockImplementation(async () => {
+          workerOptions.onReady?.(recoveredWorker.snapshot());
+        });
+        return recoveredWorker;
+      })
+      .mockReturnValueOnce(failedWorker);
     const handle = await runQwenServe(
       {
         port: 0,
@@ -13968,7 +14002,7 @@ describe('runQwenServe channel worker supervisor', () => {
       {
         bridge: makeFakeBridge(),
         bootSettings: { serve: { channels: ['telegram'] } },
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: workerFactory,
         channelServicePidfile: makePidfileDeps(),
       },
     );
@@ -13990,7 +14024,206 @@ describe('runQwenServe channel worker supervisor', () => {
           },
         },
       });
+      const failedStatus = await fetch(`${handle.url}/daemon/status`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(await failedStatus.json()).toMatchObject({
+        status: 'warning',
+        issues: expect.arrayContaining([
+          {
+            code: 'channel_startup_not_restored',
+            severity: 'warning',
+            message: 'worker failed before ready',
+            section: 'runtime.channelWorker',
+          },
+        ]),
+      });
+
+      const recovered = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram'] },
+        }),
+      });
+      expect(recovered.status).toBe(201);
+      const recoveredListing = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(await recoveredListing.json()).toMatchObject({
+        instances: {
+          telegram: { runtime: { state: 'connected' } },
+        },
+      });
+      const recoveredStatus = await fetch(`${handle.url}/daemon/status`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(
+        ((await recoveredStatus.json()) as { issues: Array<{ code: string }> })
+          .issues,
+      ).not.toContainEqual(
+        expect.objectContaining({ code: 'channel_startup_not_restored' }),
+      );
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('exposes a failed user-scoped startup name not present in workspace settings', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-user-startup-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+    });
+    worker.start.mockRejectedValueOnce(new Error('user channel failed'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: {
+            startsWithServe: true,
+            runtime: { state: 'error', lastError: 'user channel failed' },
+          },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps configured startup fail-soft when manager construction fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-manager-startup-')),
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerUrlCertifier: () => {
+          throw new Error('manager construction sentinel');
+        },
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      const runtimeRoute = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(runtimeRoute.status).not.toBe(503);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps configured startup fail-soft when worker startup exceeds the runtime timer', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-slow-startup-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'starting',
+      channels: ['telegram'],
+    });
+    let releaseStart!: () => void;
+    worker.start.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+        runtimeStartupTimeoutMs: 1,
+      },
+    );
+
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    } finally {
+      releaseStart();
+      await handle.close();
+    }
+  });
+
+  it('retains the channel lease when configured startup cleanup is unconfirmed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-cleanup-startup-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+    });
+    worker.start.mockRejectedValueOnce(new Error('worker start failed'));
+    worker.stop.mockRejectedValue(new Error('worker stop failed'));
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
+    } finally {
+      worker.stop.mockResolvedValue(undefined);
       await handle.close();
     }
   });

@@ -100,6 +100,7 @@ export interface DaemonStatusIssue {
     | 'mcp_budget_exhausted'
     | 'rate_limit_hits'
     | 'workspace_status_unavailable'
+    | 'channel_startup_not_restored'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
@@ -135,6 +136,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelStartupFailure?: () => string | undefined;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -1247,6 +1249,15 @@ function pushRuntimeIssues(
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
+  const channelStartupFailure = input.getChannelStartupFailure?.();
+  if (channelStartupFailure) {
+    issues.push({
+      code: 'channel_startup_not_restored',
+      severity: 'warning',
+      message: channelStartupFailure,
+      section: 'runtime.channelWorker',
+    });
+  }
   for (const { workspaceCwd, internal, snapshot } of workspaceSnapshots) {
     if (
       snapshot.limits.maxSessions !== null &&
