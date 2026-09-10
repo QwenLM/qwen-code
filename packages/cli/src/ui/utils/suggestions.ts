@@ -46,13 +46,6 @@ export interface Suggestion {
 export const MAX_SUGGESTIONS_TO_SHOW = 8;
 
 /**
- * Narrowest description a row keeps when the @-mention label column is sized:
- * the reference takes priority, but not so much that its description becomes
- * unreadable. Shared because both renderers cap the same column.
- */
-export const MIN_DESCRIPTION_WIDTH = 12;
-
-/**
  * Collapse all runs of whitespace (including newlines from multi-line
  * SKILL.md/command descriptions) into single spaces so a description renders
  * as a single logical line. Without this, frontmatter line breaks are

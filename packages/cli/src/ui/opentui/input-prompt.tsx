@@ -65,11 +65,7 @@ import {
 import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
-import {
-  MIN_DESCRIPTION_WIDTH,
-  normalizeDescription,
-  type Suggestion,
-} from '../utils/suggestions.js';
+import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
@@ -1160,34 +1156,25 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onSuggestionsVisibilityChange?.(showDropdown);
   }, [showDropdown, onSuggestionsVisibilityChange]);
 
-  // ink sizes this column per completion mode. Every slash row shares one
-  // half-width command column. An @-mention list shares one only when a row
-  // carries a description (an MCP resource), capped so that description stays
-  // readable; plain file rows keep the whole row, so a long path stays on one
-  // line instead of wrapping inside a column sized for a shorter neighbour.
-  // The badge counts toward the column: ink measures label + argumentHint +
-  // sourceBadge, so a `[Skill]` row fits the column it was sized for.
-  // completionModeRef only ever changes inside refreshCompletion, alongside the
-  // setSuggestions that re-renders this block.
+  // Slash rows share one half-width command column so their descriptions line
+  // up. `@` rows get no shared column: this renderer's `@` completion only
+  // yields file paths, so every row takes the whole width and a long path stays
+  // on one line instead of wrapping inside a column sized for a shorter
+  // neighbour. The badge counts toward the column: ink measures label +
+  // argumentHint + sourceBadge, so a `[Skill]` row fits the column it was sized
+  // for. completionModeRef only ever changes inside refreshCompletion, alongside
+  // the setSuggestions that re-renders this block.
   const fullLabelWidth = (s: Suggestion) =>
     [s.label ?? s.value, s.argumentHint, s.sourceBadge]
       .filter(Boolean)
       .join(' ').length;
   const slashColumn = completionModeRef.current === CompletionMode.SLASH;
-  const describedWidths = suggestions
-    .filter((s) => s.description)
-    .map(fullLabelWidth);
   const labelColumnWidth = slashColumn
     ? Math.min(
         Math.max(...suggestions.map(fullLabelWidth), 0),
         Math.floor(columns * 0.5),
       )
-    : describedWidths.length > 0
-      ? Math.min(
-          Math.max(...describedWidths),
-          Math.max(columns - MIN_DESCRIPTION_WIDTH - 2, 1),
-        )
-      : 0;
+    : 0;
   // What a row actually has left for description text: the dropdown box nests
   // its own one-column margins inside the composer's (2), the active marker
   // takes 2, and the description pays a 2-column gutter. Over-allocating here
@@ -1248,11 +1235,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const isActive = originalIndex === activeIndex;
             const color = isActive ? C.accent : C.dim;
             const label = suggestion.label ?? suggestion.value;
-            // ink gives the cell the shared column in slash mode, or whenever
-            // the row has a description to line up against; a bare file row
-            // keeps the full row width instead.
-            const fixedLabelColumn =
-              slashColumn || Boolean(suggestion.description);
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
@@ -1262,8 +1244,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                   <text fg={color}>{isActive ? '> ' : '  '}</text>
                 </box>
                 <box
-                  flexShrink={fixedLabelColumn ? 0 : 1}
-                  {...(fixedLabelColumn ? { width: labelColumnWidth } : {})}
+                  flexShrink={slashColumn ? 0 : 1}
+                  {...(slashColumn ? { width: labelColumnWidth } : {})}
                 >
                   {/* Separate flex children, not one text: an over-long hint then
                       wraps in the width left after the label. Char wrap matches
