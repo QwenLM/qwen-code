@@ -582,7 +582,9 @@ export function useQueuedPrompts({
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
   const midTurnReconcileSeqRef = useRef(0);
   const restoredPromptIdsRef = useRef<Set<number>>(new Set());
-  const pendingStartedByPromptIdRef = useRef<Map<string, string>>(new Map());
+  const pendingStartedByPromptIdRef = useRef<
+    Map<string, { text: string; rowIdFrontier: number }>
+  >(new Map());
   /**
    * Unbound `submitting` rows the confirming sync spliced out because an
    * already-displayed server prompt matched their rendered text. A submit
@@ -900,19 +902,24 @@ export function useQueuedPrompts({
       // event for the same prompt must not re-append it, and a matching
       // unbound submission means this prompt's own admission is still in
       // flight — its body will echo the full payload when it lands.
-      const parkedText = pendingStartedByPromptIdRef.current.get(promptId);
+      const parked = pendingStartedByPromptIdRef.current.get(promptId);
+      const parkedText = parked?.text;
       // A row already bound to this id proves the park is not the in-flight
       // own-admission case below, even when a foreign unbound submission
-      // happens to render the same text.
+      // happens to render the same text. A matching row younger than the park
+      // is a different message, not this prompt's own admission in flight.
       const boundRowExists = queuedPromptsRef.current.some(
         (item) => item.serverPromptId === promptId,
       );
-      const pendingOwnSubmission = queuedPromptsRef.current.some(
-        (item) =>
-          !item.serverPromptId &&
-          item.serverState === 'submitting' &&
-          pendingPromptTextsMatch(item.text, parkedText ?? ''),
-      );
+      const pendingOwnSubmission =
+        parked !== undefined &&
+        queuedPromptsRef.current.some(
+          (item) =>
+            !item.serverPromptId &&
+            item.serverState === 'submitting' &&
+            item.id < parked.rowIdFrontier &&
+            pendingPromptTextsMatch(item.text, parked.text),
+        );
       if (
         parkedText !== undefined &&
         !settledServerPromptIdsRef.current.has(promptId) &&
@@ -1716,7 +1723,13 @@ export function useQueuedPrompts({
             store.appendLocalUserMessage(eventText, undefined, { promptId });
           }
           if (!prompt?.serverPromptId) {
-            pendingStartedByPromptIdRef.current.set(promptId, eventText);
+            pendingStartedByPromptIdRef.current.set(promptId, {
+              text: eventText,
+              // Only a row that existed when the event was parked can be its
+              // own in-flight admission: a younger row that renders the same
+              // text is a different message and must not suppress the echo.
+              rowIdFrontier: nextQueuedPromptIdRef.current,
+            });
             while (pendingStartedByPromptIdRef.current.size > 200) {
               const oldest = pendingStartedByPromptIdRef.current
                 .keys()

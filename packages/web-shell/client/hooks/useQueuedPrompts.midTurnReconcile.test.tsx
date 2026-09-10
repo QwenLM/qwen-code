@@ -11529,4 +11529,98 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+
+  it('echoes a cleared text fallback whose settle parks behind a younger same-text submission', async () => {
+    let rejectPending: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt
+      .mockResolvedValueOnce({ promptId: 'prompt-1' })
+      .mockImplementation(() => new Promise(() => {}));
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts
+          .mockImplementationOnce(
+            () =>
+              new Promise((_resolve, reject) => {
+                rejectPending = reject;
+              }),
+          )
+          .mockResolvedValue({
+            pendingPrompts: [
+              {
+                promptId: 'prompt-1',
+                text: 'hello',
+                queuedAt: Date.now(),
+                state: 'running' as const,
+              },
+            ],
+          });
+        harness.result().enqueuePrompt('hello');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      // An unrelated unbound row is in flight, so the started event's raw
+      // echo is suppressed and the start is parked.
+      await act(async () => {
+        harness.result().enqueuePrompt('unrelated');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        rejectPending?.(new Error('pending snapshot unavailable'));
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'hello',
+            },
+          },
+        ]);
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // A same-text submission younger than the park cannot be the parked
+      // prompt's own in-flight admission, so the settle must not defer to it.
+      await act(async () => {
+        harness.result().enqueuePrompt('hello');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_error',
+            data: { sessionId: 'session-a', promptId: 'prompt-1' },
+          },
+        ]);
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        { promptId: 'prompt-1' },
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
 });
