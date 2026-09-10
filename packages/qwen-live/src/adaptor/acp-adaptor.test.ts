@@ -208,6 +208,48 @@ describe('AcpAdaptor sessions and receipts', () => {
     expect(connection.authCalls).toHaveLength(1);
   });
 
+  it('completes the handshake when initialize outlasts the old 10s budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      let resolveInitialize!: (value: Record<string, unknown>) => void;
+      connection.initialize = () =>
+        new Promise((resolve) => {
+          resolveInitialize = resolve;
+        });
+      const adaptor = makeAdaptor(connection);
+      adaptors.push(adaptor);
+      const preflight = adaptor.preflight();
+      // The old 10s budget would have rejected here; the widened budget
+      // still lets a slow handshake finish.
+      await vi.advanceTimersByTimeAsync(29_000);
+      resolveInitialize({ agentCapabilities: {}, authMethods: [] });
+      await preflight;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects the handshake with 'did not initialize' when initialize never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      connection.initialize = () => new Promise(() => {});
+      const adaptor = makeAdaptor(connection);
+      adaptors.push(adaptor);
+      const preflight = adaptor.preflight();
+      // Attach a handler now so the timer-driven rejection is never
+      // reported as unhandled before the assertion below awaits it.
+      void preflight.catch(() => {});
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(preflight).rejects.toThrow(
+        "acp backend 'acp' did not initialize",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('authenticates and retries when newSession returns auth_required', async () => {
     const connection = new FakeConnection();
     connection.newSessionError = Object.assign(new Error('auth required'), {
@@ -492,7 +534,7 @@ describe('AcpAdaptor real child lifecycle', () => {
     adaptors.push(adaptor);
     const started = Date.now();
     await expect(adaptor.preflight()).rejects.toThrow();
-    // The 10s handshake timeout must not be the failure path.
+    // The handshake timeout must not be the failure path.
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

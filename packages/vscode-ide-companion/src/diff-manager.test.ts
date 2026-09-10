@@ -1,93 +1,221 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JSONRPCNotification } from '@modelcontextprotocol/sdk/types.js';
+import { DiffContentProvider, DiffManager } from './diff-manager.js';
 
-const executeCommand = vi.fn().mockResolvedValue(undefined);
+const { workspaceMock, openTextDocument, executeCommand, tabGroups } =
+  vi.hoisted(() => ({
+    workspaceMock: {
+      workspaceFolders: [] as Array<{ uri: { fsPath: string } }>,
+    },
+    openTextDocument: vi.fn(),
+    executeCommand: vi.fn(),
+    tabGroups: { all: [] as unknown[], close: vi.fn() },
+  }));
 
-vi.mock('vscode', () => {
-  class EventEmitter<T> {
-    private listeners = new Set<(event: T) => void>();
-    event = (listener: (event: T) => void) => {
-      this.listeners.add(listener);
-      return { dispose: () => this.listeners.delete(listener) };
-    };
-    fire(event: T): void {
-      for (const listener of [...this.listeners]) listener(event);
-    }
-    dispose(): void {
-      this.listeners.clear();
-    }
-  }
-
-  // `with()` has to derive a new uri. DiffManager keys `diffDocuments` on
-  // `toString()` and the two sides of one diff differ only by scheme and query,
-  // so a copy that keeps rendering the original's fields collapses the left and
-  // the right side onto a single key — and two diffs for one path onto a single
-  // entry — which makes every witness about *which* document a dismissal is
-  // keyed on vacuous.
-  interface FakeUri {
-    fsPath: string;
-    scheme: string;
-    query: string;
-    with: (change: Record<string, unknown>) => FakeUri;
-    toString: () => string;
-  }
-  const makeUri = (
-    fsPath: string,
-    scheme: string,
-    query: string,
-    rendered?: string,
-  ): FakeUri => ({
+// A minimal stand-in for vscode.Uri: enough structure for the scheme/query
+// rewrites DiffManager does and a stable toString() for its map keys.
+function makeUri(fsPath: string, scheme = 'file', query = '') {
+  return {
     fsPath,
     scheme,
     query,
-    with: (change: Record<string, unknown>) =>
-      makeUri(
-        fsPath,
-        (change.scheme as string | undefined) ?? scheme,
-        (change.query as string | undefined) ?? query,
-      ),
-    toString: () => rendered ?? `${scheme}://${fsPath}?${query}`,
-  });
-
-  return {
-    EventEmitter,
-    Uri: {
-      file: (filePath: string) => makeUri(filePath, 'file', ''),
-      // closeAll() round-trips its map keys back through Uri.parse.
-      parse: (value: string) => {
-        const [scheme = '', rest = ''] = value.split('://');
-        const [fsPath = '', query = ''] = rest.split('?');
-        return makeUri(fsPath, scheme, query, value);
-      },
+    with(change: { scheme?: string; query?: string }) {
+      return makeUri(fsPath, change.scheme ?? scheme, change.query ?? query);
     },
-    ViewColumn: { Active: -1, Beside: -2 },
-    commands: { executeCommand },
-    workspace: {
-      openTextDocument: vi.fn(async () => ({ getText: () => 'new' })),
-    },
-    window: {
-      activeTextEditor: undefined,
-      onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
-      tabGroups: { all: [] },
+    toString() {
+      return `${scheme}://${fsPath}${query ? `?${query}` : ''}`;
     },
   };
-});
+}
 
-// Avoid pulling the full extension module graph; only the scheme constant is
-// needed by the diff manager.
-vi.mock('./extension.js', () => ({ DIFF_SCHEME: 'qwen-diff' }));
-
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  IdeDiffAcceptedNotificationSchema: { parse: (value: unknown) => value },
-  IdeDiffClosedNotificationSchema: { parse: (value: unknown) => value },
+vi.mock('vscode', () => ({
+  workspace: {
+    get workspaceFolders() {
+      return workspaceMock.workspaceFolders;
+    },
+    openTextDocument,
+    onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
+  },
+  window: {
+    activeTextEditor: undefined,
+    onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
+    tabGroups,
+  },
+  commands: { executeCommand },
+  ViewColumn: { Active: -1, Beside: -2 },
+  Uri: {
+    file: (fsPath: string) => makeUri(fsPath),
+    joinPath: (base: { fsPath: string }, filePath: string) =>
+      makeUri(`${base.fsPath}/${filePath}`),
+  },
+  EventEmitter: class {
+    private listeners: Array<(e: unknown) => void> = [];
+    event = (listener: (e: unknown) => void) => {
+      this.listeners.push(listener);
+      return { dispose: vi.fn() };
+    };
+    fire = (e: unknown) => {
+      for (const listener of this.listeners) listener(e);
+    };
+    dispose = () => {
+      this.listeners.length = 0;
+    };
+  },
 }));
 
-const { DiffContentProvider, DiffManager } = await import('./diff-manager.js');
+vi.mock('./extension.js', () => ({ DIFF_SCHEME: 'qwen-diff' }));
+
+vi.mock('./utils/editorGroupUtils.js', () => ({
+  findLeftGroupOfChatWebview: () => undefined,
+  findRightGroupOfChatWebview: () => undefined,
+}));
+
+describe('DiffManager path resolution', () => {
+  let diffManager: DiffManager;
+  let notifications: JSONRPCNotification[];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    workspaceMock.workspaceFolders = [{ uri: { fsPath: '/test/workspace1' } }];
+    tabGroups.all = [];
+    // The right-hand pane is read back through openTextDocument when a diff is
+    // closed; the text it returns is what closeDiff resolves with.
+    openTextDocument.mockResolvedValue({ getText: () => 'new content' });
+
+    diffManager = new DiffManager(() => {}, new DiffContentProvider());
+    notifications = [];
+    diffManager.onDidChange((n) => notifications.push(n));
+  });
+
+  it('closes a diff opened with a workspace-relative path', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+
+    await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe(
+      'new content',
+    );
+  });
+
+  it('closes a relative-opened diff when asked with the absolute path', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+
+    await expect(
+      diffManager.closeDiff('/test/workspace1/src/foo.ts'),
+    ).resolves.toBe('new content');
+  });
+
+  it('closes an absolute-opened diff when asked with the relative path', async () => {
+    await diffManager.showDiff('/test/workspace1/src/foo.ts', 'old', 'new');
+
+    await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe(
+      'new content',
+    );
+  });
+
+  it('closes the entry the caller specified, not just the first same-file entry, when two sessions hold the same file open with different content', async () => {
+    // Two entries for the same file coexist because hasExistingDiff only
+    // dedupes on identical old/new content: a webview permission-preview
+    // diff opened with the absolute form, and a second session's differently
+    // proposed edit opened with the relative form.
+    await diffManager.showDiff('/test/workspace1/src/foo.ts', 'o1', 'n1');
+    const firstRightUri = executeCommand.mock.calls.find(
+      (call) => call[0] === 'vscode.diff',
+    )?.[2];
+
+    await diffManager.showDiff('src/foo.ts', 'o2', 'n2');
+    const secondRightUri = executeCommand.mock.calls
+      .filter((call) => call[0] === 'vscode.diff')
+      .at(-1)?.[2];
+
+    openTextDocument.mockImplementation((uri: unknown) => ({
+      getText: () => (uri === secondRightUri ? 'n2' : 'n1'),
+    }));
+
+    // Closing with the same form the second entry was opened with must
+    // close the second entry, not silently fall back to the first one that
+    // happens to share a resolvedFilePath.
+    await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe('n2');
+    expect(firstRightUri).not.toBe(secondRightUri);
+  });
+
+  it('echoes the path the diff was opened with, not the one used to close', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+    await diffManager.closeDiff('/test/workspace1/src/foo.ts');
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].params).toMatchObject({
+      filePath: 'src/foo.ts',
+      content: 'new content',
+    });
+  });
+
+  it('echoes the caller-supplied path byte for byte, even when it is not normalize-stable', async () => {
+    // The CLI keys its pending openDiff promise by the exact string it sent.
+    // If the echo comes back normalized, a key like 'src/./foo.ts' no longer
+    // matches, and the CLI's promise for it never settles.
+    await diffManager.showDiff('src/./foo.ts', 'old', 'new');
+    await diffManager.closeDiff('src/foo.ts');
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].params).toMatchObject({
+      filePath: 'src/./foo.ts',
+      content: 'new content',
+    });
+  });
+
+  it('opens the diff against the resolved path', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+
+    const diffCall = executeCommand.mock.calls.find(
+      (call) => call[0] === 'vscode.diff',
+    );
+    expect(diffCall?.[1].fsPath).toBe('/test/workspace1/src/foo.ts');
+    expect(diffCall?.[2].fsPath).toBe('/test/workspace1/src/foo.ts');
+  });
+
+  it('reads the old content from the resolved path', async () => {
+    await diffManager.showDiff('src/foo.ts', 'new');
+
+    expect(openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ fsPath: '/test/workspace1/src/foo.ts' }),
+    );
+  });
+
+  it('falls back to the raw path when no workspace folder is open', async () => {
+    workspaceMock.workspaceFolders = [];
+
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+    await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe(
+      'new content',
+    );
+
+    const diffCall = executeCommand.mock.calls.find(
+      (call) => call[0] === 'vscode.diff',
+    );
+    expect(diffCall?.[1].fsPath).toBe('src/foo.ts');
+  });
+
+  it('returns undefined when no diff matches the requested path', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+
+    await expect(
+      diffManager.closeDiff('src/other.ts'),
+    ).resolves.toBeUndefined();
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('suppresses the notification when asked to', async () => {
+    await diffManager.showDiff('src/foo.ts', 'old', 'new');
+    await diffManager.closeDiff('src/foo.ts', true);
+
+    expect(notifications).toHaveLength(0);
+  });
+});
 
 const WRITABLE_COMMAND =
   'workbench.action.files.setActiveEditorWriteableInSession';
@@ -221,6 +349,7 @@ describe('DiffManager.showDiff reuse', () => {
 describe('DiffManager permission diff dismissal', () => {
   beforeEach(() => {
     executeCommand.mockClear();
+    openTextDocument.mockResolvedValue({ getText: () => 'new content' });
   });
 
   function createManager(): InstanceType<typeof DiffManager> {
@@ -354,6 +483,7 @@ describe('DiffManager permission diff dismissal', () => {
 describe('DiffManager permission request id binding', () => {
   beforeEach(() => {
     executeCommand.mockClear();
+    openTextDocument.mockResolvedValue({ getText: () => 'new content' });
   });
 
   function createManager(): InstanceType<typeof DiffManager> {

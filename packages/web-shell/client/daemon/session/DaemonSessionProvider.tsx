@@ -594,6 +594,9 @@ function projectSubagentToolUpdate(
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
+        ...(typeof rawOutput['subagentSessionReady'] === 'boolean'
+          ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
@@ -738,6 +741,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
+  sourcesVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -772,6 +776,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionContext,
     sessionId,
     clientId,
+    sessionSourceType,
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
@@ -835,6 +840,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  // Restore-time attribution is read inside the reconnect/restore effect;
+  // mirror it so a host prop change never re-triggers a session load.
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const resolvedSessionContextRef = useRef(resolvedSessionContext);
   resolvedSessionContextRef.current = resolvedSessionContext;
   const sessionContextResolutionErrorRef = useRef(
@@ -1152,6 +1161,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
+    capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
       ? 'error'
       : autoConnect
@@ -1544,6 +1554,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
+      // Let StrictMode discard its first effect before starting a session load.
+      if (!runnerSession) {
+        await Promise.resolve();
+        if (disposed) return;
+      }
       const client =
         workspaceClientRef.current ??
         new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
@@ -2021,6 +2036,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const restoreRequest = {
               timeoutMs: restoreRequestTimeoutMs,
+              // Workspace restores only: the standalone request type omits
+              // source attribution, and the daemon applies it solely when the
+              // restored session has none persisted (legacy upgrade path).
+              ...(effectSessionContext?.kind !== 'standalone' &&
+              sessionSourceTypeRef.current !== undefined
+                ? { sourceType: sessionSourceTypeRef.current }
+                : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
                 ? { liveReplayMode: 'summary' as const }
@@ -5295,17 +5317,14 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
     return createGoalStatusUiEvent(event, terminal);
   }
 
-  const loop = meta['stopHookLoop'];
-  if (!isRecord(loop)) return null;
-  const goal = loop['goal'];
-  if (!isRecord(goal)) return null;
-  const condition = getString(goal, 'condition');
-  if (!condition) return null;
-
-  // Suppress per-iteration "checking" events from the transcript to avoid
-  // flooding with one card per stop-hook turn. The active goal state is
-  // already visible in the status bar; only terminal events and the initial
-  // "set" event are shown as transcript cards.
+  // Per-iteration "checking" events are deliberately not turned into
+  // transcript cards: one card per stop-hook turn floods the transcript, and
+  // the active goal state is already visible in the status bar. Which kinds do
+  // become cards is decided by `normalizeGoalStatus` below, not here -- it
+  // admits `paused`, `cleared` and `usage_limited` as well as the terminal
+  // kinds, and dropping any of them regresses the bug recorded beside its
+  // `paused` entry. This return is only the fallthrough for an event that
+  // carried neither a status nor a terminal.
   return null;
 }
 
@@ -5423,6 +5442,7 @@ function bumpSessionEventSignals(
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
+  let sources = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -5430,6 +5450,10 @@ function bumpSessionEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.source.changed') {
+      if (includeArtifactEvents) sources += 1;
+      continue;
+    }
     if (event.type === 'session.artifact.changed') {
       if (includeArtifactEvents) artifacts += 1;
       continue;
@@ -5497,6 +5521,7 @@ function bumpSessionEventSignals(
       mcp +
       extensions +
       artifacts +
+      sources +
       init +
       auth ===
       0 &&
@@ -5520,6 +5545,7 @@ function bumpSessionEventSignals(
         mcp +
         extensions +
         artifacts +
+        sources +
         init +
         auth ===
         0 &&
@@ -5536,6 +5562,7 @@ function bumpSessionEventSignals(
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
+      sourcesVersion: (current.sourcesVersion ?? 0) + sources,
       ...(newSkillMutations.length > 0
         ? { lastSkillMutation: newSkillMutations.at(-1) }
         : current.lastSkillMutation

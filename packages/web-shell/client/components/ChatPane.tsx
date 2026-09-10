@@ -36,6 +36,7 @@ import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -359,7 +360,12 @@ export function ChatPane({
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
-      if (!connection.sessionId || !onRightPanelOpen) return;
+      if (
+        !connection.sessionId ||
+        !onRightPanelOpen ||
+        getSubagentDetailsUnavailableReason(tool)
+      )
+        return;
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -1008,6 +1014,7 @@ export function ChatPane({
         const submit = () =>
           actions
             .sendPrompt(trimmed, {
+              submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
               ...(files && files.length ? { files } : {}),
               ...(inputAnnotations ? { inputAnnotations } : {}),
@@ -1086,7 +1093,15 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images, files)
+          ? enqueuePrompt(
+              trimmed,
+              images,
+              files,
+              undefined,
+              undefined,
+              undefined,
+              text,
+            )
           : enqueuePrompt(
               trimmed,
               images,
@@ -1094,6 +1109,7 @@ export function ChatPane({
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
+              text,
             );
       if (queued !== false && catalogOwnerCwd) {
         sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);

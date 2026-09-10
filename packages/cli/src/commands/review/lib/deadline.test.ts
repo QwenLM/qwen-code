@@ -47,8 +47,6 @@ import {
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
   DEFAULT_COMPOSE_FLOOR_SECONDS,
-  DEFAULT_TOOL_CONCURRENCY,
-  TOOL_CONCURRENCY_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
   claimRetirementDegradeNote,
@@ -467,7 +465,7 @@ describe('the pair admission price — a round launched beside an in-flight roun
         p,
         2,
         6,
-        { [TOOL_CONCURRENCY_ENV]: '12' },
+        { QWEN_CODE_MAX_TOOL_CONCURRENCY: '12' },
         NOW_MS,
       ),
     ).toBe(DEFAULT_ROUND_SECONDS);
@@ -478,7 +476,7 @@ describe('the pair admission price — a round launched beside an in-flight roun
         p,
         2,
         6,
-        { [TOOL_CONCURRENCY_ENV]: '3' },
+        { QWEN_CODE_MAX_TOOL_CONCURRENCY: '3' },
         NOW_MS,
       ),
     ).toBe(2 * DEFAULT_ROUND_SECONDS);
@@ -488,15 +486,32 @@ describe('the pair admission price — a round launched beside an in-flight roun
         p,
         2,
         6,
-        { [TOOL_CONCURRENCY_ENV]: 'soon' },
+        { QWEN_CODE_MAX_TOOL_CONCURRENCY: 'soon' },
         NOW_MS,
       ),
-    ).toBe(
-      Math.ceil(
-        (DEFAULT_ROUND_SECONDS * Math.ceil(12 / DEFAULT_TOOL_CONCURRENCY)) /
-          Math.ceil(6 / DEFAULT_TOOL_CONCURRENCY),
-      ),
-    );
+    ).toBe(2 * DEFAULT_ROUND_SECONDS);
+  });
+
+  it('prices the workflow override before the tool pool, including one slot', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    for (const [pool, expected] of [
+      ['1', 2],
+      ['12', 1],
+    ] as const) {
+      expect(
+        expectedAdmissionSeconds(
+          p,
+          2,
+          6,
+          {
+            QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: pool,
+            QWEN_CODE_MAX_TOOL_CONCURRENCY: '10',
+          },
+          NOW_MS,
+        ),
+      ).toBe(expected * DEFAULT_ROUND_SECONDS);
+    }
   });
 
   it('keeps the reserve on top of the pair price at the refusal boundary', () => {

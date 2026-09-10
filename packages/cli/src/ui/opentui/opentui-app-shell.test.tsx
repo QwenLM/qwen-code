@@ -68,6 +68,9 @@ const mocks = vi.hoisted(() => {
     toolConfirmProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
+    bannerProps: null as Record<string, unknown> | null,
+    footerProps: null as Record<string, unknown> | null,
+    loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
     /** Runs while a dispatched command is still awaiting its outcome. */
@@ -194,6 +197,22 @@ vi.mock('./input-prompt.js', () => ({
     return 'input-prompt';
   },
 }));
+vi.mock('./opentui-header.js', () => ({
+  OpenTuiBanner: (props: Record<string, unknown>) => {
+    mocks.state.bannerProps = props;
+    return <span>banner</span>;
+  },
+}));
+vi.mock('./opentui-footer.js', () => ({
+  OpenTuiFooter: (props: Record<string, unknown>) => {
+    mocks.state.footerProps = props;
+    return <span>footer</span>;
+  },
+  OpenTuiLoadingIndicator: (props: Record<string, unknown>) => {
+    mocks.state.loadingProps = props;
+    return <span>loading-indicator</span>;
+  },
+}));
 vi.mock('./dialogs-confirm.js', () => ({
   OpenTuiToolConfirmation: (props: Record<string, unknown>) => {
     mocks.state.toolConfirmProps = props;
@@ -263,6 +282,9 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.toolConfirmProps = null;
     mocks.state.shellConfirmProps = null;
     mocks.state.actionConfirmProps = null;
+    mocks.state.bannerProps = null;
+    mocks.state.footerProps = null;
+    mocks.state.loadingProps = null;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.exitInProgress = false;
     mocks.state.onHandle = null;
@@ -279,6 +301,15 @@ describe('OpenTuiApp shell wiring', () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('mounts the restored banner and footer, and feeds them the streaming flag', async () => {
+    renderApp({ streaming: true });
+    await settle();
+    expect(screen.getByText('banner')).toBeTruthy();
+    expect(screen.getByText('footer')).toBeTruthy();
+    expect(mocks.state.footerProps?.['streaming']).toBe(true);
+    expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
   it('builds one host, and one dispatcher, across re-renders', async () => {

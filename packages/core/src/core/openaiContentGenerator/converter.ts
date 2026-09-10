@@ -337,6 +337,20 @@ export function convertLlmToolParametersToOpenAI(
  */
 const grammarSchemaValidationCache = new WeakMap<object, boolean>();
 
+const PARAMETERLESS_SCHEMA_KEYS = new Set([
+  '$comment',
+  '$schema',
+  'additionalProperties',
+  'deprecated',
+  'description',
+  'examples',
+  'properties',
+  'readOnly',
+  'title',
+  'type',
+  'writeOnly',
+]);
+
 function isStrictlyValidSchema(schema: object): boolean {
   const cached = grammarSchemaValidationCache.get(schema);
   if (cached !== undefined) {
@@ -386,13 +400,34 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
-            const sourceSchema = func.parametersJsonSchema;
+            const sourceSchema =
+              typeof func.parametersJsonSchema === 'object' &&
+              func.parametersJsonSchema !== null &&
+              !Array.isArray(func.parametersJsonSchema)
+                ? (func.parametersJsonSchema as Record<string, unknown>)
+                : undefined;
             const canValidateLocally =
-              typeof sourceSchema === 'object' &&
-              sourceSchema !== null &&
-              !Array.isArray(sourceSchema) &&
+              sourceSchema !== undefined &&
               !('$id' in sourceSchema) &&
               isStrictlyValidSchema(sourceSchema);
+            const sourceProperties = sourceSchema?.['properties'];
+            const sourceAdditionalProperties =
+              sourceSchema?.['additionalProperties'];
+            const hasEmptyProperties =
+              typeof sourceProperties === 'object' &&
+              sourceProperties !== null &&
+              !Array.isArray(sourceProperties) &&
+              Object.keys(sourceProperties).length === 0;
+            const declaresEmptyArgumentList =
+              sourceSchema !== undefined &&
+              ((hasEmptyProperties &&
+                (sourceAdditionalProperties === false ||
+                  sourceAdditionalProperties === undefined)) ||
+                (sourceProperties === undefined &&
+                  sourceAdditionalProperties === false)) &&
+              Object.keys(sourceSchema).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              );
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -404,6 +439,16 @@ export async function convertLlmToolsToOpenAI(
               parameters,
               canValidateLocally,
             );
+            if (
+              canValidateLocally &&
+              declaresEmptyArgumentList &&
+              parameters['type'] === 'object' &&
+              Object.keys(parameters).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              )
+            ) {
+              parameters = undefined;
+            }
           }
 
           openAITools.push({
