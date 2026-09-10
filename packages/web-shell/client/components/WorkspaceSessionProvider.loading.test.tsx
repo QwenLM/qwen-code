@@ -178,6 +178,10 @@ it.each(
           return json({ v: 1, workspaceCwd: '/work/a', skills: [] });
         if (url.pathname.endsWith('/git'))
           return json({ v: 1, isGitRepository: false });
+        // The provider probes GET /brand once per client; a 404 settles it
+        // without scheduling the 2s retry, so nothing leaks past this test.
+        if (url.pathname.endsWith('/brand'))
+          return new Response('not found', { status: 404 });
         throw new Error(`Unexpected request: ${url.pathname}`);
       }),
     );
@@ -196,7 +200,11 @@ it.each(
         );
         root.render(strictMode ? <StrictMode>{tree}</StrictMode> : tree);
       });
-      expect(calls).toEqual(['GET /capabilities']);
+      expect(calls).toEqual(
+        strictMode
+          ? ['GET /capabilities', 'GET /brand', 'GET /brand']
+          : ['GET /capabilities', 'GET /brand'],
+      );
       expect(observeLiveStateSupport).not.toHaveBeenCalled();
       await act(async () => {
         releaseCapabilities();

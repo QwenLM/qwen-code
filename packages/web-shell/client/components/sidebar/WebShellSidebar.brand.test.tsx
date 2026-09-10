@@ -97,6 +97,8 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogQueries: vi.fn(() => []),
 }));
 
+const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+
 const { I18nProvider } = await import('../../i18n');
 const { BrandProvider } = await import('../../brandContext');
 const { WebShellSidebar } = await import('./WebShellSidebar');
@@ -196,6 +198,7 @@ describe('sidebar brand', () => {
     // `""` means "use the built-in name" on the settings surface, so a host
     // that builds its prop the same way must not get an empty sidebar row and
     // a version tooltip reading " v1.2.3".
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '360');
     renderSidebar({ name: '' });
 
     expect(container.textContent).toContain('Qwen Code');
@@ -205,6 +208,7 @@ describe('sidebar brand', () => {
   });
 
   it('names the version tooltip after the brand', () => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '360');
     renderSidebar({ name: 'QiuQiu Code' });
 
     expect(
