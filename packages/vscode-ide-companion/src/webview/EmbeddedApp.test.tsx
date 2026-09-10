@@ -352,7 +352,7 @@ describe('EmbeddedApp host wiring', () => {
     expect(container.textContent).toContain('Get Started');
   });
 
-  it('keeps an explicit active-file exclusion across same-file editor changes', async () => {
+  it('keeps an explicit active-file exclusion across editor changes', async () => {
     await renderApp();
 
     const dispatchEditorChanged = (fileName: string, filePath: string) =>
@@ -410,7 +410,7 @@ describe('EmbeddedApp host wiring', () => {
         prepareSubmitAfterSameFile({ prompt: 'hi', inputAnnotations: [] }),
       ).resolves.toBeUndefined();
 
-      // Switching to a different file re-arms inclusion.
+      // Switching to a different file must preserve the explicit exclusion.
       await dispatchEditorChanged('other.ts', '/workspace/other.ts');
       const prepareSubmitAfterSwitch = callback<
         (submission: {
@@ -422,7 +422,7 @@ describe('EmbeddedApp host wiring', () => {
       >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
       await expect(
         prepareSubmitAfterSwitch({ prompt: 'hi', inputAnnotations: [] }),
-      ).resolves.toMatchObject({ prompt: '@other.ts hi' });
+      ).resolves.toBeUndefined();
     } finally {
       act(() => toolbarRoot.unmount());
       toolbarContainer.remove();
