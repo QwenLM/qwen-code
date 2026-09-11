@@ -2118,6 +2118,88 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it.each([
+    [
+      'a prompt that renders a caption',
+      'look at this',
+      [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+    ],
+    [
+      'a prompt carrying two images',
+      '[image]',
+      [
+        { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+        { type: 'image', data: 'QUFB', mimeType: 'image/png' },
+      ],
+    ],
+  ])(
+    'does not bind a blank image row to %s',
+    async (_label, serverText, serverContent) => {
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+        (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+          opts?.onAdmissionStarted?.();
+          return Promise.resolve({ accepted: false, reason: 'session_idle' });
+        },
+      );
+      sdkMock.actions.submitPrompt.mockImplementation(
+        () => new Promise<{ promptId: string }>(() => {}),
+      );
+      const harness = createHarness();
+      try {
+        await harness.render({
+          streamingState: 'responding',
+          sessionHasActivePrompt: true,
+        });
+        await act(async () => {
+          harness
+            .result()
+            .enqueuePrompt('', [{ data: 'aGVsbG8=', media_type: 'image/png' }]);
+          for (let i = 0; i < 4; i++) await Promise.resolve();
+        });
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+        await act(async () => {
+          // The snapshot holds a single candidate, so the ambiguity gate
+          // cannot be what refuses this bind. A blank row owns a placeholder
+          // rendering only, and its one image proves ownership only of a
+          // one-image payload — a captioned prompt is a different message,
+          // and a longer payload is not the row's.
+          sdkMock.actions.getPendingPrompts.mockResolvedValueOnce({
+            pendingPrompts: [
+              {
+                promptId: 'prompt-earlier',
+                text: serverText,
+                content: serverContent,
+                queuedAt: Date.now(),
+                state: 'queued' as const,
+                originatorClientId: CLIENT_ID,
+              },
+            ],
+          });
+          sdkMock.publishPendingEvents([
+            {
+              type: 'pending_prompt_started',
+              promptId: 'prompt-other',
+              originatorClientId: 'client-other',
+              data: {
+                sessionId: 'session-a',
+                promptId: 'prompt-other',
+                text: 'someone else',
+              },
+            },
+          ]);
+          for (let i = 0; i < 4; i++) await Promise.resolve();
+        });
+        const rows = harness.result().queuedPrompts;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.serverPromptId).toBeUndefined();
+        expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+        expect(harness.reportError).not.toHaveBeenCalled();
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
   it('does not echo a flagged image row under another in-flight prompt', async () => {
     const flaggedImage = { data: 'QkJC', media_type: 'image/png' };
     const ordinaryImage = { data: 'QUFB', media_type: 'image/png' };
@@ -2760,7 +2842,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('does not join a pre-admission refresh from the post-admission tail', async () => {
+  it("keeps the second body's bound row when the first body's stale flight resolves", async () => {
     const parked = deferred<{
       pendingPrompts: Array<{
         promptId: string;
@@ -2809,11 +2891,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         harness.result().enqueuePrompt('', [image]);
         for (let i = 0; i < 8; i++) await Promise.resolve();
       });
-      expect(
-        harness
-          .result()
-          .queuedPrompts.some((row) => row.serverPromptId === 'prompt-2'),
-      ).toBe(true);
+      const boundRowId = harness
+        .result()
+        .queuedPrompts.find((row) => row.serverPromptId === 'prompt-2')?.id;
+      expect(boundRowId).toBeDefined();
       await act(async () => {
         parked.resolve({ pendingPrompts: [queuedEntry('prompt-1')] });
         sdkMock.actions.getPendingPrompts.mockResolvedValue({
@@ -2821,15 +2902,16 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         });
         for (let i = 0; i < 10; i++) await Promise.resolve();
       });
-      // The stale snapshot must not splice out the row body 2 just bound.
-      expect(harness.result().queuedPrompts).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            serverPromptId: 'prompt-2',
-            serverState: 'queued',
-          }),
-        ]),
-      );
+      // The stale snapshot must not splice out the row body 2 just bound:
+      // that same local row has to survive, since a rematerialized
+      // replacement carries a new id and a summary-only payload.
+      expect(
+        harness
+          .result()
+          .queuedPrompts.some(
+            (row) => row.id === boundRowId && row.serverPromptId === 'prompt-2',
+          ),
+      ).toBe(true);
       expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
       expect(harness.reportError).not.toHaveBeenCalled();
     } finally {
@@ -9383,10 +9465,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         ]);
         for (let i = 0; i < 3; i++) await Promise.resolve();
       });
-      // The echo must come from the stashed payload: the row is gone, the
-      // event carries only the placeholder, and the not-removed answer means
-      // the daemon no longer holds the prompt as removable — it started, or
-      // a peer removed it first — so the replay is what echoes it.
+      // The echo must come from the stashed payload: the row is gone and the
+      // event carries only the placeholder. The not-removed answer means the
+      // daemon no longer holds the prompt as removable — it started, or a
+      // peer removed it first — and the DELETE had already settled before
+      // this event arrived, so nothing was parked for a replay: the started
+      // handler finds the surviving stash and echoes it.
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         '',
@@ -11002,7 +11086,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       },
     );
     sdkMock.actions.removePendingPrompt.mockClear();
-    sdkMock.actions.removePendingPrompt.mockResolvedValue({ removed: false });
+    // A rejected DELETE is the reachable way to fail a removal: the request
+    // may never have arrived, so the daemon can still hold the message
+    // queued. A resolved `{ removed: false }` cannot — it means the id is
+    // absent, or a running prompt was already removed and is hidden from
+    // every later snapshot.
+    sdkMock.actions.removePendingPrompt.mockRejectedValue(
+      new Error('delete lost'),
+    );
     const harness = createHarness();
     try {
       await harness.render({
@@ -11043,9 +11134,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         for (let i = 0; i < 6; i++) await Promise.resolve();
       });
-      // The removal did not take effect, so the daemon still holds the
-      // message: it has to be visible again instead of silently missing from
-      // the queue until the daemon runs it.
+      // The removal never reached the daemon, so it still holds the message:
+      // the row has to be visible again instead of silently missing from the
+      // queue until the daemon runs it.
       expect(harness.result().queuedPrompts).toEqual([
         expect.objectContaining({
           serverPromptId: 'prompt-1',
@@ -13151,39 +13242,27 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           serverState: 'submitting',
         }),
       ]);
-      // The user clears the queue: the row has no serverPromptId, so the
-      // clear path alone would drop it locally and leave the daemon holding
-      // a message nobody will ever cancel.
+      // The daemon still lists the prompt queued, and nothing but the clear
+      // itself asks for that snapshot: no event arrives, no other submission
+      // is in flight. The row has no serverPromptId, so the clear path alone
+      // would drop it locally and leave the daemon holding a message nobody
+      // will ever cancel.
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'doomed message',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+            originatorClientId: CLIENT_ID,
+          },
+        ],
+      });
       act(() => {
         harness.result().clearQueuedPrompts();
       });
       expect(harness.result().queuedPrompts).toEqual([]);
-      // The next snapshot still lists the prompt queued: the deferred clear
-      // must cancel it.
       await act(async () => {
-        sdkMock.actions.getPendingPrompts.mockResolvedValue({
-          pendingPrompts: [
-            {
-              promptId: 'prompt-1',
-              text: 'doomed message',
-              queuedAt: Date.now(),
-              state: 'queued' as const,
-              originatorClientId: CLIENT_ID,
-            },
-          ],
-        });
-        sdkMock.publishPendingEvents([
-          {
-            type: 'pending_prompt_started',
-            promptId: 'prompt-other',
-            originatorClientId: 'client-other',
-            data: {
-              sessionId: 'session-a',
-              promptId: 'prompt-other',
-              text: 'someone else',
-            },
-          },
-        ]);
         for (let i = 0; i < 8; i++) await Promise.resolve();
       });
       expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(

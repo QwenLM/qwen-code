@@ -719,9 +719,10 @@ export function useQueuedPrompts({
           return false;
         }
         if (!p.serverPromptId) return true;
-        // A binding made at or after this flight's dispatch is invisible to
-        // the flight's snapshot — the daemon had not admitted the prompt yet
-        // — so its absence here proves nothing: keep a row whose bind is not
+        // A flight dispatched before a submit body bound this row may have
+        // been served before the daemon admitted the prompt — the client's
+        // dispatch order is not the daemon's processing order — so the
+        // snapshot's silence proves nothing: keep a row whose bind is not
         // older than the dispatch that produced this snapshot.
         if ((p.boundAtSeq ?? 0) >= refreshRequestSeqRef.current) return true;
         return serverQueued.some(
@@ -785,7 +786,6 @@ export function useQueuedPrompts({
             midTurnFailedAction: undefined,
             serverPromptId: serverPrompt.promptId,
             serverState: serverPrompt.state,
-            boundAtSeq: refreshRequestSeqRef.current,
           };
           continue;
         }
@@ -842,7 +842,6 @@ export function useQueuedPrompts({
               ...submittingRow,
               serverPromptId: serverPrompt.promptId,
               serverState: serverPrompt.state,
-              boundAtSeq: refreshRequestSeqRef.current,
             };
             continue;
           }
@@ -1898,9 +1897,12 @@ export function useQueuedPrompts({
   ]);
 
   /**
-   * Submit one pending prompt. Returns the admission promise (already
-   * error-handled) so callers releasing several prompts can chain them and
-   * keep the daemon's queue in the order the user typed them.
+   * Submit one pending prompt. The returned promise (already error-handled)
+   * settles once the admission has resolved and, for an idle-rejected
+   * resubmission, once its confirming snapshot has been taken — so callers
+   * releasing several prompts can chain them and keep the daemon's queue in
+   * the order the user typed them, at the cost of a link also spanning that
+   * snapshot.
    */
   const submitPendingPrompt = useCallback(
     (prompt: QueuedPrompt): Promise<void> => {
@@ -2559,8 +2561,9 @@ export function useQueuedPrompts({
       }
       // Re-check the hold per link, not once for the whole batch: the chain
       // is built synchronously when the hold lifts, but each link runs only
-      // after the previous admission settles. A Goal resumed inside that
-      // window (or a write block) must stop the remaining links instead of
+      // after the previous one settles — its admission, plus the confirming
+      // snapshot an idle-rejected resubmission awaits. A Goal resumed inside
+      // that window (or a write block) must stop the remaining links instead of
       // POSTing them against an active Goal — they return to held, and the
       // next inactive transition re-drains them in order.
       if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
@@ -3187,7 +3190,9 @@ export function useQueuedPrompts({
       // prompt overtake it and reach the daemon's queue out of order.
       //
       // The chain is built synchronously, but each link runs only after the
-      // previous admission settles, so the session can change mid-drain.
+      // previous one settles — its admission, plus the confirming snapshot an
+      // idle-rejected resubmission awaits — so the session can change
+      // mid-drain.
       // Pinned here rather than read per link: the guard has to ask "is this
       // still the owner the chain was built for", not "is there an owner".
       const chainOwner = ownerTokenRef.current;
@@ -3957,6 +3962,7 @@ export function useQueuedPrompts({
       const submittingIds = new Set(
         submittingPrompts.map((prompt) => prompt.id),
       );
+      let handedOffClear = false;
       // A row whose submit body already returned unbound carries a daemon
       // id this clear path would otherwise lose — the row has no
       // serverPromptId to DELETE. Hand the id to the deferred clear so the
@@ -3968,6 +3974,7 @@ export function useQueuedPrompts({
         for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
           if (rowId === prompt.id) {
             clearedUnconfirmedPromptIdsRef.current.add(promptId);
+            handedOffClear = true;
             break;
           }
         }
@@ -3977,6 +3984,13 @@ export function useQueuedPrompts({
       );
       queuedPromptsRef.current = remaining;
       setQueuedPrompts(remaining);
+      // The deferred clear only runs inside a snapshot pass, and nothing else
+      // on this path requests one — a quiet session would leave the recorded
+      // cancellation unattempted until the daemon promotes the very message
+      // the user cleared. Ask for the evidence the handoff depends on. The
+      // pass cannot resurrect the row: the loop marks the id as being removed
+      // before it DELETEs, and the sync skips every marked id.
+      if (handedOffClear) void refreshPendingPrompts(clearSessionId);
     }
     for (const controller of submitAbortControllersRef.current) {
       controller.abort();

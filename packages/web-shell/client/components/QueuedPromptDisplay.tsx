@@ -134,10 +134,12 @@ export interface QueuedPrompt {
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
   /**
-   * The pending-prompts refresh sequence at the moment this row was bound to
-   * `serverPromptId`. A snapshot from a flight dispatched before the binding
-   * cannot list the prompt, so its absence proves nothing: the sync's
-   * retention filter keeps a row bound at or after that flight's dispatch.
+   * The pending-prompts refresh sequence at the moment a submit body bound
+   * this row to `serverPromptId`; a bind the sync performed itself leaves it
+   * unset. A flight dispatched before that binding may have been served
+   * before the daemon admitted the prompt, so its snapshot can omit the row
+   * without the row having been removed: the sync's retention filter keeps a
+   * row bound at or after that flight's dispatch.
    */
   boundAtSeq?: number;
   resubmittedAfterIdleRejection?: boolean;

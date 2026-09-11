@@ -36623,7 +36623,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('acks a same-id retry after the queued media is removed', async () => {
+  it('acks a same-id retry whose attachment reference is dead', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -36659,9 +36659,21 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         clientId: session.clientId,
       }),
     ).toEqual({ removed: true });
+    // Deleting the queued message keeps the upload, so remove it too: the
+    // retried reference must be genuinely dead for the ordering below to be
+    // at stake.
+    expect(
+      await bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        { clientId: session.clientId },
+      ),
+    ).toBe(true);
 
     // The removal settled the id; a same-id retry must hit the settled ring
-    // and ack, not throw session_attachments_gone (410).
+    // and ack, not throw session_attachments_gone (410). Hoisting the
+    // reference validation above the rings — validating inputs first — turns
+    // this into a 410 for a message the daemon already owns and settled.
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
