@@ -76,6 +76,20 @@ describe('getFocusToolSummary', () => {
     expect(
       getFocusToolSummary([
         {
+          name: 'Read Directory',
+          status: 'success',
+          description: 'Read directory src',
+        },
+      ])?.text,
+    ).toBe('Read Directory src (Ctrl+O for details)');
+    expect(
+      getFocusToolSummary([
+        { name: 'Read File', status: 'success', description: 'Read File(s)' },
+      ])?.text,
+    ).toBe('Read File (Ctrl+O for details)');
+    expect(
+      getFocusToolSummary([
+        {
           name: 'Read File',
           status: 'success',
           description: 'Read file example.ts',
@@ -126,6 +140,11 @@ describe('getFocusToolSummary', () => {
   });
 
   it('reserves the detail shortcut within the caller width', () => {
+    const expected = [
+      'Edit …/focus.ts failed (Ctrl+O for details)',
+      'Tools: 3, failed: 3 (Edit, …) (Ctrl+O for details)',
+    ];
+    let index = 0;
     for (const inputs of [
       [
         {
@@ -142,9 +161,33 @@ describe('getFocusToolSummary', () => {
       })),
     ]) {
       const summary = getFocusToolSummary(inputs, { maxWidth: 60 });
+      expect(summary?.text).toBe(expected[index++]);
       expect(summary?.text).toContain('Ctrl+O for details');
       expect(stringWidth(summary!.text)).toBeLessThanOrEqual(60);
     }
+  });
+  it('preserves directory listing identity', () => {
+    expect(
+      getFocusToolSummary([
+        { ...tool, name: 'list_directory', args: { path: 'src/components' } },
+      ])?.text,
+    ).toBe('ListFiles src/components (Ctrl+O for details)');
+  });
+
+  it('retains basename characters within a narrow identity budget', () => {
+    const summary = getFocusToolSummary(
+      [
+        {
+          ...tool,
+          name: 'write_file',
+          args: { file_path: '/long-directory/'.repeat(20) + 'focus.ts' },
+        },
+      ],
+      { maxWidth: 34 },
+    );
+    expect(summary?.text).toBe('WriteFile fo… (Ctrl+O for details)');
+    expect(summary?.text).not.toContain('…/…');
+    expect(stringWidth(summary!.text)).toBeLessThanOrEqual(34);
   });
   it('keeps the tool identity but never shell arguments or descriptions', () => {
     expect(getFocusToolSummary([tool])).toEqual({
@@ -275,7 +318,35 @@ describe('getFocusToolSummary', () => {
       maxWidth: 20,
     });
     expect(summary?.status).toBe('error');
-    expect(summary?.text).toContain('Shell failed');
+    expect(summary?.text).toBe('Shell failed');
     expect(stringWidth(summary!.text)).toBeLessThanOrEqual(20);
   });
+
+  it.each(['en', 'pt', 'de', 'zh'] as const)(
+    'keeps localized hints and parentheses whole at narrow widths (%s)',
+    async (language) => {
+      await setLanguageAsync(language);
+      try {
+        for (const maxWidth of [20, 34, 60]) {
+          for (const inputs of [
+            [{ ...tool, status: 'error' as const }],
+            ['edit', 'write_file', 'run_shell_command'].map((name) => ({
+              ...tool,
+              name,
+              status: 'error' as const,
+            })),
+          ]) {
+            const text = getFocusToolSummary(inputs, { maxWidth })!.text;
+            expect(stringWidth(text)).toBeLessThanOrEqual(maxWidth);
+            expect((text.match(/[（(]/g) ?? []).length).toBe(
+              (text.match(/[)）]/g) ?? []).length,
+            );
+            expect(text).not.toMatch(/(?:Ctrl|Strg)[^）)]*…/);
+          }
+        }
+      } finally {
+        await setLanguageAsync('en');
+      }
+    },
+  );
 });

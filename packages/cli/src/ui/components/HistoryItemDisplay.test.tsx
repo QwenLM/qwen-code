@@ -818,6 +818,13 @@ describe('<HistoryItemDisplay />', () => {
       { images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }] },
       { omittedImageCount: 1 },
       { visionBridgeNotice: 'Image sent to the configured vision provider' },
+      {
+        resultDisplay: {
+          type: 'vision_bridge_notice' as const,
+          summary: 'Image sent',
+          notice: 'Image sent to the configured vision provider',
+        },
+      },
     ])('preserves image-bearing tool groups: %j', (imageOutput) => {
       vi.mocked(ToolGroupMessage).mockClear();
       renderInFocusMode(
@@ -873,6 +880,33 @@ describe('<HistoryItemDisplay />', () => {
 
       expect(lastFrame()).not.toContain('(Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+    });
+
+    it('reserves space for complete memory counts beside a long path', () => {
+      const view = renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [
+              {
+                ...successTool('memory'),
+                name: 'read_file',
+                args: {
+                  file_path:
+                    '/long-directory/'.repeat(20) + 'ToolGroupMessage.tsx',
+                },
+              },
+            ],
+            memoryReadCount: 2,
+            memoryWriteCount: 1,
+          }}
+          terminalWidth={80}
+          isPending={false}
+        />,
+      );
+      expect(view.lastFrame()).toContain('Memory: 2 read, 1 written');
+      view.unmount();
     });
 
     it('keeps tool identity before memory counts in a narrow terminal', () => {

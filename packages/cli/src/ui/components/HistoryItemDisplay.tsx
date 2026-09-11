@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { memo, useMemo, useRef, useCallback, useState } from 'react';
 import type { DOMElement } from 'ink';
 import {
@@ -449,7 +450,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
                     : 'pending',
             isSubagent: isSubagentToolEntry(tool),
             hasImages: hasInlineImageOutput(tool),
-            hasNotice: Boolean(tool.visionBridgeNotice),
+            hasNotice:
+              Boolean(tool.visionBridgeNotice) ||
+              isVisionBridgeNoticeDisplay(tool.resultDisplay),
           })),
           {
             isPending,

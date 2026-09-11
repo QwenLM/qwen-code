@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  canonicalToolName,
+  ToolDisplayNames,
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { localizeToolDisplayName, t } from '../../i18n/index.js';
 import { TOOL_DISPLAY_BY_NAME } from './tool-display-map.js';
 import {
@@ -25,6 +28,7 @@ export interface FocusToolSummaryInput {
 }
 
 const FILE_TOOLS = new Set([
+  ToolDisplayNames.LS,
   'ReadFile',
   'WriteFile',
   'Edit',
@@ -84,7 +88,11 @@ function toolIdentity(tool: FocusToolSummaryInput, maxWidth: number): string {
   }
   const width = Math.max(0, maxWidth - getCachedStringWidth(name) - 1);
   if (getCachedStringWidth(identity) > width && /[/\\]/.test(identity)) {
-    identity = `…/${identity.split(/[/\\]/).filter(Boolean).at(-1) ?? ''}`;
+    const base = identity.split(/[/\\]/).filter(Boolean).at(-1) ?? '';
+    identity =
+      width >= 4
+        ? `…/${truncateToWidth(base, width - 2)}`
+        : truncateToWidth(base, width);
   }
   return truncateToWidth(
     identity ? `${name} ${truncateToWidth(identity, width)}` : name,
@@ -120,6 +128,7 @@ export function getFocusToolSummary(
   const status =
     failed.length > 0 ? 'error' : cancelled > 0 ? 'cancelled' : 'success';
   const maxWidth = options.maxWidth ?? 80;
+  const hint = t('{{summary}} (Ctrl+O for details)', { summary: '' });
   let text: string;
   if (tools.length === 1) {
     const template =
@@ -132,44 +141,50 @@ export function getFocusToolSummary(
     const nameWidth = getCachedStringWidth(
       localizeToolDisplayName(toolName(tools[0])),
     );
+    const showHint = maxWidth >= suffixWidth + nameWidth;
+    const reservedWidth =
+      suffixWidth - (showHint ? 0 : getCachedStringWidth(hint));
     const identity = toolIdentity(
       tools[0],
-      maxWidth >= suffixWidth + nameWidth
-        ? Math.min(40, maxWidth - suffixWidth)
-        : 40,
+      Math.max(0, Math.min(40, maxWidth - reservedWidth)),
     );
     text = t(template, { tool: identity });
+    if (!showHint) text = text.slice(0, -hint.length).trimEnd();
   } else {
-    const parts = [t('Tools: {{count}}', { count: String(tools.length) })];
-    if (failed.length > 0) {
-      const names = [
-        ...new Set(
-          failed.map((tool) => localizeToolDisplayName(toolName(tool))),
-        ),
-      ];
-      const labels = names.slice(0, 2).map((name) => truncateToWidth(name, 16));
-      if (names.length > 2) labels.push('…');
-      parts.push(
-        t('failed: {{failed}} ({{tools}})', {
-          failed: String(failed.length),
-          tools: labels.join(', '),
-        }),
-      );
+    const names = [
+      ...new Set(failed.map((tool) => localizeToolDisplayName(toolName(tool)))),
+    ];
+    const summaryFor = (count: number): string => {
+      const parts = [t('Tools: {{count}}', { count: String(tools.length) })];
+      const labels = names
+        .slice(0, count)
+        .map((name) => truncateToWidth(name, 16));
+      if (names.length > count) labels.push('…');
+      if (failed.length > 0)
+        parts.push(
+          t('failed: {{failed}} ({{tools}})', {
+            failed: String(failed.length),
+            tools: labels.join(', '),
+          }),
+        );
+      if (cancelled > 0)
+        parts.push(
+          t('cancelled: {{cancelled}}', { cancelled: String(cancelled) }),
+        );
+      return parts.join(', ');
+    };
+    const showHint = getCachedStringWidth(summaryFor(0) + hint) <= maxWidth;
+    const budget = maxWidth - (showHint ? getCachedStringWidth(hint) : 0);
+    let count = Math.min(2, names.length);
+    while (count > 0 && getCachedStringWidth(summaryFor(count)) > budget)
+      count--;
+    let summary = summaryFor(count);
+    if (getCachedStringWidth(summary) > budget) {
+      summary = summary.replace(/[（(]…[)）]/g, '').trimEnd();
     }
-    if (cancelled > 0)
-      parts.push(
-        t('cancelled: {{cancelled}}', { cancelled: String(cancelled) }),
-      );
-    const suffixWidth = getCachedStringWidth(
-      t('{{summary}} (Ctrl+O for details)', { summary: '' }),
-    );
-    const summary = parts.join(', ');
-    text = t('{{summary}} (Ctrl+O for details)', {
-      summary:
-        maxWidth > suffixWidth
-          ? truncateToWidth(summary, maxWidth - suffixWidth)
-          : summary,
-    });
+    text = showHint
+      ? t('{{summary}} (Ctrl+O for details)', { summary })
+      : summary;
   }
   return { text: truncateToWidth(text, maxWidth), status };
 }
