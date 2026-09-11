@@ -1313,6 +1313,8 @@ const EN: Messages = {
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
   'scheduledTasks.error.invalidSchedule': 'Invalid schedule',
+  'scheduledTasks.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
@@ -1358,6 +1360,18 @@ const EN: Messages = {
     'Each run gets a clean context and its own conversation.',
   'scheduledTasks.sessionMode.persistent.hint':
     'All runs continue in the same task conversation.',
+  'scheduledTasks.model': 'Model',
+  'scheduledTasks.model.workspaceDefault': 'Workspace default',
+  'scheduledTasks.model.hint':
+    'The selected model is applied when each new run session is created.',
+  'scheduledTasks.group': 'Session group',
+  'scheduledTasks.group.none': 'No group',
+  'scheduledTasks.group.create': 'Create a new group…',
+  'scheduledTasks.group.name': 'New group name',
+  'scheduledTasks.group.color': 'Group color',
+  'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
+  'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
+  'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -3575,7 +3589,9 @@ const EN: Messages = {
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
   'browserNotifications.failed':
     'This turn failed. Return to view the details.',
@@ -4896,6 +4912,7 @@ const ZH: Messages = {
   'scheduledTasks.creating': '创建中…',
   'scheduledTasks.cancel': '取消',
   'scheduledTasks.error.invalidSchedule': '计划无效',
+  'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
@@ -4939,6 +4956,17 @@ const ZH: Messages = {
     '每次运行都创建独立会话，使用干净的上下文。',
   'scheduledTasks.sessionMode.persistent.hint':
     '所有运行都继续使用同一个任务会话。',
+  'scheduledTasks.model': '模型',
+  'scheduledTasks.model.workspaceDefault': '工作区默认模型',
+  'scheduledTasks.model.hint': '创建每次运行的新会话时应用所选模型。',
+  'scheduledTasks.group': '会话分组',
+  'scheduledTasks.group.none': '不分组',
+  'scheduledTasks.group.create': '新建分组…',
+  'scheduledTasks.group.name': '新分组名称',
+  'scheduledTasks.group.color': '分组颜色',
+  'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
+  'scheduledTasks.group.nameRequired': '请输入新分组名称。',
+  'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
@@ -7000,7 +7028,9 @@ const ZH: Messages = {
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',
