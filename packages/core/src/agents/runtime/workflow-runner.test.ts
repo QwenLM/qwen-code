@@ -332,6 +332,39 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  it('keeps snapshot recovery inside the cancellable start window', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let releaseSnapshotRead: (() => void) | undefined;
+    listWorkflowSnapshotsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSnapshotRead = () => resolve([{ runId }]);
+        }),
+    );
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: runId,
+      runInBackground: true,
+    });
+
+    try {
+      await vi.waitFor(() => expect(releaseSnapshotRead).toBeDefined());
+      expect(registry.listStartingRunIds()).toEqual([runId]);
+      expect(registry.cancelStarting(runId)).toBe(true);
+      releaseSnapshotRead!();
+      await expect(start).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(registry.get(runId)).toBeUndefined();
+    } finally {
+      releaseSnapshotRead?.();
+      await start.catch(() => undefined);
+    }
+  });
+
   it('still resumes when no valid prior snapshot is available', async () => {
     const { config } = configWithRegistry();
     listWorkflowSnapshotsMock.mockResolvedValue([]);

@@ -42,13 +42,24 @@ export function matchExtensionByRef(
 }
 
 const BIDI_CONTROL_RE = /[‎‏؜⁦⁧⁨⁩‪‫‬‭‮]/g;
+const EXTENSION_BOUNDARY_LINE_RE = /^[^\S\r\n]*---\s*(?:End\s+)?Extension:/im;
+const EXTENSION_BOUNDARY_FRAGMENT_RE = /---\s*(?:End\s+)?Extension:/gi;
+
+function neutralizeExtensionBoundaryFragments(text: string): string {
+  return text.replace(
+    EXTENSION_BOUNDARY_FRAGMENT_RE,
+    (boundary) => `—${boundary.slice(3)}`,
+  );
+}
 
 export function sanitizeDisplayText(raw: string): string | null {
   const stripped = stripTerminalControlSequences(raw)
     .replace(BIDI_CONTROL_RE, '')
     .replace(/\s+/g, ' ')
     .trim();
-  return stripped.length > 0 ? stripped : null;
+  return stripped.length > 0
+    ? neutralizeExtensionBoundaryFragments(stripped)
+    : null;
 }
 
 export function getSanitizedExtensionDisplayName(extension: Extension): string {
@@ -187,10 +198,21 @@ export async function buildExtensionMentionContext(
       );
       continue;
     }
-    const content = outcome.value;
+    let content = outcome.value;
     if (!content || !content.trim()) continue;
+    const contextFilePath = extension.contextFiles[i];
+    if (EXTENSION_BOUNDARY_LINE_RE.test(content)) {
+      if (options.strict) {
+        throw new Error(
+          `Extension context file '${contextFilePath}' contains a reserved extension boundary.`,
+        );
+      }
+      content = content.replace(
+        /^([^\S\r\n]*)---(?=\s*(?:End\s+)?Extension:)/gim,
+        '$1—',
+      );
+    }
     if (options.strict) {
-      const contextFilePath = extension.contextFiles[i];
       if (content.length > EXTENSION_CONTEXT_FILE_CAP) {
         throw new Error(
           `Extension context file '${contextFilePath}' has ${content.length} characters, exceeding the ${EXTENSION_CONTEXT_FILE_CAP}-character file cap.`,

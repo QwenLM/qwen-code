@@ -38,6 +38,7 @@ import {
   WorkflowAgentCapExceededError,
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
+import { formatContextFileDisplayPath } from '../../memory/memoryDiscovery.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -2429,7 +2430,9 @@ describe('createProductionDispatch', () => {
     const config = {
       getActiveExtensions: () => [extension],
       getWorkingDir: () => process.cwd(),
-      getContextFilePaths: () => [path.relative(process.cwd(), contextFile)],
+      getContextFilePaths: () => [
+        formatContextFileDisplayPath(contextFile, process.cwd()),
+      ],
     } as unknown as Config;
     try {
       await createProductionDispatch(config)('check the table', {

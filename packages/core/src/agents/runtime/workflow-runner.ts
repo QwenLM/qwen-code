@@ -193,21 +193,8 @@ export class WorkflowRunner {
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
-    const previousEntry = registry?.get(runId);
-    const previousSnapshot =
-      options.resumeFromRunId &&
-      options.sourceRef === undefined &&
-      previousEntry === undefined
-        ? (await listWorkflowSnapshots(config)).find(
-            (snapshot) => snapshot.runId === runId,
-          )
-        : undefined;
-    const source =
-      options.sourceRef === undefined
-        ? (previousEntry?.sourceRef ?? previousSnapshot?.sourceRef)
-        : options.sourceRef;
-    const sourceRef =
-      source === undefined ? undefined : normalizeWorkflowSourceRef(source);
+    let previousEntry: WorkflowTask | undefined;
+    let sourceRef: WorkflowSourceRef | undefined;
     let entry: WorkflowTask | undefined;
     const isCurrentEntry = (): boolean =>
       registry === undefined ||
@@ -246,6 +233,22 @@ export class WorkflowRunner {
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
     try {
+      previousEntry = registry?.get(runId);
+      const previousSnapshot =
+        options.resumeFromRunId &&
+        options.sourceRef === undefined &&
+        previousEntry === undefined
+          ? (await listWorkflowSnapshots(config)).find(
+              (snapshot) => snapshot.runId === runId,
+            )
+          : undefined;
+      const source =
+        options.sourceRef === undefined
+          ? (previousEntry?.sourceRef ?? previousSnapshot?.sourceRef)
+          : options.sourceRef;
+      sourceRef =
+        source === undefined ? undefined : normalizeWorkflowSourceRef(source);
+      assertStartNotCancelled();
       const loaded =
         options.scriptPath && options.script === undefined
           ? await resolveSavedWorkflowScript(
