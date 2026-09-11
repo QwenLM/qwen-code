@@ -18643,6 +18643,54 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('turn_complete promptCancelled', () => {
+    it.each([
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
+      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
+    ])(
+      'validates %s cancellation metadata %j',
+      async (stopReason, metadata, valid) => {
+        const events: BridgeEvent[] = [];
+        const handle = makeChannel({
+          promptImpl: () =>
+            ({
+              stopReason,
+              _meta: { 'qwen.promptCancelled': metadata },
+            }) as PromptResponse,
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const sub = (async () => {
+          for await (const event of bridge.subscribeEvents(session.sessionId)) {
+            events.push(event);
+          }
+        })();
+        sub.catch(() => {});
+        await bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'cancel me' }],
+        });
+        await vi.waitFor(() =>
+          expect(events.some((event) => event.type === 'turn_complete')).toBe(
+            true,
+          ),
+        );
+        const terminal = events.find((event) => event.type === 'turn_complete');
+        if (valid) {
+          expect(terminal?.data).toHaveProperty('promptCancelled', metadata);
+        } else {
+          expect(terminal?.data).not.toHaveProperty('promptCancelled');
+        }
+        await bridge.shutdown();
+      },
+    );
+  });
+
   describe('turn_complete branchPoint', () => {
     it('publishes a validated completed-turn branch point', async () => {
       const events: BridgeEvent[] = [];
@@ -20886,6 +20934,7 @@ describe('createAcpSessionBridge', () => {
         const terms = terminalsFor(events, 'prompt-b');
         expect(terms).toHaveLength(1);
         expect(terms[0]?.type).toBe('turn_complete');
+        expect(terms[0]?.data).not.toHaveProperty('promptCancelled');
         expect((terms[0]?.data as { stopReason?: string }).stopReason).toBe(
           'cancelled',
         );
