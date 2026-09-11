@@ -4491,13 +4491,22 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
+    // Every rewind surface resolves a turn through this array's positions:
+    // `getRewindSnapshots` hands out the index, and the agent resolves a
+    // promptId with `findIndex`. Positions therefore have to keep matching the
+    // current history's turn ordinals. A conversation-only rewind abandons the
+    // later turns without going through `FileHistoryService.rewind` — which
+    // trims inclusively itself — so the trim has to happen here. Without it the
+    // next rewind resolves onto a turn the history no longer has and cuts the
+    // wrong turn, while the recorded branch and the live view disagree.
+    //
+    // The file path keeps the target snapshot: the agent restores files by
+    // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
-    if (survivingSnapshots) {
-      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    }
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     this.config
       .getChatRecordingService()
@@ -12098,6 +12107,14 @@ export class Session implements SessionContext {
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
     let executeAttempted = false;
+    // Set when the tool starts executing, so hook durations exclude
+    // validation and permission time. Read from the monotonic clock so a
+    // system clock adjustment during a long tool cannot skew the duration.
+    let executionStartedAt: number | undefined;
+    const elapsedExecutionMs = (): number | undefined =>
+      executionStartedAt === undefined
+        ? undefined
+        : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -13786,6 +13803,7 @@ export class Session implements SessionContext {
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
             executeAttempted = true;
+            executionStartedAt = performance.now();
             try {
               const execute = () =>
                 invocation.execute(
@@ -14077,6 +14095,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              elapsedExecutionMs(),
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -14145,6 +14164,7 @@ export class Session implements SessionContext {
                 permissionMode,
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -14382,6 +14402,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
