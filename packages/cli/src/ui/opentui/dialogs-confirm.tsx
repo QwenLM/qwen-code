@@ -26,7 +26,9 @@
  * Deliberate parity gaps (tracked as deferred review items, not silently
  * dropped): the ink "modify with editor" flow is not offered because the
  * live-turn scheduler is constructed with `getPreferredEditor: () => undefined`,
- * and ask_user_question has no free-text "Other" option yet.
+ * and ask_user_question's free-text row advances one tab where ink skips the
+ * question after it — ink's TextInput subscribes to Enter a second time, so
+ * matching it would reproduce a defect rather than the experience.
  */
 
 import {
@@ -49,9 +51,10 @@ import type {
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
+import { decodePasteBytes, type PasteEvent } from '@opentui/core';
 import { C } from './theme.js';
-import { toOriginalKey } from './key-map.js';
+import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -68,9 +71,16 @@ import {
   tailWindow,
   tailWindowPhysical,
 } from './messages.js';
-import { sanitizeTerminalText } from '../utils/textUtils.js';
+import {
+  getCachedStringWidth,
+  sanitizeTerminalText,
+  truncateToWidth,
+} from '../utils/textUtils.js';
+import { isPrintableKeyInput } from './input-prompt-key.js';
+import { normalizePastedText } from './input-prompt-model.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
 
@@ -559,24 +569,22 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
   });
 
   if (details.type === 'ask_user_question') {
+    // ink's ToolConfirmationMessage early-returns this dialog, so neither its
+    // border nor the payload title is rendered — the question's own header is
+    // the title row.
     return (
-      <DialogFrame borderColor={C.yellow}>
-        <box flexDirection="column">
-          <text fg={C.text} attributes={1}>
-            {sanitizeTerminalText(details.title)}
-          </text>
-          <AskUserQuestionFlow
-            details={details}
-            onAnswered={(answers) => {
-              if (answers === null) {
-                settle(ToolConfirmationOutcome.Cancel);
-              } else {
-                settle(ToolConfirmationOutcome.ProceedOnce, { answers });
-              }
-            }}
-          />
-        </box>
-      </DialogFrame>
+      <InlineConfirmation>
+        <AskUserQuestionFlow
+          details={details}
+          onAnswered={(answers) => {
+            if (answers === null) {
+              settle(ToolConfirmationOutcome.Cancel);
+            } else {
+              settle(ToolConfirmationOutcome.ProceedOnce, { answers });
+            }
+          }}
+        />
+      </InlineConfirmation>
     );
   }
 
@@ -603,79 +611,247 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
 }
 
 /**
- * Sequential ask_user_question flow: walks the questions one at a time,
- * collects single- or multi-select answers, and hands back an ink-parity
- * answers record keyed by question index — or null when the user escapes.
+ * ask_user_question parity port of ink's AskUserQuestionDialog: one tab per
+ * question plus a review-and-Submit tab, numbered options carrying their
+ * descriptions, multi-select checkboxes, and a trailing free-text row.
+ *
+ * One deliberate divergence. ink mounts a TextInput on the free-text row, and
+ * its own Enter subscriber fires alongside the dialog's — both call
+ * `selectAndAdvance`, so a typed answer on a multi-question dialog skips the
+ * question after it. Every key here runs through the single handler below, so
+ * Enter advances exactly one tab.
  */
 function AskUserQuestionFlow(props: {
   details: Extract<ToolCallConfirmationDetails, { type: 'ask_user_question' }>;
   onAnswered: (answers: Record<string, string> | null) => void;
 }) {
   const { details, onAnswered } = props;
-  const [index, setIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const questions = details.questions;
+  const hasMultipleQuestions = questions.length > 1;
+  // Only a multi-question dialog gets the review tab; a single question
+  // commits straight from its own.
+  const totalTabs = hasMultipleQuestions
+    ? questions.length + 1
+    : questions.length;
 
-  const question = details.questions[index];
-  const isMulti = question?.multiSelect === true;
+  const [tab, setTab] = useState(0);
+  const [selected, setSelected] = useState(0);
+  const [picked, setPicked] = useState<Record<number, string>>({});
+  const [checked, setChecked] = useState<Record<number, string[]>>({});
+  const [typed, setTyped] = useState<Record<number, string>>({});
+  const [typedChecked, setTypedChecked] = useState<Record<number, boolean>>({});
+  // Key events can land in one React batch, where the value captured by the
+  // render that registered the handler is already stale by the second
+  // keystroke. The mirror is written synchronously so each event appends to
+  // what the previous one produced.
+  const typedRef = useRef<Record<number, string>>({});
+  const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { width } = useTerminalDimensions();
 
-  const commitQuestion = useCallback(
-    (value: string | undefined) => {
-      if (value === undefined) return;
-      const nextAnswers = { ...answers, [index]: value };
-      setAnswers(nextAnswers);
-      setSelected(new Set());
-      if (index + 1 < details.questions.length) {
-        setIndex(index + 1);
-      } else {
-        const out: Record<string, string> = {};
-        for (const [key, val] of Object.entries(nextAnswers)) {
-          out[String(key)] = val;
-        }
-        onAnswered(out);
-      }
-    },
-    [answers, index, details.questions.length, onAnswered],
-  );
+  const isSubmitTab = hasMultipleQuestions && tab === totalTabs - 1;
+  const question = isSubmitTab ? undefined : questions[tab];
+  const isMultiSelect = question?.multiSelect === true;
+  // The free-text row sits after the predefined options.
+  const totalOptions = question ? question.options.length + 1 : 2;
+  const isCustomRow =
+    question !== undefined && selected === question.options.length;
+  const typedValue = (idx: number) => typedRef.current[idx] ?? typed[idx] ?? '';
+  const customValue = typedValue(tab);
+  const isCustomAnswer =
+    question !== undefined &&
+    !isMultiSelect &&
+    picked[tab] !== undefined &&
+    !question.options.some((option) => option.label === picked[tab]);
 
-  const items = useMemo<Array<DialogListItem<string>>>(
-    () =>
-      (question?.options ?? []).map((option, i) => ({
-        key: `${option.label}-${i}`,
-        value: option.label,
-      })),
-    [question],
-  );
+  const answerFor = (idx: number): string | undefined => {
+    const current = questions[idx];
+    if (!current?.multiSelect) return picked[idx];
+    const labels = [...(checked[idx] ?? [])];
+    const own = typedValue(idx).trim();
+    if (typedChecked[idx] && own) labels.push(own);
+    return labels.length > 0 ? labels.join(', ') : undefined;
+  };
 
-  const select = useDialogSelect<DialogListItem<string>>({
-    items,
-    numbers: false,
-    // For single-select we commit directly on Enter; for multi-select Enter is
-    // handled by the keyboard hook below (it submits the accumulated set), so
-    // onSelect must stay unset in that mode to avoid a double commit.
-    onSelect: isMulti ? undefined : (value) => commitQuestion(value),
-    resyncKey: index,
-  });
-
-  useKeyboard((key) => {
-    // Escape is owned by OpenTuiToolConfirmation (it settles the whole call).
-    if (!isMulti) return;
-    const original = toOriginalKey(key);
-    const current = items[select.activeIndex];
-    if (!current) return;
-    if (original.name === 'space' || original.sequence === ' ') {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(current.value)) next.delete(current.value);
-        else next.add(current.value);
-        return next;
-      });
+  const selectAndAdvance = (value: string) => {
+    setPicked((prev) => ({ ...prev, [tab]: value }));
+    if (!hasMultipleQuestions) {
+      onAnswered({ [tab]: value });
       return;
     }
-    if (original.name === 'return') {
-      if (selected.size === 0) return;
-      commitQuestion([...selected].join(', '));
+    if (tab >= totalTabs - 1) return;
+    // ink's pause, so the ✓ on the row just answered is visible before the tab
+    // swap carries it up into the chip row.
+    advanceTimer.current = setTimeout(() => {
+      setTab((prev) => Math.min(prev + 1, totalTabs - 1));
+      setSelected(0);
+    }, 150);
+  };
+
+  const submitAll = () => {
+    const answers: Record<string, string> = {};
+    questions.forEach((_, idx) => {
+      const answer = answerFor(idx);
+      if (answer !== undefined) answers[idx] = answer;
+    });
+    onAnswered(answers);
+  };
+
+  const multiAnswer = (includeTyped: boolean, value: string) => {
+    const labels = [...(checked[tab] ?? [])];
+    const own = value.trim();
+    if (includeTyped && own) labels.push(own);
+    return labels.length > 0 ? labels.join(', ') : undefined;
+  };
+
+  const setCustomValue = (update: (previous: string) => string) => {
+    const next = update(typedValue(tab));
+    typedRef.current = { ...typedRef.current, [tab]: next };
+    setTyped((prev) => ({ ...prev, [tab]: next }));
+    // A multi-select box tracks whether its free-text entry counts, so typing
+    // into it checks the box and emptying it unchecks it again.
+    if (isMultiSelect) {
+      setTypedChecked((prev) => ({ ...prev, [tab]: next.trim().length > 0 }));
     }
+  };
+
+  const submitCustomRow = () => {
+    // Re-read rather than use the rendered value: the keystroke that fills the
+    // row and this Enter can share one batch.
+    const current = typedValue(tab);
+    const value = current.trim();
+    if (isMultiSelect) {
+      setTypedChecked((prev) => ({ ...prev, [tab]: value.length > 0 }));
+    }
+    if (!value) return;
+    const answer = isMultiSelect ? multiAnswer(true, current) : value;
+    if (answer !== undefined) selectAndAdvance(answer);
+  };
+
+  useEffect(
+    () => () => {
+      if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    },
+    [],
+  );
+
+  // ink sizes the chip row against the width a tool confirmation gets in the
+  // transcript — the terminal minus 4 for the history item, minus 2 more for
+  // the confirmation's own padding — and reserves every cell the row spends
+  // outside the header text. Recomputed per render so answering re-fits it.
+  const answeredHeaders = questions.filter(
+    (_, idx) => answerFor(idx) !== undefined,
+  ).length;
+  const rowOverhead =
+    2 + // the dialog's own padding
+    (isSubmitTab ? 2 : 1) + // "▸ " when Submit is the active tab
+    getCachedStringWidth(t('Submit')) +
+    questions.length + // gap={1} between each chip and the Submit chip
+    2 * questions.length + // "▸ " or "  " before each header
+    2 * answeredHeaders; // " ✓" after each answered header
+  const headerCap = computeHeaderCap(
+    questions.map((q) => getCachedStringWidth(q.header)),
+    width - 6 - rowOverhead,
+  );
+
+  useKeyboard((key) => {
+    const original = toOriginalKey(key);
+
+    if (isCustomRow) {
+      // Bare letters belong to the input and ←/→ must not switch tabs while it
+      // owns the cursor, so only unambiguous shortcuts are honoured here.
+      if (original.name === 'up' || (original.ctrl && original.name === 'p')) {
+        setSelected(Math.max(0, selected - 1));
+      } else if (
+        original.name === 'down' ||
+        (original.ctrl && original.name === 'n')
+      ) {
+        setSelected(Math.min(totalOptions - 1, selected + 1));
+      } else if (original.name === 'return') {
+        submitCustomRow();
+      } else if (original.name === 'backspace') {
+        setCustomValue((previous) => previous.slice(0, -1));
+      } else if (isPrintableKeyInput(key)) {
+        setCustomValue((previous) => previous + key.sequence);
+      }
+      return;
+    }
+
+    if (hasMultipleQuestions && original.name === 'left' && tab > 0) {
+      setTab(tab - 1);
+      setSelected(0);
+      return;
+    }
+    if (
+      hasMultipleQuestions &&
+      original.name === 'right' &&
+      tab < totalTabs - 1
+    ) {
+      setTab(tab + 1);
+      setSelected(0);
+      return;
+    }
+    if (matchesCommand(Command.SELECTION_UP, key)) {
+      setSelected(Math.max(0, selected - 1));
+      return;
+    }
+    if (matchesCommand(Command.SELECTION_DOWN, key)) {
+      setSelected(Math.min(totalOptions - 1, selected + 1));
+      return;
+    }
+
+    const numKey = /^[1-9]\d*$/.test(original.sequence)
+      ? Number(original.sequence)
+      : NaN;
+    if (Number.isSafeInteger(numKey) && numKey <= totalOptions) {
+      const target = numKey - 1;
+      setSelected(target);
+      // Single-select commits a predefined option straight from its digit; the
+      // free-text row's digit only moves the cursor onto it.
+      const option = !isMultiSelect ? question?.options[target] : undefined;
+      if (option) selectAndAdvance(option.label);
+      return;
+    }
+
+    if (original.name === 'space' && isMultiSelect && question) {
+      const option = question.options[selected];
+      if (option) {
+        const current = checked[tab] ?? [];
+        setChecked((prev) => ({
+          ...prev,
+          [tab]: current.includes(option.label)
+            ? current.filter((label) => label !== option.label)
+            : [...current, option.label],
+        }));
+      }
+      return;
+    }
+
+    if (original.name === 'return') {
+      if (isSubmitTab) {
+        if (selected === 0) submitAll();
+        else onAnswered(null);
+        return;
+      }
+      if (isMultiSelect) {
+        const answer = multiAnswer(typedChecked[tab] === true, customValue);
+        if (answer !== undefined) selectAndAdvance(answer);
+        return;
+      }
+      const option = question?.options[selected];
+      if (option) selectAndAdvance(option.label);
+    }
+    // Escape is owned by OpenTuiToolConfirmation (it settles the whole call).
+  });
+
+  // Bracketed pastes arrive as one event with no keypress per character, and
+  // the composer that would otherwise consume them is unmounted while a
+  // confirmation owns the screen.
+  usePaste((event: PasteEvent) => {
+    if (!isCustomRow) return;
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    setCustomValue((previous) => previous + text);
   });
 
   // Defensive: an empty question list, or a question with no options, has
@@ -683,47 +859,185 @@ function AskUserQuestionFlow(props: {
   // render would update the parent mid-render) so the waiting call never
   // hangs.
   useEffect(() => {
-    if (details.questions.length === 0 || !question?.options?.length) {
+    if (questions.length === 0 || question?.options.length === 0) {
       onAnswered(null);
     }
-  }, [details.questions.length, question, onAnswered]);
+  }, [questions.length, question, onAnswered]);
+
+  const chipRow = (
+    <box flexDirection="row" gap={1} marginBottom={1}>
+      {questions.map((q, idx) => {
+        const active = !isSubmitTab && idx === tab;
+        return (
+          <text
+            key={idx}
+            fg={active ? C.accent : C.dim}
+            attributes={active ? 1 : 0}
+          >
+            {(active ? '▸ ' : '  ') +
+              truncateToWidth(sanitizeTerminalText(q.header), headerCap) +
+              (answerFor(idx) !== undefined ? ' ✓' : '')}
+          </text>
+        );
+      })}
+      <text
+        fg={isSubmitTab ? C.accent : C.dim}
+        attributes={isSubmitTab ? 1 : 0}
+      >
+        {(isSubmitTab ? '▸ ' : ' ') + t('Submit')}
+      </text>
+    </box>
+  );
+
+  if (isSubmitTab) {
+    return (
+      <>
+        {hasMultipleQuestions ? chipRow : null}
+        <box flexDirection="column" marginBottom={1}>
+          <text fg={C.text} attributes={1}>
+            {t('Your answers:')}
+          </text>
+          {questions.map((q, idx) => {
+            const answer = answerFor(idx);
+            return (
+              <box key={idx} flexDirection="row" marginLeft={2}>
+                <text fg={C.text}>{sanitizeTerminalText(q.header) + ': '}</text>
+                {answer ? (
+                  <text fg={C.accent}>{sanitizeTerminalText(answer)}</text>
+                ) : (
+                  <text fg={C.dim}>{t('(not answered)')}</text>
+                )}
+              </box>
+            );
+          })}
+        </box>
+        <box marginTop={1} marginBottom={1}>
+          <text fg={C.text}>{t('Ready to submit your answers?')}</text>
+        </box>
+        <box flexDirection="column">
+          <text
+            fg={selected === 0 ? C.accent : C.text}
+            attributes={selected === 0 ? 1 : 0}
+          >
+            {(selected === 0 ? '❯ ' : '  ') + `1. ${t('Submit answers')}`}
+          </text>
+          <text
+            fg={selected === 1 ? C.accent : C.text}
+            attributes={selected === 1 ? 1 : 0}
+          >
+            {(selected === 1 ? '❯ ' : '  ') + `2. ${t('Cancel')}`}
+          </text>
+        </box>
+        <FooterHint
+          text={t('↑/↓: Navigate | ←/→: Switch tabs | Enter: Select')}
+        />
+      </>
+    );
+  }
 
   if (!question) return null;
 
+  const customMark = isMultiSelect ? (typedChecked[tab] ? '[✓] ' : '[ ] ') : '';
+  const customEmphasis = isCustomAnswer || typedChecked[tab] === true;
+  const customLabel = `${question.options.length + 1}. `;
+  const placeholder = t('Type something...');
+
   return (
-    <box flexDirection="column" marginTop={1}>
-      <text fg={C.dim}>
-        {sanitizeTerminalText(question.header)} ({index + 1}/
-        {details.questions.length})
-      </text>
-      <text fg={C.text}>{sanitizeTerminalText(question.question)}</text>
-      <box marginTop={1}>
-        <DialogSelect
-          items={items}
-          activeIndex={select.activeIndex}
-          scrollOffset={select.scrollOffset}
-          showNumbers={false}
-          onHover={select.highlightIndex}
-          onSelectIndex={select.selectIndex}
-          renderLabel={(item, { isSelected }) => {
-            const checked = isMulti && selected.has(item.value);
-            const marker = isMulti ? (checked ? '[x] ' : '[ ] ') : '';
-            return (
-              <text fg={isSelected ? C.accent : C.text}>
-                {marker + item.value}
+    <>
+      {hasMultipleQuestions ? chipRow : null}
+      <box flexDirection="column" marginBottom={1}>
+        {!hasMultipleQuestions ? (
+          <box marginBottom={1}>
+            <text fg={C.accent} attributes={1}>
+              {sanitizeTerminalText(question.header)}
+            </text>
+          </box>
+        ) : null}
+        <text fg={C.text}>{sanitizeTerminalText(question.question)}</text>
+      </box>
+      <box flexDirection="column" marginBottom={1}>
+        {question.options.map((option, idx) => {
+          const isSelected = selected === idx;
+          const isChecked =
+            isMultiSelect && (checked[tab] ?? []).includes(option.label);
+          const isAnswered = !isMultiSelect && picked[tab] === option.label;
+          const highlighted = isSelected || isAnswered || isChecked;
+          return (
+            <box key={idx} flexDirection="column">
+              <text
+                fg={highlighted ? C.accent : C.text}
+                attributes={highlighted ? 1 : 0}
+              >
+                {(isSelected ? '❯ ' : '  ') +
+                  (isMultiSelect ? (isChecked ? '[✓] ' : '[ ] ') : '') +
+                  `${idx + 1}. ${sanitizeTerminalText(option.label)}` +
+                  (isAnswered ? ' ✓' : '')}
               </text>
-            );
-          }}
-        />
+              {option.description ? (
+                <box
+                  marginLeft={
+                    2 + (isMultiSelect ? 4 : 0) + String(idx + 1).length + 2
+                  }
+                >
+                  <text fg={C.dim}>
+                    {sanitizeTerminalText(option.description)}
+                  </text>
+                </box>
+              ) : null}
+            </box>
+          );
+        })}
+        {isCustomRow ? (
+          <box flexDirection="row">
+            <text fg={C.accent} attributes={1}>
+              {'❯ ' + customMark + customLabel}
+            </text>
+            <text fg={C.accent}>{'> '}</text>
+            {customValue ? (
+              <>
+                <text fg={C.text}>{sanitizeTerminalText(customValue)}</text>
+                {/* ink's software cursor: a background-filled cell at the
+                    insert position, which a text frame cannot show. */}
+                <text bg={C.accent}> </text>
+              </>
+            ) : (
+              <>
+                <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+                <text fg={C.dim}>{placeholder.slice(1)}</text>
+              </>
+            )}
+          </box>
+        ) : (
+          <text
+            fg={customEmphasis ? C.accent : customValue ? C.text : C.dim}
+            attributes={customEmphasis ? 1 : 0}
+          >
+            {'  ' +
+              customMark +
+              customLabel +
+              (customValue ? sanitizeTerminalText(customValue) : placeholder) +
+              (isCustomAnswer ? ' ✓' : '')}
+          </text>
+        )}
       </box>
       <FooterHint
         text={
-          isMulti
-            ? t('Space to toggle · Enter to submit · Esc to cancel')
-            : t('↑↓ to choose · Enter to answer · Esc to cancel')
+          hasMultipleQuestions
+            ? isMultiSelect
+              ? t(
+                  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel',
+                )
+              : t(
+                  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select | Esc: Cancel',
+                )
+            : isMultiSelect
+              ? t(
+                  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel',
+                )
+              : t('↑/↓: Navigate | Enter: Select | Esc: Cancel')
         }
       />
-    </box>
+    </>
   );
 }
 

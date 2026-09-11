@@ -57,13 +57,16 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Fourteen scenarios cover boot, a
+rather than at the same wall-clock moment. Nineteen scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
-and exit, and a long hold that cycles the loading phrases.
+and exit, a long hold that cycles the loading phrases, a to-do card, the
+question dialog on its own, the same dialog across three questions with a
+multi-select and a typed answer, the release of a parked confirmation when the
+approval mode changes, and the approval of a gated server at startup.
 
-Two properties of the comparison matter for reading the results.
+Three properties of the comparison matter for reading the results.
 
 **Vertical anchoring is not comparable.** This renderer anchors the composer to
 the bottom of the terminal; ink places it under the conversation. Every
@@ -80,6 +83,18 @@ that ambiguity mattered, a third leg ran ink under the OpenTUI runtime. It
 reproduced the missing shell-crawler diagnostics on ink, which moved that
 finding out of the renderer's column; it did not reproduce the missing
 extension-refresh notice, which stayed in.
+
+**The channel a scenario waits on is not the channel it compares on.** A
+checkpoint is reached by waiting for text the script expects to see, and that
+wait scanned the byte stream. A renderer that repaints whole lines satisfies
+it, because the line arrives contiguously; one that repaints only the cells
+that changed never does. A dialog question edited in place from one wording to
+another reaches the stream as the handful of cells that differ, so the wait
+times out on a screen that is already correct — the leg that failed this way
+had drawn the row it was waiting for, and the stream carried a five-cell
+fragment of it. Waits now poll the reconstruction as well as the stream, and
+the two channels agree. Reading the stream first is not redundant: it is cheap,
+and it still sees text that has scrolled out of the reconstructed window.
 
 ## Decision 1 — the confirmation dialog asks ink's per-type question
 
@@ -508,12 +523,67 @@ line in the body carries an extra leading space here, which is the break-rule
 difference already recorded for the context-file list; matching it would mean
 reimplementing the wrap the renderer already provides.
 
+## Decision 21 — the question dialog is ported whole, except where ink is wrong
+
+The dialog that puts a question to the user had been reduced to its literal
+options. It drew no free-text row, so an answer had to be one of the choices
+the model happened to invent; no description under each choice, so a label had
+to carry the whole meaning; and no digit keys, so a choice cost a navigation
+and a confirmation instead of one keystroke. Its header and its hint were also
+worded differently. The answer itself travelled correctly, which is why a
+state-level suite never caught any of it: once a choice was made, both
+renderers printed the same settled card word for word.
+
+Everything ink draws is now drawn here, and the geometry was derived rather
+than guessed. The chip row that names each question and marks the answered
+ones is capped by a water-filling helper imported from ink's own dialog rather
+than reimplemented, fed the width a confirmation actually gets — the terminal
+minus the four columns the transcript item spends, minus the two the
+confirmation spends inside it — and then reduced by every cell the row spends
+outside the header text: the padding, the active-tab marker, the submit chip,
+one gap per chip, two columns of prefix per header, and two more for each
+answered mark. It is recomputed on every render, because answering changes the
+marks.
+
+One divergence is deliberate. ink answers a typed free-text entry twice for one
+keystroke — the dialog's own key handler and the input widget it mounts both
+subscribe, and the key layer broadcasts to every subscriber with no notion of
+focus — and each answer advances a tab, so the question after the one being
+answered is skipped without ever being drawn. This was not reasoned from source
+alone. The ink leg of the acceptance run timed out waiting for a question that
+never appeared, and its own review tab then listed that question as
+unanswered. Here one keystroke advances one tab. Matching ink would reproduce a
+defect rather than the experience, and fixing ink would move the reference the
+whole sweep is measured against, so the divergence is recorded instead. The
+scenario was rearranged to exercise the free-text row on the last question,
+where the tab index clamps and both legs arrive at the review tab together.
+
+The free-text row keeps its value in a mirror written synchronously beside the
+state update. Key events can arrive inside one React batch, and a handler that
+builds the next value from the one its render captured appends to a snapshot
+that is already stale, so a burst keeps only its last character. ink keeps the
+same mirror for the same reason. A test dispatches a burst inside a single
+batch, and the fix was checked by taking the mirror back out: exactly that one
+test fails, and the row shows a single character of the five typed. On a real
+machine the hazard did not fire — a twenty-character answer survived intact in
+both legs — so the mirror is correctness by construction rather than the fix
+for an observed truncation.
+
+Eight checkpoints were compared. Every dialog row matches ink line for line and
+indent for indent, including the mark appearing on a chip as soon as its
+free-text box is checked and before anything is committed, the comma-and-space
+join of a multi-select answer with the typed entry counted into it, and the
+review tab's own hint, which drops the cancel clause exactly where ink drops
+it. The residuals are the three recorded elsewhere — where a long path wraps,
+which phase the loading spinner happens to be in, and the update notice this
+renderer words differently — plus vertical anchoring.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for fourteen scenarios at 100×40 and, for the narrow
+  reconstructed screen, for nineteen scenarios at 100×40 and, for the narrow
   and resize scenarios, at 60×24. Both legs from one bundle and one set of
   boot arguments.
 - **Colour was not verified.** The reconstruction is text. Several rows are
@@ -681,14 +751,16 @@ What was verified, and how far the verification reaches:
 - The composer advertises a queue key it does not bind. Its exit key also arms
   the two-press window with a non-empty draft and eats a character doing it,
   where ink declines to arm at all while the buffer holds text.
-- The question tool offers only its literal options; ink adds a free-text row so
-  an answer can be typed instead of picked, and the port records the omission in
-  a comment rather than closing it.
-- The question dialog now differs in frames, not only in source. It drops the
-  free-text row, drops each option's description, drops the number keys ink
-  prints beside them, and words its header and its hint differently. The answer
-  itself travels correctly: once a choice is made, both renderers print the same
-  settled card, word for word.
+- ink answers a typed free-text entry in its question dialog twice for one
+  keystroke, because the dialog's key handler and the input widget it mounts
+  both subscribe and the key layer has no focus stack to arbitrate between
+  them. Each answer advances a tab, so on a multi-question dialog the question
+  after the one being answered is skipped without ever being drawn, and the
+  review tab reports it as unanswered. This was observed on a real run, not
+  inferred. Decision 21 does not follow it, and fixing it in ink is out of
+  scope for a sweep that measures itself against ink's behaviour as it stands;
+  it is recorded here so the divergence between the two renderers is not
+  re-reported as a porting gap.
 - The tool card does not print the call's arguments inline, and omits the
   trailing indicator ink puts beside a row that is still pending. The first is
   not cosmetic — it is why a disabled-tool error reads as an empty card here and

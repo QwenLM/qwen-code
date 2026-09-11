@@ -13,7 +13,7 @@
  * can never settle twice.
  */
 
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
@@ -21,11 +21,13 @@ import { act, render } from '@testing-library/react';
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
+  decodePasteBytes: (bytes: Uint8Array) => Buffer.from(bytes).toString('utf8'),
 }));
 
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    pasteHandlers: [] as Array<(event: unknown) => void>,
     dimensions: { width: 110, height: 40 },
   };
   // The components carry the @opentui/react JSX import source; map its
@@ -57,12 +59,34 @@ const mocks = vi.hoisted(() => {
   return { state, buildJsxRuntime };
 });
 
-vi.mock('@opentui/react', () => ({
-  useKeyboard: (handler: (key: unknown) => void) => {
-    mocks.state.keyboardHandlers.push(handler);
-  },
-  useTerminalDimensions: () => mocks.state.dimensions,
-}));
+vi.mock('@opentui/react', async () => {
+  const React = await import('react');
+  // Mount-stable registration: the wrapper is registered once per consumer and
+  // always invokes the latest handler closure — the real renderer's semantics —
+  // so a re-render cannot multiply the deliveries of a single key event.
+  const useStableHandler = (
+    handlers: Array<(event: unknown) => void>,
+    handler: (event: unknown) => void,
+  ) => {
+    const ref = React.useRef(handler);
+    ref.current = handler;
+    React.useEffect(() => {
+      const fn = (event: unknown) => ref.current(event);
+      handlers.push(fn);
+      return () => {
+        const index = handlers.indexOf(fn);
+        if (index >= 0) handlers.splice(index, 1);
+      };
+    }, [handlers]);
+  };
+  return {
+    useKeyboard: (handler: (key: unknown) => void) =>
+      useStableHandler(mocks.state.keyboardHandlers, handler),
+    usePaste: (handler: (event: unknown) => void) =>
+      useStableHandler(mocks.state.pasteHandlers, handler),
+    useTerminalDimensions: () => mocks.state.dimensions,
+  };
+});
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
@@ -269,6 +293,7 @@ describe('OpenTuiToolConfirmation', () => {
 
   beforeEach(() => {
     mocks.state.keyboardHandlers = [];
+    mocks.state.pasteHandlers = [];
     mocks.state.dimensions = { width: 110, height: 40 };
   });
 
@@ -361,6 +386,232 @@ describe('OpenTuiToolConfirmation', () => {
       ToolConfirmationOutcome.Cancel,
       undefined,
     );
+  });
+
+  describe('ask_user_question flow', () => {
+    const twoOptions = [
+      { label: 'A', description: 'the first option' },
+      { label: 'B', description: 'the second option' },
+    ];
+
+    const multiAskDetails = (
+      onConfirm: (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>,
+    ): ToolCallConfirmationDetails => ({
+      type: 'ask_user_question',
+      title: 'Three questions',
+      questions: [
+        {
+          question: 'Pick a deploy target?',
+          header: 'Deploy',
+          options: [
+            { label: 'staging', description: 'the staging target' },
+            { label: 'prod', description: 'the production target' },
+          ],
+        },
+        {
+          question: 'Pick a region?',
+          header: 'Region',
+          options: [
+            { label: 'eu', description: 'the eu region' },
+            { label: 'us', description: 'the us region' },
+          ],
+        },
+        {
+          question: 'Pick channels?',
+          header: 'Notify',
+          multiSelect: true,
+          options: [
+            { label: 'mail', description: 'the mail channel' },
+            { label: 'chat', description: 'the chat channel' },
+          ],
+        },
+      ],
+      onConfirm,
+    });
+
+    function mount(details: ToolCallConfirmationDetails): HTMLElement {
+      return render(
+        <OpenTuiToolConfirmation
+          call={{
+            callId: 'call-1',
+            name: 'ask_user_question',
+            confirmationDetails: details,
+          }}
+          config={trustedConfig}
+          onSettled={() => {}}
+        />,
+      ).container;
+    }
+
+    function typeChars(text: string) {
+      for (const char of text) press({ name: char, sequence: char });
+    }
+
+    /** Every character in one batch, as a burst of keypresses arrives. */
+    function typeBatched(text: string) {
+      act(() => {
+        for (const char of text) {
+          for (const handler of mocks.state.keyboardHandlers) {
+            handler({ name: char, sequence: char });
+          }
+        }
+      });
+    }
+
+    function paste(text: string) {
+      act(() => {
+        for (const handler of mocks.state.pasteHandlers) {
+          handler({
+            bytes: new TextEncoder().encode(text),
+            preventDefault: () => {},
+          });
+        }
+      });
+    }
+
+    /** ink pauses before swapping tabs so the ✓ on the answered row shows. */
+    function settleAdvance() {
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('numbers each option and renders its description and the free-text row', () => {
+      const text = mount(multiAskDetails(async () => {})).textContent ?? '';
+      expect(text).toContain('1. staging');
+      expect(text).toContain('the staging target');
+      expect(text).toContain('2. prod');
+      expect(text).toContain('3. Type something...');
+    });
+
+    it('commits a predefined option straight from its digit', () => {
+      const onConfirm = vi.fn(async () => {});
+      mount(askDetails(twoOptions, onConfirm));
+      press({ name: '2', sequence: '2' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'B' } },
+      );
+    });
+
+    it("only moves the cursor onto the free-text row for that row's own digit", () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      expect(onConfirm).not.toHaveBeenCalled();
+      typeChars('own answer');
+      expect(container.textContent ?? '').toContain('> own answer');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'own answer' } },
+      );
+    });
+
+    it('deletes the last typed character on backspace', () => {
+      const onConfirm = vi.fn(async () => {});
+      mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      typeChars('abc');
+      press({ name: 'backspace' });
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'ab' } },
+      );
+    });
+
+    it('appends a bracketed paste to the free-text row', () => {
+      const onConfirm = vi.fn(async () => {});
+      mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      paste('a pasted answer');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'a pasted answer' } },
+      );
+    });
+
+    it('keeps every character of a burst that shares one batch', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      typeBatched('burst');
+      expect(container.textContent ?? '').toContain('> burst');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'burst' } },
+      );
+    });
+
+    it('advances exactly one tab when a typed answer is committed', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      expect(container.textContent ?? '').toContain('Pick a region?');
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('typed');
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      // ink mounts a TextInput whose own Enter subscriber fires alongside the
+      // dialog's, so one keystroke skips this question entirely.
+      expect(container.textContent ?? '').toContain('Pick channels?');
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('joins the checked options and counts the typed entry on a multi-select', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      expect(container.textContent ?? '').toContain('Pick channels?');
+      press({ name: 'space', sequence: ' ' });
+      press({ name: 'down' });
+      press({ name: 'space', sequence: ' ' });
+      press({ name: 'down' });
+      typeChars('sms');
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      expect(container.textContent ?? '').toContain('Notify: mail, chat, sms');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '2': 'mail, chat, sms' } },
+      );
+    });
+
+    it('reviews every answer on the Submit tab and cancels from its second row', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      press({ name: 'right' });
+      press({ name: 'right' });
+      const text = container.textContent ?? '';
+      expect(text).toContain('Your answers:');
+      expect(text).toContain('Deploy: staging');
+      expect(text).toContain('Region: (not answered)');
+      press({ name: 'down' });
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        undefined,
+      );
+    });
   });
 
   it('renders the ink question line and labeled body for MCP confirmations', () => {
