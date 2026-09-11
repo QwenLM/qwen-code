@@ -16877,6 +16877,40 @@ describe('Session', () => {
     });
 
     describe('MCP demand recovery', () => {
+      it.each([true, false])(
+        'refreshes declarations without a diagnostic only for pool sessions (pool=%s)',
+        async (pooled) => {
+          mockConfig.getMcpTransportPool = vi
+            .fn()
+            .mockReturnValue(pooled ? {} : undefined);
+          const commands = vi.spyOn(session, 'sendAvailableCommandsUpdate');
+          const recover =
+            mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+          // The transport removed the registry entry, but the model still has
+          // the previous declaration until setTools synchronizes the registry.
+          let offeredTools = ['mcp__counter__echo'];
+          const registryTools: string[] = [];
+          recover.mockImplementation(async () => {
+            offeredTools = ['mcp__counter__echo'];
+            return [];
+          });
+          mockLlmClient.setTools.mockImplementation(async () => {
+            offeredTools = [...registryTools];
+          });
+          mockChat.sendMessageStream = vi.fn(async () => {
+            expect(offeredTools).toEqual(pooled ? [] : ['mcp__counter__echo']);
+            if (pooled) expect(commands).toHaveBeenCalled();
+            return createEmptyStream();
+          });
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'continue' }],
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+          expect(recover).toHaveBeenCalledOnce();
+        },
+      );
+
       it('keeps a Stop-hook continuation in the same recovery notice turn', async () => {
         const notice = {
           serverName: 'counter',

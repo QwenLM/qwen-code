@@ -111,6 +111,81 @@ function fixture() {
 }
 
 describe('pooled management lifecycle', () => {
+  it('checks workspace trust again before a queued discovery starts acquiring', async () => {
+    const f = fixture();
+    let trusted = true;
+    f.config.isTrustedFolder = () => trusted;
+    f.settings['queued'] = new MCPServerConfig('queued');
+    const gate = deferred<void>();
+    f.pool.acquire.mockImplementationOnce(async () => {
+      await gate.promise;
+      return f.initial;
+    });
+    const adding = f.manager.addRuntimeMcpServer(
+      'srv',
+      f.settings['srv'],
+      'client',
+    );
+    const outcome = adding.catch((error: unknown) => error);
+    const discovery = f.manager.discoverAllMcpTools(f.config);
+    trusted = false;
+    gate.resolve();
+    expect(await outcome).toMatchObject({
+      message: expect.stringContaining('eligibility changed'),
+    });
+    await discovery;
+    expect(f.pool.acquire.mock.calls.map(([name]) => name)).toEqual(['srv']);
+    expect(f.initial.release).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a queued runtime add when removal arrives before its overlay is written', async () => {
+    const f = fixture();
+    const gate = deferred<void>();
+    f.pool.acquire.mockImplementationOnce(async () => {
+      await gate.promise;
+      return f.initial;
+    });
+    const first = f.manager.addRuntimeMcpServer(
+      'srv',
+      f.settings['srv'],
+      'client',
+    );
+    const queued = f.manager.addRuntimeMcpServer(
+      'next',
+      new MCPServerConfig('next'),
+      'client',
+    );
+    const outcome = queued.catch((error: unknown) => error);
+    await f.manager.removeRuntimeMcpServer('next', 'client');
+    gate.resolve();
+    await first;
+    expect(await outcome).toMatchObject({
+      message: expect.stringContaining('superseded'),
+    });
+    expect(f.runtime['next']).toBeUndefined();
+    expect(f.runtime['srv']).toBe(f.settings['srv']);
+    expect(f.pool.acquire).toHaveBeenCalledOnce();
+    expect(f.initial.release).not.toHaveBeenCalled();
+  });
+
+  it.each([MCPServerStatus.CONNECTING, MCPServerStatus.DISCONNECTED])(
+    'retains a recovered subscription while its active entry is %s',
+    async (status) => {
+      const f = fixture();
+      await f.manager.discoverAllMcpTools(f.config);
+      f.fail();
+      f.replacement.client.getStatus.mockReturnValue(status);
+      await f.recover();
+      expect(f.replacement.release).not.toHaveBeenCalled();
+      expect(f.pool.recordRecoveryFailure).not.toHaveBeenCalled();
+      f.replacement.client.getStatus.mockReturnValue(MCPServerStatus.CONNECTED);
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).resolves.toEqual({ contents: [] });
+      expect(f.replacement.client.readResource).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(['failed', 'closed'] as const)(
     'retains only missed failures when an acquired entry becomes %s before tracking',
     async (state) => {
@@ -234,10 +309,11 @@ describe('pooled management lifecycle', () => {
       } else {
         await f.manager.disconnectServer('srv');
       }
-      const afterManagement = f.runtime['srv'];
       gate.resolve();
       await expect(replacing).rejects.toThrow('replacement failed');
-      expect(f.runtime['srv']).toBe(afterManagement);
+      expect(f.runtime['srv']).toBe(
+        action === 'remove' ? undefined : f.settings['srv'],
+      );
       await f.recover();
       expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
       await expect(
@@ -261,7 +337,7 @@ describe('pooled management lifecycle', () => {
     );
     await vi.waitFor(() => expect(f.pool.acquire).toHaveBeenCalledTimes(2));
     await f.manager.disconnectServer('srv');
-    const disconnectedConfig = f.runtime['srv'];
+    const disconnectedConfig = f.settings['srv'];
     const next = f.manager.addRuntimeMcpServer('srv', {}, 'client');
     gate.resolve();
     await Promise.all([
@@ -350,7 +426,7 @@ describe('pooled management lifecycle', () => {
     ).resolves.toEqual({ contents: [] });
   });
 
-  it('not-present runtime remove does not cancel a parked add', async () => {
+  it('runtime remove cancels an add parked behind discovery', async () => {
     const f = fixture();
     const discoveryGate = deferred<typeof f.initial>();
     f.pool.acquire.mockReturnValueOnce(discoveryGate.promise);
@@ -370,9 +446,10 @@ describe('pooled management lifecycle', () => {
     discoveryGate.resolve(f.initial);
     await discovery;
     const result = await adding;
-    expect(result.error).toBeUndefined();
-    expect(result.value).toMatchObject({ name: 'added', toolCount: 1 });
-    expect(f.manager.getServerStatus('added')).toBe(MCPServerStatus.CONNECTED);
+    expect(result.error).toContain('superseded');
+    expect(result.value).toBeUndefined();
+    expect(f.runtime['added']).toBeUndefined();
+    expect(f.pool.acquire).toHaveBeenCalledOnce();
   });
 
   it('old queued refresh does not release a successful explicit re-add', async () => {

@@ -18,7 +18,11 @@ import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
-import { SdkHttpError, SdkErrorCode } from '@modelcontextprotocol/client';
+import {
+  ProtocolError,
+  SdkHttpError,
+  SdkErrorCode,
+} from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
 import {
   MCPServerStatus,
@@ -1048,7 +1052,7 @@ describe('DiscoveredMCPTool', () => {
     },
   );
 
-  it('identifies its own closed SDK transport even when a sibling is connected', async () => {
+  it('reports a closed shared transport as not sent even when a sibling is connected', async () => {
     updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
     const error = new Error('request lost');
     const callTool = vi.fn().mockRejectedValue(error);
@@ -1070,12 +1074,64 @@ describe('DiscoveredMCPTool', () => {
     ).withSessionConfig(false, false, false);
     await expect(
       shared.build({ param: 'test' }).execute(new AbortController().signal),
-    ).rejects.toMatchObject({
-      message: expect.stringContaining('Do not retry automatically'),
-      cause: error,
+    ).rejects.toThrow('was not sent');
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it('preserves standalone reconnect for an error without transport close', async () => {
+    const discoverToolsForServer = vi.fn();
+    const ensureTool = vi.fn();
+    const config = {
+      getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+    } as unknown as Config;
+    const callTool = vi.fn(async () => {
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      throw new TypeError('fetch failed');
     });
+    const tool = new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      serverName,
+      serverToolName,
+      baseDescription,
+      inputSchema,
+      undefined,
+      undefined,
+      config,
+      { callTool, transport: {} },
+    );
+    await expect(
+      tool.build({ param: 'test' }).execute(new AbortController().signal),
+    ).rejects.toThrow('verify the outcome');
+    expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+    expect(ensureTool).toHaveBeenCalledOnce();
     expect(callTool).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    [-32602, 'not connected to the selected database'],
+    [404, 'customer record not found'],
+  ] as const)(
+    'preserves a healthy server error with code %s',
+    async (code, message) => {
+      const error = new ProtocolError(code, message);
+      const callTool = vi.fn().mockRejectedValue(error);
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        { callTool, transport: {} },
+      ).withSessionConfig(false, false, false);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toBe(error);
+      expect(callTool).toHaveBeenCalledOnce();
+    },
+  );
 
   it('retains timeout classification when another shared connection is disconnected', async () => {
     updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);

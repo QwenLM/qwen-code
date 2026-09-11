@@ -282,13 +282,20 @@ export class McpTransportPool {
     // Wait before reserving a slot or creating a client. Unpooled cleanup is
     // scoped to its session, so another session can still use the same server.
     const completedCleanups = new Set<Promise<void>>();
+    const cleanupDeadline = Date.now() + 5_000;
     while (true) {
       const cleanups = this.getPendingCleanups(
         transportId,
         poolable ? undefined : sessionId,
       ).filter((cleanup) => !completedCleanups.has(cleanup));
       if (cleanups.length === 0) break;
-      await Promise.all(cleanups);
+      // A deadline bounds this caller, not the old transport's lifetime.
+      // Keep the barrier on timeout so a later acquire cannot spawn over it.
+      await runWithTimeout(
+        Promise.all(cleanups),
+        Math.max(0, cleanupDeadline - Date.now()),
+        `MCP cleanup for '${serverName}'`,
+      );
       for (const cleanup of cleanups) completedCleanups.add(cleanup);
       if (this.draining) {
         throw new Error(

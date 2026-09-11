@@ -765,7 +765,10 @@ export class McpClient {
           this.serverConfig,
           this.client,
           cliConfig,
-          { applyConfigFilters: opts?.applyConfigFilters ?? true },
+          {
+            applyConfigFilters: opts?.applyConfigFilters ?? true,
+            connectionStatus: () => this.getStatus(),
+          },
         ),
       ]);
       // Individual listings swallow transport errors. A partial snapshot must
@@ -1621,7 +1624,10 @@ async function discoverToolsWithMetadata(
   mcpServerConfig: MCPServerConfig,
   mcpClient: Client,
   cliConfig: Config,
-  opts?: { applyConfigFilters?: boolean },
+  opts?: {
+    applyConfigFilters?: boolean;
+    connectionStatus?: () => MCPServerStatus;
+  },
 ): Promise<ToolDiscoveryResult> {
   try {
     const { mcpToTool } = await import('@google/genai');
@@ -1737,6 +1743,9 @@ async function discoverToolsWithMetadata(
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
             appResourceUriMap.get(funcDecl.name!),
+            undefined,
+            true,
+            opts?.connectionStatus,
           ),
         );
       } catch (error) {

@@ -676,6 +676,57 @@ describe('McpTransportPool', () => {
       await pool.drainAll();
     });
 
+    it.each(['manual', 'silent drop'] as const)(
+      'bounds acquire waiting for %s cleanup without spawning over the old transport',
+      async (reason) => {
+        const mocked = mockMcpSuccess();
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const cfg = new MCPServerConfig('node');
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        const entry = (
+          pool as unknown as { entries: Map<string, PoolEntry> }
+        ).entries.get(first.id)!;
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        if (reason === 'manual') void entry.forceShutdown('manual');
+        else
+          (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+            new Error('EPIPE'),
+          );
+        let error: Error | undefined;
+        const pending = pool
+          .acquireForRecovery('srv', cfg, 'b', r.tools, r.prompts, r.resources)
+          .catch((cause: Error) => {
+            error = cause;
+          });
+        await vi.advanceTimersByTimeAsync(5_000);
+        const timeout = error?.message;
+        const connectsBeforeCleanup = mocked.connect.mock.calls.length;
+        const barrier = entry.waitForCleanup();
+        finish();
+        await barrier;
+        await pending;
+        await pool.acquire('srv', cfg, 'b', r.tools, r.prompts, r.resources);
+        await pool.drainAll();
+        expect(timeout ?? '').toMatch(/timed out.*cleanup/i);
+        expect(connectsBeforeCleanup).toBe(1);
+        expect(mocked.connect).toHaveBeenCalledTimes(2);
+      },
+    );
+
     it.each(
       cleanupTransports.flatMap((testCase) =>
         [false, true].map((timeout) => ({ ...testCase, timeout })),
@@ -763,9 +814,9 @@ describe('McpTransportPool', () => {
             if (rejectHandle) {
               rejectHandle = false;
               if (failure === 'disconnected') {
-                vi.spyOn(conn.client, 'getStatus').mockReturnValueOnce(
-                  MCPServerStatus.DISCONNECTED,
-                );
+                // Drive the real entry terminal, rather than confusing a
+                // transient client status with the entry's lifetime.
+                (mocked as unknown as { onclose: () => void }).onclose();
               } else {
                 vi.spyOn(conn, 'updateConfig').mockImplementationOnce(() => {
                   throw new Error('registration failed');
@@ -2463,6 +2514,80 @@ describe('McpTransportPool', () => {
   });
 
   describe('workspace budget integration (F2 commit 6)', () => {
+    it.each([false, true])(
+      'runtime removal holds capacity through drain and cleanup (sibling=%s)',
+      async (sibling) => {
+        const { WorkspaceMcpBudget } = await import(
+          './mcp-workspace-budget.js'
+        );
+        const budget = new WorkspaceMcpBudget({
+          clientBudget: 1,
+          mode: 'enforce',
+        });
+        mockMcpSuccess();
+        const r = mkSessionRegistries();
+        r.tools.getToolsByServer = vi.fn().mockReturnValue([]);
+        const runtime: Record<string, MCPServerConfig> = {};
+        const config = {
+          ...cliConfig,
+          getMcpServers: () => runtime,
+          getSettingsMcpServers: () => ({}),
+          getRuntimeMcpServers: () => runtime,
+          addRuntimeMcpServer: (name: string, recipe: MCPServerConfig) => {
+            runtime[name] = recipe;
+          },
+          removeRuntimeMcpServer: (name: string) => {
+            const present = name in runtime;
+            delete runtime[name];
+            return present;
+          },
+          getTargetDir: () => process.cwd(),
+          getSessionId: () => 'runtime',
+          getMcpServerCommand: () => undefined,
+          isTrustedFolder: () => true,
+          isMcpServerDisabled: () => false,
+          isMcpServerPendingApproval: () => false,
+          getPromptRegistry: () => r.prompts,
+          getResourceRegistry: () => r.resources,
+        } as unknown as Config;
+        const pool = new McpTransportPool(
+          config,
+          mkPoolOptions({ budget, drainDelayMs: 30_000 }),
+        );
+        const manager = new McpClientManager(config, r.tools, { pool });
+        const cfg = new MCPServerConfig('node');
+        await manager.addRuntimeMcpServer('srv', cfg, 'client');
+        const other = mkSessionRegistries();
+        const handle = sibling
+          ? await pool.acquire(
+              'srv',
+              { ...cfg, cwd: process.cwd() },
+              'sibling',
+              other.tools,
+              other.prompts,
+              other.resources,
+            )
+          : undefined;
+        await manager.removeRuntimeMcpServer('srv', 'client');
+        expect(runtime).toEqual({});
+        expect(budget.getReservedSlots()).toEqual(['srv']);
+        await expect(
+          manager.addRuntimeMcpServer('next', cfg, 'client'),
+        ).rejects.toThrow(/budget/i);
+        await vi.advanceTimersByTimeAsync(30_000);
+        if (handle) {
+          expect(handle.state).toBe('active');
+          expect(budget.getReservedSlots()).toEqual(['srv']);
+          handle.release();
+          await vi.advanceTimersByTimeAsync(30_000);
+        }
+        expect(budget.getReservedSlots()).toEqual([]);
+        await manager.addRuntimeMcpServer('next', cfg, 'client');
+        expect(budget.getReservedSlots()).toEqual(['next']);
+        await pool.drainAll();
+      },
+    );
+
     it('preserves a healthy sibling when releasing an unused runtime reservation', async () => {
       const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
       const budget = new WorkspaceMcpBudget({

@@ -7985,15 +7985,25 @@ export class Session implements SessionContext {
       const mcpRecoveryNotices = await this.config
         .getToolRegistry()
         .getMcpClientManager()
-        .recoverFailedConnections(abortSignal);
+        .recoverFailedConnections(abortSignal)
+        .catch((error: unknown) => {
+          debugLogger.error('MCP recovery before model send failed', error);
+          return [];
+        });
       if (abortSignal.aborted) {
         return { responseStream: null, stopReason: 'cancelled' };
       }
-      if (mcpRecoveryNotices.length > 0) {
-        // A later tool loop may need another connection or fresh declarations,
-        // but identical status messages should appear only once per user turn.
+      // Registrations can disappear without a notice, including revocation
+      // or explicit disconnect during recovery. Synchronize pooled sessions
+      // before every send; diagnostic deduplication does not own tool state.
+      if (
+        this.config.getMcpTransportPool?.() ||
+        mcpRecoveryNotices.length > 0
+      ) {
         await llmClient.setTools();
         await this.sendAvailableCommandsUpdate();
+      }
+      if (mcpRecoveryNotices.length > 0) {
         const recoveryTurnId = options.recoveryTurnId ?? promptId;
         if (this.mcpRecoveryNoticeTurn !== recoveryTurnId) {
           this.mcpRecoveryNoticeTurn = recoveryTurnId;

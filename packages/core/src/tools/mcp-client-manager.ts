@@ -1558,7 +1558,8 @@ export class McpClientManager {
     excludedNames: ReadonlySet<string>,
     generation: number,
   ): Promise<void> {
-    if (!this.pool) return; // unreachable; caller already gates
+    // Folder trust can change while this pass waits behind another MCP change.
+    if (!this.pool || !cliConfig.isTrustedFolder()) return;
     // reset the
     // shutdown-timeout flag at the START of every discovery pass. The
     // flag is sticky — it persists across `stop()` calls until
@@ -1873,7 +1874,7 @@ export class McpClientManager {
             // Transport identity excludes trust and tool filters. Apply the
             // current session policy before exposing a recovered connection.
             try {
-              if (conn.client.getStatus() !== MCPServerStatus.CONNECTED) {
+              if (conn.state === 'closed' || conn.state === 'failed') {
                 throw new Error('MCP connection closed during recovery');
               }
               conn.updateConfig(this.getEffectiveMcpServers()[name]!);
@@ -1886,7 +1887,9 @@ export class McpClientManager {
             budget?.clearRefusal(name);
             this.recoveryNotices.set(
               name,
-              `MCP server '${name}' reconnected. Cancelled calls were not replayed.`,
+              conn.client.getStatus() === MCPServerStatus.CONNECTED
+                ? `MCP server '${name}' reconnected. Cancelled calls were not replayed.`
+                : `MCP server '${name}' is restarting. This session remains attached; cancelled calls were not replayed.`,
             );
           } catch (error) {
             if (!stillWanted()) return;
@@ -3484,18 +3487,16 @@ export class McpClientManager {
         toolCount = this.toolRegistry.getToolsByServer(name).length;
       }
     } catch (err) {
-      // A newer queued add waits for this rollback, but cannot undo a
-      // disconnect/stop that invalidated this particular request.
-      if (
-        canRollback() &&
-        this.cliConfig.getRuntimeMcpServers()[name] === config
-      ) {
+      // Roll back only our own tentative overlay. Queued adds wait for this
+      // catch; removal or an external config write changes its identity.
+      // Restoring configuration does not authorize restoring a connection.
+      if (this.cliConfig.getRuntimeMcpServers()[name] === config) {
         if (previousRuntimeConfig) {
           this.cliConfig.addRuntimeMcpServer(name, previousRuntimeConfig);
         } else {
           this.cliConfig.removeRuntimeMcpServer(name);
         }
-        if (existingConn && !previousConnectionWasClosed) {
+        if (canRollback() && existingConn && !previousConnectionWasClosed) {
           this.failedPooledConnections.set(name, {
             transportId: existingConn.transportId,
           });
@@ -3564,15 +3565,19 @@ export class McpClientManager {
     // Config.removeRuntimeMcpServer returns true only if the entry was
     // in the runtime map.
     const wasRuntime = this.cliConfig.removeRuntimeMcpServer(name);
+    // A queued add has a token before it writes an overlay. Removal must
+    // invalidate it too, while a settings-only no-op retains recovery state.
+    if (wasRuntime || this.runtimeMcpAddTokens.has(name)) {
+      this.runtimeMcpAddTokens.delete(name);
+      for (const exclusions of this.pooledDiscoveryExclusions) {
+        exclusions.add(name);
+      }
+    }
     if (!wasRuntime) {
       return { name, skipped: true, reason: 'not_present' };
     }
-    this.runtimeMcpAddTokens.delete(name);
     this.failedPooledConnections.delete(name);
     this.recoveryNotices.delete(name);
-    for (const exclusions of this.pooledDiscoveryExclusions) {
-      exclusions.add(name);
-    }
 
     // Detect whether this was shadowing a settings-layer entry
     const settingsServers = this.cliConfig.getSettingsMcpServers() ?? {};

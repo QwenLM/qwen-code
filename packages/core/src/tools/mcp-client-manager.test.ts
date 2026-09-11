@@ -5067,7 +5067,10 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
         transportId: connectionIdOf('srv', serverConfig),
         client: { getStatus: () => MCPServerStatus.CONNECTED },
         on: vi.fn(),
-        release: () => holders.delete('runtime-entry'),
+        release: () => {
+          holders.delete('runtime-entry');
+          holders.add('draining-entry');
+        },
         updateConfig: vi.fn(),
       };
       let reservedDuringAcquire: string[] = [];
@@ -5079,8 +5082,8 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
           holders.add('runtime-entry');
           return conn;
         },
-        // The pool owns holder/drain bookkeeping; this boundary stub lets
-        // the manager cleanup exercise both occupied and unused names.
+        // Releasing a seat leaves a draining process holding the slot.
+        // The real-pool test separately verifies drain and eviction timing.
         releaseUnusedBudgetReservation: (name: string) => {
           if (name === 'srv' && holders.size === 0) budget.release(name);
         },
@@ -5107,11 +5110,15 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
 
       expect(reservedDuringAcquire).toEqual(['srv']);
       expect(config.getRuntimeMcpServers()).toEqual({});
-      expect([...holders]).toEqual(anotherHolder ? ['sibling-entry'] : []);
-      expect(budget.getReservedSlots()).toEqual(anotherHolder ? ['srv'] : []);
-      expect(budget.getReservedCount()).toBe(anotherHolder ? 1 : 0);
+      const held = anotherHolder || action === 'remove';
+      expect([...holders]).toEqual([
+        ...(anotherHolder ? ['sibling-entry'] : []),
+        ...(action === 'remove' ? ['draining-entry'] : []),
+      ]);
+      expect(budget.getReservedSlots()).toEqual(held ? ['srv'] : []);
+      expect(budget.getReservedCount()).toBe(held ? 1 : 0);
       expect(budget.tryReserve('next-server')).toBe(
-        anotherHolder ? 'refused' : 'reserved',
+        held ? 'refused' : 'reserved',
       );
     },
   );
@@ -5754,16 +5761,14 @@ describe('pooled session recovery', () => {
     },
   );
 
-  it.each(['disconnected', 'registration failure'])(
+  it.each(['failed', 'closed', 'registration failure'])(
     'records cooldown when a recovered handle fails acceptance: %s',
     async (failure) => {
       const f = fixture();
       await f.manager.discoverAllMcpTools(f.config);
       f.fail();
-      if (failure === 'disconnected') {
-        vi.spyOn(f.replacement.client, 'getStatus').mockReturnValue(
-          MCPServerStatus.DISCONNECTED,
-        );
+      if (failure !== 'registration failure') {
+        Object.assign(f.replacement, { state: failure });
       } else {
         f.replacement.updateConfig.mockImplementation(() => {
           throw new Error('registration failed');

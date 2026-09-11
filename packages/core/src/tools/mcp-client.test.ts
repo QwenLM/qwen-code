@@ -1571,6 +1571,67 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
+    it.each(['standalone', 'pooled', 'qualified', 'trust', 'app'] as const)(
+      'uses the owning client status after an error without close (%s)',
+      async (copy) => {
+        const name = 'status-owner';
+        const error = new TypeError('fetch failed');
+        const mockedClient = {
+          transport: {},
+          onerror: (_error: Error) => {},
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          getServerCapabilities: vi.fn().mockReturnValue({}),
+          listTools: vi.fn().mockResolvedValue({ tools: [{ name: 'write' }] }),
+          getInstructions: vi.fn(),
+          callTool: vi.fn(async () => {
+            mockedClient.onerror(error);
+            // A healthy same-name sibling overwrites the process-global map.
+            updateMCPServerStatus(name, MCPServerStatus.CONNECTED);
+            throw error;
+          }),
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+          tool: async () => ({ functionDeclarations: [{ name: 'write' }] }),
+        } as unknown as GenAiLib.CallableTool);
+        const discoverToolsForServer = vi.fn();
+        const ensureTool = vi.fn();
+        const cfg = Object.assign(cfgWithResources(), {
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        });
+        const client = new McpClient(
+          name,
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          {} as WorkspaceContext,
+          false,
+        );
+        await client.connect();
+        const { tools } = await client.discoverAndReturn(cfg);
+        let tool = tools[0];
+        if (copy !== 'standalone')
+          tool = tool.withSessionConfig(false, false, false);
+        if (copy === 'qualified') tool = tool.asFullyQualifiedTool();
+        if (copy === 'trust') tool = tool.withTrust(true);
+        if (copy === 'app')
+          tool = tool.withAppResourceUi({ resourceUri: 'ui://test' });
+        await expect(
+          tool.build({}).execute(new AbortController().signal),
+        ).rejects.toThrow('verify the outcome');
+        expect(mockedClient.callTool).toHaveBeenCalledOnce();
+        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+        expect(mockedClient.transport).toBeDefined();
+        if (copy === 'standalone')
+          expect(discoverToolsForServer).toHaveBeenCalledWith(name);
+        else expect(discoverToolsForServer).not.toHaveBeenCalled();
+      },
+    );
+
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
       // F2 (#4175) pool path: a single shared McpClient produces this
       // snapshot once; per-session SessionMcpView instances each register

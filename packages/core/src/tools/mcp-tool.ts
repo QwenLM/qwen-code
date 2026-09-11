@@ -28,6 +28,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
+import { ProtocolError } from '@modelcontextprotocol/client';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -212,8 +213,7 @@ type ToolParams = Record<string, unknown>;
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
- * This avoids a direct import of the MCP SDK in this file,
- * keeping the dependency contained in mcp-client.ts.
+ * Discovery supplies only the SDK methods used by an invocation.
  */
 export interface McpDirectClient {
   /** The SDK clears this getter when this particular connection closes. */
@@ -334,6 +334,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
     private readonly reconnectOnError = true,
+    private readonly connectionStatus?: () => MCPServerStatus,
   ) {
     super(params);
   }
@@ -495,6 +496,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool['appResourceUri'],
           newTool.appResourceUi,
           this.retryCount + 1,
+          true,
+          newTool['connectionStatus'],
         );
         if (!newInvocation.canSafelyReplay()) {
           throw new Error(
@@ -559,17 +562,25 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
   private getConnectionStatus(): MCPServerStatus | undefined {
     if (this.mcpClient && 'transport' in this.mcpClient) {
-      return this.mcpClient.transport
-        ? MCPServerStatus.CONNECTED
-        : MCPServerStatus.DISCONNECTED;
+      if (!this.mcpClient.transport) return MCPServerStatus.DISCONNECTED;
     }
+    // onerror does not clear the SDK transport. Read the owning McpClient,
+    // whose status also observes those errors, before any legacy fallback.
+    if (this.connectionStatus) return this.connectionStatus();
     // A name-only status cannot identify one of several pooled transports.
     return this.reconnectOnError
       ? getAllMCPServerStatuses().get(this.serverName)
-      : undefined;
+      : this.mcpClient?.transport
+        ? MCPServerStatus.CONNECTED
+        : undefined;
   }
 
   private isConnectionError(error: unknown): boolean {
+    // A JSON-RPC error is a response to this call, even if the transport
+    // closes afterwards. Its application code 404 is not an HTTP status,
+    // and its prose may describe a disconnected service behind the server.
+    if (!this.reconnectOnError && error instanceof ProtocolError) return false;
+
     if (this.getConnectionStatus() === MCPServerStatus.DISCONNECTED) {
       return true;
     }
@@ -612,6 +623,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     if (signal.aborted) {
       throw createToolCallAbortError();
+    }
+
+    if (
+      !this.reconnectOnError &&
+      this.mcpClient &&
+      'transport' in this.mcpClient &&
+      !this.mcpClient.transport
+    ) {
+      throw new Error(
+        'The MCP tool call was not sent because the shared transport is closed. Start a new call after the session restores the connection.',
+      );
     }
 
     // Create an AbortController for idle timeout
@@ -1007,6 +1029,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     readonly appResourceUri?: string,
     readonly appResourceUi?: Record<string, unknown>,
     private readonly reconnectOnError = true,
+    private readonly connectionStatus?: () => MCPServerStatus,
   ) {
     super(
       nameOverride ??
@@ -1080,6 +1103,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       this.appResourceUi,
       this.reconnectOnError,
+      this.connectionStatus,
     );
   }
 
@@ -1105,6 +1129,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       appResourceUi,
       this.reconnectOnError,
+      this.connectionStatus,
     );
   }
 
@@ -1160,6 +1185,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       this.appResourceUi,
       reconnectOnError,
+      this.connectionStatus,
     );
   }
 
@@ -1185,6 +1211,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUi,
       0,
       this.reconnectOnError,
+      this.connectionStatus,
     );
   }
 }
