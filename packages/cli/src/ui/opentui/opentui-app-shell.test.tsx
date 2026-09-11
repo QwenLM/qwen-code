@@ -1687,6 +1687,37 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     expect(writes).toEqual([ApprovalMode.PLAN]);
   });
 
+  it('releases a parked call when the cycle reaches YOLO', async () => {
+    // ink pairs the mode switch with confirming whatever is already parked.
+    // Which calls qualify is selectAutoApprovals' rule, covered in
+    // live-session.test.ts; this pins the wiring, which had no caller.
+    const onToolCallSettled = vi.fn();
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const { config } = fakeConfig(ApprovalMode.AUTO_EDIT);
+    renderApp({
+      config,
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?', onConfirm },
+        } as never,
+      ],
+      onToolCallSettled,
+    });
+    await settle();
+    // AUTO_EDIT → AUTO releases nothing: ink's rule names only AUTO_EDIT and
+    // YOLO, and a shell call is not an edit either way.
+    await pressShiftTab();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onToolCallSettled).not.toHaveBeenCalled();
+    // AUTO → YOLO does.
+    await pressShiftTab();
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
+    expect(onToolCallSettled).toHaveBeenCalledWith('call-1');
+  });
+
   it('writes the next mode and repaints both chrome rows', async () => {
     const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
     renderApp({ config, approvalMode: ApprovalMode.DEFAULT });

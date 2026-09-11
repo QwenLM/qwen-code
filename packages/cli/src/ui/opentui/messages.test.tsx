@@ -362,6 +362,22 @@ describe('message meta (ink glyph/color parity)', () => {
     expect(collapsed.hint).toContain('ctrl+o');
   });
 
+  it('labels a committed thought with ink’s duration wording', () => {
+    expect(thinkingMeta(true, false, false, 400).label).toBe('Thought briefly');
+    expect(thinkingMeta(true, false, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    expect(thinkingMeta(true, true, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    // No duration stamped: ink falls back to the pending wording rather than
+    // naming a time it never measured.
+    expect(thinkingMeta(true, false, false).label).toBe('Thinking');
+    // The duration is only stamped when the thought ends, so a live row never
+    // carries one.
+    expect(thinkingMeta(false, false, false, 12_000).label).toBe('Thinking…');
+  });
+
   it('marks canceled tools for strikethrough', () => {
     const item = {
       kind: 'tool',

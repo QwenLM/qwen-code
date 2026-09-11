@@ -400,6 +400,78 @@ The margin sits on the wrapper and the per-item row cap applies to the item's
 own content, so the two are additive: the cap cannot eat the separator, and the
 separator cannot cause an item to be clipped.
 
+## Decision 17 — an approval-mode switch releases the calls it would not have parked
+
+Rotating into an auto-approving mode left the confirmation on screen. The
+keystroke and the dialog both funnel through one adoption point, and that point
+set the local mode and announced an entry into auto mode, then stopped: a call
+already parked behind a confirmation stayed parked under a mode that would never
+have asked it.
+
+ink pairs the switch with the release. Entering the mode that approves
+everything confirms every parked call; entering the edit-only mode confirms just
+the edit tools; and a call flagged as never offering "always allow" is left
+alone, because that flag marks a question that exists to be answered by a human.
+The selection rule was already ported here, docstring and unit tests included —
+it simply had no caller, so this renderer had the rule and not the behaviour.
+
+The adoption point now runs it and confirms each selected call once, then
+reports it settled so the entry drops the row. Two details differ from the
+reference and are deliberate. The release confirms without waiting for each
+call in turn, where ink awaits them one at a time to keep a batch of parallel
+calls from settling out of order; with a single parked call — the only case any
+scenario produces — the two are the same, and this renderer already settles a
+parked call without awaiting it on the exit cascade. And the row is dropped
+whether the confirm resolved or threw, because a confirm that rejected would
+otherwise leave a modal over a call nothing will answer.
+
+## Decision 18 — a committed thought names its duration, and the key its hint advertises is bound
+
+The collapsed thought printed a key hint for a binding that did not exist. Every
+keyboard handler in this renderer was accounted for and none took that key; the
+row's own click did toggle it, but the hint's clickable branch was off, so the
+one affordance that worked was the one the row never named.
+
+ink binds the key at app level, with a legacy alternative beside it, to a single
+flag that forces every thought open. It resolves a thought as that flag or the
+id the user clicked open individually, which is why turning the global back off
+leaves a hand-opened thought open. The port keeps both halves: the flag lives at
+the entry, the analogue of ink's app-level owner, so the keystroke still lands
+while a dialog or a confirmation owns the screen, and the row keeps its own
+click state. The binding goes through the shared matcher rather than a literal
+key name, so a user's rebinding and the legacy alternative both work — and the
+command was already reserved in this renderer's priority table, with nothing
+consuming it.
+
+The label was wrong for the same reason: the duration was measured when the
+thought ended and carried all the way to the view, which never read it. Its only
+readers were the arena cards. ink names the duration — under a second reads as
+brief, over it names the time — and falls back to the pending wording for a
+thought that never reported one. Which formatter matters: two exist, one rounding
+to whole seconds and one keeping a decimal, and ink's thought uses the
+whole-second one.
+
+## Decision 19 — one precedence for a tool result's structured payload
+
+A todo list reached the tool card as its raw JSON. Nothing was missing on the
+consumption side: the event carried a todo field, the model folded it in, and
+the card had a checkbox-list renderer it put ahead of every other body. The
+whole chain was built with nothing producing into it.
+
+Six paths turn a result display into events. One checked the structured payloads
+— a file diff, a todo list, an ANSI grid — before falling back to text; the
+other five flattened straight to text, so each of them dumped JSON for a todo
+list. They now share one helper holding that precedence, with the flattening
+fallback unchanged, so a display with no structured form renders exactly as
+before.
+
+Two of the six keep a convention of their own: a live chunk and a resumed
+transcript emit the flattened text as an incremental output event rather than a
+result event, which their tests pin and which the fold treats identically for
+text. Those two share only the structured half and keep their own fallback. What
+changes for them is the payload, not the event type — a todo list mid-execution
+and a shell result's ANSI grid on resume now render instead of dumping.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -473,6 +545,33 @@ What was verified, and how far the verification reaches:
   rather than the failed one. Both wordings send the user to the same command,
   and recovering the reason would mean adding a public accessor to the shared
   state for a distinction with no different action behind it.
+- **The approval release is unit-covered only.** No scenario parks a
+  confirmation and then rotates the mode. The wiring is pinned by a test with
+  its negative control — the intermediate mode that must release nothing — and
+  the selection rule it consumes was already covered on its own.
+- **The thought toggle's keystroke is not covered at all.** The entry's own test
+  replaces the keyboard hook with a no-op, so only the consumer half is
+  asserted: the flag reaching the row and opening it. Nor is it frame-covered,
+  because no scenario makes the model emit a thought — neither the new label nor
+  the binding appears in any capture.
+- **Only the thought half of ink's full-detail switch is bound.** ink's flag
+  also untruncates every tool group; the tool cards here keep their row cap
+  regardless of it.
+- **A live thought's body streams here.** ink hides it until the thought is
+  expanded. Recorded rather than changed: with no scenario producing a live
+  thought, a change would be unverifiable in either direction.
+- **`output.showTimestamps` still has no reader here.** ink prints a dim clock
+  row above the assistant row when the setting is on. Wiring it needs a
+  timestamp on the shared item type, stamped where the item is created, and a
+  second source on the resume path, which rebuilds the transcript from the
+  recording rather than from live items. A live-only half would itself be a
+  divergence — a resumed session would show no timestamps at all — so it is
+  deferred whole rather than shipped partial.
+- **Which tools actually emit a structured payload mid-execution was not
+  traced.** The consolidation makes every payload available on every path, live
+  chunks included, so a shell result that reports an ANSI grid while it runs now
+  renders in colour; whether any tool does so before it completes is a question
+  about the tools, not about this renderer, and was not answered here.
 
 ## Follow-ups
 
@@ -510,3 +609,39 @@ What was verified, and how far the verification reaches:
   paints its dark palette.
 - Two dialog list widgets remain where one would do; consolidating them touches
   numbering, colour and scroll arrows at once.
+- A line-by-line comparison against ink's component and rendering source turned
+  up gaps well past this change's scope. Dialogs with no counterpart here at all
+  — among them the OAuth progress, without which a Qwen login cannot be
+  completed in this renderer, and the startup approval of a project's MCP
+  servers, so a checked-in server list is silently never offered. Dialogs that
+  open read-only where ink's are actionable: trust, rewind, diff, subagent
+  creation and listing, skills, hooks, the status line, memory, two of the stats
+  tabs, and the extension manager's discover and source tabs. And the whole
+  subagent and background-task surface — no live agent panel, no background-task
+  dialog or footer pill, and no inline attribution of an approval a subagent
+  asked for, so one arrives with nothing to say whose it is.
+- The footer has no right-hand segment. ink joins several indicators there with
+  a pipe — sandbox, safe mode, debug mode, context percentage, and the goal and
+  cron pills — and adds an MCP health pill, a worktree indicator, a workflow
+  indicator and a skill-review warning. This renderer prints one left column.
+- The status-line settings are ignored. ink renders up to two lines produced by
+  a user-configured command, on its own refresh interval and with its own colour
+  choice; this renderer hardcodes a directory, session, branch and model row.
+- The composer advertises a queue key it does not bind. Its exit key also arms
+  the two-press window with a non-empty draft and eats a character doing it,
+  where ink declines to arm at all while the buffer holds text.
+- The question tool offers only its literal options; ink adds a free-text row so
+  an answer can be typed instead of picked, and the port records the omission in
+  a comment rather than closing it.
+- The question dialog now differs in frames, not only in source. It drops the
+  free-text row, drops each option's description, drops the number keys ink
+  prints beside them, and words its header and its hint differently. The answer
+  itself travels correctly: once a choice is made, both renderers print the same
+  settled card, word for word.
+- The tool card does not print the call's arguments inline, and omits the
+  trailing indicator ink puts beside a row that is still pending. The first is
+  not cosmetic — it is why a disabled-tool error reads as an empty card here and
+  as a card carrying the full argument JSON there. A settled card also keeps the
+  position it was created at, where ink commits it to permanent history after
+  whatever notices arrived meanwhile, so a notice printed during a tool call
+  lands after the card here and before it there.

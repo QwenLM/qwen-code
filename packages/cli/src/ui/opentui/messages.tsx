@@ -34,6 +34,7 @@ import {
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { formatDuration } from '../utils/displayUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
@@ -399,6 +400,9 @@ export function assistantMessageMeta(): { glyph: string; color: string } {
   return { glyph: ICON.DIAMOND, color: C.purple };
 }
 
+/** ink ConversationMessages: under this a committed thought reads "briefly". */
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
+
 export interface ThinkingMeta {
   icon: string;
   label: string;
@@ -417,10 +421,17 @@ export function thinkingMeta(
   done: boolean,
   expanded: boolean,
   clickable: boolean,
+  durationMs?: number,
 ): ThinkingMeta {
   const expandHint = clickable
     ? '(click or ctrl+o to expand)'
     : '(ctrl+o to expand)';
+  const completedLabel =
+    durationMs === undefined
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? 'Thought briefly'
+        : `Thought for ${formatDuration(durationMs)}`;
   if (!done) {
     return {
       icon: ICON.BECAUSE,
@@ -433,7 +444,7 @@ export function thinkingMeta(
   if (!expanded) {
     return {
       icon: ICON.THEREFORE,
-      label: 'Thought',
+      label: completedLabel ?? 'Thinking',
       hint: expandHint,
       color: C.dim,
       collapsed: true,
@@ -441,7 +452,7 @@ export function thinkingMeta(
   }
   return {
     icon: ICON.THEREFORE,
-    label: 'Thought',
+    label: completedLabel ?? 'Thinking…',
     hint: '(ctrl+o to collapse)',
     color: C.dim,
     collapsed: false,

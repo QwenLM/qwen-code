@@ -47,6 +47,7 @@ import {
   type GoalCardColor,
   type LiveGoalLegacyData,
   type LiveHistoryItem,
+  type LiveThinkingItem,
   type LiveToolItem,
   type LiveArenaSessionItem,
 } from './live-session-model.js';
@@ -76,6 +77,8 @@ export interface TranscriptViewProps {
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
   availableTerminalHeight?: number;
+  /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
+  thoughtsExpanded?: boolean;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -101,6 +104,7 @@ export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   return (
@@ -116,6 +120,7 @@ export function OpenTuiTranscriptView({
             maxRows={maxRows}
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
+            thoughtsExpanded={thoughtsExpanded}
           />
         </box>
       ))}
@@ -128,11 +133,13 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -140,7 +147,7 @@ function TranscriptItem({
     case 'assistant':
       return <AssistantRow text={item.text} streaming={item.streaming} />;
     case 'thinking':
-      return <ThinkingRow text={item.text} done={item.done} />;
+      return <ThinkingRow item={item} allExpanded={thoughtsExpanded} />;
     case 'tool':
       return (
         <ToolCard
@@ -250,14 +257,23 @@ function AssistantRow({
   );
 }
 
-function ThinkingRow({ text, done }: { text: string; done: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = thinkingMeta(done, expanded, false);
+function ThinkingRow({
+  item,
+  allExpanded,
+}: {
+  item: LiveThinkingItem;
+  allExpanded: boolean;
+}) {
+  const [clickedOpen, setClickedOpen] = useState(false);
+  // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
+  // head id, so switching the global back off leaves a hand-opened thought open.
+  const expanded = allExpanded || clickedOpen;
+  const meta = thinkingMeta(item.done, expanded, false, item.durationMs);
   return (
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (done) setExpanded((v) => !v);
+        if (item.done) setClickedOpen((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -266,9 +282,9 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
           {meta.hint ? ` ${meta.hint}` : ''}
         </text>
       </box>
-      {!meta.collapsed && text ? (
+      {!meta.collapsed && item.text ? (
         <text fg={C.dim} attributes={4} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
+          {sanitizeTerminalText(item.text)}
         </text>
       ) : null}
     </box>

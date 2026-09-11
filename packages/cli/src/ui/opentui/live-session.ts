@@ -54,8 +54,9 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
-  extractFileDiff,
+  extractStructuredResult,
   renderResultDisplay,
+  toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
@@ -252,9 +253,8 @@ function atMentionCardEvents(
       title: display.description,
     },
   ];
-  const text = renderResultDisplay(display.resultDisplay);
-  if (text)
-    events.push({ type: 'tool-result', id: display.callId, display: text });
+  const result = toolResultEvent(display.callId, display.resultDisplay);
+  if (result) events.push(result);
   const failed = display.status === ToolCallStatus.Error;
   events.push({
     type: 'tool-end',
@@ -845,9 +845,13 @@ export async function* livePromptEvents(
         }
         return out;
       }
-      const display = renderResultDisplay(
-        compactToolResultDisplayForHistory(chunk),
-      );
+      const compacted = compactToolResultDisplayForHistory(chunk);
+      const structured = extractStructuredResult(compacted);
+      if (structured)
+        return [
+          { type: 'tool-result', id: callId, display: '', ...structured },
+        ];
+      const display = renderResultDisplay(compacted);
       return display
         ? [{ type: 'tool-output', id: callId, output: display }]
         : [];
@@ -944,22 +948,8 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
-      // FileDiff results ride as structured payloads so the tool card renders
-      // colored diff lines (ink DiffResultRenderer parity) instead of the
-      // flattened unified-diff text.
-      const diff = extractFileDiff(resp?.resultDisplay);
-      if (diff) {
-        yield {
-          type: 'tool-result',
-          id: call.request.callId,
-          display: '',
-          diff,
-        };
-      } else {
-        const display = renderResultDisplay(resp?.resultDisplay);
-        if (display)
-          yield { type: 'tool-result', id: call.request.callId, display };
-      }
+      const result = toolResultEvent(call.request.callId, resp?.resultDisplay);
+      if (result) yield result;
       const failed = call.status === 'error' || call.status === 'cancelled';
       yield {
         type: 'tool-end',

@@ -42,6 +42,7 @@ import {
 } from 'react';
 import {
   ApprovalMode,
+  ToolConfirmationOutcome,
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
@@ -63,7 +64,11 @@ import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
-import { nextApprovalMode, type WaitingCallInfo } from './live-session.js';
+import {
+  nextApprovalMode,
+  selectAutoApprovals,
+  type WaitingCallInfo,
+} from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
@@ -304,8 +309,24 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       ) {
         emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
       }
+      // ink's handleApprovalModeChange pairs the switch with releasing what is
+      // already parked: entering an auto-approving mode confirms those calls
+      // instead of leaving a dialog up over a mode that would not have asked.
+      for (const call of selectAutoApprovals(next, waitingToolCalls ?? [])) {
+        void call.confirmationDetails
+          .onConfirm(ToolConfirmationOutcome.ProceedOnce)
+          .catch(() => {});
+        onToolCallSettled?.(call.callId);
+      }
     },
-    [config, settings, addInfoItem, currentApprovalMode],
+    [
+      config,
+      settings,
+      addInfoItem,
+      currentApprovalMode,
+      waitingToolCalls,
+      onToolCallSettled,
+    ],
   );
   const cycleApprovalMode = useCallback(() => {
     const next = nextApprovalMode(config.getApprovalMode());

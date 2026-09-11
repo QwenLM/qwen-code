@@ -117,6 +117,37 @@ describe('opentui resume mapping', () => {
     });
   });
 
+  it('carries TodoWrite results as a todo list, not as raw JSON', () => {
+    const todos = [
+      { id: '1', content: 'write the design', status: 'completed' },
+      { id: '2', content: 'run the matrix', status: 'in_progress' },
+    ];
+    const events: OpenTuiStreamEvent[] = resumeEventsFromSession({
+      conversation: {
+        messages: [
+          {
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [{ functionResponse: { id: 'c1', name: 'todo_write' } }],
+            },
+            toolCallResult: {
+              callId: 'c1',
+              status: 'success',
+              resultDisplay: { type: 'todo_list', todos },
+            },
+          },
+        ],
+      },
+    });
+    expect(events).toContainEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      todos,
+    });
+  });
+
   it('folds the replay into render-ready history items', () => {
     const events = resumeEventsFromSession({
       conversation: { messages: sampleMessages() },

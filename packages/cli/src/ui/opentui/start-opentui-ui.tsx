@@ -82,6 +82,7 @@ import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { Command, matchesCommand } from './key-map.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import {
   armCapturedInputInjection,
@@ -199,6 +200,16 @@ function OpenTuiEntryApp({
   useEffect(() => {
     waitingCallsRef.current = live.waitingCalls;
   }, [live.waitingCalls]);
+  // ink AppContainer's ctrl+O / alt+T toggle: one app-wide flag that forces
+  // every committed thought open. It lives here rather than in the transcript
+  // so the keystroke still lands while a dialog or a confirmation owns the
+  // screen, the way ink's app-level handler does.
+  const [thoughtsExpanded, setThoughtsExpanded] = useState(false);
+  useKeyboard((key: KeyEvent) => {
+    if (!matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) return;
+    key.preventDefault();
+    setThoughtsExpanded((prev) => !prev);
+  });
   useKeyboard((key: KeyEvent) => {
     if (!key.ctrl || (key.name !== 'c' && key.name !== 'd')) return;
     // ink handleExit cascade parity: a parked confirmation closes first
@@ -234,10 +245,11 @@ function OpenTuiEntryApp({
           items={live.items}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
+          thoughtsExpanded={thoughtsExpanded}
         />
       </box>
     ),
-    [live.items, width, height],
+    [live.items, width, height, thoughtsExpanded],
   );
 
   const handleRenderError = useCallback(

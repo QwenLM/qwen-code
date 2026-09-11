@@ -58,7 +58,7 @@ vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
-import type { LiveToolItem } from './live-session-model.js';
+import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
   kind: 'tool',
@@ -283,5 +283,31 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text).not.toContain('\u202e');
     expect(text).toContain('b.ts');
+  });
+
+  it('names a committed thought’s duration and opens it on the global toggle', () => {
+    const items: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'INSPECTING_THE_REPOSITORY',
+        done: true,
+        durationMs: 12_000,
+      },
+    ];
+    const collapsed = render(<OpenTuiTranscriptView items={items} />);
+    expect(collapsed.container.textContent).toContain('Thought for 12s');
+    expect(collapsed.container.textContent).not.toContain(
+      'INSPECTING_THE_REPOSITORY',
+    );
+    collapsed.unmount();
+
+    const expanded = render(
+      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
+    );
+    expect(expanded.container.textContent).toContain(
+      'INSPECTING_THE_REPOSITORY',
+    );
+    expect(expanded.container.textContent).toContain('ctrl+o to collapse');
   });
 });
