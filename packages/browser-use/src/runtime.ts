@@ -28,11 +28,19 @@ export async function createBrowserBackend(): Promise<BrowserBackend> {
         new URL('./native-host.js', import.meta.url),
       ),
     };
-    if (!(await isChromeExtensionInstalled(options))) {
-      throw new Error(
-        'Could not find an installed Qwen Code Chrome extension. ' +
-          'Install the Qwen Code Chrome extension at chrome://extensions ' +
-          '(Developer mode > Load unpacked), then retry Browser Use.',
+    const deadline = Date.now() + 30_000;
+    while (!(await isChromeExtensionInstalled(options))) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          'Could not detect the Qwen Code Chrome extension after waiting 30 seconds. ' +
+            'If you just installed it, wait a few seconds and retry Browser Use. ' +
+            'If it is not installed, install it at chrome://extensions ' +
+            '(Developer mode > Load unpacked), then retry Browser Use.',
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(1_000, remainingMs)),
       );
     }
     await installChromeNativeHost(options);

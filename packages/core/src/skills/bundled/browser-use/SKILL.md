@@ -13,9 +13,12 @@ start a separate Browser Use MCP server.
 
 The Qwen Code Chrome extension must already be installed. On macOS and Linux,
 the SDK checks for it before automatically registering the local Native
-Messaging host. If setup reports that the extension is missing, tell the user
-to install it at `chrome://extensions` (Developer mode → Load unpacked), then
-stop. Do not run the Native Host installer to bypass this check.
+Messaging host. If it is not detected immediately, the SDK retries for up to
+30 seconds so Chrome can finish saving a new installation. If setup still
+cannot detect it, tell a user who just installed it to wait a few seconds and
+retry; if it is not installed, direct them to `chrome://extensions`
+(Developer mode → Load unpacked). Then stop. Do not run the Native Host
+installer to bypass this check.
 
 Installing the Chrome extension opts into this automatic local setup. Its
 Native Host files persist after Qwen exits. The user can inspect or remove
