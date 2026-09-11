@@ -1270,9 +1270,9 @@ describe('QwenLogger', () => {
     });
 
     it('redacts quote-opened secret values', () => {
-      expect(
-        TEST_ONLY.redactTelemetryError('TOKEN="ghs_testsecret123"'),
-      ).toBe('TOKEN=***REDACTED***');
+      expect(TEST_ONLY.redactTelemetryError('TOKEN="ghs_testsecret123"')).toBe(
+        'TOKEN=***REDACTED***',
+      );
       expect(
         TEST_ONLY.redactTelemetryError("--token 'ghs_testsecret123'"),
       ).toBe('--token ***REDACTED***');
