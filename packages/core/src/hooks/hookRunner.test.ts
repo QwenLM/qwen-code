@@ -25,6 +25,13 @@ import type {
 // Hoisted mock
 const mockSpawn = vi.hoisted(() => vi.fn());
 const mockExecFile = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: () => false,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual('node:child_process');
@@ -34,6 +41,11 @@ vi.mock('node:child_process', async () => {
     execFile: mockExecFile,
   };
 });
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => mockDebugLogger,
+}));
 
 describe('HookRunner', () => {
   let hookRunner: HookRunner;
@@ -1256,7 +1268,7 @@ describe('HookRunner', () => {
         // supervisor is detached and may already be gone, which puts the shell
         // outside the supervisor's own tree kill. See #11303.
         vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
-        vi.spyOn(process, 'kill').mockReturnValue(true);
+        const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
         mockExecFile.mockImplementation(
           (
             _file: string,
@@ -1281,6 +1293,10 @@ describe('HookRunner', () => {
           expect.objectContaining({ windowsHide: true }),
           expect.any(Function),
         );
+        // A successful taskkill must not be followed by a pid-level SIGKILL:
+        // the pid is dead and immediately recyclable, so the fallback would
+        // land on an unrelated process (the #6067 collateral kill).
+        expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
       },
     );
 
@@ -1438,8 +1454,169 @@ describe('HookRunner', () => {
       mockProcess.emit('close', null);
       await resultPromise;
 
-      expect(mockExecFile).toHaveBeenCalled();
+      expect(mockExecFile).toHaveBeenCalledWith(
+        expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+        ['/f', '/t', '/pid', String(survivingPid)],
+        expect.anything(),
+        expect.any(Function),
+      );
       expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+    });
+
+    it('still reaps a surviving Windows hook whose liveness probe is denied', async () => {
+      // An elevated or protected hook makes process.kill(pid, 0) fail with
+      // EPERM on Windows, not ESRCH: the process exists but cannot be opened.
+      // That answer is alive, not dead — treating it as dead would leave the
+      // hook's cmd.exe tree running (#11303).
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9915;
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === survivingPid && signal === 0) {
+          throw Object.assign(new Error('operation not permitted'), {
+            code: 'EPERM',
+          });
+        }
+        return true;
+      });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(null);
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+        ['/f', '/t', '/pid', String(survivingPid)],
+        expect.anything(),
+        expect.any(Function),
+      );
+    });
+
+    it('does not taskkill a surviving Windows hook whose liveness probe fails unexpectedly', async () => {
+      // A probe error that is neither "gone" (ESRCH) nor "exists but denied"
+      // (EPERM/EACCES) establishes nothing about the pid. isPidAlive treats it
+      // as dead, because taskkilling a pid of unknown state risks the #6067
+      // recycled-pid collateral kill.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9916;
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === survivingPid && signal === 0) {
+          throw Object.assign(new Error('invalid argument'), {
+            code: 'EINVAL',
+          });
+        }
+        return true;
+      });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(null);
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockExecFile).not.toHaveBeenCalledWith(
+        expect.anything(),
+        ['/f', '/t', '/pid', String(survivingPid)],
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('warns when the SIGKILL fallback is refused for a surviving Windows hook', async () => {
+      // An elevated or AV-protected hook refuses OpenProcess(PROCESS_TERMINATE)
+      // the same way it refused the probe: EPERM. The re-probe just reported
+      // the pid alive, so swallowing the refusal would leave a #11303-class
+      // leak without a single log line.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9917;
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((target, signal) => {
+          if (target === survivingPid && signal === 'SIGKILL') {
+            throw Object.assign(new Error('operation not permitted'), {
+              code: 'EPERM',
+            });
+          }
+          return true;
+        });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(new Error('ERROR_ACCESS_DENIED'));
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(killSpy).toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `SIGKILL fallback failed for surviving hook ${survivingPid}`,
+        ),
+      );
+    });
+
+    it('stays silent when the SIGKILL fallback finds the surviving Windows hook already gone', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9918;
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((target, signal) => {
+          if (target === survivingPid && signal === 'SIGKILL') {
+            throw createNoSuchProcessError();
+          }
+          return true;
+        });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(new Error('ERROR_ACCESS_DENIED'));
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(killSpy).toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+      expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('SIGKILL fallback failed'),
+      );
     });
 
     it('owns a POSIX process group without signalling it on normal completion', async () => {

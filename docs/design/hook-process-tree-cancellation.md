@@ -1,5 +1,7 @@
 # Hook Process Tree Cancellation
 
+[English](hook-process-tree-cancellation.md) | [简体中文](hook-process-tree-cancellation.zh-CN.md)
+
 ## Problem
 
 Command hooks run through a shell and can create nested processes. HookRunner currently signals only the direct shell process and uses `ChildProcess.killed` to decide whether to escalate from SIGTERM to SIGKILL. That property records that a signal was sent, not that the process exited, so an unresponsive shell can prevent escalation and descendants can survive as orphans.
@@ -23,7 +25,9 @@ Graceful supervisor exit and handled termination signals remove staged input and
 
 On POSIX, the supervisor starts the command in a separate owned process group and retains the configured deadline after Qwen exits. Root-process close records the exit status but is not completion while another process remains in the group. Normal completion ends the supervisor as soon as the group is empty; timeout sends TERM and then KILL to the group. While Qwen is still alive, AbortSignal cancellation terminates the supervisor, which forwards the same tree cleanup to the command group. Generic `async: true` hooks remain process-scoped: their captured output belongs to AsyncHookRegistry and, on POSIX, they are reclaimed when the Qwen process exits.
 
-Windows does not expose POSIX process-group signals. HookRunner instead invokes the absolute System32 `taskkill.exe` path asynchronously with `/f /t /pid` and a bounded execution time. A failed taskkill falls back to force-killing the direct child and emits a diagnostic warning. If the root process has already exited, taskkill cannot reconstruct descendants from that former PID; reclaiming that case requires a Windows Job Object or descendant tracking and remains outside this change.
+Windows does not expose POSIX process-group signals. HookRunner instead invokes the absolute System32 `taskkill.exe` path asynchronously with `/f /t /pid` and a bounded execution time, skipping the call when the root child has already exited. A failed taskkill falls back to force-killing the direct child and emits a diagnostic warning.
+
+For the parent-exit-surviving `MessageDisplay`, `StopFailure`, and `SessionDelete` hooks, the supervisor reports the hook shell's pid over fd 3, so the shell can be reclaimed even after the supervisor has exited and its former tree can no longer be reconstructed. While Qwen is alive, hook termination probes that pid first with the shared `isPidAlive` helper and never taskkills a pid that has already exited; an access-denied probe (EPERM or EACCES) counts as alive, while an unexpected probe error counts as dead. When taskkill fails or times out, a second probe gates a direct pid-level SIGKILL fallback, and a refused fallback is logged rather than swallowed. Both probes are the recycled-pid guard: taskkill has no process-group equivalent, so it must never be fired at a pid that may have been recycled onto an unrelated application. A probe establishes existence, not identity — Windows exposes no cheap process-start token, so a pid recycled between probe and kill remains a residual risk that a Windows Job Object would close.
 
 Timeout and AbortSignal races share the same termination promise. Abort retains its existing result precedence, and normal hook success, output parsing, exit-code handling, and timeout defaults remain unchanged.
 
@@ -40,7 +44,7 @@ After tree termination, HookRunner waits up to one second for the root child to 
 
 ## Test plan
 
-- Unit-test process-group ownership, parent-independent supervisor selection, TERM-to-KILL timing, root-close races, timeout/abort races, parent-exit fallback, normal completion, spawn errors, and Windows taskkill fallback.
+- Unit-test process-group ownership, parent-independent supervisor selection, TERM-to-KILL timing, root-close races, timeout/abort races, parent-exit fallback, normal completion, spawn errors, Windows taskkill fallback, and Windows surviving-hook reclamation (liveness-probe gating, probe-denied and probe-error handling, SIGKILL fallback, and skipped kills for already-exited processes).
 - Run a POSIX process test whose descendant confirms receipt of SIGTERM, ignores it, and is then made non-running by group SIGKILL.
 - Run POSIX process tests proving process-scoped async hooks are reaped on parent exit while `MessageDisplay`, `StopFailure`, and `SessionDelete` hooks let Qwen exit naturally and still finish afterward.
 - Run POSIX process tests proving surviving hooks keep their timeout after Qwen exits, retain supervision when the root exits before a descendant, preserve explicit abort, and receive input larger than the OS pipe buffer in full.

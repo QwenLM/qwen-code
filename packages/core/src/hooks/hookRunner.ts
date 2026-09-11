@@ -36,6 +36,7 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -302,19 +303,6 @@ async function waitForProcessGroupExit(
   return true;
 }
 
-/**
- * Windows has no process groups, so liveness is checked on the pid itself.
- * `process.kill(pid, 0)` sends no signal; it only reports existence.
- */
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !isNoSuchProcessError(error);
-  }
-}
-
 function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
   try {
     child.kill(signal);
@@ -496,7 +484,7 @@ async function terminateSurvivingHookProcessGroup(
     // The liveness probe is the #6067 guard: taskkill has no process-group
     // equivalent, so it must not be fired at a pid that has already exited and
     // may have been recycled onto an unrelated application.
-    if (!isProcessAlive(pid)) {
+    if (!isPidAlive(pid)) {
       return;
     }
     // `taskkillProcessTree` resolves false when execFile errors or when
@@ -510,11 +498,20 @@ async function terminateSurvivingHookProcessGroup(
     // pid-based kill against a recycled pid is a collateral kill (the #6067
     // failure mode). Re-probe liveness before falling back so a dead pid is
     // never signalled directly.
-    if (!(await taskkillProcessTree(pid)) && isProcessAlive(pid)) {
+    if (!(await taskkillProcessTree(pid)) && isPidAlive(pid)) {
       try {
         process.kill(pid, 'SIGKILL');
-      } catch {
-        // The process already exited.
+      } catch (error) {
+        // ESRCH means the pid is already gone; anything else (EPERM from an
+        // elevated or AV-protected hook) is a refused kill that must not
+        // vanish silently while the tree keeps running.
+        if (!isNoSuchProcessError(error)) {
+          debugLogger.warn(
+            `SIGKILL fallback failed for surviving hook ${pid}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
     }
     return;
