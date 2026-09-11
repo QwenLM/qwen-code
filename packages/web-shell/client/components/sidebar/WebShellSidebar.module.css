@@ -1044,11 +1044,6 @@
   color: var(--success-color, #3fb950);
 }
 
-.sessionStatusUnknown {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
 .sessionSourceIcon {
   width: 18px;
   height: 18px;

@@ -1210,6 +1210,7 @@ interface InFlightTurnRecording {
   originatorClientId?: string;
   abortController?: AbortController;
   startedAt?: number;
+  cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
   finalAnswer: { finalText: string };
@@ -4614,6 +4615,17 @@ export class Session implements SessionContext {
       );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    const recordAdmissionCancellation = () => {
+      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+    };
+    admissionCancellation?.addEventListener(
+      'abort',
+      recordAdmissionCancellation,
+      {
+        once: true,
+      },
+    );
+    if (admissionCancellation?.aborted) recordAdmissionCancellation();
     try {
       const result = await this.#promptWithTurnRecording(
         params,
@@ -4623,7 +4635,7 @@ export class Session implements SessionContext {
         scheduledGoalTurn,
         turnRecording,
       );
-      this.#settleTurnRecording(
+      await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
         result,
@@ -4648,11 +4660,16 @@ export class Session implements SessionContext {
         (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
-        this.#settleTurnRecording('cancelled', turnRecording, result);
+        await this.#settleTurnRecording('cancelled', turnRecording, result);
         return result;
       }
-      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      await this.#settleTurnRecording('error', turnRecording, undefined, error);
       throw error;
+    } finally {
+      admissionCancellation?.removeEventListener(
+        'abort',
+        recordAdmissionCancellation,
+      );
     }
   }
 
@@ -4740,6 +4757,17 @@ export class Session implements SessionContext {
     this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
     const pendingSend = goalTurn?.controller ?? new AbortController();
     if (turnRecording) turnRecording.abortController = pendingSend;
+    const recordCancellation = () => {
+      if (
+        turnRecording &&
+        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON
+      ) {
+        turnRecording.cancelledAt ??= Date.now();
+      }
+    };
+    pendingSend.signal.addEventListener('abort', recordCancellation, {
+      once: true,
+    });
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -4750,6 +4778,7 @@ export class Session implements SessionContext {
     this.pendingPrompt = pendingSend;
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
+      pendingSend.signal.removeEventListener('abort', recordCancellation);
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
       }
@@ -7636,13 +7665,27 @@ export class Session implements SessionContext {
     };
   }
 
-  #settleTurnRecording(
+  async #settleTurnRecording(
     state: 'completed' | 'cancelled' | 'error',
     recording: InFlightTurnRecording | null,
     response?: PromptResponse,
     error?: unknown,
-  ): void {
+  ): Promise<void> {
     if (recording === null) return;
+    const cancelledAt =
+      state === 'cancelled' ? recording.cancelledAt : undefined;
+    if (cancelledAt !== undefined && response) {
+      response._meta = {
+        ...response._meta,
+        'qwen.promptCancelled': {
+          cancelledAt,
+          elapsedMs: Math.max(
+            0,
+            cancelledAt - (recording.startedAt ?? cancelledAt),
+          ),
+        },
+      };
+    }
     const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
     const stopReason =
       response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
@@ -7654,6 +7697,7 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
+      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -7670,6 +7714,9 @@ export class Session implements SessionContext {
     };
     try {
       recording.recordingService?.recordTurnResult(payload);
+      if (cancelledAt !== undefined) {
+        await recording.recordingService?.flush();
+      }
     } catch (recordError) {
       debugLogger.warn(
         `Failed to record turn result: ${this.#formatError(recordError)}`,

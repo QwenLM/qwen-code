@@ -1668,12 +1668,38 @@ function appendPromptCancelledBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
 ): void {
+  const existing = event.promptId
+    ? state.blocks.find(
+        (block) =>
+          block.kind === 'prompt_cancelled' &&
+          block.promptId === event.promptId,
+      )
+    : undefined;
+  if (existing) {
+    if (event.elapsedMs === undefined) return;
+    const block = getWritableBlockById(state, existing.id);
+    if (block?.kind !== 'prompt_cancelled') return;
+    const bytesBefore = estimateBlockBytes(block);
+    block.elapsedMs = event.elapsedMs;
+    if (event.serverTimestamp !== undefined) {
+      block.serverTimestamp = event.serverTimestamp;
+    }
+    if (event.sourceRecordIds) block.sourceRecordIds = event.sourceRecordIds;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    return;
+  }
   const block: DaemonPromptCancelledTranscriptBlock = {
     id: allocateBlockId(state, 'prompt_cancelled'),
     kind: 'prompt_cancelled',
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(event.elapsedMs !== undefined ? { elapsedMs: event.elapsedMs } : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.serverTimestamp !== undefined

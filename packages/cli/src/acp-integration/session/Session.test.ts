@@ -9160,6 +9160,8 @@ describe('Session', () => {
       });
 
       it('records a cancelled turn when admission aborts before dispatch', async () => {
+        let now = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
         let releaseAdmission!: () => void;
         const admission = new Promise<void>((resolve) => {
           releaseAdmission = resolve;
@@ -9178,15 +9180,27 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
         );
+        now = 4_500;
         cancellation.abort();
+        now = 9_500;
         releaseAdmission();
 
-        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(prompt).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': {
+              cancelledAt: 4_500,
+              elapsedMs: 0,
+            },
+          },
+        });
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
             stopReason: 'cancelled',
+            cancelledAt: 4_500,
+            endedAt: 9_500,
           }),
         );
       });
@@ -9269,10 +9283,14 @@ describe('Session', () => {
         );
       });
 
-      it('records a cancelled turn when user cancel races an abort-shaped stream error', async () => {
+      it('records cancellation time before stream wind-down completes', async () => {
+        let now = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createFailingStream('Request was aborted.', () => {
+            now = 4_500;
             void session.cancelPendingPrompt();
+            now = 9_500;
           }),
         );
 
@@ -9284,14 +9302,62 @@ describe('Session', () => {
             },
             trustedContext,
           ),
-        ).resolves.toEqual({ stopReason: 'cancelled' });
+        ).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: 4_500, elapsedMs: 3_500 },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
+            startedAt: 1_000,
+            cancelledAt: 4_500,
+            endedAt: 9_500,
           }),
         );
+      });
+
+      it('waits for the cancellation record to flush before returning', async () => {
+        let releaseFlush!: () => void;
+        const flushed = new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        mockChatRecordingService.flush.mockReturnValue(flushed);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+        let settled = false;
+        const prompt = session
+          .prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          )
+          .then((response) => {
+            settled = true;
+            return response;
+          });
+        await vi.waitFor(() =>
+          expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ state: 'cancelled' }),
+        );
+        expect(settled).toBe(false);
+        releaseFlush();
+        await expect(prompt).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+          },
+        });
       });
 
       it('records a cancelled turn when user cancel races a plain stream error', async () => {
@@ -9309,7 +9375,12 @@ describe('Session', () => {
             },
             trustedContext,
           ),
-        ).resolves.toEqual({ stopReason: 'cancelled' });
+        ).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -9502,6 +9573,7 @@ describe('Session', () => {
           stopReason: 'cancelled',
           promptText: 'first prompt',
         });
+        expect(firstPayload).not.toHaveProperty('cancelledAt');
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           2,
         );
@@ -9649,7 +9721,15 @@ describe('Session', () => {
 
         releaseFirst();
         await first;
-        await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(second).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': {
+              cancelledAt: expect.any(Number),
+              elapsedMs: 0,
+            },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           2,
@@ -38816,7 +38896,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseWait();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     it('lets cancellation win while a loop-detected Stop continuation is preserved', async () => {
@@ -38867,7 +38947,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseDrain();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     it('rejects a foreground turn whose Stop continuation trips loop protection', async () => {
@@ -42330,7 +42410,7 @@ describe('Session', () => {
             }),
           ],
         });
-        expect(firstResult).toEqual({ stopReason: 'cancelled' });
+        expect(firstResult).toMatchObject({ stopReason: 'cancelled' });
       },
     );
 

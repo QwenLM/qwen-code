@@ -4395,6 +4395,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
+  it.each([
+    [7069, '8s'],
+    [0, '0s'],
+    ['1000', '14s'],
+    [-1, '14s'],
+    [NaN, '14s'],
+    [Infinity, '14s'],
+  ] as const)(
+    'uses valid cancellation duration %s for the processed summary',
+    (elapsedMs, expected) => {
+      const c = mount([
+        { ...userMsg('u1'), timestamp: 1_000 },
+        {
+          id: 't1',
+          role: 'thinking',
+          content: 'thinking before cancel',
+          timestamp: 2_000,
+        },
+        { ...asstMsg('a1'), timestamp: 3_000 },
+        { ...systemMsg('c1'), timestamp: 15_000, data: { elapsedMs } },
+      ]);
+      expect(c.textContent).toContain(`Processed ${expected}`);
+    },
+  );
+
   it('renders collapse metrics in the standalone turn row', () => {
     const c = mount([
       { ...userMsg('u1'), timestamp: 1_000 },
