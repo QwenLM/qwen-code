@@ -64,13 +64,13 @@ const SHUTDOWN_GRACE_MS = 75_000;
 
 /**
  * How long the POSIX escalation waits between the SIGTERM rung and the
- * SIGKILL rung. SIGTERM triggers the CLI's `shutdownHandler`. If it overlaps
- * an IDE close, the handler joins the in-flight SessionEnd hook, session
- * dispose and MCP drain; otherwise it may owe the full 30s session drain, 8s
- * MCP drain and 5s exit cleanup. Keep this rung above that 43s bound so
- * SIGKILL remains a last resort and the CLI's exit-time reaper gets a chance.
+ * SIGKILL rung. SIGTERM triggers the CLI's `shutdownHandler`. The handler's
+ * SessionEnd hooks are capped at 30s, followed by the 30s session drain, 8s
+ * MCP drain and 5s exit cleanup. Keep this rung above that 73s bound so
+ * SIGKILL remains a last resort and the CLI's exit-time reaper gets a chance,
+ * even when SIGTERM arrives before the normal connection-close path.
  */
-const SIGTERM_GRACE_MS = 45_000;
+const SIGTERM_GRACE_MS = 75_000;
 
 // Resolve taskkill by absolute System32 path, never the bare name: on Windows
 // a bare command is resolved through PATH *and* the current directory, so a

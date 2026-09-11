@@ -24,7 +24,7 @@ const sdkClientFactory = vi.hoisted(() => ({
 const SHUTDOWN_GRACE_MS = 75_000;
 // Same pin for the second rung of the POSIX escalation ladder
 // (SIGTERM_GRACE_MS): SIGKILL must not land until this long after SIGTERM.
-const SIGTERM_GRACE_MS = 45_000;
+const SIGTERM_GRACE_MS = 75_000;
 // Same pin for the refused-close backoff rungs (CLOSE_RETRY_BASE_MS and
 // CLOSE_RETRY_CEILING_MS): 60s, doubling, capped at 1h.
 const CLOSE_RETRY_BASE_MS = 60_000;
@@ -671,7 +671,7 @@ describe('AcpConnection child exit cleanup', () => {
           setupChildProcessHandlers: () => Promise<void>;
         }
       ).setupChildProcessHandlers();
-      const setupFailure = expect(setup).rejects.toThrow(
+      const setupFailure = await expect(setup).rejects.toThrow(
         /failed to start|superseded/i,
       );
 

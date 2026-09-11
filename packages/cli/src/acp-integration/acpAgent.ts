@@ -2978,18 +2978,19 @@ export async function runAcpAgent(
         }
       }
 
-      // IDE disconnects have a bounded hook budget. The signal path still
-      // joins this promise when it overlaps the IDE close, so it cannot
-      // dispose sessions or drain the MCP pool underneath a live hook.
-      const ideCloseHookTimeoutMs = 30_000;
-      const hookAbortController =
-        reason === SessionEndReason.PromptInputExit
-          ? new AbortController()
-          : undefined;
-      const hookTimeout = hookAbortController
-        ? setTimeout(() => hookAbortController.abort(), ideCloseHookTimeoutMs)
-        : undefined;
-      hookTimeout?.unref();
+      // Shutdown has a bounded hook budget for every entry point. The signal
+      // path can arrive before connection.closed (for example when the
+      // process receives SIGTERM directly), so leaving Other unbounded would
+      // let a slow hook outlive the companion's escalation window. The signal
+      // also lets the hook runner terminate its child process tree instead of
+      // merely abandoning the promise.
+      const sessionEndHookTimeoutMs = 30_000;
+      const hookAbortController = new AbortController();
+      const hookTimeout = setTimeout(
+        () => hookAbortController.abort(),
+        sessionEndHookTimeoutMs,
+      );
+      hookTimeout.unref();
 
       try {
         const failures: unknown[] = [];
@@ -3004,14 +3005,10 @@ export async function runAcpAgent(
             continue;
           }
           try {
-            if (hookAbortController) {
-              await hookSystem.fireSessionEndEvent(
-                reason,
-                hookAbortController.signal,
-              );
-            } else {
-              await hookSystem.fireSessionEndEvent(reason);
-            }
+            await hookSystem.fireSessionEndEvent(
+              reason,
+              hookAbortController.signal,
+            );
           } catch (err) {
             if (managedConfigs) failures.push(err);
             debugLogger.warn(

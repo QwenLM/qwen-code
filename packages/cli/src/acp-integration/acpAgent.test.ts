@@ -2074,6 +2074,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -2093,6 +2094,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -2173,6 +2175,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -2184,6 +2187,44 @@ describe('runAcpAgent SessionEnd hooks', () => {
 
     // SessionEnd should have been called exactly once
     expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds SessionEnd hooks when SIGTERM arrives before connection.closed', async () => {
+    const fireSessionEndEvent = vi.fn(
+      (_reason: SessionEndReason, signal?: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        }),
+    );
+    mockConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionEndEvent,
+    });
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    vi.useFakeTimers();
+    try {
+      sigTermListeners[0]('SIGTERM');
+      expect(fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Other,
+        expect.any(AbortSignal),
+      );
+      expect(mockRunExitCleanup).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => {
+        expect(mockRunExitCleanup).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 });
 
