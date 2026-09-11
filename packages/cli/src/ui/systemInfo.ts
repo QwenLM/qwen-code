@@ -148,20 +148,12 @@ export function getSandboxEnv(stripPrefix = false): string {
     return 'no sandbox';
   }
 
-  // A partially-enforced kernel sandbox must not read like a fully confined
-  // one: on an older Landlock ABI some accesses are not governed at all, and
-  // the backend reports that rather than promising full confinement. Kept on
-  // the bug-report path too, for the same reason the seatbelt branch above
-  // keeps its profile name there — it is diagnostic, not decoration.
-  const partialSuffix =
-    process.env['SANDBOX_ENFORCEMENT'] === 'partial' ? ' (partial)' : '';
-
   // For bug reports, remove qwen- prefix
   if (stripPrefix) {
-    return `${sandbox.replace(/^qwen-(?:code-)?/, '')}${partialSuffix}`;
+    return sandbox.replace(/^qwen-(?:code-)?/, '');
   }
 
-  return `${sandbox}${partialSuffix}`;
+  return sandbox;
 }
 
 /**

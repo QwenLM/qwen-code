@@ -1,5 +1,7 @@
 # Linux kernel sandbox (bwrap + landlock-run) design
 
+[English](2026-09-09-linux-kernel-sandbox.md) | [简体中文](2026-09-09-linux-kernel-sandbox.zh-CN.md)
+
 Internal design document for giving qwen-code kernel-level isolation on Linux
 hosts that have no container runtime — closing the gap where today
 `--sandbox` on Linux means "docker/podman or nothing", and
@@ -422,23 +424,27 @@ sandbox-exec branch (they are in-place hops, not images — no
 
 ### UI
 
-`packages/cli/src/ui/systemInfo.ts`: `getSandboxEnv()` needs less work than it
-looks — its final `return sandbox` (`:156`) already renders an unknown
-`SANDBOX` value verbatim, so `bwrap` and `qwen-landlock-run` display without a
-change. The addition is the enforcement suffix when `SANDBOX_ENFORCEMENT` says
-`partial`, so a partially-enforced Landlock run cannot be mistaken for a fully
-confined one.
+`packages/cli/src/ui/systemInfo.ts` needs **no change in P0**:
+`getSandboxEnv()`'s final `return sandbox` (`:156`) already renders an unknown
+`SANDBOX` value verbatim, so `bwrap` displays correctly as-is. The enforcement
+suffix (`landlock (partial)`) lands with P1, which is the phase that can
+actually produce a level other than `full` — shipping the suffix earlier would
+mean an unreachable branch for a backend that does not exist yet. P0 still
+surfaces the level where it is meaningful: `qwen sandbox` prints
+`Enforcement: <level>` from `SANDBOX_ENFORCEMENT`.
 
 ### Model-visible boundary
 
 `packages/core/src/core/prompts.ts:406-427`: add a branch for the in-place
-kernel backends. Without it `SANDBOX=bwrap` lands in the generic branch, which
+kernel backend. Without it `SANDBOX=bwrap` lands in the generic branch, which
 tells the model it runs "in a sandbox container" and teaches it to look for
 `Operation not permitted` — the wrong shape for a bwrap denial. The new branch
-states the backend, the enforcement level, that the host root is read-only
-outside the writable roots, both `EROFS` / `EACCES` spellings, and the same
-instruction the existing branches carry: report a suspected confinement denial
-to the user rather than detouring around it. Rationale in D2.
+states the backend, that the host root is read-only outside the writable roots,
+both `EROFS` / `EACCES` spellings, and the same instruction the existing
+branches carry: report a suspected confinement denial to the user rather than
+detouring around it. Rationale in D2. The branch matches `bwrap` only; P1 adds
+`qwen-landlock-run` to it together with the enforcement wording, for the same
+reason the UI suffix waits.
 
 The measured spelling matters. A denied `git add` in a worktree checkout reads
 `fatal: Unable to create '…/index.lock': Read-only file system`, so the branch
@@ -647,8 +653,6 @@ written with it — nothing below is deferred to a later phase.
 - `prompts.test.ts`: the new `SANDBOX=bwrap` branch is selected and names
   `EROFS`; the existing `sandbox-exec` and container branches keep their current
   text (snapshot).
-- `systemInfo.test.ts`: `bwrap` rendering, with and without an enforcement
-  suffix (the no-suffix case guards the verbatim fallthrough at `:156`).
 - `sandbox.command.test.ts`: `qwen sandbox` output shape; `--verify` reports a
   failing case as failure (a battery that cannot fail proves nothing).
 
@@ -664,7 +668,10 @@ written with it — nothing below is deferred to a later phase.
   `grantArgs` shape; arch resolution (mocked platform/arch, the pattern in
   `ripgrepUtils.test.ts`).
 - `sandbox.test.ts`: landlock argv = launcher + grants + `--` + cliArgs.
-- `systemInfo.test.ts`: `landlock (partial, …)` rendering.
+- `systemInfo.test.ts`: `landlock (partial, …)` rendering, plus the no-suffix
+  case guarding the verbatim fallthrough at `:156`.
+- `prompts.test.ts`: `SANDBOX=qwen-landlock-run` selects the kernel-sandbox
+  branch and the `partial` wording appears only when the level says so.
 
 **P1 — build gate and integration**
 

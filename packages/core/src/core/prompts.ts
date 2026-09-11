@@ -406,13 +406,11 @@ ${taskManagementToolGuidance}- **Parallel Tool Calls:** You can call multiple to
 ${(function () {
   // Determine sandbox status based on environment variables
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
-  // The in-place Linux backends confine this process behind a read-only host
-  // root rather than running a container, and their denials read "Read-only
-  // file system" instead of "Operation not permitted" — so they need their own
+  // The in-place bwrap backend confines this process behind a read-only host
+  // root rather than running a container, and its denials read "Read-only
+  // file system" instead of "Operation not permitted" — so it needs its own
   // section rather than the container wording below.
-  const isKernelSandbox =
-    process.env['SANDBOX'] === 'bwrap' ||
-    process.env['SANDBOX'] === 'qwen-landlock-run';
+  const isKernelSandbox = process.env['SANDBOX'] === 'bwrap';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (isSandboxExec) {
@@ -422,13 +420,9 @@ You are running under macos seatbelt with limited access to files outside the pr
 `;
   } else if (isKernelSandbox) {
     const backend = process.env['SANDBOX'];
-    const partialNote =
-      process.env['SANDBOX_ENFORCEMENT'] === 'partial'
-        ? ' Enforcement is only partial on this kernel, so some operations are not governed at all.'
-        : '';
     return `
 # Kernel Sandbox (${backend})
-You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY except for the project directory, the system temp directory, the Qwen configuration and runtime directories, the git directories of the current checkout, and any directories the user added explicitly.${partialNote} A refused write fails with 'Read-only file system' (EROFS) or 'Permission denied' (EACCES). Network reachability follows the configured sandbox network mode.
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY except for the project directory, the system temp directory, the Qwen configuration and runtime directories, the git directories of the current checkout, and any directories the user added explicitly. A refused write fails with 'Read-only file system' (EROFS) or 'Permission denied' (EACCES). Network reachability follows the configured sandbox network mode.
 When a command fails with one of those errors, treat the sandbox as the likely cause: report it to the user, name the path that was refused, and explain that they can add that path to the sandbox or run without one. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
