@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { registerSkillHooks } from './registerSkillHooks.js';
+import {
+  registerSkillHooks,
+  unregisterSkillHooks,
+} from './registerSkillHooks.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import { HookEventName, HookType } from './types.js';
 import type { SkillConfig } from '../skills/types.js';
@@ -411,5 +414,51 @@ describe('registerSkillHooks — the trust gate travels with the entry', () => {
     });
     const [entry] = manager.getHooksForEvent('s1', HookEventName.PreToolUse);
     expect(entry.trustGated).toBeUndefined();
+  });
+
+  describe('unregisterSkillHooks', () => {
+    const skillWithRoot = (name: string, root?: string): SkillConfig => ({
+      name,
+      description: name,
+      level: 'user',
+      filePath: `/skills/${name}/SKILL.md`,
+      ...(root ? { skillRoot: root } : {}),
+      body: '',
+      hooks: {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: HookType.Command, command: `echo ${name}` }],
+          },
+        ],
+      },
+    });
+
+    it('removes only the hooks the skill registered', () => {
+      const manager = new SessionHooksManager();
+      const skillA = skillWithRoot('a', '/skills/a');
+      const skillB = skillWithRoot('b', '/skills/b');
+      registerSkillHooks(manager, 's1', skillA);
+      registerSkillHooks(manager, 's1', skillB);
+
+      expect(unregisterSkillHooks(manager, 's1', skillA)).toBe(1);
+      expect(
+        manager
+          .getHooksForEvent('s1', HookEventName.PreToolUse)
+          .map((entry) => entry.skillRoot),
+      ).toEqual(['/skills/b']);
+      expect(registerSkillHooks(manager, 's1', skillA)).toBe(1);
+    });
+
+    it('removes nothing for a skill without a root directory', () => {
+      const manager = new SessionHooksManager();
+      const rootless = skillWithRoot('rootless');
+      registerSkillHooks(manager, 's1', rootless);
+
+      expect(unregisterSkillHooks(manager, 's1', rootless)).toBe(0);
+      expect(
+        manager.getHooksForEvent('s1', HookEventName.PreToolUse),
+      ).toHaveLength(1);
+    });
   });
 });
