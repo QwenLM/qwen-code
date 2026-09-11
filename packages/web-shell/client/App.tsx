@@ -12030,6 +12030,10 @@ export function App({
     () => showContextUsage('/context', false),
     [showContextUsage],
   );
+  const contextUsageAvailable = !shouldBlockComposerSubmit({
+    connectionStatus: connection.status,
+    hasSession: Boolean(connection.sessionId),
+  });
 
   // Stable reference: this travels through the memoized MessageList →
   // MessageItem chain, so an inline closure would defeat their memo.
@@ -18877,12 +18881,18 @@ export function App({
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
-                          tokenCount={connection.tokenCount ?? 0}
-                          contextWindow={connection.contextWindow ?? 0}
+                          tokenCount={
+                            contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+                          }
+                          contextWindow={
+                            contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+                          }
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
                           }
-                          onShowContextUsage={handleShowContextUsage}
+                          onShowContextUsage={
+                            contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
