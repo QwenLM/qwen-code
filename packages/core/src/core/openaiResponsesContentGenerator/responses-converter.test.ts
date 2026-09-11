@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type {
   GenerateContentParameters,
+  Part,
   FunctionResponsePart,
 } from '@google/genai';
 import {
@@ -2073,4 +2074,97 @@ describe('normalizeResponsesParameters', () => {
   it('passes through undefined', () => {
     expect(normalizeResponsesParameters(undefined)).toBeUndefined();
   });
+});
+
+describe('assistant phase replay', () => {
+  it.each(['added', 'done', 'completed', 'incomplete'] as const)(
+    'preserves phase received in %s through serialization',
+    (phaseEvent) => {
+      const state = new ResponsesStreamState();
+      const parts: Part[] = [];
+      const output = [];
+      const emit = (event: ResponsesSSEEvent) => {
+        parts.push(
+          ...(convertResponsesEventToGemini(event, 'test-model', state)
+            ?.candidates?.[0]?.content?.parts ?? []),
+        );
+      };
+      for (const [index, phase] of ['commentary', 'final_answer'].entries()) {
+        const item = {
+          type: 'message',
+          id: `msg_${index}`,
+          role: 'assistant',
+          content: [],
+        };
+        emit({
+          event: 'response.output_item.added',
+          data: {
+            output_index: index,
+            item: { ...item, ...(phaseEvent === 'added' ? { phase } : {}) },
+          },
+        });
+        emit({
+          event: 'response.output_text.delta',
+          data: {
+            output_index: index,
+            item_id: item.id,
+            delta: `message ${index}`,
+          },
+        });
+        emit({
+          event: 'response.output_item.done',
+          data: {
+            output_index: index,
+            item: { ...item, ...(phaseEvent === 'done' ? { phase } : {}) },
+          },
+        });
+        output.push({
+          ...item,
+          ...(['completed', 'incomplete'].includes(phaseEvent)
+            ? { phase }
+            : {}),
+        });
+      }
+      emit({
+        event:
+          phaseEvent === 'incomplete'
+            ? 'response.incomplete'
+            : 'response.completed',
+        data: { response: { output } },
+      });
+      const restoredParts = JSON.parse(JSON.stringify(parts)) as Part[];
+      const { input } = convertGeminiContentsToResponsesInput({
+        model: 'test-model',
+        contents: [{ role: 'model', parts: restoredParts }],
+      });
+      expect(input).toEqual([
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'message 0',
+          phase: 'commentary',
+        },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'message 1',
+          phase: 'final_answer',
+        },
+      ]);
+      const user = convertGeminiContentsToResponsesInput({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: restoredParts }],
+      });
+      expect(user.input).toEqual([
+        {
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'message 0' },
+            { type: 'input_text', text: 'message 1' },
+          ],
+        },
+      ]);
+    },
+  );
 });

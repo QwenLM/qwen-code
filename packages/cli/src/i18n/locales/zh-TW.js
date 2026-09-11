@@ -168,6 +168,7 @@ export default {
   // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
   // verbatim inside an otherwise-translated label.
   // ============================================================================
+  'toolDisplayName.Exec': '執行程式碼',
   'toolDisplayName.Edit': '編輯',
   'toolDisplayName.WriteFile': '寫入檔案',
   'toolDisplayName.ReadFile': '讀取檔案',
@@ -339,8 +340,8 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高範圍設定鎖定（此處無法切換）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被無法在此切換的設定條目鎖定：',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',
@@ -682,6 +683,7 @@ export default {
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
+  'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',

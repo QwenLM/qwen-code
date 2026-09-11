@@ -141,6 +141,10 @@ Commands for managing AI tools and models.
 >
 > `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
+> [!note]
+>
+> A skill from an installed extension is a slash command too, and its name carries its owner: `/rust:pdf`, not `/pdf`. The bare form is not an alias — if another skill is named `pdf`, `/pdf` runs that skill instead. `slashCommands.disabled` gates such a command under either spelling, so an entry written before the name carried the owner still bites. See [How extension Skills are named](./skills.md#how-extension-skills-are-named).
+
 ### 1.5 Built-in Skills
 
 These commands invoke bundled skills that provide specialized workflows.
@@ -1066,3 +1070,8 @@ writing one: the record schema and how liveness is judged, the socket
 paths and framing, the auth line, every frame field, the receipt states
 and their transitions, and what a receiver does with a message before its
 model sees it.
+
+A Node program does not have to write any of that by hand:
+`@qwen-code/sdk/peer` implements the contract. `PeerEndpoint.start({ name })`
+publishes the record and binds the inbox, `list()` and `send()` address
+sessions by name, and `onMessage` receives what they send.

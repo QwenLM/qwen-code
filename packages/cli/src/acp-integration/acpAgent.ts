@@ -147,6 +147,7 @@ import {
   extractAndStripMeta,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
+  qualifySkillName,
   sessionIdContext,
   registerSession,
   SessionSourceService,
@@ -442,6 +443,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -6120,7 +6122,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -7485,13 +7489,26 @@ class QwenAgent implements Agent {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
           const extensionName = extension.name;
-          const key = `extension:${extensionName}:${skill.name}`;
+          // The registry rows above key on the qualified name; the manifest
+          // still holds the authored spelling. Qualify it here or the two keys
+          // never meet, and a stale registry row plus its manifest entry emit
+          // the same skill twice under two names.
+          const key = `extension:${extensionName}:${qualifySkillName(
+            extensionName,
+            skill.name,
+          )}`;
           if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
               {
                 ...skill,
+                // Carry the qualified name like the registry rows do: a
+                // surface that persists this row's name verbatim (the web
+                // shell's Enable toggle) would otherwise write a bare entry
+                // that can never grant once the extension activates.
+                name: qualifySkillName(extensionName, skill.name),
+                authoredName: skill.name,
                 level: 'extension',
                 extensionName,
                 extensionDisplayName: extension.displayName,
@@ -8105,6 +8122,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      recovery: session.getRecoveryStatus(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -14336,6 +14354,7 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
     if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
       config.setGoalProposalHostSupported(true);
     }
