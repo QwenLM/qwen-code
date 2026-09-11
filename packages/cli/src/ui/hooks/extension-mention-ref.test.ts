@@ -251,9 +251,10 @@ describe('buildExtensionContextText', () => {
     });
     const text = buildExtensionContextText(ext);
     expect(text).toContain(
-      '--- Extension: minimal (untrusted third-party content) ---',
+      '--- Extension: selected (untrusted third-party content) ---',
     );
-    expect(text).toContain('--- End Extension: minimal ---');
+    expect(text).toContain('> Extension: minimal');
+    expect(text).toContain('--- End Extension: selected ---');
     expect(text).not.toContain('Available capabilities');
   });
 

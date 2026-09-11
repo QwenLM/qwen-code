@@ -41,25 +41,33 @@ export function matchExtensionByRef(
   );
 }
 
-const BIDI_CONTROL_RE = /[‎‏؜⁦⁧⁨⁩‪‫‬‭‮]/g;
-const EXTENSION_BOUNDARY_LINE_RE = /^[^\S\r\n]*---\s*(?:End\s+)?Extension:/im;
-const EXTENSION_BOUNDARY_FRAGMENT_RE = /---\s*(?:End\s+)?Extension:/gi;
+const DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/gu;
+const EXTENSION_OPENING_FENCE =
+  '--- Extension: selected (untrusted third-party content) ---';
+const EXTENSION_CLOSING_FENCE = '--- End Extension: selected ---';
 
-function neutralizeExtensionBoundaryFragments(text: string): string {
-  return text.replace(
-    EXTENSION_BOUNDARY_FRAGMENT_RE,
-    (boundary) => `—${boundary.slice(3)}`,
-  );
+/**
+ * 把不可信扩展文本固定在 Markdown 引用层级内，同时移除能改变终端显示或
+ * 隐藏分隔符字符的控制码。分隔符保持在顶层，因此扩展内容无法自行结束区块。
+ */
+function quoteUntrustedExtensionText(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u2028\u2029]/g, '\n')
+    .split('\n')
+    .map(
+      (line) =>
+        `> ${stripTerminalControlSequences(line).replace(DEFAULT_IGNORABLE_RE, '')}`,
+    )
+    .join('\n');
 }
 
 export function sanitizeDisplayText(raw: string): string | null {
   const stripped = stripTerminalControlSequences(raw)
-    .replace(BIDI_CONTROL_RE, '')
+    .replace(DEFAULT_IGNORABLE_RE, '')
     .replace(/\s+/g, ' ')
     .trim();
-  return stripped.length > 0
-    ? neutralizeExtensionBoundaryFragments(stripped)
-    : null;
+  return stripped.length > 0 ? stripped : null;
 }
 
 export function getSanitizedExtensionDisplayName(extension: Extension): string {
@@ -72,11 +80,7 @@ export function getSanitizedExtensionDisplayName(extension: Extension): string {
 
 export function buildExtensionContextText(extension: Extension): string {
   const displayName = getSanitizedExtensionDisplayName(extension);
-  const lines: string[] = [];
-
-  lines.push(
-    `--- Extension: ${displayName} (untrusted third-party content) ---`,
-  );
+  const lines: string[] = [`Extension: ${displayName}`];
   if (extension.config.description) {
     const desc = sanitizeDisplayText(extension.config.description);
     if (desc) {
@@ -114,9 +118,11 @@ export function buildExtensionContextText(extension: Extension): string {
     lines.push('');
   }
 
-  lines.push(`--- End Extension: ${displayName} ---`);
-
-  return lines.join('\n');
+  return [
+    EXTENSION_OPENING_FENCE,
+    quoteUntrustedExtensionText(lines.join('\n')),
+    EXTENSION_CLOSING_FENCE,
+  ].join('\n');
 }
 
 export async function buildExtensionMentionContext(
@@ -144,7 +150,7 @@ export async function buildExtensionMentionContext(
     return { text: contextText, remainingBudget };
   }
 
-  const closingFence = `--- End Extension: ${getSanitizedExtensionDisplayName(extension)} ---`;
+  const closingFence = EXTENSION_CLOSING_FENCE;
   const appendInsideFence = (text: string, content: string): string => {
     const prefix = text.slice(0, -closingFence.length);
     const separator = prefix.endsWith('\n\n') ? '' : '\n';
@@ -198,27 +204,19 @@ export async function buildExtensionMentionContext(
       );
       continue;
     }
-    let content = outcome.value;
+    const content = outcome.value;
     if (!content || !content.trim()) continue;
     const contextFilePath = extension.contextFiles[i];
-    if (EXTENSION_BOUNDARY_LINE_RE.test(content)) {
-      if (options.strict) {
-        throw new Error(
-          `Extension context file '${contextFilePath}' contains a reserved extension boundary.`,
-        );
-      }
-      content = content.replace(
-        /^([^\S\r\n]*)---(?=\s*(?:End\s+)?Extension:)/gim,
-        '$1—',
-      );
-    }
     if (options.strict) {
       if (content.length > EXTENSION_CONTEXT_FILE_CAP) {
         throw new Error(
           `Extension context file '${contextFilePath}' has ${content.length} characters, exceeding the ${EXTENSION_CONTEXT_FILE_CAP}-character file cap.`,
         );
       }
-      const nextText = appendInsideFence(contextText, content);
+      const nextText = appendInsideFence(
+        contextText,
+        quoteUntrustedExtensionText(content),
+      );
       const addedLength = nextText.length - contextText.length;
       if (addedLength > remainingBudget) {
         throw new Error(
@@ -236,10 +234,15 @@ export async function buildExtensionMentionContext(
       break;
     }
     const cap = Math.min(EXTENSION_CONTEXT_FILE_CAP, remainingBudget);
+    const quotedContent = quoteUntrustedExtensionText(content);
+    const truncationMarker = '\n> ... (truncated)';
     const cappedContent =
-      content.length > cap
-        ? content.slice(0, cap) + '\n... (truncated)'
-        : content;
+      quotedContent.length > cap
+        ? cap > truncationMarker.length
+          ? quotedContent.slice(0, cap - truncationMarker.length) +
+            truncationMarker
+          : quotedContent.slice(0, cap)
+        : quotedContent;
     contextText = appendInsideFence(contextText, cappedContent);
     remainingBudget -= cappedContent.length;
   }

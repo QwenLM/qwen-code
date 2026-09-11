@@ -529,18 +529,37 @@ export function createProductionDispatch(
     const taskName = prompt;
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     if (opts.extensions !== undefined) {
+      const rawExtensions = opts.extensions;
       if (
-        !Array.isArray(opts.extensions) ||
-        opts.extensions.length === 0 ||
-        opts.extensions.length > 16 ||
-        opts.extensions.some((name) => !isWorkflowReferenceString(name, 128)) ||
-        new Set(opts.extensions.map((name) => name.toLowerCase())).size !==
-          opts.extensions.length
+        !Array.isArray(rawExtensions) ||
+        rawExtensions.length === 0 ||
+        rawExtensions.length > 16
       ) {
         throw new Error(
           'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
         );
       }
+      // 该数组来自 workflow VM。先逐项复制到宿主数组，再做任何集合操作，
+      // 避免调用脚本可修改的 Array.prototype 方法。
+      const extensionNames: string[] = [];
+      const normalizedNames = new Set<string>();
+      for (let i = 0; i < rawExtensions.length; i++) {
+        const name = rawExtensions[i];
+        if (!isWorkflowReferenceString(name, 128)) {
+          throw new Error(
+            'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+          );
+        }
+        const normalizedName = name.toLowerCase();
+        if (normalizedNames.has(normalizedName)) {
+          throw new Error(
+            'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+          );
+        }
+        normalizedNames.add(normalizedName);
+        extensionNames[i] = name;
+      }
+      opts = { ...opts, extensions: extensionNames };
       const extensions = config.getActiveExtensions?.() ?? [];
       let remainingBudget = EXTENSION_CONTEXT_BUDGET;
       const contexts: string[] = [];
@@ -548,7 +567,7 @@ export function createProductionDispatch(
       const loadedContextFiles = new Set(config.getContextFilePaths?.() ?? []);
       const workingDirectory = config.getWorkingDir?.() ?? process.cwd();
       let selectedExtensionHasSkills = false;
-      for (const name of opts.extensions) {
+      for (const name of extensionNames) {
         const extension = matchExtensionByRef(name, extensions);
         if (!extension?.isActive)
           throw new Error(

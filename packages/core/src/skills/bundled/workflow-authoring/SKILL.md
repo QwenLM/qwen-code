@@ -93,9 +93,11 @@ say explicitly what each one should read and whether it may edit files.
   changing it invalidates resume reuse from that call onward.
 - `extensions` (array of 1 to 16 unique names) — loads each selected active
   extension's capabilities and retained context before the subagent starts.
+  An `@ext:<name>` mention in the prompt text loads nothing here; select
+  extensions with this option. Loaded context is quoted as untrusted text.
   An unknown or inactive extension, or required context that is unreadable,
-  outside the extension directory, oversized, or over the shared budget,
-  rejects the dispatch. Extension context does not grant permissions.
+  outside the extension directory, oversized, or over the shared context
+  budget, rejects the dispatch. Extension context does not grant permissions.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with

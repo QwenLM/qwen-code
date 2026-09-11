@@ -2580,6 +2580,19 @@ describe('createProductionDispatch', () => {
     },
   );
 
+  it('validates extension names without invoking caller array methods', async () => {
+    const extensions = ['\u001b[31mEVIL\u001b[0m', 'x'.repeat(300)];
+    Object.defineProperties(extensions, {
+      some: { value: () => false },
+      map: { value: () => ['0', '1'] },
+    });
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    await expect(
+      createProductionDispatch(config)('check', { extensions }),
+    ).rejects.toThrow(/expected 1 to 16 unique/);
+    expect(created).toHaveLength(0);
+  });
+
   it.each([false, true])(
     'does not start a leaf when its extension is disabled or unreadable (active=%s)',
     async (isActive) => {

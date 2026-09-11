@@ -1488,10 +1488,16 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
       const KNOWN_AGENT_OPTS = ['label', 'stepId', 'extensions', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      // 在 workflow 脚本修改自身 realm 前固定这些原生方法。下方校验不再
+      // 调用调用方数组或可变 String.prototype 上的方法。
+      const safeArrayIsArray = Array.isArray;
+      const safeStringTrim = Function.prototype.call.bind(String.prototype.trim);
+      const safeStringToLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
+      const safeStringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
       // Keep aligned with isWorkflowReferenceString. This VM bootstrap cannot
       // import host modules, so the code-point ranges must be mirrored here.
       const isUnsafeWorkflowReferenceCharacter = function (char) {
-        const code = char.charCodeAt(0);
+        const code = safeStringCharCodeAt(char, 0);
         return code < 32 ||
           (code >= 127 && code <= 159) ||
           code === 0x061c || code === 0x200e || code === 0x200f ||
@@ -1510,13 +1516,28 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         }
       };
       const validateAgentExtensions = function (extensions) {
-        if (extensions !== undefined && (
-          !Array.isArray(extensions) || extensions.length === 0 || extensions.length > 16 ||
-          extensions.some((name) => typeof name !== 'string' || name.length === 0 || name.length > 128 || name.trim() !== name ||
-            Array.from(name).some(isUnsafeWorkflowReferenceCharacter)) ||
-          new Set(extensions.map((name) => name.toLowerCase())).size !== extensions.length
-        )) {
+        if (extensions === undefined) return;
+        if (!safeArrayIsArray(extensions) || extensions.length === 0 || extensions.length > 16) {
           throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+        }
+        const normalizedNames = [];
+        for (let i = 0; i < extensions.length; i++) {
+          const name = extensions[i];
+          if (typeof name !== 'string' || name.length === 0 || name.length > 128 || safeStringTrim(name) !== name) {
+            throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+          }
+          for (let j = 0; j < name.length; j++) {
+            if (isUnsafeWorkflowReferenceCharacter(name[j])) {
+              throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+            }
+          }
+          const normalizedName = safeStringToLowerCase(name);
+          for (let j = 0; j < normalizedNames.length; j++) {
+            if (normalizedNames[j] === normalizedName) {
+              throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+            }
+          }
+          normalizedNames[i] = normalizedName;
         }
       };
       globalThis.agent = vmAsync(function (prompt, agentOpts) {

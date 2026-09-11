@@ -28466,8 +28466,9 @@ describe('Session', () => {
         expect(message[0]).toEqual({ text: 'Use @ext:browser now' });
         const sentText = textParts(message).join('\n');
         expect(sentText).toContain(
-          '--- Extension: Browser (untrusted third-party content) ---',
+          '--- Extension: selected (untrusted third-party content) ---',
         );
+        expect(sentText).toContain('> Extension: Browser');
         expect(sentText).toContain('Browser automation');
         expect(sentText).toContain(
           '- Skills: browser-skill (invoke via /<skill-name>)',
@@ -28523,7 +28524,7 @@ describe('Session', () => {
       });
 
       const sentText = textParts(firstSentMessage()).join('\n');
-      expect(sentText.match(/--- Extension: Browser/g)).toHaveLength(1);
+      expect(sentText.match(/^> Extension: Browser$/gm)).toHaveLength(1);
       expect(sentText).not.toContain('Extension: missing');
     });
 

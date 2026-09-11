@@ -1810,6 +1810,25 @@ describe('createWorkflowSandbox security', () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
+  it('validates extension names without invoking script-realm array methods', async () => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`
+        Array.prototype.some = function () { return false; };
+        Array.prototype.map = function () {
+          const indexes = [];
+          for (let i = 0; i < this.length; i++) indexes[i] = String(i);
+          return indexes;
+        };
+        return agent('check', {
+          extensions: ['\\u001b[31mEVIL\\u001b[0m', 'x'.repeat(300)],
+        });
+      `),
+    ).rejects.toThrow(/extensions.*array/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('agent({workingDir}) is passed through to dispatch', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
