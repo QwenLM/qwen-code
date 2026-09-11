@@ -1317,7 +1317,7 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,64}$"
             },
-            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. Read only when a Last-Event-ID resume cursor is present: a stale token is then answered with 200 plus an id-less state_resync_required frame before replay, while a value the published pattern rejects is treated as not provided. Without a cursor the header is ignored, and a malformed value never fails the request."
+            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. Echo the token the handshake advertised in the X-Qwen-Event-Epoch response header; any other value mismatches and reads as a restart. Read only when a Last-Event-ID resume cursor is present: a stale token is then answered with 200 plus an id-less state_resync_required frame before replay, while a value the published pattern rejects is treated as not provided. Without a cursor the header is ignored, and a malformed value never fails the request."
           },
           {
             "name": "maxQueued",
