@@ -53,8 +53,9 @@ export function sanitizeDisplayText(raw: string): string | null {
 
 export function getSanitizedExtensionDisplayName(extension: Extension): string {
   return (
-    sanitizeDisplayText(extension.displayName || extension.name) ||
-    extension.name
+    sanitizeDisplayText(extension.displayName || extension.name) ??
+    sanitizeDisplayText(extension.name) ??
+    'unnamed extension'
   );
 }
 
@@ -77,21 +78,21 @@ export function buildExtensionContextText(extension: Extension): string {
 
   if (extension.skills && extension.skills.length > 0) {
     const skillNames = extension.skills
-      .map((s) => sanitizeDisplayText(s.name) || s.name)
+      .map((s) => sanitizeDisplayText(s.name) ?? 'unnamed')
       .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
 
   if (extension.mcpServers && Object.keys(extension.mcpServers).length > 0) {
     const serverNames = Object.keys(extension.mcpServers)
-      .map((n) => sanitizeDisplayText(n) || n)
+      .map((n) => sanitizeDisplayText(n) ?? 'unnamed')
       .join(', ');
     capabilities.push(`- MCP Servers: ${serverNames}`);
   }
 
   if (extension.agents && extension.agents.length > 0) {
     const agentNames = extension.agents
-      .map((a) => sanitizeDisplayText(a.name) || a.name)
+      .map((a) => sanitizeDisplayText(a.name) ?? 'unnamed')
       .join(', ');
     capabilities.push(`- Agents: ${agentNames}`);
   }
@@ -111,7 +112,7 @@ export async function buildExtensionMentionContext(
   extension: Extension,
   options: {
     remainingBudget: number;
-    /** 编排调用必须完整加载上下文，不能把缺失规则静默当作成功。 */
+    /** Fail instead of truncating context files retained by the loader. */
     strict?: boolean;
     signal?: AbortSignal;
     onDebugMessage?: (message: string) => void;
@@ -123,12 +124,21 @@ export async function buildExtensionMentionContext(
   if (options.strict) {
     remainingBudget -= contextText.length;
     if (remainingBudget < 0)
-      throw new Error('Extension context exceeds the available budget.');
+      throw new Error(
+        `Extension '${getSanitizedExtensionDisplayName(extension)}' metadata needs ${contextText.length} characters, but only ${options.remainingBudget} remain in the shared context budget.`,
+      );
   }
 
   if (extension.contextFiles.length === 0) {
     return { text: contextText, remainingBudget };
   }
+
+  const closingFence = `--- End Extension: ${getSanitizedExtensionDisplayName(extension)} ---`;
+  const appendInsideFence = (text: string, content: string): string => {
+    const prefix = text.slice(0, -closingFence.length);
+    const separator = prefix.endsWith('\n\n') ? '' : '\n';
+    return `${prefix}${separator}${content}\n\n${closingFence}`;
+  };
 
   const fileReads = await Promise.allSettled(
     extension.contextFiles.map(async (contextFilePath) => {
@@ -179,13 +189,23 @@ export async function buildExtensionMentionContext(
     }
     const content = outcome.value;
     if (!content || !content.trim()) continue;
-    if (
-      options.strict &&
-      content.length > Math.min(EXTENSION_CONTEXT_FILE_CAP, remainingBudget - 2)
-    ) {
-      throw new Error(
-        'Extension context exceeds the available budget or file cap.',
-      );
+    if (options.strict) {
+      const contextFilePath = extension.contextFiles[i];
+      if (content.length > EXTENSION_CONTEXT_FILE_CAP) {
+        throw new Error(
+          `Extension context file '${contextFilePath}' has ${content.length} characters, exceeding the ${EXTENSION_CONTEXT_FILE_CAP}-character file cap.`,
+        );
+      }
+      const nextText = appendInsideFence(contextText, content);
+      const addedLength = nextText.length - contextText.length;
+      if (addedLength > remainingBudget) {
+        throw new Error(
+          `Extension context file '${contextFilePath}' needs ${addedLength} characters, but only ${remainingBudget} remain in the shared context budget.`,
+        );
+      }
+      contextText = nextText;
+      remainingBudget -= addedLength;
+      continue;
     }
     if (remainingBudget <= 0) {
       options.onDebugMessage?.(
@@ -198,8 +218,8 @@ export async function buildExtensionMentionContext(
       content.length > cap
         ? content.slice(0, cap) + '\n... (truncated)'
         : content;
-    contextText += `\n\n${cappedContent}`;
-    remainingBudget -= cappedContent.length + (options.strict ? 2 : 0);
+    contextText = appendInsideFence(contextText, cappedContent);
+    remainingBudget -= cappedContent.length;
   }
 
   return { text: contextText, remainingBudget };

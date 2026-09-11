@@ -20,7 +20,10 @@ import {
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  listWorkflowSnapshots,
+  writeWorkflowSnapshot,
+} from '../workflow-snapshot.js';
 import {
   createProductionDispatch,
   resolveConcurrencyLimit,
@@ -184,9 +187,18 @@ export class WorkflowRunner {
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
+    const previousEntry = registry?.get(runId);
+    const previousSnapshot =
+      options.resumeFromRunId &&
+      options.sourceRef === undefined &&
+      previousEntry === undefined
+        ? (await listWorkflowSnapshots(config)).find(
+            (snapshot) => snapshot.runId === runId,
+          )
+        : undefined;
     const source =
       options.sourceRef === undefined
-        ? registry?.get(runId)?.sourceRef
+        ? (previousEntry?.sourceRef ?? previousSnapshot?.sourceRef)
         : options.sourceRef;
     const sourceRef =
       source === undefined ? undefined : normalizeWorkflowSourceRef(source);
@@ -214,7 +226,6 @@ export class WorkflowRunner {
       }
     };
     const storage = config.storage;
-    const previousEntry = registry?.get(runId);
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
       : undefined;

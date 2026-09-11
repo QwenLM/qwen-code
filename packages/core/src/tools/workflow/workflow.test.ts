@@ -26,6 +26,7 @@ import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budge
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
+import { WORKFLOW_SOURCE_REF_LIMITS } from '../../agents/workflow-source-ref.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -69,11 +70,23 @@ describe('WorkflowTool', () => {
     const schema = tool.schema.parametersJsonSchema as {
       properties: {
         run_in_background: { default?: boolean; description?: string };
+        sourceRef: {
+          description?: string;
+          properties: Record<string, { maxLength?: number }>;
+        };
       };
     };
     expect(schema.properties.run_in_background.default).toBe(false);
     expect(schema.properties.run_in_background.description).toContain(
       'cooperatively pause/resume',
+    );
+    for (const [field, limit] of Object.entries(WORKFLOW_SOURCE_REF_LIMITS)) {
+      expect(schema.properties.sourceRef.properties[field]?.maxLength).toBe(
+        limit,
+      );
+    }
+    expect(schema.properties.sourceRef.description).toContain(
+      'no surrounding whitespace',
     );
   });
 
@@ -1026,6 +1039,13 @@ await agent('scan package.json')
       sourceRef,
     });
     await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).resolves.toMatchObject({
+      type: 'info',
+      hideAlwaysAllow: true,
+      permissionRules: [],
+    });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.sourceRef).toEqual(sourceRef);
     expect(registry.list()[0].sourceRef).toEqual(sourceRef);

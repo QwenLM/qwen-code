@@ -98,18 +98,17 @@ export interface JournalReplay {
 }
 
 /**
- * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * Project the dispatch and replay-identity opts into a stable canonical
+ * string. Runtime choices plus `stepId` and ordered `extensions` determine
+ * whether a completed call may be reused; `label` / `phase` / `stallMs` are
+ * cosmetic or operational and must NOT bust the cache. Object keys are sorted
+ * recursively so a re-serialized schema with reordered keys hashes the same.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
  * it projected away, a resume that changed only the directory would replay
  * the previous tree's answers as if they were this one's.
  */
-// stepId 与 extensions 固定业务节点和显式选择的能力；旧脚本未设置时保持原有 journal key。
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
   for (const k of [

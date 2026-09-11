@@ -12,6 +12,13 @@ export interface WorkflowSourceRef {
   title?: string;
 }
 
+export const WORKFLOW_SOURCE_REF_LIMITS = {
+  id: 256,
+  revision: 256,
+  digest: 256,
+  title: 512,
+} as const;
+
 function isUnsafeWorkflowReferenceCharacter(char: string): boolean {
   const code = char.charCodeAt(0);
   return (
@@ -43,11 +50,14 @@ export function normalizeWorkflowSourceRef(value: unknown): WorkflowSourceRef {
     throw new Error('Workflow sourceRef must be an object.');
   }
   const record = value as Record<string, unknown>;
-  const limits = { id: 256, revision: 256, digest: 256, title: 512 };
-  if (Object.keys(record).some((key) => !Object.hasOwn(limits, key))) {
+  if (
+    Object.keys(record).some(
+      (key) => !Object.hasOwn(WORKFLOW_SOURCE_REF_LIMITS, key),
+    )
+  ) {
     throw new Error('Workflow sourceRef contains an unknown field.');
   }
-  for (const [key, limit] of Object.entries(limits)) {
+  for (const [key, limit] of Object.entries(WORKFLOW_SOURCE_REF_LIMITS)) {
     if (record[key] === undefined && key !== 'id' && key !== 'revision') {
       continue;
     }

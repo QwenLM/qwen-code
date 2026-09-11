@@ -283,9 +283,11 @@ return await agent('Inspect the selected table', {
 
 `stepId` identifies a definition node; multiple calls can share it, while each
 runtime dispatch keeps its own unique `id`. `extensions` selects active extension
-capabilities and context for that agent. Missing, unreadable, or oversized context
-fails the dispatch. It does not grant tool permissions. Both options participate
-in journal matching, so a changed node or expert invalidates reuse from that call.
+capabilities and context for that agent. Unknown or inactive extensions and
+unreadable, out-of-directory, or oversized context files retained by the extension
+loader fail the dispatch. Files already absent when the extension is loaded are
+omitted by the loader. Extension context does not grant tool permissions. Both
+options participate in journal matching, so a changed node or expert invalidates reuse from that call.
 Legacy scripts that omit these options retain their existing behavior.
 
 For observation, `sessionWorkflowTasks(sessionId)` exposes

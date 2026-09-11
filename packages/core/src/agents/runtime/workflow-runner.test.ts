@@ -37,6 +37,7 @@ const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  listWorkflowSnapshotsMock,
   persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
   writeLineMock,
@@ -45,6 +46,7 @@ const {
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  listWorkflowSnapshotsMock: vi.fn().mockResolvedValue([]),
   persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
@@ -55,9 +57,15 @@ vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowRun: logWorkflowRunMock,
 }));
 
-vi.mock('../workflow-snapshot.js', () => ({
-  writeWorkflowSnapshot: writeWorkflowSnapshotMock,
-}));
+vi.mock('../workflow-snapshot.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../workflow-snapshot.js')>();
+  return {
+    ...actual,
+    listWorkflowSnapshots: listWorkflowSnapshotsMock,
+    writeWorkflowSnapshot: writeWorkflowSnapshotMock,
+  };
+});
 
 vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
   const actual =
@@ -154,6 +162,8 @@ describe('WorkflowRunner', () => {
     createProductionDispatchMock.mockReset();
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    listWorkflowSnapshotsMock.mockReset();
+    listWorkflowSnapshotsMock.mockResolvedValue([]);
     persistInlineWorkflowScriptMock.mockClear();
     resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
@@ -266,6 +276,44 @@ describe('WorkflowRunner', () => {
     } finally {
       load.mockRestore();
     }
+  });
+
+  it('recovers source references from a snapshot after the registry is lost', async () => {
+    const { config } = configWithRegistry();
+    const sourceRef = {
+      id: 'flow-1',
+      revision: '7',
+      title: 'Check tables',
+    };
+    listWorkflowSnapshotsMock.mockResolvedValue([
+      { runId: 'wf_1234abcd', sourceRef },
+    ]);
+    const resumed = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: 'wf_1234abcd',
+    });
+    await resumed.completion;
+    expect(resumed.sourceRef).toEqual(sourceRef);
+    expect(writeWorkflowSnapshotMock.mock.calls.at(-1)?.[1].sourceRef).toEqual(
+      sourceRef,
+    );
+  });
+
+  it('still resumes when no valid prior snapshot is available', async () => {
+    const { config } = configWithRegistry();
+    listWorkflowSnapshotsMock.mockResolvedValue([]);
+    const resumed = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: 'wf_1234abcd',
+    });
+    await expect(resumed.completion).resolves.toMatchObject({ ok: true });
+    expect(resumed.sourceRef).toBeUndefined();
   });
 
   it('rejects malformed provenance before registering a run', async () => {

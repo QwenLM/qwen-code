@@ -73,6 +73,7 @@ import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { formatContextFileDisplayPath } from '../../memory/memoryDiscovery.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -525,6 +526,8 @@ export function createProductionDispatch(
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
     }
+    const taskName = prompt;
+    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     if (opts.extensions !== undefined) {
       if (
         !Array.isArray(opts.extensions) ||
@@ -542,6 +545,9 @@ export function createProductionDispatch(
       let remainingBudget = EXTENSION_CONTEXT_BUDGET;
       const contexts: string[] = [];
       const loaded = new Set<string>();
+      const loadedContextFiles = new Set(config.getContextFilePaths?.() ?? []);
+      const workingDirectory = config.getWorkingDir?.() ?? process.cwd();
+      let selectedExtensionHasSkills = false;
       for (const name of opts.extensions) {
         const extension = matchExtensionByRef(name, extensions);
         if (!extension?.isActive)
@@ -549,18 +555,37 @@ export function createProductionDispatch(
             `agent({extensions}): active extension '${name}' was not found.`,
           );
         if (loaded.has(extension.name)) continue;
-        const context = await buildExtensionMentionContext(extension, {
-          remainingBudget,
-          signal,
-          strict: true,
-        });
+        selectedExtensionHasSkills ||= (extension.skills?.length ?? 0) > 0;
+        const unloadedContextFiles = extension.contextFiles.filter(
+          (contextFile) =>
+            !loadedContextFiles.has(
+              formatContextFileDisplayPath(contextFile, workingDirectory),
+            ),
+        );
+        const context = await buildExtensionMentionContext(
+          { ...extension, contextFiles: unloadedContextFiles },
+          {
+            remainingBudget,
+            signal,
+            strict: true,
+          },
+        );
         remainingBudget = context.remainingBudget;
         contexts.push(context.text);
         loaded.add(extension.name);
       }
-      // 结构化选中的扩展在 leaf 启动前真实加载；不依赖只处理用户输入的 @ext 提及链路。
+      const allowedTools = agentIdentity.resolvedAgentType?.tools;
+      const skillToolAllowed =
+        !allowedTools ||
+        allowedTools.length === 0 ||
+        allowedTools.includes('*') ||
+        allowedTools.includes(ToolNames.SKILL);
+      const skillInstruction =
+        selectedExtensionHasSkills && skillToolAllowed
+          ? ' Invoke listed Skills through the Skill tool using the exact skill name;'
+          : '';
       prompt +=
-        '\n\nSelected extension context follows. Invoke listed Skills through the Skill tool using the exact skill name; context does not grant additional permissions.\n' +
+        `\n\nSelected extension context follows.${skillInstruction} context does not grant additional permissions.\n` +
         contexts.join('\n\n');
     }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
@@ -582,7 +607,6 @@ export function createProductionDispatch(
     // the on-disk records name the same agent that ran. The resolved
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
-    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     if (agentIdentity.resolvedAgentType?.executor !== undefined) {
       throw new Error(
         'Workflow agent() does not support external-executor agents: ' +
@@ -610,6 +634,7 @@ export function createProductionDispatch(
           return await runSingleDispatch(
             config,
             prompt,
+            taskName,
             opts,
             attemptSignal,
             emitter,
@@ -768,6 +793,7 @@ function terminalDispatchError(
 async function runSingleDispatch(
   config: Config,
   prompt: string,
+  taskName: string,
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
@@ -821,7 +847,7 @@ async function runSingleDispatch(
       emitter,
       undefined,
       undefined,
-      prompt,
+      taskName,
       workflowAgentId,
     );
     // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
@@ -858,6 +884,7 @@ async function runSingleDispatch(
   return runOverridePath(
     config,
     ctx,
+    taskName,
     opts,
     attemptSignal,
     workflowAgentId,
@@ -931,6 +958,7 @@ function reportTokens(
 async function runOverridePath(
   config: Config,
   ctx: ContextState,
+  taskName: string,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
@@ -1205,7 +1233,7 @@ async function runOverridePath(
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
         eventEmitter,
-        taskName: String(ctx.get('task_prompt')),
+        taskName,
         subagentId: workflowAgentId,
       },
     );

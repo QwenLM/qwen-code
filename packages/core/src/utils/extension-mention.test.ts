@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Extension } from '../extension/extensionManager.js';
 import {
+  buildExtensionContextText,
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
   EXTENSION_CONTEXT_FILE_CAP,
@@ -47,12 +48,15 @@ describe('extension mention context', () => {
     });
     expect(result.text).toContain('untrusted third-party content');
     expect(result.text).toContain('Read table schemas before running SQL.');
+    expect(
+      result.text.indexOf('Read table schemas before running SQL.'),
+    ).toBeLessThan(result.text.indexOf('--- End Extension:'));
     expect(result.remainingBudget).toBe(
       EXTENSION_CONTEXT_BUDGET - result.text.length,
     );
   });
 
-  it('retains lenient mention behavior but refuses missing required workflow context', async () => {
+  it('retains lenient mention behavior but refuses an unreadable listed context file', async () => {
     await expect(
       buildExtensionMentionContext(extension, {
         remainingBudget: EXTENSION_CONTEXT_BUDGET,
@@ -92,7 +96,7 @@ describe('extension mention context', () => {
         remainingBudget: EXTENSION_CONTEXT_BUDGET,
         strict: true,
       }),
-    ).rejects.toThrow(/budget or file cap/);
+    ).rejects.toThrow(/file cap/);
     const result = await buildExtensionMentionContext(extension, {
       remainingBudget: EXTENSION_CONTEXT_BUDGET,
     });
@@ -115,5 +119,40 @@ describe('extension mention context', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('cancelled');
+  });
+
+  it('preserves cancellation that arrives while required context is read', async () => {
+    await fs.writeFile(extension.contextFiles[0], 'rules');
+    const controller = new AbortController();
+    let checks = 0;
+    const throwIfAborted = vi
+      .spyOn(controller.signal, 'throwIfAborted')
+      .mockImplementation(() => {
+        checks += 1;
+        if (checks === 2) throw new Error('cancelled during read');
+      });
+    try {
+      await expect(
+        buildExtensionMentionContext(extension, {
+          remainingBudget: EXTENSION_CONTEXT_BUDGET,
+          strict: true,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow('cancelled during read');
+      expect(throwIfAborted).toHaveBeenCalledTimes(2);
+    } finally {
+      throwIfAborted.mockRestore();
+    }
+  });
+
+  it('never falls back to terminal-control-only capability names', () => {
+    extension.displayName = '\u001b[31m\u001b[0m';
+    extension.name = '\u001b[31m\u001b[0m';
+    extension.skills = [{ name: '\u001b[31m\u001b[0m' } as never];
+    expect(buildExtensionContextText(extension)).toContain(
+      'Extension: unnamed extension',
+    );
+    expect(buildExtensionContextText(extension)).toContain('Skills: unnamed');
+    expect(buildExtensionContextText(extension)).not.toContain('\u001b');
   });
 });

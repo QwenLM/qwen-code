@@ -85,6 +85,14 @@ describe('canonicalizeAgentOpts', () => {
       deriveAgentKey('', 'check', { extensions: ['files'] }),
     );
     expect(first).toBe(deriveAgentKey('', 'check', { extensions: ['tables'] }));
+    expect(first).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files', 'tables'] }),
+    );
+    expect(
+      deriveAgentKey('', 'check', { extensions: ['tables', 'files'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files', 'tables'] }),
+    );
     expect(deriveAgentKey('', 'check', {})).toBe(
       deriveAgentKey('', 'check', { extensions: undefined }),
     );

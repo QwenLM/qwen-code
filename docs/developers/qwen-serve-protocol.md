@@ -2104,7 +2104,9 @@ extensions (`agentExtensions`). It is optional for older runtimes. Supporting
 runtimes report these fields as `true` independently of `workflowsEnabled`, which
 expresses current session availability. Disabling Workflow or distrusting a
 workspace does not erase implementation support or grant permission to run it.
-The same snapshot is available through ACP `session/supported-commands`.
+The same snapshot is available through the ACP vendor method
+`_qwen/session/supported_commands` and agent-side ext method
+`qwen/status/session/supported_commands`.
 
 Generated flows execute through the current agent's native tool scheduler, with
 foreground execution by default and the existing hooks and approvals. See
@@ -2153,8 +2155,9 @@ for the tool arguments and observation contract.
 This route is a read-only out-of-band snapshot. It is intentionally not a
 prompt and can be queried while the session is streaming. The response only
 contains whitelisted metadata from the agent, shell, and monitor task
-registries; controllers, timers, offsets, pending messages, and raw registry
-objects are never exposed.
+registries, plus the workflow registry when `includeWorkflows=true`;
+controllers, timers, offsets, pending messages, and raw registry objects are
+never exposed.
 
 Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
 `maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the

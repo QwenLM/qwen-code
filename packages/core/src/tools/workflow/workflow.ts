@@ -41,6 +41,7 @@ import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import {
   normalizeWorkflowSourceRef,
+  WORKFLOW_SOURCE_REF_LIMITS,
   type WorkflowSourceRef,
 } from '../../agents/workflow-source-ref.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
@@ -145,7 +146,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         '`agent(prompt, opts?)`, and read `args`. ' +
         'agent() opts: `{ label?, stepId?, extensions?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
         '`stepId` (optional non-empty string, at most 256 characters): associates this dispatch with an external definition step. Multiple dispatches may share a stepId; changing it invalidates the resume cache from that call. ' +
-        '`extensions` (optional array of 1 to 16 unique names): loads active extension capabilities and context files before this agent starts. Missing, unreadable, or oversized extension context makes the dispatch fail; it does not grant permissions. ' +
+        '`extensions` (optional array of 1 to 16 unique names): loads active extension capabilities and context files before this agent starts. Unknown or inactive extensions and unreadable, out-of-directory, or oversized context files retained by the extension loader make the dispatch fail; files already absent when the extension is loaded are omitted. Extension context does not grant permissions. ' +
         '`schema` (JSON Schema object): the subagent must deliver its result ' +
         'by calling `structured_output` with arguments matching the schema; ' +
         'agent() resolves to the validated object. After two in-conversation ' +
@@ -236,12 +237,28 @@ const WORKFLOW_PARAM_SCHEMA = {
     sourceRef: {
       type: 'object',
       description:
-        'Optional external definition provenance. Does not grant permissions.',
+        'Optional external definition provenance. Every field must be non-empty, within its declared maximum length, and contain no surrounding whitespace, control characters, or bidirectional formatting controls. Does not grant permissions.',
       properties: {
-        id: { type: 'string', minLength: 1, maxLength: 256 },
-        revision: { type: 'string', minLength: 1, maxLength: 256 },
-        digest: { type: 'string', minLength: 1, maxLength: 256 },
-        title: { type: 'string', minLength: 1, maxLength: 512 },
+        id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: WORKFLOW_SOURCE_REF_LIMITS.id,
+        },
+        revision: {
+          type: 'string',
+          minLength: 1,
+          maxLength: WORKFLOW_SOURCE_REF_LIMITS.revision,
+        },
+        digest: {
+          type: 'string',
+          minLength: 1,
+          maxLength: WORKFLOW_SOURCE_REF_LIMITS.digest,
+        },
+        title: {
+          type: 'string',
+          minLength: 1,
+          maxLength: WORKFLOW_SOURCE_REF_LIMITS.title,
+        },
       },
       required: ['id', 'revision'],
       additionalProperties: false,
