@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -45,6 +52,8 @@ const MAX_PANES = MAX_SPLIT_PANES;
 export interface SplitViewProps {
   /** Sessions to show in the split view. */
   sessionIds?: string[];
+  /** Respect the host's session-details action allowlist. */
+  showSessionDetails?: boolean;
   /**
    * Report the live pane set (after every add / remove) up to the parent so it
    * survives this view unmounting. Switching away from the split and back must
@@ -53,6 +62,11 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /**
+   * Report panes surfacing approvals, including hidden panes. Keep stable while
+   * consumer inputs are unchanged; a new callback receives the current list.
+   */
+  onPendingPanesChange?: (sessionIds: string[]) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
@@ -87,6 +101,7 @@ export interface SplitViewProps {
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   sessionWorkflowEnabled?: boolean;
+  planControlVisible?: boolean;
 }
 
 /**
@@ -98,7 +113,9 @@ export interface SplitViewProps {
  */
 export function SplitView({
   sessionIds,
+  showSessionDetails = true,
   onPanesChange,
+  onPendingPanesChange,
   onExit,
   onError,
   onImageIngestionNotice,
@@ -117,6 +134,7 @@ export function SplitView({
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  planControlVisible = false,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -161,6 +179,61 @@ export function SplitView({
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [activePaneId, setActivePaneId] = useState(paneIds[0]);
+  const [pendingPaneIds, setPendingPaneIds] = useState<Set<string>>(new Set());
+  const [paneFocusId, setPaneFocusId] = useState<string | null>(null);
+  const panesRef = useRef<HTMLDivElement>(null);
+  const previousPaneIdsRef = useRef(paneIds);
+  const activeId = paneIds.includes(activePaneId ?? '')
+    ? activePaneId
+    : paneIds[
+        Math.min(
+          Math.max(previousPaneIdsRef.current.indexOf(activePaneId ?? ''), 0),
+          paneIds.length - 1,
+        )
+      ];
+  useLayoutEffect(() => {
+    if (previousPaneIdsRef.current === paneIds) return;
+    previousPaneIdsRef.current = paneIds;
+    if (activeId === activePaneId) return;
+    setActivePaneId(activeId);
+    if (document.activeElement === document.body) {
+      setPaneFocusId(activeId ?? null);
+    }
+  }, [paneIds, activeId, activePaneId]);
+  // Keep report identity stable across parent renders: consumers may store it
+  // in state, which would otherwise retrigger the reporting effect below.
+  const pendingIds = useMemo(
+    () => paneIds.filter((id) => pendingPaneIds.has(id)),
+    [paneIds, pendingPaneIds],
+  );
+  useEffect(() => {
+    onPendingPanesChange?.(pendingIds);
+  }, [pendingIds, onPendingPanesChange]);
+  useEffect(() => () => onPendingPanesChange?.([]), [onPendingPanesChange]);
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingButtonRef = useRef<HTMLButtonElement | null>(null);
+  const setPendingButtonRef = useCallback(
+    (button: HTMLButtonElement | null) => {
+      if (!button && pendingButtonRef.current === document.activeElement) {
+        backButtonRef.current?.focus();
+      }
+      pendingButtonRef.current = button;
+    },
+    [],
+  );
+  const handleApprovalChange = useCallback(
+    (sessionId: string, pending: boolean) => {
+      setPendingPaneIds((current) => {
+        if (current.has(sessionId) === pending) return current;
+        const next = new Set(current);
+        if (pending) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+    },
+    [],
+  );
   // Which pane, if any, is maximized to fill the whole split. Purely visual and
   // ephemeral (not deep-linked via `?split=`, like the dialog fullscreen toggle
   // it mirrors): the other panes stay mounted and streaming, just hidden.
@@ -226,6 +299,11 @@ export function SplitView({
     return map;
   }, [allSessions]);
 
+  const sessionById = useMemo(
+    () => new Map(allSessions.map((session) => [session.sessionId, session])),
+    [allSessions],
+  );
+
   // The workspace each session lives in, so a pane attaches under its owning
   // workspace (a non-primary session 409s if loaded with the primary cwd). The
   // seed pane is the current session, whose workspace the connection already
@@ -260,6 +338,7 @@ export function SplitView({
       // Reveal the freshly added pane rather than leaving it hidden behind a
       // still-maximized one.
       setMaximizedPaneId(null);
+      setActivePaneId(sessionId);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
@@ -304,8 +383,32 @@ export function SplitView({
   );
 
   const toggleMaximize = useCallback((sessionId: string) => {
+    setActivePaneId(sessionId);
     setMaximizedPaneId((current) => (current === sessionId ? null : sessionId));
   }, []);
+
+  const goToPendingPane = () => {
+    const activeIndex = paneIds.indexOf(activeId ?? '');
+    const nextId =
+      pendingIds.find((id) => paneIds.indexOf(id) > activeIndex) ??
+      pendingIds[0];
+    if (!nextId) return;
+    setActivePaneId(nextId);
+    if (maximizedPaneId) setMaximizedPaneId(nextId);
+    setPaneFocusId(nextId);
+  };
+
+  useLayoutEffect(() => {
+    if (!paneFocusId) return;
+    const pane = Array.from(panesRef.current?.children ?? []).find(
+      (element) => element.getAttribute('data-pane-session-id') === paneFocusId,
+    );
+    pane?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    // Approval panels submit on Escape, Enter, and digits. Navigation must
+    // stop outside those keyboard scopes until the user deliberately enters.
+    if (pane instanceof HTMLElement) pane.focus({ preventScroll: true });
+    setPaneFocusId(null);
+  }, [paneFocusId]);
 
   // Maximize only makes sense against another pane, so drop it whenever it no
   // longer can hold: the maximized pane left the set (closed here, or removed by
@@ -352,6 +455,7 @@ export function SplitView({
         <button
           type="button"
           className={styles.backButton}
+          ref={backButtonRef}
           onClick={onExit}
           aria-label={t('common.back')}
           title={t('common.back')}
@@ -371,6 +475,25 @@ export function SplitView({
         <span className={styles.count}>
           {t('splitView.count', { count: paneIds.length })}
         </span>
+        <span className="sr-only" role="status">
+          {pendingIds.length > 0
+            ? t('splitView.pendingCount', { count: pendingIds.length })
+            : ''}
+        </span>
+        {pendingIds.length > 0 && (
+          <button
+            type="button"
+            className={styles.pendingButton}
+            onClick={goToPendingPane}
+            ref={setPendingButtonRef}
+            title={t('splitView.nextPending')}
+            aria-label={`${t('splitView.pendingCount', {
+              count: pendingIds.length,
+            })} — ${t('splitView.nextPending')}`}
+          >
+            {t('splitView.pendingCount', { count: pendingIds.length })}
+          </button>
+        )}
         <div className={styles.addWrap} ref={addWrapRef}>
           <button
             type="button"
@@ -414,7 +537,7 @@ export function SplitView({
         </div>
       </header>
 
-      <div className={styles.panes}>
+      <div className={styles.panes} ref={panesRef}>
         {paneIds.length === 0 ? (
           <div className={styles.empty}>{t('splitView.empty')}</div>
         ) : (
@@ -427,7 +550,21 @@ export function SplitView({
             return (
               <div
                 className={styles.paneSlot}
+                data-pane-session-id={sessionId}
                 data-pane-hidden={isHidden ? '' : undefined}
+                role="group"
+                aria-label={titleById.get(sessionId) ?? sessionId.slice(0, 8)}
+                tabIndex={-1}
+                onPointerDownCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
+                onFocusCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
                 // Include the resolved workspace in the key on a multi-workspace
                 // daemon so a pane whose workspace resolves only after mount (e.g.
                 // a `?split=` deep link) remounts under the right workspace rather
@@ -486,6 +623,13 @@ export function SplitView({
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
+                      sessionSummary={
+                        showSessionDetails
+                          ? sessionById.get(sessionId)
+                          : undefined
+                      }
+                      isActive={activeId === sessionId}
+                      onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}
                       reportCatalogTurnCompletion={
                         sessionId !== currentSessionId ||
@@ -512,6 +656,7 @@ export function SplitView({
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
+                      planControlVisible={planControlVisible}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

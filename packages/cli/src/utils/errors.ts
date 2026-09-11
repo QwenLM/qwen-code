@@ -22,9 +22,9 @@ import { writeStderrLine } from './stdioHelpers.js';
 const debugLogger = createDebugLogger('CLI_ERRORS');
 
 /**
- * Marker thrown when a producer has already formatted and emitted the error
- * message on its active output channel. The downstream `handleError` should
- * propagate the exit code without formatting it again.
+ * Marker thrown when a producer has already formatted and reported an error
+ * through the active output path — the downstream `handleError` should
+ * propagate the exit code without printing or reformatting it again.
  *
  * The non-interactive runner uses this when an upstream API error event
  * arrives mid-stream: text mode writes it to stderr, while structured modes

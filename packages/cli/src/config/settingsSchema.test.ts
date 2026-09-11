@@ -7,6 +7,9 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
@@ -328,6 +331,10 @@ describe('SettingsSchema', () => {
         { value: 'hold', label: 'Hold for review' },
         { value: 'refuse', label: 'Refuse' },
       ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
@@ -373,6 +380,42 @@ describe('SettingsSchema', () => {
       expect(timeout.maximum).toBe(2_147_483_647);
       expect(timeout.requiresRestart).toBe(true);
       expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.requiresRestart).toBe(false);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should bound the Goal cadence ceilings and default them to no ceiling', () => {
+      const model = getSettingsSchema().model.properties;
+
+      for (const [key, cap] of [
+        ['goalMaxTurns', GOAL_MAX_TURNS_CAP],
+        ['goalMaxActiveMinutes', GOAL_MAX_ACTIVE_MINUTES_CAP],
+      ] as const) {
+        const setting = model[key];
+        expect(setting).toBeDefined();
+        expect(setting.type).toBe('integer');
+        expect(setting.category).toBe('Model');
+        // Absent means no ceiling: a cadence is what an operator asks for,
+        // not a number the project picks on their behalf.
+        expect(setting.default).toBeUndefined();
+        expect(setting.minimum).toBe(-1);
+        expect(setting.maximum).toBe(cap);
+        expect(setting.excludedValues).toEqual([0]);
+        expect(setting.requiresRestart).toBe(true);
+        expect(setting.showInDialog).toBe(false);
+      }
     });
 
     it('should define count-based model limits as integers', () => {
@@ -602,6 +645,24 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
+    });
+
     it('should define Markdown render mode as a user-facing UI enum', () => {
       const renderMode = getSettingsSchema().ui.properties.renderMode;
 
@@ -632,6 +693,16 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should expose tool call details as a live UI setting', () => {
+      const showToolCallDetails =
+        getSettingsSchema().ui.properties.showToolCallDetails;
+      expect(showToolCallDetails).toBeDefined();
+      expect(showToolCallDetails.type).toBe('boolean');
+      expect(showToolCallDetails.default).toBe(true);
+      expect(showToolCallDetails.showInDialog).toBe(true);
+      expect(showToolCallDetails.requiresRestart).toBe(false);
     });
 
     it('should have showToolCallArgs in ui settings', () => {

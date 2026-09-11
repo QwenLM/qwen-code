@@ -37,6 +37,10 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
@@ -114,6 +118,7 @@ export interface DaemonConnectionState {
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
+  planExecutionMode?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
@@ -144,6 +149,8 @@ export interface DaemonReasoningControls {
   efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
   /** The model default when the daemon advertises one. */
   defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
+  enableValue?: 'default';
+  canEnable?: false;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -169,6 +176,13 @@ export interface DaemonSessionProviderProps {
   sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
+  /**
+   * Creator attribution forwarded on workspace session load/resume. The
+   * daemon applies it only when the restored session has no persisted source,
+   * so a host (e.g. the VS Code companion) reclaims its pre-attribution
+   * sessions on first open without ever overwriting existing attribution.
+   */
+  sessionSourceType?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
   createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
   /** Maximum queued SSE events requested from the daemon per subscription. */
@@ -285,6 +299,7 @@ export interface DaemonSessionNotice {
   message: string;
   debugMessage?: string;
   recoverable?: boolean;
+  sourceRetry?: () => Promise<void>;
   createdAt: number;
 }
 
@@ -329,6 +344,8 @@ export interface DaemonCommandInfo {
 }
 
 export interface SendPromptOptions {
+  /** Original text declared at the user submission boundary, before host preparation. */
+  submittedPrompt?: string;
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
@@ -450,7 +467,7 @@ export interface DaemonSessionActions {
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult>;
   respondToPermission(
     requestId: string,
@@ -523,6 +540,9 @@ export interface DaemonSessionActions {
   getContext(): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
+    /** Rethrow transient failures raw instead of recording a notice; for
+     * surfaces that re-collect automatically and report failures inline. */
+    silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
@@ -629,6 +649,9 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  listSources(): Promise<SessionSourcesResult>;
+  upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
+  removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
   branchSession(
     name?: string,
     atRecordId?: string,
@@ -636,6 +659,7 @@ export interface DaemonSessionActions {
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
+    sourceWarnings?: string[];
   }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
@@ -658,6 +682,7 @@ export interface DaemonWorkspaceEventSignals {
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;
+  sourcesVersion?: number;
   lastExtensionChange?: {
     status?:
       | 'installed'

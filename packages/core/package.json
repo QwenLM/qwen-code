@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.0",
+  "version": "0.23.3",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./subagentRuntime": {
+      "types": "./dist/src/subagent-runtime.d.ts",
+      "import": "./dist/src/subagent-runtime.js"
     },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
@@ -84,6 +88,7 @@
     "@anthropic-ai/sdk": "^0.36.1",
     "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -123,7 +128,8 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
-    "sharp": "^0.35.0",
+    "quickjs-emscripten-core": "0.32.0",
+    "sharp": "^0.35.4",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",
@@ -149,6 +155,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
     "@types/minimatch": "^5.1.2",
+    "@types/node": "20.19.1",
     "@types/picomatch": "^4.0.1",
     "@types/prompts": "^2.4.9",
     "@types/tar": "^6.1.13",

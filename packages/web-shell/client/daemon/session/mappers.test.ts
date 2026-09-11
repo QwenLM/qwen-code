@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  getPlanExecutionMode,
   getReplayTokenCount,
   getReplayTokenUsage,
   mapProviderStatus,
@@ -167,6 +168,53 @@ describe('session title metadata', () => {
 });
 
 describe('mapReasoningControls', () => {
+  it.each(['default', 'max', null, false, undefined])(
+    'accepts only the explicit reset enable value %j',
+    (enableValue) => {
+      const result = mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'none',
+          options: [{ value: 'none' }, { value: 'medium' }],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'medium', enableValue },
+          },
+        },
+      ]);
+      expect(result).toEqual({
+        enabled: false,
+        effort: 'medium',
+        efforts: ['medium'],
+        defaultEffort: 'medium',
+        ...(enableValue === 'default' ? { enableValue: 'default' } : {}),
+      });
+    },
+  );
+
+  it.each([false, true, 'false', null, undefined])(
+    'preserves only an explicit cannot-enable capability %j for tiered and toggle-only controls',
+    (canEnable) => {
+      for (const toggleOnly of [false, true]) {
+        const result = mapReasoningControls([
+          {
+            id: 'reasoning_effort',
+            currentValue: 'none',
+            options: [
+              { value: 'none' },
+              { value: 'default' },
+              ...(toggleOnly ? [] : [{ value: 'low' }, { value: 'high' }]),
+            ],
+            _meta: { 'qwenCode/reasoning': { canEnable, toggleOnly } },
+          },
+        ]);
+        expect(result?.enabled).toBe(false);
+        if (canEnable === false)
+          expect(result).toHaveProperty('canEnable', false);
+        else expect(result).not.toHaveProperty('canEnable');
+      }
+    },
+  );
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([
@@ -507,6 +555,8 @@ describe('updateConnectionFromDaemonEvent', () => {
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 3,
       activeTimeMs: 4_000,
+      tokensUsed: 1_234,
+      tokenBudget: 30_000_000,
       createdAt: 10,
       updatedAt: 20,
     };
@@ -965,6 +1015,93 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it.each(['turn_budget', 'time_budget'])(
+    'carries a %s limitKind through from the wire',
+    (limitKind) => {
+      // The mapper enumerates the kinds by value, so a kind it does not name
+      // is dropped on the live path even though the daemon sent it.
+      const next = applyEvent(
+        { status: 'connected', workspaceCwd: '/workspace' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-1',
+                    revision: 3,
+                    objective: 'ship it',
+                    status: 'usage_limited',
+                    evidenceCursor: { recordId: 'record-1' },
+                    turnCount: 20,
+                    activeTimeMs: 1_800_000,
+                    turnBudget: 20,
+                    activeTimeBudgetMs: 1_800_000,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    limitKind,
+                  },
+                },
+              },
+            },
+          },
+        } as DaemonEvent,
+      );
+
+      expect(next.goalState?.goal).toMatchObject({
+        limitKind,
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    },
+  );
+
+  it('leaves out the cadence ceilings when the daemon omits them', () => {
+    // Spreading them in unconditionally would leave `turnBudget: undefined` on
+    // the record, which renders the same but does not compare the same.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('turnBudget');
+    expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
+  });
+
   it('drops an unknown limitKind rather than passing it through', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
@@ -999,6 +1136,48 @@ describe('updateConnectionFromDaemonEvent', () => {
     );
 
     expect(next.goalState?.goal?.limitKind).toBeUndefined();
+  });
+
+  it('leaves out the spend keys when the daemon omits them', () => {
+    // Older daemons send neither field. Spreading them in unconditionally
+    // would leave `tokensUsed: undefined` on the record, which reads the same
+    // to the renderer but not to the structural comparisons this state goes
+    // through.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('tokensUsed');
+    expect(Object.keys(goal!)).not.toContain('tokenBudget');
   });
 
   it('ignores malformed Goal snapshots', () => {
@@ -1266,5 +1445,55 @@ describe('updateConnectionFromDaemonEvent', () => {
 
     expect(next.commands).toEqual([]);
     expect(next.skills).toEqual([]);
+  });
+});
+
+describe('Plan connection state', () => {
+  it.each(['approval_mode_changed', 'session_snapshot'])(
+    'maps workflow and execution permission together from %s',
+    (type) => {
+      const planning = applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type,
+          data: {
+            next: 'plan',
+            currentApprovalMode: 'plan',
+            planExecutionMode: 'yolo',
+          },
+        },
+      );
+      expect(planning).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      const done = applyEvent(planning, {
+        id: 2,
+        v: 1,
+        type,
+        data: { next: 'yolo', currentApprovalMode: 'yolo' },
+      });
+      expect(done.currentMode).toBe('yolo');
+      expect(done.planExecutionMode).toBeUndefined();
+    },
+  );
+
+  it('reads execution permission only while the context is in Plan', () => {
+    const context = {
+      v: 1 as const,
+      sessionId: 's',
+      workspaceCwd: '/workspace',
+      state: {
+        modes: {
+          currentModeId: 'plan',
+          _meta: { planExecutionMode: 'auto-edit' },
+        },
+      },
+    };
+    expect(getPlanExecutionMode(context)).toBe('auto-edit');
+    context.state.modes.currentModeId = 'default';
+    expect(getPlanExecutionMode(context)).toBeUndefined();
   });
 });

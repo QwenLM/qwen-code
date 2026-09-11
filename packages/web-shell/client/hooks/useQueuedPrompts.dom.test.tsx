@@ -201,6 +201,43 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it.each([undefined, ' original question\n'])(
+    'keeps an optional original submission separate from the queued payload: %s',
+    async (submittedPrompt) => {
+      const { actions } = createActions();
+      const { render } = mount(
+        'responding',
+        actions,
+        false,
+        false,
+        false,
+        true,
+      );
+      act(() =>
+        latest.enqueuePrompt(
+          'host-expanded payload',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          submittedPrompt,
+        ),
+      );
+      await act(async () => render('idle', 'session-1', false, false, false));
+      expect(actions.submitPrompt).toHaveBeenCalledWith(
+        'host-expanded payload',
+        expect.objectContaining({ sessionId: 'session-1' }),
+      );
+      const options = vi.mocked(actions.submitPrompt).mock.calls[0]?.[1];
+      if (submittedPrompt === undefined) {
+        expect(options).not.toHaveProperty('submittedPrompt');
+      } else {
+        expect(options).toHaveProperty('submittedPrompt', submittedPrompt);
+      }
+    },
+  );
+
   it('holds Goal follow-ups locally until an explicit insert', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
@@ -2159,5 +2196,24 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toMatchObject([
       { text: '无能力', midTurnState: 'queued' },
     ]);
+  });
+});
+
+describe('useQueuedPrompts writer-blocked recovery', () => {
+  it('holds a rejected mid-turn draft until the writer fence clears', async () => {
+    const { actions } = createActions();
+    const enqueue = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValueOnce(
+      enqueue.promise,
+    );
+    const { render } = mount('responding', actions, true, false, false);
+    act(() => latest.enqueuePrompt('queued follow-up'));
+    render('idle', 'session-1', false, true);
+    await act(async () => enqueue.resolve({ accepted: false }));
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', false, true);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', true, false);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 });
