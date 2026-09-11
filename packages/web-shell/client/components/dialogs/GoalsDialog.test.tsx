@@ -341,6 +341,40 @@ describe('GoalsDialog', () => {
     expect(checkpointLine()).toBeUndefined();
   });
 
+  it('shows the failure that stopped a Goal whose checkpoint request was too large', async () => {
+    // That stop spends no stall, and its failure is the whole explanation.
+    await mount([
+      stopped({
+        limitKind: 'checkpoint_request',
+        lastCheckpointFailure: 'Error: request of 300000 bytes',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBe(
+      'Checkpoint: last evidence checkpoint failed · Error: request of 300000 bytes',
+    );
+  });
+
+  it('reads a diagnostic made only of control characters as no failure, as core does', async () => {
+    // Sanitizing escapes a lone control character rather than removing it, so
+    // the gate has to read the raw value.
+    await mount([withSpend({ lastCheckpointFailure: '\r' })]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
+  it('hides checkpoint health on a completed Goal that still carries it', async () => {
+    await mount([
+      withSpend({
+        status: 'complete',
+        checkpointStalls: 3,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
   it('renders no bidi or control characters from the diagnostic', async () => {
     await mount([
       withSpend({

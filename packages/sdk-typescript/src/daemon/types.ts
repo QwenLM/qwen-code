@@ -93,9 +93,11 @@ export interface GoalRecord {
    */
   checkpointStalls?: number;
   /**
-   * A one-line diagnostic for the most recent checkpoint check that failed,
-   * kept until a later check succeeds. Absent when the last check did not fail
-   * or the daemon predates the field.
+   * A one-line diagnostic for the most recent checkpoint check that failed.
+   * Cleared by a check that succeeds, by every control action that clears
+   * `checkpointStalls`, and by a checkpoint stop whose cause is not itself a
+   * failed check, so it can be absent while `checkpointStalls` is still
+   * non-zero. Also absent when the daemon predates the field.
    */
   lastCheckpointFailure?: string;
   lastReason?: string;

@@ -9348,6 +9348,46 @@ describe('formatGoalState', () => {
     );
   });
 
+  it('names the checkpoint failure below the stop reason', () => {
+    // The stop reason names the kind of checkpoint failure; only this line
+    // says which one it was.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'usage_limited',
+          lastReason: 'Checkpoints stalled.',
+          checkpointStalls: 3,
+          lastCheckpointFailure:
+            'Error: Goal checkpoint verifier timed out after 30000ms',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal usage limited: ship the release notes\nReason: Checkpoints stalled.\nCheckpoint: 3/3 stalled · Error: Goal checkpoint verifier timed out after 30000ms',
+    );
+  });
+
+  it('shows checkpoint health under the rule the interactive cards use', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ lastCheckpointFailure: 'Error: provider failed' }),
+        'status',
+      ),
+    ).toBe(
+      'Goal active: ship the release notes\nCheckpoint: last check failed · Error: provider failed',
+    );
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'complete',
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+        'status',
+      ),
+    ).not.toContain('Checkpoint');
+  });
+
   it('has no usage to report for a cleared Goal', () => {
     expect(
       formatGoalState({ v: 2, activity: 'idle', goal: null }, 'clear'),

@@ -37,8 +37,8 @@ export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 /**
  * The stall stop for a Goal whose last stalled check could not fit the window
  * inside the checkpoint's claim bounds: a full claim list that still left
- * evidence behind, or well-formed claims over the byte or per-claim length
- * budget. Compaction itself cannot keep up -- the objective produces more
+ * evidence behind, or well-formed claims over the claim count, the byte budget
+ * or the per-claim length. Compaction itself cannot keep up -- the objective produces more
  * evidence than one window holds -- so narrowing it is the remedy.
  */
 export const GOAL_CHECKPOINT_STALLED_REASON =
@@ -69,7 +69,7 @@ export const GOAL_CHECKPOINT_UNREACHABLE_REASON =
  * What the last stalled checkpoint check ran into, which decides the advice
  * the stop carries. `capacity`: the check could not fit the window within the
  * claim bounds (a full claim list that left evidence behind, or claims over
- * the byte or length budget). `unusable`: it answered with output that is not
+ * the count, byte or length bound). `unusable`: it answered with output that is not
  * usable claims. `unreachable`: no answer arrived to judge.
  */
 export type GoalCheckpointFailureShape =
@@ -125,22 +125,24 @@ export function capGoalCheckpointFailure(text: string): string {
  * card and summary agrees. A completed Goal never does: its checkpoints no
  * longer matter, and the terminal snapshot keeps whatever the record carried.
  * A running stall streak always does, whatever the status, because it is
- * still the truth about the evidence window a resume re-enters. A failure that
- * spent no stall shows only while the Goal is active: once the Goal stops or
- * pauses for another reason, that diagnostic explains nothing about the stop
- * and would read as though it did.
+ * still the truth about the evidence window a resume re-enters. A Goal stopped
+ * because its checkpoint request was too large to send shows the failure that
+ * stopped it, since that failure is the stop. Any other failure that spent no
+ * stall shows only while the Goal is active: once the Goal stops or pauses for
+ * another reason, that diagnostic explains nothing about the stop and would
+ * read as though it did.
  */
 export function goalCheckpointHealthVisible(goal: {
   status?: string;
   checkpointStalls?: number;
   lastCheckpointFailure?: string;
+  limitKind?: string;
 }): boolean {
   if (goal.status === 'complete') return false;
   if ((goal.checkpointStalls ?? 0) > 0) return true;
-  return (
-    (goal.status ?? 'active') === 'active' &&
-    Boolean(goal.lastCheckpointFailure?.trim())
-  );
+  const failed = Boolean(goal.lastCheckpointFailure?.trim());
+  if (goal.limitKind === 'checkpoint_request') return failed;
+  return (goal.status ?? 'active') === 'active' && failed;
 }
 
 /**
@@ -415,9 +417,12 @@ export interface GoalRecord {
    * claim list), capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by
    * every check that fails, whether or not it spends a stall, and kept on the
    * record the stall breaker stops, so the stop can be diagnosed from the
-   * record alone. Cleared by a check that succeeds and by every control
-   * action that clears `checkpointStalls`; a check that proves nothing either
-   * way (a turn that recorded no evidence) leaves it as it was.
+   * record alone. Cleared by a check that succeeds, by every control action
+   * that clears `checkpointStalls`, and by a checkpoint stop whose cause is not
+   * itself a failed check (missing recovery dependencies, an exhausted catalog,
+   * an unreadable transcript), so it can be absent while `checkpointStalls` is
+   * still non-zero. A check that proves nothing either way (a turn that
+   * recorded no evidence) leaves it as it was.
    */
   lastCheckpointFailure?: string;
   /**

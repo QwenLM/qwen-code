@@ -364,6 +364,76 @@ describe('GetGoalTool', () => {
     expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
   });
 
+  it('reports a stall-free checkpoint failure while the Goal is still active', async () => {
+    // A turn without a Goal permit can find the Goal still active; the failure
+    // is what its later checks keep running into before any stall stops it.
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal.lastCheckpointFailure).toBe('Error: provider failed');
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+  });
+
+  it('reports the failure that stopped a Goal whose checkpoint request was too large', async () => {
+    // That stop spends no stall, and its failure is the whole explanation.
+    const failure =
+      'GoalCheckpointVerifierInputTooLargeError: Goal checkpoint verifier request of 300000 bytes exceeds the 256000-byte limit';
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: failure,
+          lastReason: 'checkpoint request too large',
+          limitKind: 'checkpoint_request' as const,
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({
+      status: 'usage_limited',
+      lastCheckpointFailure: failure,
+    });
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+  });
+
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
     const config = makeConfig({
       getGoalForWorker: vi.fn(),

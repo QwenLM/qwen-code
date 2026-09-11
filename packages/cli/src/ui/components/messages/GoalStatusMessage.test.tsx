@@ -271,6 +271,20 @@ describe('<GoalStatusMessage />', () => {
     expect(streak.lastFrame()).toContain('Checkpoint: 2/3 stalled');
   });
 
+  it('shows a bare stall streak without a trailing separator', () => {
+    // A stop for another reason clears the diagnostic and keeps the streak.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'paused by the user', {
+          checkpointStalls: 2,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Checkpoint: 2/3 stalled');
+    expect(lastFrame()).not.toContain('stalled ·');
+  });
+
   it('never writes control or bidi characters from the diagnostic to the terminal', () => {
     const { lastFrame } = render(
       <GoalStatusMessage

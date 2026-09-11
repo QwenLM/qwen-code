@@ -375,18 +375,23 @@ export function GoalsDialog({
           // Checkpoint health, before the stall breaker has to stop the Goal.
           // Same visibility rule as the terminal cards (core's
           // goalCheckpointHealthVisible, which the web shell cannot import):
-          // never on a completed Goal, always during a stall streak, and a
-          // failure that spent no stall only while the Goal is active. The
-          // text is sanitized before the gate, so a value made only of control
-          // or bidi characters cannot leave a dangling separator.
+          // never on a completed Goal, always during a stall streak, the
+          // failure that stopped a Goal whose checkpoint request was too large,
+          // and any other failure that spent no stall only while the Goal is
+          // active. The gate reads the raw value, as core does; sanitizing
+          // escapes control characters rather than removing them, so it is
+          // applied only to the text shown.
           const checkpointStalls = goal.checkpointStalls ?? 0;
+          const checkpointFailed = Boolean(goal.lastCheckpointFailure?.trim());
           const checkpointFailure = sanitizeControlChars(
             goal.lastCheckpointFailure ?? '',
           ).trim();
           const checkpointVisible =
             goal.status !== 'complete' &&
             (checkpointStalls > 0 ||
-              (goal.status === 'active' && checkpointFailure !== ''));
+              (checkpointFailed &&
+                (goal.status === 'active' ||
+                  goal.limitKind === 'checkpoint_request')));
           const checkpointLine = checkpointVisible
             ? [
                 checkpointStalls > 0

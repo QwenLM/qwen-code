@@ -22,6 +22,7 @@ import type {
   ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -80,6 +81,8 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
+  goalCheckpointHealthVisible,
+  GOAL_CHECKPOINT_STALL_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -287,14 +290,32 @@ export function formatGoalState(
         : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
     );
   }
-  const withUsage =
-    usage.length > 0 ? `${summary}\nUsage: ${usage.join(' · ')}` : summary;
+  const lines = [summary];
+  if (usage.length > 0) lines.push(`Usage: ${usage.join(' · ')}`);
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  return goal.status !== 'active' && goal.lastReason
-    ? `${withUsage}\nReason: ${goal.lastReason}`
-    : withUsage;
+  if (goal.status !== 'active' && goal.lastReason) {
+    lines.push(`Reason: ${goal.lastReason}`);
+  }
+  // The checkpoint line the interactive cards show, under the same rule: a
+  // checkpoint stop reason names the kind of failure, only this says which.
+  if (goalCheckpointHealthVisible(goal)) {
+    const stalls = goal.checkpointStalls ?? 0;
+    const failure = sanitizeTerminalText(
+      goal.lastCheckpointFailure ?? '',
+    ).trim();
+    const checkpoint = [
+      stalls > 0
+        ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+        : 'last check failed',
+      failure,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    lines.push(`Checkpoint: ${checkpoint}`);
+  }
+  return lines.join('\n');
 }
 
 async function claimUserGoalTurn(

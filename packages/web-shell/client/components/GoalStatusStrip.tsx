@@ -70,9 +70,10 @@ export function GoalStatusStrip({
   const canPause = goal.status === 'active';
   const canResume = canResumeGoal(goal);
   const tokenLabel = getGoalTokenLabel(goal, t);
-  // Like the terminal footer pill: a running stall streak shows here, where a
-  // daemon-session user is already looking, while the failure text itself is
-  // left to the Goals dialog, which has room for it.
+  // A stall streak shows here whatever the status, where a daemon-session user
+  // is already looking -- including on a Goal the breaker stopped, which the
+  // terminal footer pill labels by its status instead. The failure text itself
+  // is left to the Goals dialog, which has room for it.
   const checkpointStalls = goal.checkpointStalls ?? 0;
 
   return (

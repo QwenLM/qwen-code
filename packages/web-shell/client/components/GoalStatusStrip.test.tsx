@@ -259,6 +259,19 @@ describe('GoalStatusStrip', () => {
     expect(container.textContent).not.toContain('provider failed');
   });
 
+  it('keeps the streak on a Goal the stall breaker stopped', () => {
+    render('usage_limited', {
+      checkpointStalls: 3,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    expect(
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
+        ?.textContent,
+    ).toBe('3/3 checks stalled');
+    expect(container.textContent).not.toContain('provider failed');
+  });
+
   it('shows no streak when no checkpoint has stalled', () => {
     render('active', { lastCheckpointFailure: 'Error: provider failed' });
 

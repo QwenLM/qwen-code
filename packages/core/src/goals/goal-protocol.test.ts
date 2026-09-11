@@ -249,6 +249,24 @@ describe('goal checkpoint health visibility', () => {
       false,
     ],
     [
+      'a Goal stopped because its checkpoint request was too large',
+      {
+        status: 'usage_limited',
+        limitKind: 'checkpoint_request',
+        lastCheckpointFailure: failure,
+      },
+      true,
+    ],
+    [
+      'a Goal stopped by its checkpoint request with a blank diagnostic',
+      {
+        status: 'usage_limited',
+        limitKind: 'checkpoint_request',
+        lastCheckpointFailure: ' ',
+      },
+      false,
+    ],
+    [
       'a completed Goal that still carries both fields',
       {
         status: 'complete',

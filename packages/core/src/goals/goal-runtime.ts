@@ -23,6 +23,7 @@ import {
 } from './goal-checkpoint.js';
 import {
   GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimCountError,
   GoalCheckpointClaimLengthError,
   GoalCheckpointVerifierInputTooLargeError,
 } from './goal-checkpoint-verifier.js';
@@ -92,11 +93,11 @@ interface CheckpointFailure {
 }
 
 /**
- * Classifies a checkpoint check that threw. A claim-budget or claim-length
- * overrun is well-formed output that could not fit the window within the
- * checkpoint's bounds -- the same capacity failure as a full claim list, with
- * the same remedy -- so those two subclasses are tested before their base
- * class. Any other `InvalidGoalCheckpointError` means the verifier answered
+ * Classifies a checkpoint check that threw. A claim-count, claim-budget or
+ * claim-length overrun is well-formed output that could not fit the window
+ * within the checkpoint's bounds -- the same capacity failure as a full claim
+ * list, with the same remedy -- so those three subclasses are tested before
+ * their base class. Any other `InvalidGoalCheckpointError` means the verifier answered
  * with output that is not usable claims. Anything else means no answer
  * arrived to judge: a provider error, the check's own timeout, or a failure
  * inside the check.
@@ -104,6 +105,7 @@ interface CheckpointFailure {
 function describeCheckpointFailure(error: unknown): CheckpointFailure {
   return {
     shape:
+      error instanceof GoalCheckpointClaimCountError ||
       error instanceof GoalCheckpointClaimBudgetError ||
       error instanceof GoalCheckpointClaimLengthError
         ? 'capacity'

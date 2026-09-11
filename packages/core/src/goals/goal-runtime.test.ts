@@ -21,6 +21,7 @@ import {
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   goalActiveTimeBudgetReason,
+  goalCheckpointHealthVisible,
   goalTurnBudgetReason,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -44,6 +45,8 @@ import {
 } from './goal-checkpoint.js';
 import {
   GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimCountError,
+  GoalCheckpointClaimLengthError,
   GoalCheckpointVerifierInputTooLargeError,
 } from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
@@ -2020,6 +2023,7 @@ describe('goal runtime', () => {
       host,
       runtime,
       checkpointVerifier,
+      evidenceSource,
       setRecords: (next: readonly RuntimeRecord[]) => {
         records = next;
       },
@@ -2340,39 +2344,42 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
   });
 
-  it('reads a claim-budget overrun as capacity, not as unusable output', async () => {
-    // A budget overrun is well-formed JSON that could not fit the window
-    // within the checkpoint's bounds -- the capacity failure a narrower
-    // objective fixes -- so its stop keeps that advice rather than telling
-    // the user to debug JSON that was valid.
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValue(
-      new GoalCheckpointClaimBudgetError(20_000),
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+  it.each([
+    ['claim-count', new GoalCheckpointClaimCountError(33)],
+    ['claim-budget', new GoalCheckpointClaimBudgetError(20_000)],
+    ['claim-length', new GoalCheckpointClaimLengthError(0, 9_000)],
+  ] as const)(
+    'reads a %s overrun as capacity, not as unusable output',
+    async (_label, overrun) => {
+      // An overrun of a claim bound is well-formed JSON that could not fit the
+      // window within the checkpoint's bounds -- the capacity failure a
+      // narrower objective fixes -- so its stop keeps that advice rather than
+      // telling the user to debug JSON that was valid.
+      const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+      checkpointVerifier.mockRejectedValue(overrun);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
 
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      records = await runCheckpointTurn(
-        runtime,
-        host,
-        setRecords,
-        records,
-        101,
-        `budget-${turn}`,
-      );
-    }
+      let records: RuntimeRecord[] = [];
+      for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+        records = await runCheckpointTurn(
+          runtime,
+          host,
+          setRecords,
+          records,
+          101,
+          `overrun-${turn}`,
+        );
+      }
 
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'usage_limited',
-      limitKind: 'evidence_catalog',
-      lastReason: GOAL_CHECKPOINT_STALLED_REASON,
-      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-      lastCheckpointFailure: expect.stringMatching(
-        /^GoalCheckpointClaimBudgetError: /,
-      ),
-    });
-  });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: `${overrun.name}: ${overrun.message}`,
+      });
+    },
+  );
 
   it('reads any other subclass of the unusable-result error as unusable output', async () => {
     // Pins `instanceof` rather than an exact-constructor check: the hierarchy
@@ -2453,10 +2460,70 @@ describe('goal runtime', () => {
       limitKind: 'checkpoint_request',
       lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
       checkpointStalls: 1,
+      // The measured size, so a reader can tell how far over the limit it is.
       lastCheckpointFailure: expect.stringMatching(
-        /^GoalCheckpointVerifierInputTooLargeError: /,
+        /^GoalCheckpointVerifierInputTooLargeError: .*\b300000 bytes\b/,
       ),
     });
+  });
+
+  it('shows the failure of a checkpoint request too large to send, with no streak behind it', async () => {
+    // That stop spends no stall, so only its own limit kind can make the
+    // failure it recorded visible.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(
+      new GoalCheckpointVerifierInputTooLargeError(300_000),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'only');
+
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'checkpoint_request',
+      lastCheckpointFailure: expect.stringContaining('300000 bytes'),
+    });
+    expect(goal).not.toHaveProperty('checkpointStalls');
+    expect(goalCheckpointHealthVisible(goal)).toBe(true);
+  });
+
+  it('clears the diagnostic but keeps the streak when a checkpoint stop has a cause of its own', async () => {
+    // Its own lastReason says what happened; an earlier provider failure left
+    // on the record would read as the cause of this stop.
+    const { host, runtime, checkpointVerifier, evidenceSource, setRecords } =
+      stallHarness();
+    checkpointVerifier.mockRejectedValue(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `stall-${turn}`,
+      );
+    }
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(
+      new Error('evidence source unavailable'),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'lost');
+
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: 'evidence source unavailable',
+      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+    });
+    expect(goal).not.toHaveProperty('lastCheckpointFailure');
   });
 
   it('does not count an unusable result while the window has room', async () => {

@@ -786,6 +786,13 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     ).toMatchObject({
       checkpoint: 'Checkpoint: last check failed · Error: provider failed',
     });
+    // A stop for another reason clears the diagnostic and keeps the streak:
+    // the line is the count alone, with no trailing separator.
+    expect(
+      describeGoalCard(
+        snap({ objective: 'o', status: 'paused', checkpointStalls: 2 }),
+      ),
+    ).toMatchObject({ checkpoint: 'Checkpoint: 2/3 stalled' });
     const healthy = describeGoalCard(
       snap({ objective: 'o', status: 'active' }),
     );

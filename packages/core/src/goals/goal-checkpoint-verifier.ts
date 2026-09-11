@@ -106,8 +106,9 @@ export interface CreateGoalCheckpointVerifierOptions {
  * and one the emitted schema cannot prevent -- JSON Schema has no aggregate
  * byte bound, and the per-claim and per-item bounds it does carry are
  * stripped before the request goes out. It stays an
- * `InvalidGoalCheckpointError`, so a retry that overruns again reaches the
- * runtime as the unusable result it is.
+ * `InvalidGoalCheckpointError`, but `describeCheckpointFailure` reads it as a
+ * capacity failure: a retry that overruns again stops a stalled Goal with the
+ * narrow-the-objective advice, not the unusable-output one.
  */
 export class GoalCheckpointClaimBudgetError extends InvalidGoalCheckpointError {
   constructor(readonly byteLength: number) {
@@ -216,7 +217,7 @@ function proofKindErrorMessage(
 export class GoalCheckpointVerifierInputTooLargeError extends Error {
   constructor(readonly byteLength: number) {
     super(
-      `Goal checkpoint verifier request exceeds the ${GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT}-byte limit`,
+      `Goal checkpoint verifier request of ${byteLength} bytes exceeds the ${GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT}-byte limit`,
     );
     this.name = 'GoalCheckpointVerifierInputTooLargeError';
   }
