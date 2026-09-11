@@ -5,17 +5,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
 import {
+  rebuildSessionArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+  deleteArtifactSnapshot,
   stableSessionArtifactId,
   type RebuiltSessionArtifactSnapshot,
   type SessionArtifactEventRecordPayload,
@@ -6190,6 +6194,887 @@ describe('SessionArtifactStore', () => {
     expect(warnings).toEqual([staleWarning]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [],
+    });
+  });
+
+  it('restores saved webpage records and deletion markers without reading their files', async () => {
+    const sessionId = 'saved-webpages';
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+        '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+      ].map((uuid) => ({
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        toolCallId: `call-${uuid}`,
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(
+          path.join(workspace, 'artifacts', 'snapshots', uuid, 'index.html'),
+        ).href,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          publishedUrl: 'https://example.com/latest',
+          'qwen.published.sha256': 'a'.repeat(64),
+        },
+      })),
+      { strict: true, trustedPublisher: true },
+    );
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    expect(rebuilt.artifacts[0]?.metadata?.['publishedUrl']).toBe(
+      'https://example.com/latest',
+    );
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    await expect(restored.restore(rebuilt)).resolves.toEqual([]);
+    const listed = await restored.list();
+    for (const saved of rebuilt.artifacts) {
+      expect(listed.artifacts).toContainEqual(
+        expect.objectContaining({ ...saved, restoreState: 'restored' }),
+      );
+    }
+    const first = rebuilt.artifacts[0]!;
+    await expect(
+      restored.restore({
+        ...rebuilt,
+        artifacts: [rebuilt.artifacts[1]!],
+        tombstonedIds: [first.id],
+        markerArtifacts: [first],
+      }),
+    ).resolves.toEqual([]);
+    await restored.recordSnapshot();
+    expect(snapshots.at(-1)?.markerArtifacts).toEqual([
+      expect.objectContaining(first),
+    ]);
+    expect((await restored.list()).artifacts.map((entry) => entry.id)).toEqual([
+      rebuilt.artifacts[1]!.id,
+    ]);
+
+    for (const override of [
+      { source: 'client' as const },
+      { source: 'hook' as const },
+      { toolName: 'record_artifact' },
+    ]) {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, ...override }],
+      });
+      expect(warnings).toContain(
+        'artifact snapshot restore failed; kept existing live artifacts',
+      );
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
+  });
+
+  it('reclaims saved webpage snapshot files when their records leave the store', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const snapshotArtifact = async (uuid: string, html: string) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          toolName: 'artifact',
+          toolCallId: `call-${uuid}`,
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+        };
+      };
+      const first = await snapshotArtifact(firstUuid, 'first');
+      const second = await snapshotArtifact(secondUuid, 'second');
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      await store.upsertMany([first], {
+        strict: true,
+        trustedPublisher: true,
+      });
+      await store.upsertMany([second], {
+        strict: true,
+        trustedPublisher: true,
+      });
+
+      const listed = await store.list();
+      expect(listed.artifacts).toHaveLength(1);
+      // The evicted record's snapshot bytes are reclaimed; the retained
+      // record's snapshot stays in place.
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+
+      await store.remove(listed.artifacts[0]!.id);
+      await expect(fs.stat(dirFor(secondUuid))).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims snapshot files for restored records pruned to the live limit', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const persistedSnapshot = async (
+        uuid: string,
+        html: string,
+        createdAt: string,
+      ) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          id: stableSessionArtifactId(
+            'snapshot-restore-reclaim',
+            `managed:preview-${uuid}`,
+          ),
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          status: 'available' as const,
+          toolName: 'artifact',
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+          retention: 'restorable' as const,
+          clientRetained: false,
+          createdAt,
+          updatedAt: createdAt,
+        };
+      };
+      const first = await persistedSnapshot(
+        firstUuid,
+        'first',
+        '2026-09-07T00:00:00.000Z',
+      );
+      const second = await persistedSnapshot(
+        secondUuid,
+        'second',
+        '2026-09-07T00:01:00.000Z',
+      );
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-restore-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      const warnings = await store.restore({
+        v: 2,
+        sessionId: 'snapshot-restore-reclaim',
+        sequence: 1,
+        artifacts: [first, second],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      });
+      expect(warnings).toContain('restored artifact list pruned to live limit');
+      expect((await store.list()).artifacts).toHaveLength(1);
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
+  describe('saved webpage ownership', () => {
+    const persistence = {
+      recordEvent: async () => {},
+      recordSnapshot: async () => {},
+    };
+    async function saved(sessionId: string, html: string) {
+      const uuid = randomUUID();
+      const dir = path.join(workspace, 'artifacts', 'snapshots', uuid);
+      await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+      await fs.writeFile(path.join(dir, 'index.html'), html);
+      return {
+        id: stableSessionArtifactId(sessionId, `managed:preview-${uuid}`),
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(path.join(dir, 'index.html')).href,
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.snapshot.references': 1,
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+    }
+    function snapshot(
+      sessionId: string,
+      artifacts: Array<Awaited<ReturnType<typeof saved>>>,
+    ): RebuiltSessionArtifactSnapshot {
+      return {
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts,
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      };
+    }
+    function store(sessionId: string, maxArtifacts = 200) {
+      return new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts,
+        persistence,
+      });
+    }
+
+    it.each(['remove', 'evict'] as const)(
+      'keeps the parent readable after a fork %s',
+      async (action) => {
+        const page = await saved('parent', 'original');
+        const parent = store('parent');
+        await parent.restore(snapshot('parent', [page]));
+        const forked = {
+          ...page,
+          id: stableSessionArtifactId('fork', `managed:${page.managedId}`),
+        };
+        const fork = store('fork', 1);
+        await fork.restore(snapshot('fork', [forked]));
+        if (action === 'remove') await fork.remove(forked.id);
+        else
+          await fork.upsertMany([await saved('fork', 'new')], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        expect((await parent.list()).artifacts[0]!.status).toBe('available');
+        await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+          'original',
+        );
+        await parent.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      },
+    );
+
+    it.each(['reject', 'unavailable'] as const)(
+      'keeps durable bytes when restore pruning persistence is %s',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const original = snapshot('owner', [first, second]);
+        const pruned = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence:
+            failure === 'reject'
+              ? {
+                  ...persistence,
+                  recordEvent: async () => {
+                    throw new Error('disk full');
+                  },
+                }
+              : undefined,
+        });
+        const warnings = await pruned.restore(original);
+        expect(warnings).toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        expect((await pruned.list()).artifacts).toHaveLength(1);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        const reloaded = store('owner');
+        await reloaded.restore(original);
+        expect((await reloaded.list()).artifacts).toHaveLength(2);
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it.each(['strict persistence', 'durable transition', 'capacity'])(
+      'releases new ownership after %s rollback and preserves existing owners',
+      async (failure) => {
+        let failWrites = false;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: failure === 'strict persistence' ? 200 : 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        const prior = await saved('owner', 'prior');
+        if (failure !== 'capacity') {
+          await live.upsertMany([prior], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        }
+        const before = (await live.list()).artifacts;
+        const pages = [await saved('owner', 'new')];
+        if (failure === 'capacity') pages.push(await saved('owner', 'second'));
+        for (const page of pages) {
+          await retainArtifactSnapshot(page, workspace, 'producer');
+        }
+        failWrites = true;
+        const result = live.upsertMany(
+          [
+            ...(failure === 'capacity'
+              ? []
+              : [{ ...prior, title: 'Attempted update' }]),
+            ...pages,
+          ],
+          { strict: failure !== 'durable transition', trustedPublisher: true },
+        );
+        if (failure === 'durable transition') {
+          await expect(result).resolves.toMatchObject({
+            changes: [],
+            warnings: [
+              'artifact durable removal not persisted; live changes rolled back',
+            ],
+          });
+        } else {
+          await expect(result).rejects.toThrow(
+            failure === 'capacity' ? 'artifact store is full' : 'disk full',
+          );
+        }
+        expect((await live.list()).artifacts).toEqual(before);
+        if (failure !== 'capacity') {
+          await expect(readArtifactSnapshot(prior, workspace)).resolves.toBe(
+            'prior',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(prior.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        }
+        for (const page of pages) {
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('producer').digest('hex')]);
+          await deleteArtifactSnapshot(page, workspace, 'producer');
+          await expect(
+            fs.stat(path.dirname(fileURLToPath(page.url))),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+        }
+      },
+    );
+
+    it.each(['before', 'after'] as const)(
+      'returns the complete non-strict batch when retaining a snapshot fails %s its reference write',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordSnapshot: async (payload) => {
+              snapshots.push(payload);
+            },
+          },
+        });
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              if (failure === 'after') await writeFile(...args);
+              throw Object.assign(new Error('ENOSPC: reference write failed'), {
+                code: 'ENOSPC',
+              });
+            }
+            await writeFile(...args);
+          });
+        try {
+          const result = await live.upsertMany([first, second], {
+            trustedPublisher: true,
+          });
+          expect(result.warnings).toEqual([
+            `artifact ${first.id} kept without retaining its snapshot: ENOSPC: reference write failed`,
+          ]);
+          expect(result.changes.map((change) => change.action)).toEqual([
+            'created',
+            'created',
+          ]);
+          expect(result.changes.map((change) => change.artifact)).toEqual(
+            (await live.list()).artifacts,
+          );
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+          expect(snapshots.at(-1)?.artifacts.map((page) => page.id)).toEqual(
+            result.changes.map((change) => change.artifactId),
+          );
+          await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+            'first',
+          );
+          await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+            'second',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(second.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each(['EEXIST', 'ENOENT'] as const)(
+      'does not warn when snapshot retention tolerates %s',
+      async (code) => {
+        const page = await saved('owner', 'original');
+        const references = path.join(
+          path.dirname(fileURLToPath(page.url)),
+          'references',
+        );
+        if (code === 'ENOENT') await fs.unlink(fileURLToPath(page.url));
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              await writeFile(...args);
+            }
+            await writeFile(...args);
+          });
+        try {
+          const live = store('owner');
+          const result = await live.upsertMany([page], {
+            trustedPublisher: true,
+          });
+          expect(result.warnings).toBeUndefined();
+          expect(result.changes).toHaveLength(1);
+          expect(result.changes[0]!.artifact).toEqual(
+            (await live.list()).artifacts[0],
+          );
+          if (code === 'EEXIST') {
+            expect(spy).toHaveBeenCalledTimes(1);
+            await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+              'original',
+            );
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      { strict: true },
+      { validationStrict: true },
+      { persistenceStrict: true },
+    ])(
+      'cleans the whole batch after a reference write fails with %j',
+      async (strictOptions) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(second, workspace, 'owner');
+        const live = store('owner');
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            await writeFile(...args);
+            if (path.dirname(String(args[0])) === references) {
+              throw new Error('reference write failed');
+            }
+          });
+        try {
+          await expect(
+            live.upsertMany([first, second], {
+              ...strictOptions,
+              trustedPublisher: true,
+            }),
+          ).rejects.toThrow('reference write failed');
+          expect((await live.list()).artifacts).toEqual([]);
+          for (const page of [first, second]) {
+            await expect(
+              fs.stat(path.dirname(fileURLToPath(page.url))),
+            ).rejects.toMatchObject({ code: 'ENOENT' });
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'protects failed durable pruning through rollback after partial restore: %s',
+      async (partialRestore) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await expect(
+          live.restore(snapshot('owner', [first, second])),
+        ).resolves.toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        if (partialRestore) {
+          await expect(
+            live.restore(
+              snapshot('owner', [{ ...first, id: 'abcdef1234567890' }, second]),
+            ),
+          ).resolves.toContain(
+            'skipped artifact with mismatched id abcdef1234567890',
+          );
+        }
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it.each(['event', 'snapshot', 'restore'])(
+      'stops protecting an old failed removal after a complete %s commit',
+      async (commit) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(first, workspace, 'fork');
+        let failWrites = true;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        failWrites = false;
+        if (commit === 'event') {
+          await live.upsertMany([first], {
+            strict: true,
+            trustedPublisher: true,
+          });
+          await live.remove(first.id);
+        } else if (commit === 'snapshot') {
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+        } else {
+          await expect(
+            live.restore(snapshot('owner', [second])),
+          ).resolves.toEqual([]);
+        }
+        failWrites = true;
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect(
+          await fs.readdir(
+            path.join(path.dirname(fileURLToPath(first.url)), 'references'),
+          ),
+        ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+      },
+    );
+
+    it('releases a failed reintroduction after successful durable removal', async () => {
+      const page = await saved('owner', 'shared');
+      let failWrites = false;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [page]));
+      await retainArtifactSnapshot(page, workspace, 'fork');
+      await live.remove(page.id);
+      failWrites = true;
+      await expect(
+        live.upsertMany([page], { strict: true, trustedPublisher: true }),
+      ).rejects.toThrow('disk full');
+      expect((await live.list()).artifacts).toEqual([]);
+      expect(
+        await fs.readdir(
+          path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+        ),
+      ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+      await deleteArtifactSnapshot(page, workspace, 'fork');
+      await expect(
+        fs.stat(path.dirname(fileURLToPath(page.url))),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['id', 'title'])(
+      'preserves history skipped due to %s through partial restore and later rollback',
+      async (invalidField) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        await expect(
+          live.restore(
+            snapshot('owner', [
+              invalidField === 'id'
+                ? { ...first, id: 'abcdef1234567890' }
+                : { ...first, title: '' },
+              second,
+            ]),
+          ),
+        ).resolves.toContain(
+          invalidField === 'id'
+            ? 'skipped artifact with mismatched id abcdef1234567890'
+            : 'skipped artifact restore: title is required',
+        );
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it('preserves pending durable history dropped from a later successful batch', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const third = await saved('owner', 'third');
+      let failWrites = true;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [first, second]));
+      failWrites = false;
+      const result = await live.upsertMany([third, first], {
+        trustedPublisher: true,
+      });
+      expect(result.warnings).toContain(
+        'dropped 1 newly created artifacts because the store is full',
+      );
+      expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+        third.id,
+      ]);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await expect(
+        readArtifactSnapshot(second, workspace),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readArtifactSnapshot(third, workspace)).resolves.toBe(
+        'third',
+      );
+    });
+
+    it('reclaims discarded rewind history only after a complete restore', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [first, second]));
+      await live.restore(snapshot('owner', [{ ...second, id: 'invalid-id' }]));
+      expect((await live.list()).artifacts).toHaveLength(2);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await live.restore(snapshot('owner', [second]));
+      await expect(readArtifactSnapshot(first, workspace)).rejects.toThrow();
+      await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+        'second',
+      );
+    });
+
+    it('uses the runtime captured before the ambient environment changes', async () => {
+      const page = await saved('owner', 'secondary');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [page]));
+      vi.stubEnv('QWEN_RUNTIME_DIR', path.join(workspace, 'primary'));
+      try {
+        await live.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps the restored record when snapshot retain bookkeeping fails', async () => {
+      const page = await saved('owner', 'original');
+      const references = path.join(
+        workspace,
+        'artifacts',
+        'snapshots',
+        page.managedId.replace('preview-', ''),
+        'references',
+      );
+      await fs.rm(references, { recursive: true });
+      await fs.writeFile(references, 'not a directory');
+
+      const restored = store('owner');
+      const warnings = await restored.restore(snapshot('owner', [page]));
+
+      expect(warnings).toEqual([
+        expect.stringContaining(
+          `restored artifact ${page.id} without retaining its snapshot`,
+        ),
+      ]);
+      await expect(restored.list()).resolves.toMatchObject({
+        artifacts: [expect.objectContaining({ id: page.id })],
+      });
+      await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+        'original',
+      );
     });
   });
 

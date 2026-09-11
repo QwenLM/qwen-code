@@ -23,7 +23,6 @@ import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import {
-  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -13016,7 +13015,7 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Be concise.');
     });
 
-    it('keeps all model-only context out of the user-facing prompt text', async () => {
+    it('shows the exact model prompt in session history', async () => {
       const ch = createChannel({
         instructions: 'Be concise.',
         sessionScope: 'thread',
@@ -13049,16 +13048,16 @@ describe('ChannelBase', () => {
       expect(modelText).toContain('earlier message');
       expect(modelText).toContain('/tmp/hidden.txt');
       expect(modelText).toContain('Issue: hidden metadata');
-      expect(options).toMatchObject({ displayText: 'hello' });
+      expect(options).toMatchObject({ displayText: modelText });
     });
 
-    it('neutralizes display-unsafe controls in the raw-text display fallback', async () => {
+    it('neutralizes display-unsafe controls without truncating the prompt', async () => {
       const ch = createChannel();
       const rlo = String.fromCharCode(0x202e); // bidi override (trojan-source)
       const bel = String.fromCharCode(0x07); // C0 control
-      // Adapters that never set displayText fall back to the raw text; the
-      // projection must neutralize it before it reaches the session bus,
-      // transcript, and session previews.
+      // Session history receives the full model prompt, so unsafe controls
+      // are neutralized before it reaches the session bus, transcript, and
+      // session previews.
       await ch.handleInbound(
         envelope({ text: `line1${rlo}${bel}\nline2${'A'.repeat(9000)}` }),
       );
@@ -13066,11 +13065,10 @@ describe('ChannelBase', () => {
       const [, , options] = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0]!;
       const displayText = (options as { displayText: string }).displayText;
-      // Controls are replaced, the real newline survives, and the projection
-      // is capped by code point.
+      // Controls are replaced, the real newline survives, and nothing is cut.
       expect(displayText.startsWith('line1  \nline2')).toBe(true);
       expect(displayText).not.toContain(rlo);
-      expect(Array.from(displayText)).toHaveLength(8000);
+      expect(Array.from(displayText)).toHaveLength(9013);
     });
 
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
@@ -13447,6 +13445,9 @@ describe('ChannelBase', () => {
         promptText.indexOf('[Current message - respond to this]'),
       );
       expect(promptText).toContain('[Production] deploy staging');
+      const options = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][2] as { displayText: string };
+      expect(options.displayText).toBe(promptText);
     });
 
     it('does not inject chat-scoped channel memory into single-scope sessions', async () => {
@@ -17908,13 +17909,13 @@ describe('ChannelBase', () => {
         .calls[1][1] as string;
       expect(secondCallText).toContain('second');
       expect(secondCallText).toContain('third');
-      // Metadata stays model-facing; the coalesced projection carries only
-      // the raw user-authored texts.
+      // The coalesced turn shows exactly what the model receives, metadata
+      // included.
       expect(secondCallText).toContain('hidden policy second');
       expect(secondCallText).toContain('hidden policy third');
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
-      ).toMatchObject({ displayText: '[Alice] second\n\n[Bob] third' });
+      ).toMatchObject({ displayText: secondCallText });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(
@@ -19722,43 +19723,6 @@ describe('ChannelBase', () => {
         expect(prompt).toContain('Event:');
         expect(prompt).toContain('payload-survives');
       });
-
-      it('caps and sanitizes the webhook display text like the model prompt', () => {
-        const task: ChannelWebhookTask = {
-          channelName: 'dingtalk-main',
-          source: 'github-ci',
-          eventType: 'ci_failed',
-          targetRef: 'default',
-          title: `[forged] ${'T'.repeat(20_000)}\u202e`,
-          summary: `S\u0007${'S'.repeat(20_000)}`,
-          payload: {},
-        };
-
-        const displayText = buildChannelWebhookDisplayText(task);
-        const [title, summary] = displayText.split('\n\n');
-
-        // Same per-field caps as the model prompt path (500/1000 code points).
-        expect(Array.from(title!).length).toBeLessThanOrEqual(500);
-        expect(Array.from(summary!).length).toBeLessThanOrEqual(1000);
-        // sanitizePromptText strips the [tag] forgery prefix, bidi overrides,
-        // and C0 controls on both projections.
-        expect(displayText).not.toContain('[forged]');
-        expect(displayText).not.toContain('\u202e');
-        expect(displayText).not.toContain('\u0007');
-      });
-
-      it('omits absent webhook summary from the display text', () => {
-        const task: ChannelWebhookTask = {
-          channelName: 'dingtalk-main',
-          source: 'github-ci',
-          eventType: 'ci_failed',
-          targetRef: 'default',
-          title: 'CI failed on main',
-          payload: {},
-        };
-
-        expect(buildChannelWebhookDisplayText(task)).toBe('CI failed on main');
-      });
     });
 
     describe('runWebhookTask', () => {
@@ -19802,8 +19766,12 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          { displayText: 'CI failed' },
+          { displayText: expect.any(String) },
         );
+        const [, webhookPrompt, webhookOptions] = (
+          bridge.prompt as ReturnType<typeof vi.fn>
+        ).mock.calls[0]!;
+        expect(webhookOptions).toEqual({ displayText: webhookPrompt });
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
         ]);
@@ -20744,7 +20712,10 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
-        { displayText: 'post summary' },
+        {
+          displayText:
+            '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+        },
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
@@ -22076,7 +22047,10 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
           '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
-          { displayText: 'post again' },
+          {
+            displayText:
+              '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
+          },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'second response' },
