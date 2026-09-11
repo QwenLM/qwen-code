@@ -51,18 +51,22 @@ function imageParts(contents: Content[]): Part[] {
 
 describe('prepareImagePayloadsForRequest', () => {
   it('collects image references nested in function responses', () => {
-    const ids = collectReferencedImageIds({
-      role: 'user',
-      parts: [
-        {
-          functionResponse: {
-            name: 'screenshot',
-            response: {},
-            parts: [{ text: 'Inspect Image #abcdef123456' }],
+    const ids = collectReferencedImageIds([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'screenshot',
+              response: {},
+              parts: [
+                { text: 'Inspect Image #abcdef123456' },
+              ] as unknown as Part[],
+            },
           },
-        },
-      ],
-    });
+        ],
+      },
+    ]);
 
     expect([...ids]).toEqual(['abcdef123456']);
   });

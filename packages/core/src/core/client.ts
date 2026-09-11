@@ -5013,7 +5013,7 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
-      chat.copyImagePayloadsTo(this.getChat());
+      previousChat.copyImagePayloadsTo(this.getChat());
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

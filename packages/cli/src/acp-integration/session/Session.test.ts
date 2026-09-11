@@ -6582,7 +6582,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
@@ -6927,7 +6927,7 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
+      expect(mockLlmClient.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -6974,7 +6974,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron prompt is mutating history', () => {
@@ -6983,7 +6983,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron abort is active', () => {
@@ -6994,7 +6994,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification prompt is processing', () => {
@@ -7005,7 +7005,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification abort controller is active', () => {
@@ -7016,7 +7016,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
   });
 

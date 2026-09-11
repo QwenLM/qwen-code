@@ -994,7 +994,7 @@ describe('Gemini Client (client.ts)', () => {
         lastCompletedUuid: null,
       } as unknown as ReturnType<Config['getResumedSessionData']>);
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(

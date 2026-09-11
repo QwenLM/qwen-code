@@ -201,10 +201,6 @@ describe('LlmChat', async () => {
         toolResultsNumToKeep: 1,
       }),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
-      getClearContextOnIdle: vi.fn().mockReturnValue({
-        toolResultsThresholdMinutes: 60,
-        toolResultsNumToKeep: 5,
-      }),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()
@@ -18644,7 +18640,7 @@ describe('LlmChat', async () => {
       const imageId = imagePartToStoredPayload(imagePart).id;
       chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
 
-      await chat.tryCompress('p-image', 'm1');
+      await chat.tryCompress('p-image');
 
       expect(chat.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
         `inspect Image #${imageId}`,

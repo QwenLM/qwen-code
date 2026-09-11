@@ -911,7 +911,7 @@ describe('useLlmStream', () => {
 
     it('resolves a stored image id before applying the vision bridge', async () => {
       enableBridge();
-      const client = mockConfig.getGeminiClient() as any;
+      const client = mockConfig.getLlmClient() as any;
       client.resolveImageReferences = vi
         .fn()
         .mockReturnValue([{ text: 'inspect Image #abc123abc123' }, imagePart]);
