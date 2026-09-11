@@ -23,6 +23,7 @@ try {
     });
     const runtime = new PlaywrightRuntime({ bridge: transport });
     try {
+      await transport.start();
       const ping = asRecord(await transport.request('ping', {}, 20_000));
       assert(
         ping['extensionId'] === CHROME_EXTENSION_ID &&
