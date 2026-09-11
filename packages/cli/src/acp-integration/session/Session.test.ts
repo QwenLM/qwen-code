@@ -6941,13 +6941,57 @@ describe('Session', () => {
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
+      // One turn survives, so one snapshot may: every rewind surface resolves
+      // a turn through this array's positions.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
-        undefined,
+        expect.arrayContaining([expect.objectContaining({ promptId: 'p1' })]),
+      );
+    });
+
+    it('drops snapshot positions along with the turns a rewind discards', () => {
+      // A rewind resolves a turn through the snapshot array's POSITION
+      // (`getRewindSnapshots` hands out `idx`, the agent resolves a promptId
+      // with `findIndex`). Leaving an abandoned turn's snapshot behind makes
+      // the position point at a turn the history no longer has, so the next
+      // rewind cuts the wrong turn and the recorded branch disagrees with the
+      // live view.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      const snapshots = ['p1', 'p2', 'p3'].map((promptId) => ({
+        promptId,
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {},
+      }));
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(snapshots);
+
+      session.rewindToTurn(2, { rewindFiles: false });
+
+      // Two turns survive the cut to the third prompt.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        snapshots[0],
+        snapshots[1],
+      ]);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        2,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
       );
     });
 
@@ -34924,6 +34968,139 @@ describe('Session', () => {
         };
       }>;
     };
+
+    it('re-enters the ACP tool chain and preserves native result metadata', async () => {
+      const onResult = vi.fn();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedExecute = vi.fn().mockImplementation(async () => {
+        expect(core.getToolCallRuntime()).toBeUndefined();
+        return {
+          llmContent: [
+            { text: 'nested ACP output' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'QUJD',
+              },
+            },
+          ],
+          returnDisplay: 'nested ACP output',
+          modelOverride: undefined,
+          terminateTurn: true,
+        };
+      });
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/example.txt' },
+          execute: nestedExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            const runtime = core.getToolCallRuntime();
+            if (!runtime) throw new Error('missing runtime');
+            const nested = await runtime.dispatch(
+              'read_file',
+              { path: '/tmp/example.txt' },
+              signal,
+              onResult,
+            );
+            expect(nested.content).toEqual([
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+            ]);
+            return {
+              llmContent: nested.output,
+              returnDisplay: nested.output,
+            };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-acp', [
+        {
+          id: 'exec-acp-parent',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(onResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelOverride: undefined,
+          terminateTurn: true,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+                ],
+              }),
+            }),
+          ],
+        }),
+      );
+      expect(Object.hasOwn(onResult.mock.calls[0][0], 'modelOverride')).toBe(
+        true,
+      );
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(mockToolRegistry.getTool).toHaveBeenCalledWith('read_file');
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse?.name).toBe(core.ToolNames.EXEC);
+      expect(result.parts[0].functionResponse?.response?.['output']).toBe(
+        'nested ACP output',
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ name: 'read_file' }),
+          }),
+        ]),
+        expect.anything(),
+      );
+
+      const direct = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-direct', [
+        {
+          id: 'read-acp-direct',
+          name: 'read_file',
+          args: { path: '/tmp/example.txt' },
+        },
+      ]);
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(direct.parts[0].functionResponse?.response?.['error']).toContain(
+        'unavailable on this CodeModeOnly call surface',
+      );
+    });
 
     function emitNestedAskUserQuestion(
       eventEmitter: EventEmitter,

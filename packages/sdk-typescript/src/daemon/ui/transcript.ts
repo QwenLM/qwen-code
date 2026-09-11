@@ -2052,7 +2052,13 @@ function rewindTranscriptToUserTurn(
   let lastUserIndex = -1;
 
   for (let index = 0; index < state.blocks.length; index += 1) {
-    if (state.blocks[index]?.kind !== 'user') continue;
+    const block = state.blocks[index];
+    if (
+      block?.kind !== 'user' ||
+      block.meta?.['source'] === 'background_notification'
+    ) {
+      continue;
+    }
     lastUserIndex = index;
     if (userTurnIndex === targetTurnIndex) {
       truncateTranscriptBeforeBlock(state, index);

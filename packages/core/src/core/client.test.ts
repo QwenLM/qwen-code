@@ -608,6 +608,7 @@ describe('Gemini Client (client.ts)', () => {
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
@@ -15228,6 +15229,7 @@ Other open files:
         'headless',
         undefined,
         false,
+        false,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -15261,6 +15263,32 @@ Other open files:
         'headless',
         concise,
         false,
+        false,
+      );
+    });
+
+    it('passes the CodeModeOnly flag to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getCodeModeOnly').mockReturnValue(true);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        undefined,
+        false,
+        true,
       );
     });
 
@@ -15293,6 +15321,7 @@ Other open files:
           undefined,
           mode,
           undefined,
+          false,
           false,
         );
       },

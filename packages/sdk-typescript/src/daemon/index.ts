@@ -246,6 +246,7 @@ export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_PAUSE_REASON_COMMAND,
   isDaemonContentHash,
   requireWorkspaceCwd,

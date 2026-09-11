@@ -65,9 +65,8 @@ import {
 import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
-import type { Suggestion } from '../utils/suggestions.js';
-import { cpLen, toCodePoints } from '../utils/textUtils.js';
-import { t } from '../../i18n/index.js';
+import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
+import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import { InputHistory } from './input-history.js';
@@ -152,23 +151,18 @@ function buildCompletionContext(
 const DEFAULT_PLACEHOLDER = '  Type your message or @path/to/file';
 const ESCAPE_ARM_HINT = 'Press Esc again to clear.';
 
-/** Approval-mode chrome exactly like InputPrompt's statusColor/statusText. */
+/** Approval-mode chrome exactly like InputPrompt's statusColor/prefix. */
 function promptChrome(approvalMode: ApprovalMode | undefined): {
   prefix: string;
   color?: string;
-  statusText?: string;
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return {
-        prefix: '>',
-        color: C.yellow,
-        statusText: t('Accepting edits'),
-      };
+      return { prefix: '>', color: C.yellow };
     case ApprovalMode.AUTO:
-      return { prefix: '>', color: C.accent, statusText: t('Auto mode') };
+      return { prefix: '>', color: C.accent };
     case ApprovalMode.YOLO:
-      return { prefix: '*', color: C.red, statusText: t('YOLO mode') };
+      return { prefix: '*', color: C.red };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
       return { prefix: '>' };
@@ -214,6 +208,19 @@ export interface InputPromptProps {
   shellModeActive?: boolean;
   /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
   onToggleShellMode?: () => void;
+  /**
+   * Completion-dropdown visibility, lifted for the shell: ink's Composer hides
+   * the footer while the suggestion list is open, and here the footer is a
+   * sibling of the composer rather than a child of it.
+   */
+  onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Cycles the approval mode (ink `useAutoAcceptIndicator`). The shell owns
+   * Shift+Tab itself, so this is only the Windows bare-Tab fallback — the one
+   * route that has to stay here, because the composer is the only place that
+   * knows whether Tab was already spent on a completion.
+   */
+  onCycleApprovalMode?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -235,6 +242,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onPromptSuggestionAbort,
     shellModeActive = false,
     onToggleShellMode,
+    onSuggestionsVisibilityChange,
+    onCycleApprovalMode,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -330,11 +339,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
 
-  // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
-  // wins over the approval-mode prefix and replaces its status text with
-  // "Shell mode" — the only signal that Enter now executes shell commands).
+  // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
+  // over the approval-mode prefix). The label itself lives in the footer, as
+  // ink's ShellModeIndicator does.
   const chrome = shellModeActive
-    ? { prefix: '!', color: C.accent, statusText: t('Shell mode') }
+    ? { prefix: '!', color: C.accent }
     : promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
 
@@ -1015,6 +1024,24 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       onPromptSuggestionDismiss?.();
       return;
     }
+
+    // Windows cannot tell Shift+Tab from a bare Tab in some terminals, so there
+    // a free Tab cycles the mode too (ink useAutoAcceptIndicator, #4171). Both
+    // Tab consumers above return, which is why this needs no shouldBlockTab
+    // guard of its own. A real Shift+Tab belongs to the shell: it has to keep
+    // cycling while a dialog or a confirmation has this composer unmounted.
+    if (
+      process.platform === 'win32' &&
+      key.name === 'tab' &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.shift
+    ) {
+      key.preventDefault();
+      onCycleApprovalMode?.();
+      return;
+    }
+
     if (
       key.name === 'right' &&
       !key.ctrl &&
@@ -1121,7 +1148,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   }, []);
 
-  const columns = Math.max(width - 2, 1);
+  const columns = Math.max(width, 1);
   const dashLine = '─'.repeat(columns);
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
@@ -1129,25 +1156,41 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   );
   const showDropdown =
     loadingSuggestions || (suggestions.length > 0 && visible.length > 0);
+  useEffect(() => {
+    onSuggestionsVisibilityChange?.(showDropdown);
+  }, [showDropdown, onSuggestionsVisibilityChange]);
 
-  // Slash-mode labels share one half-width command column, exactly like the
-  // ink SuggestionsDisplay.
-  const labelColumnWidth = Math.min(
-    Math.max(
-      ...suggestions.map(
-        (s) =>
-          (s.label ?? s.value).length +
-          (s.argumentHint ? 1 + s.argumentHint.length : 0),
-      ),
-      0,
-    ),
-    Math.floor(columns * 0.5),
-  );
+  // Slash rows share one half-width command column so their descriptions line
+  // up. `@` rows get no shared column: this renderer's `@` completion only
+  // yields file paths, so every row takes the whole width and a long path stays
+  // on one line instead of wrapping inside a column sized for a shorter
+  // neighbour. The badge counts toward the column: ink measures label +
+  // argumentHint + sourceBadge, so a `[Skill]` row fits the column it was sized
+  // for. completionModeRef only ever changes inside refreshCompletion, alongside
+  // the setSuggestions that re-renders this block.
+  const fullLabelWidth = (s: Suggestion) =>
+    [s.label ?? s.value, s.argumentHint, s.sourceBadge]
+      .filter(Boolean)
+      .join(' ').length;
+  const slashColumn = completionModeRef.current === CompletionMode.SLASH;
+  // The half-width cap applies to ink's `contentWidth` — the row after the
+  // 2-column active marker — not to the terminal width.
+  const labelColumnWidth = slashColumn
+    ? Math.min(
+        Math.max(...suggestions.map(fullLabelWidth), 0),
+        Math.floor(Math.max(columns - 2, 1) * 0.5),
+      )
+    : 0;
+  // What a row actually has left for description text: the dropdown box sits
+  // two columns in on each side, the active marker takes 2, and the description
+  // pays a 2-column gutter. Over-allocating here does not clip — it wraps the
+  // tail onto a second row and doubles the height.
+  const descriptionWidth = Math.max(columns - 8 - labelColumnWidth, 1);
 
   return (
-    <box flexDirection="column" marginLeft={1} marginRight={1}>
+    <box flexDirection="column">
       {attachments.length > 0 && (
-        <box flexDirection="column" paddingLeft={1}>
+        <box flexDirection="column" paddingLeft={2}>
           {attachments.map((a) => (
             <text key={a.id} fg={C.purple}>{`📎 ${a.filename}`}</text>
           ))}
@@ -1190,7 +1233,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         />
       </box>
       {showDropdown && (
-        <box flexDirection="column" marginLeft={1} marginRight={1}>
+        <box flexDirection="column" marginLeft={2} marginRight={2}>
           {loadingSuggestions && <text fg={C.dim}>Loading suggestions...</text>}
           {hasMoreAbove && <text fg={C.text}>▲</text>}
           {visible.map((suggestion, index) => {
@@ -1206,17 +1249,51 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                 <box width={2} flexShrink={0}>
                   <text fg={color}>{isActive ? '> ' : '  '}</text>
                 </box>
-                <box width={labelColumnWidth} flexShrink={0}>
-                  <text fg={color} attributes={isActive ? 1 : 0}>
-                    {label}
-                    {suggestion.argumentHint
-                      ? ` ${suggestion.argumentHint}`
-                      : ''}
-                  </text>
+                <box
+                  flexShrink={slashColumn ? 0 : 1}
+                  // `"auto"` rather than omitting the attribute: @opentui resets
+                  // a removed prop by assigning null, which its width setter
+                  // type-guards away, so the slash column would stay stuck on
+                  // every `@` row after one slash completion.
+                  width={slashColumn ? labelColumnWidth : 'auto'}
+                >
+                  {/* Separate flex children, not one text: an over-long hint then
+                      wraps in the width left after the label. Char wrap matches
+                      ink's hard wrap-ansi; word wrap strands `[` on its own row. */}
+                  <box flexDirection="row">
+                    <box flexShrink={0}>
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {label}
+                      </text>
+                    </box>
+                    {suggestion.argumentHint && (
+                      <text fg={C.dim} wrapMode="char">
+                        {` ${suggestion.argumentHint}`}
+                      </text>
+                    )}
+                    {suggestion.sourceBadge && (
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {` ${suggestion.sourceBadge}`}
+                      </text>
+                    )}
+                  </box>
                 </box>
                 {suggestion.description && (
                   <box paddingLeft={2} flexGrow={1}>
-                    <text fg={color}>{suggestion.description}</text>
+                    <text fg={color}>
+                      {truncateToWidth(
+                        normalizeDescription(suggestion.description),
+                        descriptionWidth,
+                      )}
+                    </text>
                   </box>
                 )}
               </box>
@@ -1229,11 +1306,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             </text>
           )}
         </box>
-      )}
-      {/* No "(shift + tab to cycle)" suffix like ink's AutoAcceptIndicator:
-          nextApprovalMode is not bound to any key in this renderer yet. */}
-      {chrome.statusText && (
-        <text fg={chrome.color ?? C.dim}>{chrome.statusText}</text>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
     </box>
