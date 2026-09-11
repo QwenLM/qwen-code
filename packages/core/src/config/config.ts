@@ -3499,6 +3499,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -3511,6 +3514,9 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                   (input['tool_call_id'] as string) || undefined,
+                  typeof input['duration_ms'] === 'number'
+                    ? input['duration_ms']
+                    : undefined,
                 );
                 break;
               case 'PostToolBatch':
