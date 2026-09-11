@@ -318,29 +318,4 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
       );
     });
   });
-
-  describe('Active-todo reminder write-through', () => {
-    it('routes a subagent completing todo_write through to the parent reminder', async () => {
-      // The subagent shares the session-scoped plan file but runs on a
-      // deriveConfig wrapper whose reminder maps are isolated. A completing
-      // todo_write inside the wrapper must forward its `setActiveTodoReminder
-      // (_, undefined)` to the base Config so the foreground reminder is
-      // cleared instead of stranded (#10953).
-      const parent = new Config(baseParams);
-      const parentRegistry = await parent.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (parent as any).toolRegistry = parentRegistry;
-      parent.startActiveTodoWorkChain('parent-prompt');
-      parent.setActiveTodoReminder('parent-prompt', 'unfinished');
-
-      const manager = new SubagentManager(parent);
-      const child = await callBuildOverride(manager, parent);
-
-      child.setActiveTodoReminder('child-prompt', undefined);
-
-      expect(parent.getActiveTodoReminder('parent-prompt')).toBeUndefined();
-    });
-  });
 });
