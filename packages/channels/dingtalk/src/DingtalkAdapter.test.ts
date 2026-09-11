@@ -4493,6 +4493,48 @@ describe('DingtalkChannel chat records', () => {
     ).not.toContain('[Chat record messages]');
   });
 
+  it('keeps an atUserId mention in replied rich text', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'rich-text-reply-m1',
+        conversationType: '2',
+        conversationId: 'cid-rich-text-reply',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: '@DingTalkTest what was that?',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'rich-text-source-m1',
+            msgType: 'richText',
+            senderId: 'sender-2',
+            content: {
+              richText: [
+                { type: 'at', atUserId: 'test-bot' },
+                { text: 'quoted body' },
+              ],
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'rich-text-reply-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ referencedText: '@test-bot quoted body' }),
+    );
+  });
+
   it('normalizes a JSON summary and recovers sender names for forwarded entries', () => {
     const channel = createChannel();
     const downstream = {

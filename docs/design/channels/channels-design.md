@@ -50,7 +50,7 @@ Normalized message format all platforms convert to:
 - **Content**: `text`, optional `imageBase64`/`imageMimeType`, optional `referencedText`
 - **Context**: `isGroup`, `isMentioned`, `isReplyToBot`, optional `threadId`
 
-Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic; @mentions stripped from `text`.
+Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic. Adapters decide whether `text` retains platform @mentions; a retained leading mention means slash-command parsing sees the complete body.
 
 ### Message Flow
 

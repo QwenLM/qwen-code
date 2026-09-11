@@ -2030,6 +2030,7 @@ export abstract class ChannelBase {
       ...lastEnvelope,
       text: coalesced,
       displayText: coalescedDisplayText,
+      localControlText: undefined,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -3742,7 +3743,7 @@ export abstract class ChannelBase {
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
-    const bangText = envelope.text.trimStart();
+    const bangText = (envelope.localControlText ?? envelope.text).trimStart();
     return (
       bangText.startsWith('!') &&
       (envelope.isGroup || this.isSharedSession(envelope))
@@ -5590,6 +5591,7 @@ export abstract class ChannelBase {
 
   private async classifyChannelMemoryIntent(
     envelope: Envelope,
+    text: string,
   ): Promise<ResolvedChannelMemoryIntent | null> {
     if (!this.memoryIntentClassifier || !this.channelMemory) {
       return null;
@@ -5613,7 +5615,7 @@ export abstract class ChannelBase {
     try {
       classified =
         await this.memoryIntentClassifier.classifyChannelMemoryIntent(
-          envelope.text,
+          text,
           entries,
         );
     } catch (error) {
@@ -6517,10 +6519,11 @@ export abstract class ChannelBase {
     );
 
     const parsed = this.parseCommand(envelope.text);
+    const localControlText = envelope.localControlText ?? envelope.text;
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
         ? null
-        : parseChannelMemoryIntent(envelope.text);
+        : parseChannelMemoryIntent(localControlText);
     let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
@@ -6528,9 +6531,12 @@ export abstract class ChannelBase {
     if (
       !memoryIntent &&
       parsed?.command !== 'btw' &&
-      this.shouldClassifyChannelMemoryIntent(envelope.text)
+      this.shouldClassifyChannelMemoryIntent(localControlText)
     ) {
-      memoryIntent = await this.classifyChannelMemoryIntent(envelope);
+      memoryIntent = await this.classifyChannelMemoryIntent(
+        envelope,
+        localControlText,
+      );
       memoryIntentFromClassifier = memoryIntent !== null;
     }
     if (memoryIntent) {
@@ -6610,7 +6616,7 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    const bangText = localControlText.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`

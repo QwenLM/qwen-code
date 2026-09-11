@@ -12610,6 +12610,25 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('/help');
     });
 
+    it('does not use local control text for slash-command dispatch', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        envelope({
+          text: '@Qwen /new',
+          localControlText: '/new',
+          isGroup: true,
+          isMentioned: true,
+        }),
+      );
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        's-1',
+        expect.stringContaining('@Qwen /new'),
+        expect.anything(),
+      );
+    });
+
     it('forwards unrecognized commands to agent', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: '/unknown' }));

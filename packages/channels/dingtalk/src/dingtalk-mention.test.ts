@@ -49,6 +49,67 @@ function receive(data: Record<string, unknown>): Envelope {
   return envelope;
 }
 
+function createPipelineChannel(options: Record<string, unknown> = {}) {
+  return new DingtalkChannel(
+    'mention-pipeline-test',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'test-client-id',
+      clientSecret: 'test-client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    },
+    {} as never,
+    { registerBridgeEvents: false, ...options } as never,
+  );
+}
+
+function deliverGroupText(
+  channel: DingtalkChannel,
+  messageId: string,
+  text: string,
+): void {
+  (
+    channel as unknown as { onMessage(data: DWClientDownStream): void }
+  ).onMessage({
+    headers: { messageId },
+    data: JSON.stringify({
+      msgId: messageId,
+      msgtype: 'text',
+      conversationType: '2',
+      conversationId: 'test-conversation',
+      sessionWebhook: 'https://example.invalid/test-webhook',
+      senderNick: 'Tester',
+      senderStaffId: 'test-sender',
+      chatbotUserId: 'test-bot',
+      isInAtList: true,
+      atUsers: [{ dingtalkId: 'test-bot' }],
+      text: { content: text },
+    }),
+  } as DWClientDownStream);
+}
+
+function mockThreadReplies(channel: DingtalkChannel) {
+  return vi
+    .spyOn(
+      channel as unknown as {
+        sendThreadMessage(
+          chatId: string,
+          threadId: string | undefined,
+          text: string,
+        ): Promise<void>;
+      },
+      'sendThreadMessage',
+    )
+    .mockResolvedValue();
+}
+
 describe('DingTalk mention body preservation', () => {
   it.each([
     {
@@ -193,5 +254,103 @@ describe('DingTalk mention body preservation', () => {
       },
     });
     expect(envelope.text).toBe('@Qwen第一段\n第二段');
+  });
+
+  it('keeps the body while projecting a verified bot-only mention for local controls', () => {
+    const envelope = receive({
+      text: { content: '@Qwen 查看记忆' },
+      atUsers: [{ dingtalkId: 'test-bot' }],
+    });
+
+    expect(envelope.text).toBe('@Qwen 查看记忆');
+    expect(envelope.localControlText).toBe('查看记忆');
+  });
+
+  it('does not project local controls for a private chat', () => {
+    const envelope = receive({
+      conversationType: '1',
+      text: { content: '@Qwen 清空记忆' },
+      atUsers: [{ dingtalkId: 'test-bot' }],
+    });
+
+    expect(envelope.text).toBe('@Qwen 清空记忆');
+    expect(envelope).not.toHaveProperty('localControlText');
+  });
+});
+
+describe('DingTalk mention-prefixed local controls', () => {
+  it('clears channel memory after a mention-prefixed confirmation', async () => {
+    const clearChannelMemory = vi.fn().mockResolvedValue({ changed: true });
+    const channel = createPipelineChannel({
+      channelMemory: { clearChannelMemory },
+    });
+    const replies = mockThreadReplies(channel);
+
+    try {
+      deliverGroupText(channel, 'clear-request', '@Qwen 清空记忆');
+      await vi.waitFor(() => expect(replies).toHaveBeenCalledOnce());
+
+      deliverGroupText(channel, 'clear-confirm', '@Qwen 确认清空记忆');
+      await vi.waitFor(() => expect(clearChannelMemory).toHaveBeenCalledOnce());
+
+      expect(clearChannelMemory).toHaveBeenCalledWith({
+        channelName: 'mention-pipeline-test',
+        chatId: 'test-conversation',
+        threadId: undefined,
+      });
+      expect(replies).toHaveBeenLastCalledWith(
+        'test-conversation',
+        undefined,
+        'Channel memory cleared.',
+      );
+    } finally {
+      channel.disconnect();
+    }
+  });
+
+  it('lists channel memory without sending the mention-prefixed body to the model', async () => {
+    const listChannelMemoryEntries = vi
+      .fn()
+      .mockResolvedValue([{ id: 'm-a31f0d82c7e4', text: 'Use staging.' }]);
+    const channel = createPipelineChannel({
+      channelMemory: { listChannelMemoryEntries },
+    });
+    const replies = mockThreadReplies(channel);
+
+    try {
+      deliverGroupText(channel, 'memory-list', '@Qwen 查看记忆');
+      await vi.waitFor(() => expect(replies).toHaveBeenCalledOnce());
+
+      expect(listChannelMemoryEntries).toHaveBeenCalledOnce();
+      expect(replies).toHaveBeenCalledWith(
+        'test-conversation',
+        undefined,
+        'Channel memory (page 1/1):\nm-a31f0d82c7e4  Use staging.',
+      );
+    } finally {
+      channel.disconnect();
+    }
+  });
+
+  it('refuses and audits a mention-prefixed bang command in a group', async () => {
+    const channel = createPipelineChannel();
+    const replies = mockThreadReplies(channel);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    try {
+      deliverGroupText(channel, 'bang-command', '@Qwen !whoami');
+      await vi.waitFor(() => expect(replies).toHaveBeenCalledOnce());
+
+      expect(replies).toHaveBeenCalledWith(
+        'test-conversation',
+        undefined,
+        'Shell commands (`!`) are disabled in group chats.',
+      );
+      expect(
+        stderr.mock.calls.map(([line]) => String(line)).join(''),
+      ).toContain('blocked ! shell command');
+    } finally {
+      channel.disconnect();
+    }
   });
 });

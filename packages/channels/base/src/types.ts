@@ -93,6 +93,13 @@ export interface Envelope {
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
   /**
+   * Adapter-provided text after removing a platform-verified routing mention.
+   * Used only for channel-memory controls and the group/shared-session `!`
+   * safety gate. Slash commands, display, history, and model prompting continue
+   * to use `text`.
+   */
+  localControlText?: string;
+  /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
    *
@@ -111,10 +118,10 @@ export interface Envelope {
   /**
    * Stable identifiers (staffId preferred, platform ID fallback) of non-bot
    * members mentioned alongside the bot in a group message, deduplicated and
-   * excluding the bot itself. Kept separate from `text` (like `metadata`) so
-   * slash-command parsing sees the message body alone; ChannelBase renders it
-   * as a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered
-   * format stays uniform regardless of the identifier list length.
+   * excluding the bot itself. Kept separate from `text` (like `metadata`);
+   * ChannelBase renders it as a `[Mentioned …]` wrapper AFTER prompt
+   * sanitization so the delivered format stays uniform regardless of the
+   * identifier list length.
    * Rendered only when sender attribution is rendered (group/single-scope,
    * not `alreadyPrefixed`, not a recognized slash command) — self-prefixing
    * adapters must render it themselves. Group history backfill records the

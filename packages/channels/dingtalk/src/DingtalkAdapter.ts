@@ -95,6 +95,13 @@ interface DingTalkRichTextPart {
   atUserId?: string;
 }
 
+function renderRichTextAt(part: DingTalkRichTextPart): string {
+  const value = part.text || part.atName || part.atUserId;
+  if (!value) return '';
+  const label = value.startsWith('@') ? value : `@${value}`;
+  return /\s$/u.test(label) ? label : `${label} `;
+}
+
 interface DingTalkMessageContent {
   text?: string;
   richText?: DingTalkRichTextPart[];
@@ -852,6 +859,22 @@ function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   }
 
   return [...mentions];
+}
+
+function extractLocalControlText(
+  data: DingTalkMessageData,
+  text: string,
+): string | undefined {
+  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
+    return undefined;
+  }
+  const includesBot = data.atUsers.some(
+    (user) => user?.dingtalkId === data.chatbotUserId,
+  );
+  if (!includesBot || collectNonBotMentionIds(data).length > 0) {
+    return undefined;
+  }
+  return text.match(/^\s*@[^\s\p{Cf}]+\s+([\s\S]*)$/u)?.[1]?.trim();
 }
 
 interface DingTalkTokenResponse {
@@ -2964,8 +2987,9 @@ export class DingtalkChannel extends ChannelBase {
           parts.push(part.text);
         } else if (partType === 'picture') {
           parts.push('[image]');
-        } else if (partType === 'at' && part.atName) {
-          parts.push(`@${part.atName}`);
+        } else if (partType === 'at') {
+          const label = renderRichTextAt(part);
+          if (label) parts.push(label);
         }
       }
       const summary = parts.join('').trim();
@@ -3034,8 +3058,7 @@ export class DingtalkChannel extends ChannelBase {
         if (partType === 'text' && part.text) {
           text += part.text;
         } else if (partType === 'at') {
-          const label = part.text || `@${part.atName || part.atUserId || ''} `;
-          text += label.startsWith('@') ? label : `@${label} `;
+          text += renderRichTextAt(part);
         } else if (partType === 'picture' && part.downloadCode) {
           codes.push(part.downloadCode);
         }
@@ -3127,8 +3150,9 @@ export class DingtalkChannel extends ChannelBase {
    * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
    * direct-media call site has one, and only that call may erase it: on the
    * quoted-media path `envelope.text` is the user's own reply, and a reply
-   * that happens to read exactly like a placeholder must survive (a group
-   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
+   * that happens to read exactly like a placeholder must survive. The native
+   * callback can already omit the bot mention, so a reply reading `(audio)`
+   * still reaches this method verbatim.
    */
   private async attachMedia(
     envelope: Envelope,
@@ -3329,10 +3353,13 @@ export class DingtalkChannel extends ChannelBase {
 
       const chatId = conversationId || sessionWebhook;
 
-      // Carry mention targets as a structured envelope field (like
-      // referencedText) so ChannelBase renders the marker after prompt
-      // sanitization and slash-command parsing sees the body alone.
+      // Carry non-bot mention targets separately so ChannelBase can render a
+      // stable marker after prompt sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
+      const localControlText =
+        isGroup && isMentioned
+          ? extractLocalControlText(data, content.text)
+          : undefined;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -3345,6 +3372,7 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: content.text,
+        ...(localControlText !== undefined ? { localControlText } : {}),
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
