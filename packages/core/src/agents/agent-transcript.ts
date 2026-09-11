@@ -45,6 +45,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
+import type { SubagentExecutorSpec } from '../subagents/types.js';
 import type {
   AgentCompletionStats,
   BackgroundActivity,
@@ -155,7 +156,7 @@ export interface AgentMeta {
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
   /** External launch provenance; transcript replay cannot restore its session. */
-  executor?: 'acp';
+  executor?: SubagentExecutorSpec['kind'];
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */

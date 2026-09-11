@@ -4404,8 +4404,6 @@ export function WebShellSidebar({
       const isCurrent = standalone?.active ?? isCurrentSession(session);
       const sessionWorkActive =
         !session.hasActivePrompt && session.activeWorkState === 'active';
-      const activityUnknown =
-        !session.hasActivePrompt && session.activeWorkState === 'unknown';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
@@ -4506,13 +4504,6 @@ export function WebShellSidebar({
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
-            ) : activityUnknown && !completedUnread ? (
-              <span
-                className={styles.sessionStatusUnknown}
-                aria-label={t('sidebar.activityUnknown')}
-              >
-                ?
-              </span>
             ) : null}
           </span>
           {isEditing && showRename ? (

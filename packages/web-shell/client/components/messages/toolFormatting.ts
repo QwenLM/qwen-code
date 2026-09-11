@@ -21,6 +21,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   thread_review: 'ThreadReview',
   thread_create: 'ThreadCreate',
   thread_read: 'ThreadRead',
+  exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',

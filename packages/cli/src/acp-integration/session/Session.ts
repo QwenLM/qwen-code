@@ -60,6 +60,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
   BranchPoint,
+  CodeModeToolResult,
   AdmissibleNotification,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -113,6 +114,7 @@ import {
   createHookOutput,
   wrapUserPromptSubmitContext,
   generateToolUseId,
+  isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
@@ -190,12 +192,20 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
   goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
   todoWorkChainContext,
+  extractCodeModeImageContent,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  isCodeModeToolCallAllowed,
+  ToolMode,
   dedupeToolCallsById,
   getFunctionCallFingerprint,
   getProviderToolCallId,
@@ -440,6 +450,8 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+const GOAL_HELD_RECOVERY_COMMANDS =
+  'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
@@ -574,6 +586,7 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
 }
 
 type RunToolResult = {
+  modelOverride?: string;
   parts: Part[];
   stopAfterPermissionCancel: boolean;
   loopDetected?: boolean;
@@ -1219,6 +1232,7 @@ interface InFlightTurnRecording {
   originatorClientId?: string;
   abortController?: AbortController;
   startedAt?: number;
+  cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
   finalAnswer: { finalText: string };
@@ -1520,12 +1534,15 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId?: string;
+  groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -1546,6 +1563,12 @@ interface PromptChannelDelivery {
 }
 
 interface AgentResponseCapture {
+  goalProposalTurn?: {
+    turnKey: string;
+    controller: AbortController;
+    completedNormally: boolean;
+    settlementBlocked?: boolean;
+  };
   channelDelivery?: {
     finalText: string;
   };
@@ -2005,6 +2028,7 @@ export async function buildAvailableCommandsSnapshot(
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -2022,6 +2046,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private codeModeNestedSequence = 0;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -2104,6 +2129,7 @@ export class Session implements SessionContext {
   private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
+  private heldGoalProposal?: Pick<GoalRecord, 'goalId' | 'revision'>;
   private goalProcessing = false;
   private activeGoalTurn: AcpGoalTurn | undefined;
   private goalHostUnbind?: () => void;
@@ -2329,6 +2355,15 @@ export class Session implements SessionContext {
       this.goalRuntimeUnsubscribe = runtime.subscribe((snapshot, cause) => {
         const previousGoal = this.lastGoalSnapshot?.goal ?? null;
         this.lastGoalSnapshot = snapshot;
+        if (
+          this.heldGoalProposal &&
+          (snapshot.goal?.goalId !== this.heldGoalProposal.goalId ||
+            snapshot.goal.revision !== this.heldGoalProposal.revision ||
+            snapshot.goal.status !== 'active' ||
+            cause === 'resume')
+        ) {
+          this.heldGoalProposal = undefined;
+        }
         void this.#queueGoalState(snapshot, cause, previousGoal).catch(
           (error) =>
             debugLogger.warn(
@@ -2563,6 +2598,14 @@ export class Session implements SessionContext {
       this.notificationProcessing ||
       this.notificationAbortController ||
       this.#isAutomaticWorkHeld()
+    ) {
+      return;
+    }
+    const next = this.goalQueue[0];
+    if (
+      this.heldGoalProposal &&
+      next?.permit.goalId === this.heldGoalProposal.goalId &&
+      next.permit.revision === this.heldGoalProposal.revision
     ) {
       return;
     }
@@ -4627,6 +4670,17 @@ export class Session implements SessionContext {
       );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    const recordAdmissionCancellation = () => {
+      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+    };
+    admissionCancellation?.addEventListener(
+      'abort',
+      recordAdmissionCancellation,
+      {
+        once: true,
+      },
+    );
+    if (admissionCancellation?.aborted) recordAdmissionCancellation();
     try {
       const result = await this.#promptWithTurnRecording(
         params,
@@ -4636,7 +4690,7 @@ export class Session implements SessionContext {
         scheduledGoalTurn,
         turnRecording,
       );
-      this.#settleTurnRecording(
+      await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
         result,
@@ -4661,11 +4715,16 @@ export class Session implements SessionContext {
         (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
-        this.#settleTurnRecording('cancelled', turnRecording, result);
+        await this.#settleTurnRecording('cancelled', turnRecording, result);
         return result;
       }
-      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      await this.#settleTurnRecording('error', turnRecording, undefined, error);
       throw error;
+    } finally {
+      admissionCancellation?.removeEventListener(
+        'abort',
+        recordAdmissionCancellation,
+      );
     }
   }
 
@@ -4726,7 +4785,19 @@ export class Session implements SessionContext {
     if (!goalTurn) {
       try {
         const runtime = this.config.getGoalRuntime();
-        if (runtime.getSnapshot().goal?.status === 'active') {
+        const activeGoal = runtime.getSnapshot().goal;
+        const heldGoalMatches =
+          this.heldGoalProposal?.goalId === activeGoal?.goalId &&
+          this.heldGoalProposal?.revision === activeGoal?.revision;
+        if (activeGoal?.status === 'active' && heldGoalMatches) {
+          for (const queued of this.goalQueue.splice(0)) {
+            queued.controller.abort(NEW_PROMPT_ABORT_REASON);
+            await runtime.releaseTurn(queued.turnKey, { requeue: false });
+          }
+          await this.messageEmitter.emitAgentMessage(
+            `Automatic Goal execution is still held. ${GOAL_HELD_RECOVERY_COMMANDS}`,
+          );
+        } else if (activeGoal?.status === 'active') {
           reservedGoalRuntime = runtime;
           reservedGoalTurnKey = `goal-user:${randomUUID()}`;
           runtime.beginTurn(reservedGoalTurnKey);
@@ -4753,6 +4824,17 @@ export class Session implements SessionContext {
     this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
     const pendingSend = goalTurn?.controller ?? new AbortController();
     if (turnRecording) turnRecording.abortController = pendingSend;
+    const recordCancellation = () => {
+      if (
+        turnRecording &&
+        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON
+      ) {
+        turnRecording.cancelledAt ??= Date.now();
+      }
+    };
+    pendingSend.signal.addEventListener('abort', recordCancellation, {
+      once: true,
+    });
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -4763,6 +4845,7 @@ export class Session implements SessionContext {
     this.pendingPrompt = pendingSend;
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
+      pendingSend.signal.removeEventListener('abort', recordCancellation);
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
       }
@@ -4969,6 +5052,14 @@ export class Session implements SessionContext {
           }
         : result;
       promptResult = completedResult;
+      const proposalTurn = responseCapture.goalProposalTurn;
+      if (proposalTurn) {
+        proposalTurn.completedNormally =
+          completedResult.stopReason === 'end_turn' &&
+          !pendingSend.signal.aborted &&
+          proposalTurn.settlementBlocked !== true;
+      }
+      await this.#settleGoalProposal(responseCapture);
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -4998,6 +5089,26 @@ export class Session implements SessionContext {
       rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
+      const proposalTurn = responseCapture.goalProposalTurn;
+      if (proposalTurn) {
+        this.config.takePendingGoalProposal(proposalTurn.turnKey);
+        if (this.activeGoalProposalTurn === proposalTurn) {
+          this.activeGoalProposalTurn = undefined;
+        }
+      }
+      if (
+        this.config.getGoalProposalHostSupported() &&
+        this.config.setGoalProposalTurnKey(undefined)
+      ) {
+        try {
+          await this.config.getLlmClient().setTools();
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to refresh Goal proposal availability',
+            error,
+          );
+        }
+      }
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
@@ -5290,6 +5401,88 @@ export class Session implements SessionContext {
       : goalTurnContext.exit(execute);
   }
 
+  async #settleGoalProposal(capture: AgentResponseCapture): Promise<void> {
+    const turn = capture.goalProposalTurn;
+    if (!turn) return;
+    const proposal = this.config.takePendingGoalProposal(turn.turnKey);
+    if (!proposal) return;
+    const ownsTurn = () =>
+      turn.completedNormally &&
+      !turn.controller.signal.aborted &&
+      this.pendingPrompt === turn.controller &&
+      this.activeGoalProposalTurn === turn &&
+      !this.disposed &&
+      !this.closing;
+    if (!ownsTurn()) {
+      if (!this.disposed && !this.closing) {
+        await this.messageEmitter.emitAgentMessage(
+          formatProposeGoalRecoveryNotStarted(proposal.objective),
+        );
+      }
+      return;
+    }
+    try {
+      const runtime = await this.config.getGoalRuntimeReady();
+      if (!ownsTurn()) {
+        if (!this.disposed && !this.closing) {
+          await this.messageEmitter.emitAgentMessage(
+            formatProposeGoalRecoveryNotStarted(proposal.objective),
+          );
+        }
+        return;
+      }
+      const result = await applyPendingGoalProposal(runtime, proposal);
+      // The automatic queue remains blocked until this prompt releases its
+      // completion. Cancellation during persistence must pause before then.
+      if (result.applied && (!ownsTurn() || proposal.approvalSignal?.aborted)) {
+        try {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: result.goal.goalId,
+            expectedRevision: result.goal.revision,
+            reason:
+              this.closing || this.disposed
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
+          });
+        } catch (error) {
+          const current = runtime.getSnapshot().goal;
+          if (
+            current?.goalId === result.goal.goalId &&
+            current.revision === result.goal.revision &&
+            current.status === 'active'
+          ) {
+            this.heldGoalProposal = {
+              goalId: current.goalId,
+              revision: current.revision,
+            };
+            debugLogger.warn(
+              'Failed to pause the cancelled Goal proposal',
+              error,
+            );
+            await this.messageEmitter.emitAgentMessage(
+              `The Goal was created, but its cancellation could not be saved. Automatic execution is held in this session. ${GOAL_HELD_RECOVERY_COMMANDS}`,
+            );
+          }
+        }
+      } else if (!result.applied) {
+        debugLogger.debug(
+          `Dropping an approved Goal proposal: ${result.reason}`,
+        );
+        await this.messageEmitter.emitAgentMessage(
+          result.kind === 'changed'
+            ? result.reason
+            : formatProposeGoalRecoveryFailed(proposal.objective),
+        );
+      }
+    } catch (error) {
+      debugLogger.warn('Failed to apply an approved Goal proposal', error);
+      await this.messageEmitter.emitAgentMessage(
+        formatProposeGoalRecoveryFailed(proposal.objective),
+      );
+    }
+  }
+
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
@@ -5312,6 +5505,26 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        if (
+          !goalTurn &&
+          !channelTurn &&
+          params._meta?.['qwen.goalProposalApproval'] === true
+        ) {
+          responseCapture.goalProposalTurn = {
+            turnKey: promptId,
+            controller: pendingSend,
+            completedNormally: false,
+          };
+          this.activeGoalProposalTurn = responseCapture.goalProposalTurn;
+        }
+        if (
+          this.config.getGoalProposalHostSupported() &&
+          this.config.setGoalProposalTurnKey(
+            responseCapture.goalProposalTurn?.turnKey,
+          )
+        ) {
+          await this.config.getLlmClient().setTools();
+        }
         const daemonPromptId = getInvocationContext()?.promptId;
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
@@ -6477,6 +6690,11 @@ export class Session implements SessionContext {
       modelOverride = model;
       return true;
     };
+    const blockGoalProposalSettlement = () => {
+      if (responseCapture?.goalProposalTurn) {
+        responseCapture.goalProposalTurn.settlementBlocked = true;
+      }
+    };
     let midTurnContinuationCount = 0;
 
     while (true) {
@@ -6493,6 +6711,7 @@ export class Session implements SessionContext {
       }
 
       if (this.todoStopGuardQueuedPromptPriority) {
+        blockGoalProposalSettlement();
         return { stopReason: 'end_turn' };
       }
 
@@ -6507,6 +6726,7 @@ export class Session implements SessionContext {
               pendingSend.signal,
             );
             if (claim === 'queued') {
+              blockGoalProposalSettlement();
               this.#preserveUnsentMessageHistory(
                 { role: 'user', parts: drained.parts },
                 true,
@@ -6518,6 +6738,7 @@ export class Session implements SessionContext {
             }
           }
           this.todoStopGuard.acceptMidTurnUserInput();
+          blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
             pendingSend,
             promptId + '_mid_turn_' + ++midTurnContinuationCount,
@@ -6545,6 +6766,7 @@ export class Session implements SessionContext {
             pendingSend.signal,
           );
           if (claim === 'queued') {
+            blockGoalProposalSettlement();
             return { stopReason: 'end_turn' };
           }
           if (claim === 'unavailable') {
@@ -6609,6 +6831,7 @@ export class Session implements SessionContext {
                 pendingSend.signal,
               );
               if (claim === 'queued') {
+                blockGoalProposalSettlement();
                 this.#preserveUnsentMessageHistory(
                   { role: 'user', parts: drained.parts },
                   true,
@@ -6620,6 +6843,7 @@ export class Session implements SessionContext {
               }
             }
             this.todoStopGuard.acceptMidTurnUserInput();
+            blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
               pendingSend,
               promptId + '_mid_turn_' + ++midTurnContinuationCount,
@@ -6647,6 +6871,7 @@ export class Session implements SessionContext {
               pendingSend.signal,
             );
             if (claim === 'queued') {
+              blockGoalProposalSettlement();
               return { stopReason: 'end_turn' };
             }
             if (claim === 'unavailable') {
@@ -6693,7 +6918,10 @@ export class Session implements SessionContext {
 
       if (guardDecision?.kind === 'exhausted') {
         await this.#emitTodoStopGuardExhausted(guardDecision);
-        if (!externalReason) return { stopReason: 'end_turn' };
+        if (!externalReason) {
+          blockGoalProposalSettlement();
+          return { stopReason: 'end_turn' };
+        }
       }
 
       if (externalReason && stopHookIterationCount >= stopHookBlockingCap) {
@@ -6716,6 +6944,7 @@ export class Session implements SessionContext {
           await this.#pauseGoalForStopHookCap();
         }
         this.todoStopGuard.suspend();
+        blockGoalProposalSettlement();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
         return { stopReason: 'end_turn' };
@@ -6817,6 +7046,15 @@ export class Session implements SessionContext {
           : null,
         true,
       );
+    };
+    // A skipped send that yields to a queued user prompt (or to an
+    // unreliable queue read) is not a normally-finished turn for a parked
+    // Goal proposal; the loop-level exits already block settlement there.
+    const blockGoalProposalSettlement = () => {
+      const proposalTurn = options.responseCapture?.goalProposalTurn;
+      if (proposalTurn) {
+        proposalTurn.settlementBlocked = true;
+      }
     };
 
     while (nextMessage !== null) {
@@ -6951,6 +7189,7 @@ export class Session implements SessionContext {
                     nextGuardContinuation = undefined;
                     if (!options.externalParts) {
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       return { kind: 'stop', stopReason: 'end_turn' };
                     }
                     if (!initialSend && nextMessage) {
@@ -6973,6 +7212,7 @@ export class Session implements SessionContext {
                       guardForThisSend = undefined;
                       nextGuardContinuation = undefined;
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       if (initialSend) {
                         supersededAutomaticContinuation = true;
                       }
@@ -7049,6 +7289,7 @@ export class Session implements SessionContext {
                       guardForThisSend = undefined;
                       nextGuardContinuation = undefined;
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       if (initialSend) {
                         supersededAutomaticContinuation = true;
                       }
@@ -7730,13 +7971,27 @@ export class Session implements SessionContext {
     };
   }
 
-  #settleTurnRecording(
+  async #settleTurnRecording(
     state: 'completed' | 'cancelled' | 'error',
     recording: InFlightTurnRecording | null,
     response?: PromptResponse,
     error?: unknown,
-  ): void {
+  ): Promise<void> {
     if (recording === null) return;
+    const cancelledAt =
+      state === 'cancelled' ? recording.cancelledAt : undefined;
+    if (cancelledAt !== undefined && response) {
+      response._meta = {
+        ...response._meta,
+        'qwen.promptCancelled': {
+          cancelledAt,
+          elapsedMs: Math.max(
+            0,
+            cancelledAt - (recording.startedAt ?? cancelledAt),
+          ),
+        },
+      };
+    }
     const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
     const stopReason =
       response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
@@ -7748,6 +8003,7 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
+      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -7764,6 +8020,9 @@ export class Session implements SessionContext {
     };
     try {
       recording.recordingService?.recordTurnResult(payload);
+      if (cancelledAt !== undefined) {
+        await recording.recordingService?.flush();
+      }
     } catch (recordError) {
       debugLogger.warn(
         `Failed to record turn result: ${this.#formatError(recordError)}`,
@@ -8706,6 +8965,13 @@ export class Session implements SessionContext {
       preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
+    const proposalTurn = this.activeGoalProposalTurn;
+    if (
+      messages.length > 0 &&
+      proposalTurn?.controller.signal === abortSignal
+    ) {
+      proposalTurn.settlementBlocked = true;
+    }
     const parts: Part[] = [];
     for (const message of messages) {
       if (message.kind === 'structured' && message.agentRun) {
@@ -8907,6 +9173,33 @@ export class Session implements SessionContext {
           );
         });
     };
+    const restoreOneShot = async (): Promise<void> => {
+      if (job.recurring !== false || !job.id) return;
+      try {
+        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        if (!restored) {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not restore its unexecuted one-shot: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (
+      (job.modelServiceId !== undefined &&
+        !isValidCronTaskRoutingId(job.modelServiceId)) ||
+      (job.groupId !== undefined && !isValidCronTaskRoutingId(job.groupId))
+    ) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
+      );
+      await record({ dispatchFailed: true });
+      await restoreOneShot();
+      return;
+    }
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
@@ -8934,6 +9227,8 @@ export class Session implements SessionContext {
                 sourceId: scheduledTaskRunSourceId(job.id),
               }
             : {}),
+          ...(job.modelServiceId ? { model: job.modelServiceId } : {}),
+          ...(job.groupId ? { groupId: job.groupId } : {}),
           callerSessionId: this.sessionId,
         },
       );
@@ -8946,10 +9241,30 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const requiresFreshSessionRouting =
+        job.modelServiceId !== undefined || job.groupId !== undefined;
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' &&
+              error !== null &&
+              typeof (error as Record<string, unknown>)['message'] === 'string'
+            ? (error as Record<string, unknown>)['message']
+            : String(error);
       debugLogger.warn(
-        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+        requiresFreshSessionRouting
+          ? `Scheduled task ${taskId} could not create a fresh session with its requested routing: ${errorMessage}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${errorMessage}`,
       );
-      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      await record(
+        requiresFreshSessionRouting
+          ? { dispatchFailed: true }
+          : { sessionId: this.sessionId, dispatchFailed: true },
+      );
+      if (requiresFreshSessionRouting) {
+        await restoreOneShot();
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',
@@ -11132,11 +11447,17 @@ export class Session implements SessionContext {
       ]),
     );
     const pendingToolResultRecords: PendingToolResultRecord[] = [];
+    const pendingNestedToolResultRecords: PendingToolResultRecord[] = [];
     let toolResultRecordSequence = 0;
     const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
-      pendingToolResultRecords.push({
+      const ordinal = dedupedFunctionCalls.indexOf(fc);
+      const target =
+        ordinal === -1
+          ? pendingNestedToolResultRecords
+          : pendingToolResultRecords;
+      target.push({
         ...record,
-        ordinal: dedupedFunctionCalls.indexOf(fc),
+        ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
       });
     };
@@ -11145,47 +11466,20 @@ export class Session implements SessionContext {
     // end the turn asked no matter which of the exits below the batch takes,
     // and the exits that run before any tool does read it as false anyway.
     let batchTerminatesTurn = false;
-    const finalizeRunToolResult = async (
-      result: RunToolResult,
-    ): Promise<RunToolResult> => {
-      const orderedRecords = [...pendingToolResultRecords].sort(
-        (left, right) =>
-          left.ordinal - right.ordinal || left.sequence - right.sequence,
-      );
-      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
-        complete:
-          orderedRecords.length === dedupedFunctionCalls.length &&
-          new Set(orderedRecords.map((record) => record.ordinal)).size ===
-            dedupedFunctionCalls.length,
-        observations: orderedRecords.map((record) => ({
-          callId: record.callId,
-          policyToolName: record.policyToolName,
-          toolType: record.toolType,
-          terminalStatus: record.metadata.status,
-          executionStatus: record.metadata.executionStatus,
-          executionErrorType: record.executionErrorType,
-          providerDuplicate: record.providerDuplicate,
-        })),
-      };
-      if (orderedRecords.length === 0) {
-        return {
-          ...result,
-          repeatedToolFailureBatch,
-          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
-        };
-      }
+    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+      if (records.length === 0) return [];
       const finalized = await finalizeToolResponses(
         this.config,
-        orderedRecords.map((record) => ({
+        records.map((record) => ({
           callId: record.callId,
           toolName: record.toolName,
           responseParts: record.responseParts,
           persistedOutputFiles: record.persistedOutputFiles,
           artifacts: record.metadata.artifacts,
         })),
-        new Map(orderedRecords.map((record) => [record.callId, promptId])),
+        new Map(records.map((record) => [record.callId, promptId])),
       );
-      orderedRecords.forEach((record, index) => {
+      records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
         // in-memory result is produced. The flag check is retroactive on
@@ -11212,6 +11506,51 @@ export class Session implements SessionContext {
           ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
         );
       });
+      return finalized;
+    };
+    const finalizeNestedToolResult = async (
+      result: RunToolResult,
+    ): Promise<Part[]> => {
+      const records = pendingNestedToolResultRecords.splice(0);
+      if (records.length === 0) return result.parts;
+      const finalized = await finalizeAndRecord(records);
+      return finalized.flatMap((entry) => entry.responseParts);
+    };
+    const finalizeRunToolResult = async (
+      result: RunToolResult,
+    ): Promise<RunToolResult> => {
+      await finalizeAndRecord(
+        [...pendingNestedToolResultRecords].sort(
+          (left, right) => left.sequence - right.sequence,
+        ),
+      );
+      const orderedRecords = [...pendingToolResultRecords].sort(
+        (left, right) =>
+          left.ordinal - right.ordinal || left.sequence - right.sequence,
+      );
+      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
+        complete:
+          orderedRecords.length === dedupedFunctionCalls.length &&
+          new Set(orderedRecords.map((record) => record.ordinal)).size ===
+            dedupedFunctionCalls.length,
+        observations: orderedRecords.map((record) => ({
+          callId: record.callId,
+          policyToolName: record.policyToolName,
+          toolType: record.toolType,
+          terminalStatus: record.metadata.status,
+          executionStatus: record.metadata.executionStatus,
+          executionErrorType: record.executionErrorType,
+          providerDuplicate: record.providerDuplicate,
+        })),
+      };
+      if (orderedRecords.length === 0) {
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
+        };
+      }
+      const finalized = await finalizeAndRecord(orderedRecords);
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
@@ -11602,6 +11941,8 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          undefined,
+          finalizeNestedToolResult,
         )
           .then((r) => {
             results[idx] = r;
@@ -11745,6 +12086,8 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              undefined,
+              finalizeNestedToolResult,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -11846,6 +12189,11 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    codeModeContext?: {
+      parentCallId: string;
+      source: 'code_mode';
+    },
+    finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -11912,6 +12260,12 @@ export class Session implements SessionContext {
           'event.name': 'tool_call',
           'event.timestamp': new Date().toISOString(),
           call_id: callId,
+          ...(codeModeContext
+            ? {
+                parent_call_id: codeModeContext.parentCallId,
+                source: codeModeContext.source,
+              }
+            : {}),
           prompt_id: promptId,
           function_name: toolName,
           function_args: args,
@@ -12094,6 +12448,22 @@ export class Session implements SessionContext {
     }
 
     const toolName = fc.name;
+    if (
+      this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+      !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
+    ) {
+      return earlyErrorResponse(
+        new Error(
+          `Tool "${toolName}" is unavailable on this CodeModeOnly call surface.`,
+        ),
+        toolName,
+        {
+          status: 'error',
+          errorType: ToolErrorType.EXECUTION_DENIED,
+          executionStatus: 'not_started',
+        },
+      );
+    }
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(toolName);
 
@@ -12136,6 +12506,12 @@ export class Session implements SessionContext {
         // matching daemon/ACP tool spans during the migration window.
         call_id: callId,
         tool_name: policyToolName,
+        ...(codeModeContext
+          ? {
+              'tool.parent_call_id': codeModeContext.parentCallId,
+              'tool.source': codeModeContext.source,
+            }
+          : {}),
       },
       tool.description,
       promptId,
@@ -12144,6 +12520,24 @@ export class Session implements SessionContext {
       return await runInToolSpanContext(toolSpan, async () => {
         const entryCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (entryCancellation) return entryCancellation;
+
+        if (
+          policyToolName === ToolNames.PROPOSE_GOAL &&
+          (this.activeGoalProposalTurn?.turnKey !== promptId ||
+            this.activeGoalProposalTurn.controller.signal.aborted)
+        ) {
+          return earlyErrorResponse(
+            new Error(
+              'The Goal was not set: this turn cannot own a Goal approval. Hand the user a `/goal set <objective>` line instead.',
+            ),
+            toolName,
+            {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            },
+          );
+        }
 
         // ---- L1: Tool enablement check ----
         const isTrustedLiveScreenContextTool =
@@ -13496,11 +13890,106 @@ export class Session implements SessionContext {
             executionStatus = 'error';
             executeAttempted = true;
             try {
-              toolResult = await invocation.execute(
-                activeToolAbortSignal,
-                onToolProgress,
-                this.config.getShellExecutionConfig(),
-              );
+              const execute = () =>
+                invocation.execute(
+                  activeToolAbortSignal,
+                  onToolProgress,
+                  this.config.getShellExecutionConfig(),
+                );
+              if (toolName !== ToolNames.EXEC) {
+                toolResult = await execute();
+              } else {
+                let dispatchTail = Promise.resolve();
+                const dispatch = (
+                  nestedName: string,
+                  nestedArgs: Record<string, unknown>,
+                  nestedSignal: AbortSignal,
+                  onResult?: (response: ToolCallResponseInfo) => void,
+                ): Promise<CodeModeToolResult> => {
+                  const next = dispatchTail.then(async () => {
+                    if (!isCodeModeToolCallAllowed(nestedName, 'code_mode')) {
+                      throw new Error(
+                        `Tool "${nestedName}" is not callable from exec.`,
+                      );
+                    }
+                    const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                    const nested = await runWithoutToolCallRuntime(() =>
+                      this.runTool(
+                        nestedSignal,
+                        promptId,
+                        {
+                          id: nestedCallId,
+                          name: nestedName,
+                          args: nestedArgs,
+                        },
+                        onStopAfterPermissionCancel,
+                        toolLoopState,
+                        recordSkippedToolCall,
+                        queueToolResultRecord,
+                        nestedCallId,
+                        onFullTurnModel,
+                        { parentCallId: callId, source: 'code_mode' },
+                      ),
+                    );
+                    const nestedParts = finalizeCodeModeToolResult
+                      ? await finalizeCodeModeToolResult(nested)
+                      : nested.parts;
+                    const functionResponse = nestedParts
+                      .map((part) => part.functionResponse)
+                      .find((part) => part?.id === nestedCallId);
+                    const response = functionResponse?.response as
+                      | Record<string, unknown>
+                      | undefined;
+                    const nestedError = response?.['error'];
+                    onResult?.({
+                      callId: nestedCallId,
+                      responseParts: nestedParts,
+                      resultDisplay: undefined,
+                      error:
+                        nestedError === undefined
+                          ? undefined
+                          : new Error(String(nestedError)),
+                      errorType: undefined,
+                      ...('modelOverride' in nested
+                        ? { modelOverride: nested.modelOverride }
+                        : {}),
+                      ...(nested.terminateTurn ? { terminateTurn: true } : {}),
+                    });
+                    if (nestedError !== undefined) {
+                      throw new Error(
+                        typeof nestedError === 'string'
+                          ? nestedError
+                          : JSON.stringify(nestedError),
+                      );
+                    }
+                    const nestedOutput =
+                      response?.['output'] ?? response?.['content'] ?? '';
+                    const content = extractCodeModeImageContent(nestedParts);
+                    return {
+                      callId: nestedCallId,
+                      name: nestedName,
+                      status: 'success' as const,
+                      output:
+                        typeof nestedOutput === 'string'
+                          ? nestedOutput
+                          : JSON.stringify(nestedOutput),
+                      ...(content ? { content } : {}),
+                    };
+                  });
+                  dispatchTail = next.then(
+                    () => undefined,
+                    () => undefined,
+                  );
+                  return next;
+                };
+                toolResult = await runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    dispatch,
+                  },
+                  execute,
+                );
+              }
               executeReturned = true;
               try {
                 settledArtifacts = toolResult.artifacts;
@@ -13878,6 +14367,12 @@ export class Session implements SessionContext {
               'event.name': 'tool_call',
               'event.timestamp': new Date().toISOString(),
               call_id: callId,
+              ...(codeModeContext
+                ? {
+                    parent_call_id: codeModeContext.parentCallId,
+                    source: codeModeContext.source,
+                  }
+                : {}),
               function_name: toolName,
               function_args: args,
               duration_ms: durationMs,
@@ -13946,8 +14441,13 @@ export class Session implements SessionContext {
           }
           return {
             parts: responseParts,
+            ...('modelOverride' in toolResult && succeeded
+              ? { modelOverride: toolResult.modelOverride }
+              : {}),
             stopAfterPermissionCancel: nestedPermissionCancelled,
-            ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
+            ...(toolResult.terminateTurn && succeeded
+              ? { terminateTurn: true }
+              : {}),
             memoryWriteCandidates:
               status === 'success'
                 ? [
