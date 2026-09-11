@@ -479,7 +479,20 @@ function runScenario(
         // waits for the watcher's cede (the SUPERSEDE_FILE write) and then
         // dies as killed — the watcher's local kill record is the only
         // departure witness, since a normal push emits no force-push event.
-        '  cede_revert_ff_kill) if [ "$n" -eq 1 ]; then i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 400 ]; do /bin/sleep 0.05; i=$((i+1)); done; exit 143; else r success false "attempt 2 must not run"; fi ;;',
+        // The death must not precede the record: the real attempt dies to
+        // the watcher's TERM, strictly after the record write, while a
+        // stub exiting on the signal alone let the loop's cede check read
+        // the dir first and refuse the genuine cede on the lost-record
+        // branch (release run 34485181843 — this arm, red at 326ms). The
+        // dir is never exported, so the wait discovers it by listing
+        // RUNNER_TEMP (pinned private per replay below — a shared one
+        // hands the glob stale records), the same discovery
+        // supersede_forged_kill_record makes. The race itself has no
+        // deterministic committed witness — the harness offers no hook
+        // between the watcher's two writes — so it is probed by injecting
+        // a delay there: green with this wait, the release's
+        // `expected 1 to be +0` without it.
+        '  cede_revert_ff_kill) if [ "$n" -eq 1 ]; then i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 400 ]; do /bin/sleep 0.05; i=$((i+1)); done; i=0; while [ "$i" -lt 200 ]; do hit=0; for d in "${RUNNER_TEMP:-/tmp}"/qwen-review-supersede-kill.*; do [ -f "$d/killed" ] && { hit=1; break; }; done; [ "$hit" -eq 1 ] && break; /bin/sleep 0.05; i=$((i+1)); done; exit 143; else r success false "attempt 2 must not run"; fi ;;',
         // R4-1 agent-side forgery: the kill dir is never exported, but it
         // is minted under the enumerable RUNNER_TEMP with a fixed prefix —
         // the stub DISCOVERS it by listing (no derivation), plants the kill
@@ -4633,6 +4646,20 @@ describe('review supersede salvage (#10110)', () => {
     expect((run.match(/cede_superseded/g) ?? []).length).toBe(5);
   });
 
+  it('pins the kill-record branch acceptance bound', () => {
+    // Scoped to supersede_reverted_during_run(): a whole-file toContain is
+    // satisfiable by an occurrence anywhere in the YAML, so the bound could
+    // be deleted from the branch and stay green on a stray copy elsewhere.
+    // The needle runs through `|| continue` — the full shell line — so
+    // nothing can be inserted between the bound and the skip (an appended
+    // ceiling conjunct leaves a shorter needle's substring intact). The
+    // sibling lost-record pair branch's START_TS - 15 tolerance is a
+    // deliberately different bound and stays out of this pin.
+    expect(supersedeRevertedSource()).toContain(
+      '[ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ] || continue',
+    );
+  });
+
   it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
     const fn = run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0];
     expect(fn).toBeTruthy();
@@ -4682,6 +4709,12 @@ describe('review supersede salvage (#10110)', () => {
 
   function writeSignalSource() {
     return run.match(/write_signal\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function supersedeRevertedSource() {
+    return (
+      run.match(/supersede_reverted_during_run\(\) \{[\s\S]*?\n\}/)?.[0] ?? ''
+    );
   }
 
   function runWatcher({
@@ -6237,10 +6270,13 @@ describe('review supersede salvage (#10110)', () => {
       // between now and the loop start. The branch imposes no upper
       // bound on the event time, so a generous margin costs nothing —
       // the harness child's 30s timeout bounds the replay body long
-      // before the margin does.
-      expect(workflow).toContain(
-        '[ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ]',
-      );
+      // before the margin does. RUNNER_TEMP is pinned private per replay:
+      // the stub's kill-record wait globs it (see the stub), and a shared
+      // one could hand the glob a stale record — the minted dir survives
+      // the replay (no EXIT trap in the extraction window), so the far
+      // arm below gets its own.
+      const rt = join(dir, 'rt');
+      mkdirSync(rt);
       const now = new Date(Date.now() + 300000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
@@ -6251,6 +6287,7 @@ describe('review supersede salvage (#10110)', () => {
           STUB_LIVE_HEAD_A1: 'head-b',
           STUB_LIVE_HEAD: 'head-a',
           REPO: 'o/r',
+          RUNNER_TEMP: rt,
           STUB_TIMELINE: `head-x head-a ${now}`,
         },
       });
@@ -6258,6 +6295,36 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.status).toBe(0);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).not.toContain('FAIL ');
+      // The no-upper-bound property the comment above relies on is a
+      // behaviour, not a text shape: an added ceiling — a sibling
+      // `continue` line or a conjunct on the bound line — defeats any
+      // needle, while an event beyond every plausible ceiling must still
+      // cede. 3600s, not an intermediate offset: the offset is measured
+      // from Date.now() here while START_TS is captured inside the
+      // harness, and a loaded shared runner's setup eats a tight margin
+      // (the flake class this suite keeps hitting). A fresh SUPERSEDE_FILE
+      // path too: reusing the one above cedes at the loop's pre-attempt
+      // check before the attempt runs.
+      const rtFar = join(dir, 'rt-far');
+      mkdirSync(rtFar);
+      const farNow = new Date(Date.now() + 3_600_000).toISOString();
+      const far = runScenario('cede_revert_ff_kill', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: join(dir, 'superseded-far'),
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count-far'),
+          STUB_LIVE_HEAD_A1: 'head-b',
+          STUB_LIVE_HEAD: 'head-a',
+          REPO: 'o/r',
+          RUNNER_TEMP: rtFar,
+          STUB_TIMELINE: `head-x head-a ${farNow}`,
+        },
+      });
+      expect(far.attempts).toBe(1);
+      expect(far.status).toBe(0);
+      expect(far.raw).toContain('Superseded early:');
+      expect(far.raw).not.toContain('FAIL ');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
