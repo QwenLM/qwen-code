@@ -17,9 +17,11 @@ import {
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
+  getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
+  runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -124,6 +126,7 @@ describe('AgentCore.runInAgentFrames', () => {
     runtimeView?: RuntimeContentGeneratorView,
     taskName?: string,
     subagentId?: string,
+    toolConfig?: ToolConfig,
   ) {
     const promptConfig: PromptConfig = { systemPrompt: '' };
     const modelConfig: ModelConfig = { model: 'test-model' };
@@ -134,7 +137,7 @@ describe('AgentCore.runInAgentFrames', () => {
       promptConfig,
       modelConfig,
       runConfig,
-      undefined,
+      toolConfig,
       undefined,
       undefined,
       runtimeView,
@@ -142,6 +145,28 @@ describe('AgentCore.runInAgentFrames', () => {
       subagentId,
     );
   }
+
+  it('publishes the per-agent disallowedTools blocklist, shadowing any parent frame', async () => {
+    // AgentTool's fork reads this frame (getCurrentAgentDisallowedTools) so
+    // the parent's blocklist survives one level down (R24-1). Mutation
+    // check: removing the runWithAgentDisallowedTools wrap in
+    // runInAgentFrames turns the first assertion red. A nested agent with no
+    // blocklist of its own must shadow — not inherit — the parent's frame.
+    const blocked = makeCore('blocked-agent', undefined, undefined, undefined, {
+      tools: ['*'],
+      disallowedTools: ['mcp__slack'],
+    });
+    const plain = makeCore('plain-agent');
+
+    await runWithAgentDisallowedTools(['outer__blocked'], async () => {
+      await blocked.runInAgentFrames(async () => {
+        expect(getCurrentAgentDisallowedTools()).toEqual(['mcp__slack']);
+      });
+      await plain.runInAgentFrames(async () => {
+        expect(getCurrentAgentDisallowedTools()).toBeUndefined();
+      });
+    });
+  });
 
   it('keeps the stable telemetry name and exposes task identity locally', async () => {
     const core = makeCore(

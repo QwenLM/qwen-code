@@ -35,6 +35,16 @@ interface AgentContext {
   readonly agentId?: string;
   readonly runtimeView?: RuntimeContentGeneratorView;
   /**
+   * The owning agent's per-agent `toolConfig.disallowedTools` blocklist.
+   * Published by `AgentCore.runInAgentFrames` so a tool that reshapes a
+   * child agent's tool surface — AgentTool's fork — keeps the blocklist one
+   * level down instead of the fork's execution allowlist re-admitting a
+   * tool the parent was configured never to reach. Re-set (even to
+   * `undefined`) on every agent frame: a nested agent without a blocklist
+   * must not see its parent's.
+   */
+  readonly disallowedTools?: readonly string[];
+  /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
    * Auto-incremented by default; resume paths (background resume,
@@ -69,6 +79,27 @@ export function runWithRuntimeContentGenerator<T>(
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   return storage.run({ ...current, runtimeView: view }, fn);
+}
+
+/**
+ * Sets the owning agent's `disallowedTools` blocklist for the duration of
+ * `fn`. Always establishes the field — including as `undefined` — so a
+ * nested agent's frame shadows the parent's blocklist rather than
+ * inheriting it.
+ */
+export function runWithAgentDisallowedTools<T>(
+  disallowedTools: readonly string[] | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, disallowedTools }, fn);
+}
+
+/** The owning agent's `disallowedTools` blocklist, if its frame set one. */
+export function getCurrentAgentDisallowedTools():
+  | readonly string[]
+  | undefined {
+  return storage.getStore()?.disallowedTools;
 }
 
 export function getCurrentAgentId(): string | null {

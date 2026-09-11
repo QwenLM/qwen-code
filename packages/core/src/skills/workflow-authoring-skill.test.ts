@@ -47,7 +47,12 @@ interface StubOptions {
 function stubConfig(options: StubOptions = {}) {
   const {
     skillManager = true,
-    toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+    toolNames = [
+      ToolNames.SKILL,
+      ToolNames.WORKFLOW,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ],
     deferred = [],
     visibleTools = [],
     revealed = [],
@@ -145,9 +150,20 @@ describe('resolveWorkflowAuthoringRoute', () => {
     ['skills are off entirely', { skillManager: false }],
     ['the Skill tool is not registered', { toolNames: [ToolNames.WORKFLOW] }],
     [
-      'the Skill tool is deferred and nothing can reveal it',
+      'the Skill tool is deferred and no bridge tool is registered',
       {
         toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW],
+        deferred: [ToolNames.SKILL],
+      },
+    ],
+    // R27-2: tool_search alone is half a bridge — the schema can be reviewed
+    // but never invoked, so the reference must inline rather than point at a
+    // route the session cannot serve. Mutation check: dropping the TOOL_CALL
+    // half of the route gate turns this red.
+    [
+      'the Skill tool is deferred and tool_call is missing',
+      {
+        toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
         deferred: [ToolNames.SKILL],
       },
     ],
@@ -159,7 +175,7 @@ describe('resolveWorkflowAuthoringRoute', () => {
 
   // A `tools.eager` allowlist that omits the Skill tool keeps its schema out
   // of the request while leaving it registered. The pointer still works, one
-  // ToolSearch away, and has to say so.
+  // bridge hop (tool_search review, then tool_call) away, and has to say so.
   it('routes through ToolSearch when the Skill tool is deferred', () => {
     const { config } = stubConfig({ deferred: [ToolNames.SKILL] });
     expect(resolveWorkflowAuthoringRoute(config)).toBe('skill-via-tool-search');
@@ -222,6 +238,13 @@ describe('resolveWorkflowAuthoringSurface', () => {
   it.each([
     [{}, 'pointer'],
     [{ deferred: [ToolNames.SKILL] }, 'pointer-via-tool-search'],
+    [
+      {
+        deferred: [ToolNames.SKILL],
+        toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+      },
+      'inline',
+    ],
     [{ toolNames: [ToolNames.WORKFLOW] }, 'inline'],
     [{ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] }, 'withheld'],
   ])('maps %o to %s', (options: StubOptions, surface) => {

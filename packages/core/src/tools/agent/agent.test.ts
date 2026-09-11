@@ -48,7 +48,10 @@ import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import {
+  runWithAgentContext,
+  runWithAgentDisallowedTools,
+} from '../../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -4619,6 +4622,60 @@ describe('AgentTool', () => {
         ToolNames.WEB_FETCH,
         'mcp__docs__search',
       ]);
+    });
+
+    it("keeps the parent subagent's disallowedTools out of the fork execution allowlist", async () => {
+      // R24-1: the fork's execution allowlist unions the parent's declared
+      // tools with the live registry. A tool the parent's own disallowedTools
+      // blocklist removed from its declarations (prepareTools) stays
+      // registered, so the union would re-admit it — and the bridge decouples
+      // execution from declaration, making the bypass callable. The blocklist
+      // must survive one level down. Mutation check: dropping the
+      // keepOffParentBlocklist filter in createForkSubagent turns this red.
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        'mcp__slack__post_message',
+        ToolNames.WRITE_FILE,
+      ]);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork inside a slack-blocked parent',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+      });
+      await runWithAgentDisallowedTools(['mcp__slack'], () =>
+        invocation.execute(),
+      );
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.executionAllowedTools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+      ]);
+      expect(toolConfig?.executionAllowedTools).not.toContain(
+        'mcp__slack__post_message',
+      );
+      // The fork's own invocation-level re-check enforces the blocklist too,
+      // covering wildcard fork_tools patterns an exact-name filter misses.
+      expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
     });
 
     it('preserves display_image in the fork declarations but denies its execution', async () => {

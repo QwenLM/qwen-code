@@ -54,7 +54,7 @@ export {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringRoute,
   resolveWorkflowAuthoringSurface,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from './workflow-authoring-skill.js';
 export type {

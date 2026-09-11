@@ -30,6 +30,7 @@ import {
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
+  runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -874,6 +875,16 @@ export class AgentCore {
           },
           () => {
             const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            // Publish this agent's per-agent disallowedTools blocklist so a
+            // fork it launches inherits the blocklist one level down
+            // (getCurrentAgentDisallowedTools). The helper always re-sets the
+            // field, so an agent without a blocklist shadows its parent's
+            // frame instead of leaking it.
+            const runWithToolPolicy = () =>
+              runWithAgentDisallowedTools(
+                this.toolConfig?.disallowedTools,
+                runWithView,
+              );
             // inheritedAgentDepth restores the agent's original nesting depth.
             // Without it the frame recomputes from the UI's frame-less async
             // chain to depth 0, and an approved `agent` tool call from a
@@ -881,10 +892,10 @@ export class AgentCore {
             return inheritedAgentId
               ? runWithAgentContext(
                   inheritedAgentId,
-                  runWithView,
+                  runWithToolPolicy,
                   inheritedAgentDepth,
                 )
-              : runWithView();
+              : runWithToolPolicy();
           },
         ),
       );

@@ -5,6 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
+import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
@@ -154,6 +155,28 @@ const PRE_APPROVAL_TASK_CLAIM_KEYS: ReadonlySet<string> = new Set([
 
 export function isSubagentLikeExecutionContext(): boolean {
   return getCurrentAgentId() !== null || isTeammate();
+}
+
+/**
+ * Whether `toolName` matches a per-agent `disallowedTools` blocklist, with
+ * the exact match semantics AgentCore.prepareTools() applies at declaration
+ * level: MCP server-level patterns via {@link matchesMcpPattern} for `mcp__`
+ * tools, exact match otherwise. Shared so a fork's inherited execution
+ * allowlist (tools/agent/agent.ts) cannot drift from the parent's own
+ * declaration/invocation enforcement.
+ */
+export function matchesAgentToolBlocklist(
+  blocklist: readonly string[] | undefined,
+  toolName: string,
+): boolean {
+  if (!blocklist?.length) {
+    return false;
+  }
+  return blocklist.some((pattern) =>
+    toolName.startsWith('mcp__')
+      ? matchesMcpPattern(pattern, toolName)
+      : pattern === toolName,
+  );
 }
 
 /**

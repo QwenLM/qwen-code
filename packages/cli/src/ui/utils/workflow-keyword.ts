@@ -25,7 +25,7 @@ import {
   resolveWorkflowAuthoringSurface,
   ToolDisplayNames,
   ToolNames,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -66,13 +66,14 @@ export function detectWorkflowKeyword(text: string): boolean {
  * the reference is inlined there is nothing to load, and when the user withheld
  * it there is nothing the model should go looking for.
  *
- * `revealWorkflowTool` is set when the Workflow tool's own schema is withheld
- * and ToolSearch can bring it back — steering toward the tool without saying so
- * would send the model to call something it has no declaration for.
+ * `bridgeWorkflowTool` is set when the Workflow tool's own schema is withheld
+ * and the tool_search + tool_call bridge can reach it — steering toward the
+ * tool without saying so would send the model to call something it has no
+ * declaration for.
  */
 export function buildWorkflowSteeringNotice(
   surface?: WorkflowAuthoringSurface,
-  options: { revealWorkflowTool?: boolean } = {},
+  options: { bridgeWorkflowTool?: boolean } = {},
 ): string {
   const parts = [
     'The user\'s message includes the "workflow" keyword. If this request ' +
@@ -81,8 +82,8 @@ export function buildWorkflowSteeringNotice(
       'parallel()/pipeline() — over ad-hoc sequential tool calls. If a workflow ' +
       'is not a good fit for this request, proceed normally.',
   ];
-  if (options.revealWorkflowTool) {
-    parts.push(toolSearchRevealSentence(ToolDisplayNames.WORKFLOW));
+  if (options.bridgeWorkflowTool) {
+    parts.push(toolSearchBridgeSentence(ToolDisplayNames.WORKFLOW));
   }
   if (surface === 'pointer' || surface === 'pointer-via-tool-search') {
     parts.push(
@@ -91,7 +92,7 @@ export function buildWorkflowSteeringNotice(
     );
   }
   if (surface === 'pointer-via-tool-search') {
-    parts.push(toolSearchRevealSentence(ToolDisplayNames.SKILL));
+    parts.push(toolSearchBridgeSentence(ToolDisplayNames.SKILL));
   }
   return parts.join(' ');
 }
@@ -103,8 +104,9 @@ export function buildWorkflowSteeringNotice(
  * `null` when the keyword is absent; for a shell-mode submission, whose text
  * goes to bash (where a leading `<system-reminder>` is a syntax error) and is
  * recorded as the command the user ran; and when the Workflow tool is out of
- * reach — not registered, or its schema withheld with no ToolSearch to reveal
- * it. Steering toward a tool the model cannot call helps nobody.
+ * reach — not registered, or its schema withheld with no tool_search +
+ * tool_call bridge to reach it. Steering toward a tool the model cannot call
+ * helps nobody.
  *
  * The description shape is read from the Workflow tool instance, which
  * recorded it when it was built, rather than re-derived: a `/skills` toggle
@@ -118,15 +120,22 @@ export function buildWorkflowKeywordPrefix(
   if (options.shellMode) return null;
   if (!detectWorkflowKeyword(text)) return null;
   let surface: WorkflowAuthoringSurface | undefined;
-  let revealWorkflowTool = false;
+  let bridgeWorkflowTool = false;
   try {
     const registry = config.getToolRegistry?.();
     const toolNames = registry?.getAllToolNames?.();
     if (Array.isArray(toolNames)) {
       if (!toolNames.includes(ToolNames.WORKFLOW)) return null;
       if (isToolHiddenBehindToolSearch(config, ToolNames.WORKFLOW)) {
-        if (!toolNames.includes(ToolNames.TOOL_SEARCH)) return null;
-        revealWorkflowTool = true;
+        // Both bridge halves are required: tool_search alone can review the
+        // schema but never invoke it.
+        if (
+          !toolNames.includes(ToolNames.TOOL_SEARCH) ||
+          !toolNames.includes(ToolNames.TOOL_CALL)
+        ) {
+          return null;
+        }
+        bridgeWorkflowTool = true;
       }
     }
     // Typed against the real class so renaming the property in core is a
@@ -140,5 +149,5 @@ export function buildWorkflowKeywordPrefix(
     // closing sentences is the right degradation.
     surface = undefined;
   }
-  return `<system-reminder>\n${buildWorkflowSteeringNotice(surface, { revealWorkflowTool })}\n</system-reminder>\n\n`;
+  return `<system-reminder>\n${buildWorkflowSteeringNotice(surface, { bridgeWorkflowTool })}\n</system-reminder>\n\n`;
 }

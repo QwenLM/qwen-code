@@ -69,11 +69,13 @@ import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
+  getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
   spawnBlockReason,
 } from '../../agents/runtime/agent-context.js';
+import { matchesAgentToolBlocklist } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import {
   endSubagentSpan,
@@ -1717,6 +1719,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       ? extractParentToolNames(generationConfig)
       : [];
     registerForkDisplayImageForCache(agentConfig, parentToolNames);
+    // A fork inherits the parent's tool surface, so the parent agent's own
+    // disallowedTools blocklist must survive one level down: the union with
+    // the live registry — or an explicit fork_tools request — would
+    // otherwise re-admit a tool prepareTools removed from the parent's
+    // declarations (e.g. `{ tools: ['*'], disallowedTools: ['mcp__slack']
+    // }`), and the bridge decouples execution from declaration. The
+    // blocklist is applied to the computed allowlist below and also handed
+    // to the fork's toolConfig, whose invocation-level re-check enforces it
+    // against wildcard fork_tools patterns a name filter cannot see (R24-1).
+    const parentDisallowedTools = getCurrentAgentDisallowedTools();
+    const keepOffParentBlocklist = (toolName: string): boolean =>
+      !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
     const defaultExecutionToolNames = Array.from(
       new Set([
         ...parentToolNames,
@@ -1730,7 +1744,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
-            buildForkExecutionAllowlist(requestedTools, []),
+            buildForkExecutionAllowlist(requestedTools, []).filter(
+              keepOffParentBlocklist,
+            ),
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
@@ -1849,8 +1865,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildForkExecutionAllowlist(
             requestedTools,
             defaultExecutionToolNames,
-          ),
+          ).filter(keepOffParentBlocklist),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     } else {
       promptConfig = {
@@ -1864,8 +1883,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildForkExecutionAllowlist(
             requestedTools,
             defaultExecutionToolNames,
-          ),
+          ).filter(keepOffParentBlocklist),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     }
 

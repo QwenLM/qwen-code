@@ -195,6 +195,22 @@ export async function resolveDeferredToolCall(
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
     };
   }
+  // The registry's capability gate (isToolDeclared — e.g. propose_goal is
+  // registered but undeclared until a turn with a responder) is enforced by
+  // every other reachability reader: getFunctionDeclarations{,Filtered},
+  // getDeferredToolSummary, the scheduler's filter, and tool_search's
+  // select:. The invocation half must agree, or tool_call would execute a
+  // target tool_search refuses to describe (R27-3). Optional-chained:
+  // bridge test registries do not stub the method, and absent means no
+  // capability gate exists to enforce.
+  if (registry.isToolDeclared?.(target.name) === false) {
+    return {
+      error: new Error(
+        `Deferred tool "${target.name}" is not declared in this session, so it cannot be invoked via tool_call.`,
+      ),
+      errorType: ToolErrorType.EXECUTION_DENIED,
+    };
+  }
   // The bridge has two halves: discovery (tool_search) and invocation
   // (tool_call). When tool_search is unregistered the hidden target cannot
   // be reviewed, and client.ts already reports such tools as unreachable for

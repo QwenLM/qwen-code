@@ -499,6 +499,50 @@ describe('ToolCallTool', () => {
     });
   });
 
+  it('rejects a registered-but-undeclared target via the capability gate', async () => {
+    // R27-3: isToolDeclared (the registry's capability gate — propose_goal is
+    // registered but undeclared until a turn with a responder) is enforced by
+    // every other reachability reader, including tool_search's select:; the
+    // invocation half must agree, or tool_call executes a target the model
+    // was never offered. Mutation check: removing the isToolDeclared gate in
+    // resolveDeferredToolCall turns this red. The same stub leaves ordinary
+    // declared tools resolvable, so the gate cannot degrade into a blanket
+    // denial.
+    const gated = new MockTool({
+      name: ToolNames.PROPOSE_GOAL,
+      shouldDefer: true,
+    });
+    const ordinary = new MockTool({
+      name: 'deferred_target',
+      shouldDefer: true,
+    });
+    const registry = makeRegistry(
+      [gated, ordinary],
+      new Set([gated.name, ordinary.name]),
+    );
+    registry.isToolDeclared = (name: string) => name !== ToolNames.PROPOSE_GOAL;
+
+    const denied = await resolveDeferredToolCall(registry, {
+      name: gated.name,
+      arguments: {},
+    });
+    expect(denied).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      error: expect.objectContaining({
+        message: expect.stringContaining(ToolNames.PROPOSE_GOAL),
+      }),
+    });
+
+    const allowed = await resolveDeferredToolCall(registry, {
+      name: ordinary.name,
+      arguments: { foo: 'bar' },
+    });
+    expect(allowed).toMatchObject({
+      tool: expect.objectContaining({ name: ordinary.name }),
+      arguments: { foo: 'bar' },
+    });
+  });
+
   it('does not suggest tool_search for unknown targets when it is absent', async () => {
     const result = await resolveDeferredToolCall(
       makeRegistry([], new Set(), { withToolSearch: false }),

@@ -70,7 +70,7 @@ import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringSurface,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
   type WorkflowAuthoringReference,
   type WorkflowAuthoringSurface,
@@ -1155,7 +1155,7 @@ const WORKFLOW_AUTHORING_POINTER = `**Writing the script**
 Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill — the authoring reference: the sandbox contract, agent() options, \`pipeline()\` vs \`parallel()\`, verification and convergence patterns, resume, and a worked example.`;
 
 /** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
-const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
 
 /**
  * Leads the inlined reference. The reference is written for sessions that can
@@ -1241,7 +1241,7 @@ function buildWorkflowAuthoringHint(
     case 'pointer-via-tool-search':
       // The retry moment is exactly when the model reaches for the Skill tool,
       // so the detour the description names has to be repeated here.
-      return `${loadSkill} ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+      return `${loadSkill} ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
     case 'inline':
       return "hint: See the authoring reference in this tool's description, fix the script, and retry.";
     case 'withheld':
