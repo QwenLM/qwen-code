@@ -23,6 +23,7 @@ import type {
   PromptHookConfig,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
   escapeShellArg,
   getShellConfiguration,
@@ -256,8 +257,11 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
  * Events whose plain-text stdout on a successful exit is handed to the model
- * as additional context. On every other event plain text stays a system
- * message, since those events have no prompt to attach context to.
+ * as additional context, matching the events Claude Code promotes. Other
+ * events keep converting plain text to a system message, even those whose
+ * JSON `additionalContext` does reach the model (PostToolUse, SubagentStart,
+ * ...), so a hook that merely prints a log line does not start injecting it
+ * into tool results or subagent prompts.
  */
 const PLAIN_TEXT_CONTEXT_EVENTS: ReadonlySet<HookEventName> = new Set([
   HookEventName.SessionStart,
@@ -1373,23 +1377,45 @@ export class HookRunner {
         const textToParse = isBlockingError
           ? stderr.trim()
           : stdoutText || stderr.trim();
-        // Only stdout is hook output. The stderr fallback is diagnostics and
-        // must never be promoted into model context.
+        // Only stdout is promoted as plain-text context; the stderr fallback
+        // stays a system message. JSON on stderr is still parsed as structured
+        // output when stdout is empty, as it was before.
         const parsedFromStdout = !isBlockingError && stdoutText !== '';
 
         if (textToParse) {
-          // Try parsing as JSON to preserve structured output like
-          // hookSpecificOutput.additionalContext (applies to both exit 0 and exit 2)
+          // Structured output is a JSON object, possibly double-encoded as a
+          // JSON string (applies to both exit 0 and exit 2). Anything else,
+          // including bare JSON values such as `42` or `[1, 2]`, is plain text.
+          let parsed: unknown;
+          let parseFailed = false;
           try {
-            let parsed = JSON.parse(textToParse);
+            parsed = JSON.parse(textToParse);
             if (typeof parsed === 'string') {
               parsed = JSON.parse(parsed);
             }
-            if (parsed && typeof parsed === 'object') {
-              output = parsed as HookOutput;
-            }
           } catch {
-            // Not JSON, convert plain text to structured output
+            parseFailed = true;
+          }
+          if (
+            !parseFailed &&
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed)
+          ) {
+            output = parsed as HookOutput;
+          } else {
+            // Output shaped like a JSON object that fails to parse is a broken
+            // structured payload, not context: as in Claude Code, it is kept
+            // out of the model.
+            const malformedObject =
+              parseFailed &&
+              textToParse.startsWith('{') &&
+              textToParse.endsWith('}');
+            if (malformedObject) {
+              debugLogger.warn(
+                `Hook "${hookConfig.name || hookConfig.command}" printed output that looks like a JSON object but is not valid JSON; it is not added to model context`,
+              );
+            }
             output = this.convertPlainTextToHookOutput(
               textToParse,
               isBlockingError
@@ -1397,7 +1423,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
-              parsedFromStdout ? eventName : undefined,
+              parsedFromStdout && !malformedObject ? eventName : undefined,
             );
           }
         }
@@ -1472,7 +1498,12 @@ export class HookRunner {
           reason: 'Hook executed successfully',
           hookSpecificOutput: {
             hookEventName: stdoutEvent,
-            additionalContext: text,
+            // Terminal escapes from colored tool output must not reach the
+            // model; strip per line so newlines survive.
+            additionalContext: text
+              .split('\n')
+              .map((line) => stripAnsiAndControl(line))
+              .join('\n'),
           },
         };
       }

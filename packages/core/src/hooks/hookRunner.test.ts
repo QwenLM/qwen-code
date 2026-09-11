@@ -1103,6 +1103,101 @@ describe('HookRunner', () => {
       },
     );
 
+    it.each(['42', 'true', 'null', '[1, 2]'])(
+      'should treat bare JSON value %s as plain text on SessionStart',
+      async (text) => {
+        mockSpawn.mockImplementation(() => createMockProcess(0, text));
+
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo value',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.SessionStart,
+          createMockInput({ hook_event_name: HookEventName.SessionStart }),
+        );
+
+        expect(result.output?.hookSpecificOutput).toEqual({
+          hookEventName: HookEventName.SessionStart,
+          additionalContext: text,
+        });
+      },
+    );
+
+    it('should keep a bare JSON value as a system message on PreToolUse', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, '42'));
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo 42',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.systemMessage).toBe('42');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
+
+    it('should still block on exit code 2 when stderr is a bare JSON value', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(2, '', '1'));
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo 1 >&2; exit 2',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('1');
+    });
+
+    it('should not promote output shaped like a JSON object that fails to parse', async () => {
+      const malformed = '{"decision": "deny",}';
+      mockSpawn.mockImplementation(() => createMockProcess(0, malformed));
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo malformed',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.UserPromptSubmit,
+        createMockInput({ hook_event_name: HookEventName.UserPromptSubmit }),
+      );
+
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+      expect(result.output?.systemMessage).toBe(malformed);
+    });
+
+    it('should strip terminal escapes from promoted context and keep newlines', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, '\u001b[31mred\u001b[0m context\nline two\n'),
+      );
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'npm test --color=always',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.SessionStart,
+        createMockInput({ hook_event_name: HookEventName.SessionStart }),
+      );
+
+      expect(result.output?.hookSpecificOutput).toEqual({
+        hookEventName: HookEventName.SessionStart,
+        additionalContext: 'red context\nline two',
+      });
+    });
+
     it('should not promote the stderr fallback into SessionStart context', async () => {
       const mockProcess = createMockProcess(0, '', 'diagnostic noise');
       mockSpawn.mockImplementation(() => mockProcess);
