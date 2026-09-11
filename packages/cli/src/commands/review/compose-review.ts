@@ -1104,7 +1104,7 @@ function floorResolvesCritical(
   // The fix-audit arm (#10104): the PLAN records that the capture resolved
   // this round's posture to critical from the same side-file facts the two
   // arms above read — and the round's SHAPE was spent on that resolution
-  // (narrowed fan-out, seam-bounded republication, narrowed waves).
+  // (narrowed fan-out, narrowed waves).
   // Where the arms above cannot re-derive it — a context-unavailable
   // compose, or a side file rewritten between capture and compose — the
   // plan's own record still resolves the floor, because the alternative is
@@ -7698,8 +7698,7 @@ function composeReviewBody(
   // The fix-audit round-shape disclosure (#10104), non-capping: when the
   // capture resolved the critical posture, the round's SHAPE changed — the
   // fan-out covered the delta and its seams instead of the full territory,
-  // interaction files republished seam-bounded, and the reverse-audit waves
-  // narrowed. Every one of those is a reduction the
+  // and the reverse-audit waves narrowed. Each is a reduction the
   // posted record must own rather than leave to a diff of agent counts, the
   // same accounting rule the retirement and floor-enforcement notes follow.
   const fixAuditCauseEn =
@@ -7817,11 +7816,6 @@ function composeReviewBody(
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
       fixAuditOpenTailZh;
-  // The interaction files re-enter with their full-range sections, the
-  // same as on any other incremental round — the posture changes the
-  // fan-out and the waves, never what a widened file displays.
-  const fixAuditSeamEn = '';
-  const fixAuditSeamZh = '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
         {
@@ -7831,7 +7825,7 @@ function composeReviewBody(
             `posting posture (engaged by ${fixAuditCauseEn}) — the territory fan-out ` +
             `covered the commits since the previous round` +
             (fixAudit.interactionFiles > 0
-              ? ` plus their import-seam interaction files${fixAuditSeamEn}`
+              ? ' plus their import-seam interaction files'
               : ' (no still-clean importer re-entered the scope)') +
             `, and the reverse-audit waves ` +
             `re-launched delta territories under the ordinary retirement ` +
@@ -7847,7 +7841,7 @@ function composeReviewBody(
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
             (fixAudit.interactionFiles > 0
-              ? `及其 import 接缝 interaction 文件${fixAuditSeamZh}`
+              ? '及其 import 接缝 interaction 文件'
               : '（没有仍然干净的 importer 重新进入范围）') +
             `，反向审计各波按普通退役规则重发 delta ` +
             `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +

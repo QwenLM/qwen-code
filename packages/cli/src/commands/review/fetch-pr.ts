@@ -373,8 +373,7 @@ export interface IncrementalDecision {
    * critical-only (#10104) — present exactly beside an effective scope. It
    * is what flips the round to the fix-audit shape: the territory fan-out
    * regardless of the narrowed delta's size (`isFixAuditRound` in
-   * budget.ts), seam-bounded interaction republication, and the
-   * posture-narrowed reverse-audit schedule.
+   * budget.ts) and the posture-narrowed reverse-audit schedule.
    */
   posture?: 'critical';
   /** Which arm resolved it: the operator's recorded floor, the round
