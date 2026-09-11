@@ -170,8 +170,8 @@ function FootnoteCard({
           }
           className={
             variant === 'footer'
-              ? 'inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
-              : 'mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-baseline text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
+              ? 'inline-flex h-5 items-center gap-1 rounded-[5px] px-1 text-[11px] leading-[1.4] text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
+              : 'mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-middle text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
           }
           aria-label={t('footnotes.references', { count: notes.length })}
           onPointerEnter={(event) => {
@@ -201,7 +201,9 @@ function FootnoteCard({
         >
           <span
             aria-hidden="true"
-            className="inline-block size-4 shrink-0 bg-current"
+            className={`inline-block shrink-0 bg-current ${
+              variant === 'footer' ? 'size-3.5' : 'size-4'
+            }`}
             style={{
               maskImage: cssUrlValue(knowledgeIcon),
               maskSize: 'contain',

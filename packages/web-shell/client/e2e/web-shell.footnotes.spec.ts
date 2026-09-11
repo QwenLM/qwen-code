@@ -582,6 +582,52 @@ test('source locator demo delegates the card link to its host panel', async ({
   const assistantFooter = footerTrigger.locator('..');
   await expect(assistantFooter).toHaveCSS('opacity', '0');
   await expect(page.locator('[data-footnotes]')).toHaveCount(0);
+  const footerMetrics = await footerTrigger.evaluate((element) => {
+    const footer = element.parentElement!;
+    const citationIcon = element.querySelector<HTMLElement>(
+      '[aria-hidden="true"]',
+    )!;
+    const copyIcon = footer.querySelector<SVGElement>(
+      'button[aria-label="复制"] svg',
+    )!;
+    const time = footer.querySelector<HTMLElement>(
+      ':scope > span[aria-hidden="true"]',
+    )!;
+    const center = (target: Element) => {
+      const rect = target.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    };
+    return {
+      citationFontSize: getComputedStyle(element).fontSize,
+      citationIconWidth: citationIcon.getBoundingClientRect().width,
+      copyIconWidth: copyIcon.getBoundingClientRect().width,
+      iconCenterDelta: Math.abs(center(citationIcon) - center(copyIcon)),
+      textCenterDelta: Math.abs(center(element) - center(time)),
+      timeFontSize: getComputedStyle(time).fontSize,
+    };
+  });
+  expect(footerMetrics).toMatchObject({
+    citationFontSize: '11px',
+    citationIconWidth: 14,
+    copyIconWidth: 14,
+    timeFontSize: '11px',
+  });
+  expect(footerMetrics.iconCenterDelta).toBeLessThan(0.1);
+  expect(footerMetrics.textCenterDelta).toBeLessThan(0.1);
+  const inlineMetrics = await triggers.nth(1).evaluate((element) => {
+    const icon = element.querySelector<HTMLElement>('[aria-hidden="true"]')!;
+    const triggerRect = element.getBoundingClientRect();
+    const iconRect = icon.getBoundingClientRect();
+    return {
+      centerDelta: Math.abs(
+        triggerRect.top +
+          triggerRect.height / 2 -
+          (iconRect.top + iconRect.height / 2),
+      ),
+      verticalAlign: getComputedStyle(element).verticalAlign,
+    };
+  });
+  expect(inlineMetrics).toEqual({ centerDelta: 0, verticalAlign: 'middle' });
   await page.screenshot({
     path: testInfo.outputPath('source-footnote-host-demo-idle.png'),
     fullPage: true,
