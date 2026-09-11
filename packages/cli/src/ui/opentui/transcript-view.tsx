@@ -66,6 +66,7 @@ import type { ArenaAgentCardData } from '../types.js';
 import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
 import { formatMemorySummary } from '../utils/memory-summary.js';
 import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { PagedToolOutput, ToolOutputNavigation } from './paged-tool-output.js';
 
 const GOAL_COLOR: Record<GoalCardColor, string> = {
   secondary: C.dim,
@@ -76,6 +77,7 @@ const GOAL_COLOR: Record<GoalCardColor, string> = {
 };
 
 export interface TranscriptViewProps {
+  canNavigateDetails?: boolean;
   items: readonly LiveHistoryItem[];
   focusMode?: boolean;
   fullDetail?: boolean;
@@ -113,34 +115,35 @@ export function OpenTuiTranscriptView({
   focusMode = false,
   fullDetail = false,
   thoughtsExpanded = false,
+  canNavigateDetails = false,
 }: TranscriptViewProps) {
-  const maxRows = fullDetail
-    ? Number.POSITIVE_INFINITY
-    : maxHistoryItemRows(availableTerminalHeight);
+  const maxRows = maxHistoryItemRows(availableTerminalHeight);
   return (
-    <box flexDirection="column" marginLeft={2} marginRight={2}>
-      {items
-        .filter(
-          (item) => !(focusMode && !fullDetail && item.kind === 'thinking'),
-        )
-        .map((item) => (
-          <box
-            key={item.id}
-            flexDirection="column"
-            marginTop={itemMarginTop(item.kind)}
-          >
-            <TranscriptItem
-              item={item}
-              focusMode={focusMode && !fullDetail}
-              fullDetail={fullDetail}
-              maxRows={maxRows}
-              terminalHeight={availableTerminalHeight}
-              width={availableWidth}
-              thoughtsExpanded={thoughtsExpanded}
-            />
-          </box>
-        ))}
-    </box>
+    <ToolOutputNavigation enabled={fullDetail && canNavigateDetails}>
+      <box flexDirection="column" marginLeft={2} marginRight={2}>
+        {items
+          .filter(
+            (item) => !(focusMode && !fullDetail && item.kind === 'thinking'),
+          )
+          .map((item) => (
+            <box
+              key={item.id}
+              flexDirection="column"
+              marginTop={itemMarginTop(item.kind)}
+            >
+              <TranscriptItem
+                item={item}
+                focusMode={focusMode && !fullDetail}
+                fullDetail={fullDetail}
+                maxRows={maxRows}
+                terminalHeight={availableTerminalHeight}
+                width={availableWidth}
+                thoughtsExpanded={thoughtsExpanded}
+              />
+            </box>
+          ))}
+      </box>
+    </ToolOutputNavigation>
   );
 }
 
@@ -390,9 +393,18 @@ function ToolCard({
     return (
       <box key="focus-summary" flexDirection="row">
         <box width={STATUS_INDICATOR_WIDTH}>
-          <text fg={status.color}>{status.glyph}</text>
+          <text
+            fg={status.color}
+            attributes={(status.strikethrough ? 128 : 0) | 1}
+          >
+            {status.glyph}
+          </text>
         </box>
-        <text fg={C.dim} {...selectionProps()}>
+        <text
+          fg={C.dim}
+          attributes={status.strikethrough ? 128 : 0}
+          {...selectionProps()}
+        >
           {truncateToWidth(
             compact.text + memory,
             width - STATUS_INDICATOR_WIDTH,
@@ -417,11 +429,9 @@ function ToolCard({
     text,
     name,
     width,
-    fullDetail && item.confirm !== 'pending'
-      ? Number.POSITIVE_INFINITY
-      : item.confirm === 'pending' && !item.done
-        ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
-        : TOOL_CARD_DESCRIPTION_ROWS,
+    item.confirm === 'pending' && !item.done
+      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
+      : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (
@@ -447,6 +457,15 @@ function ToolCard({
       </box>
       {cap.hiddenRows > 0 && (
         <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
+      )}
+      {fullDetail && cap.hiddenRows > 0 && item.confirm !== 'pending' && (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <PagedToolOutput
+            text={description}
+            maxRows={maxRows}
+            width={width - STATUS_INDICATOR_WIDTH}
+          />
+        </box>
       )}
       {item.confirm === 'pending' && !item.done ? (
         <text fg={C.yellow}> (awaiting approval)</text>
@@ -490,6 +509,21 @@ function ToolCardBody({
   maxRows: number;
   width: number;
 }) {
+  if (fullDetail && (!item.todos || item.detailedDisplay)) {
+    if (!item.detailedDisplay && !item.output && !item.diff && !item.ansi)
+      return null;
+    return (
+      <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+        <PagedToolOutput
+          text={item.detailedDisplay ?? item.diff?.fileDiff ?? item.output}
+          grid={item.detailedDisplay ? undefined : item.ansi?.grid}
+          diff={Boolean(item.diff)}
+          maxRows={maxRows}
+          width={width - STATUS_INDICATOR_WIDTH}
+        />
+      </box>
+    );
+  }
   if (item.todos && !(fullDetail && item.detailedDisplay)) {
     return (
       <box paddingLeft={STATUS_INDICATOR_WIDTH}>

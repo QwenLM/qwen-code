@@ -123,7 +123,7 @@ export interface OpenTuiAppProps {
 
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
-  renderMain?: () => ReactNode;
+  renderMain?: (canNavigateDetails: boolean) => ReactNode;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -930,7 +930,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <OpenTuiBanner config={config} settings={settings} />
-        {renderMain ? renderMain() : null}
+        {renderMain
+          ? renderMain(!dialog && !activeModal && !activeToolCall)
+          : null}
         {!dialog &&
         !activeModal &&
         !activeToolCall &&

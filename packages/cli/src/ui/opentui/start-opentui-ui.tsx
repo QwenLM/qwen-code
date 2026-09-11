@@ -248,7 +248,7 @@ function OpenTuiEntryApp({
 
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
-    () => (
+    (canNavigateDetails: boolean) => (
       <box flexDirection="column" flexGrow={1}>
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
@@ -259,6 +259,7 @@ function OpenTuiEntryApp({
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
+          canNavigateDetails={canNavigateDetails}
         />
       </box>
     ),

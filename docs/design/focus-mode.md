@@ -94,6 +94,14 @@ the user's selected renderer.
 
 ## Open questions
 
+### Bounded OpenTUI details
+
+OpenTUI displays full tool details in pages, retaining the original output in history. Each text page uses the existing row budget and at most the smaller of 1M characters or viewport width times that budget. A long single line continues on the next page. Diff pages show the original unified diff; ANSI pages preserve styled grid rows and their existing terminal-width clipping. Long descriptions are paged separately. No transcript data is evicted by paging.
+
+Click the arrows to move between pages. Ctrl+Alt+Left/Right selects a pager, and Ctrl+Alt+Up/Down changes its page, including with mouse support disabled for screen readers. The last pager is selected initially; `>` marks the selected page number. Navigation is disabled while a dialog or tool approval owns input. Ctrl+O closes details normally. Keyboard paging does not change composer focus or intercept unmodified arrows.
+
+Verification covers multi-page text, an oversized single line, descriptions, diffs, ANSI rows, surrogate-pair progress, mouse navigation and keyboard gating. ANSI columns outside the terminal width retain the existing clipping behavior; widening the terminal reveals those columns. Session export remains independent and retains its existing recorder limits.
+
 Upstream maintainers can decide whether a later iteration should aggregate
 whole turns or also influence model narration. Neither decision blocks this
 presentation-only MVP.
