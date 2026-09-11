@@ -29,7 +29,9 @@ export type StreamEvent =
   | { type: 'thinking-end' }
   | { type: 'text'; delta: string }
   | { type: 'tool-start'; id: string; tool: string; title: string }
-  | { type: 'tool-output'; id: string; delta: string }
+  /** The whole output so far, not an increment — a tool card replaces its
+   * output per event, unlike the incremental `text`/`thinking` above. */
+  | { type: 'tool-output'; id: string; output: string }
   | { type: 'tool-end'; id: string; success: boolean; summary: string }
   | { type: 'task-start'; id: string; name: string; description: string }
   | { type: 'task-progress'; id: string; line: string }
@@ -189,7 +191,7 @@ export function reduceStreamEvent(
       const index = findItemIndex(items, 'tool', event.id);
       if (index >= 0) {
         const tool = items[index] as Extract<HistoryItem, { kind: 'tool' }>;
-        items[index] = { ...tool, output: tool.output + event.delta };
+        items[index] = { ...tool, output: event.output };
       }
       break;
     }

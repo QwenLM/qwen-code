@@ -3,7 +3,7 @@
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { EnvironmentPanel } from './EnvironmentPanel';
 import type { SourcesState } from './SourcesSection';
@@ -44,11 +44,17 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
+beforeEach(() => {
+  // The add-source button is hidden by default; enable it for these tests.
+  window.history.replaceState({}, '', '/?addSource=1');
+});
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
   container = null;
   root = null;
+  window.history.replaceState({}, '', '/');
 });
 
 function mount(
