@@ -14047,6 +14047,38 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoReminder('prompt-user-2')).toBeUndefined();
   });
 
+  it('clears the foreground reminder when an unrelated automatic turn completes the shared plan', () => {
+    // An isolated cron/notification turn has no `continuedFrom`, so its
+    // completion todo_write resolves to its own prompt id and, before the
+    // session-wide clear, would leave the foreground reminder behind. The
+    // plan file is session-scoped, so completion must clear every reminder.
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('p1');
+    config.setActiveTodoReminder('p1', 'R');
+    config.startAutomaticActiveTodoWorkChain('p-cron');
+
+    config.setActiveTodoReminder('p-cron', undefined);
+
+    expect(config.getActiveTodoReminder('p1')).toBeUndefined();
+  });
+
+  it('prunes the superseded foreground head when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user-1');
+    config.setActiveTodoReminder('prompt-user-1', 'R');
+
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user-1');
+
+    // The old head must no longer resolve to the shared owner; it falls back
+    // to itself so the owners map does not grow one entry per continuation.
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-user-2', 'stale'),
+    ).toBe('prompt-user-1');
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-user-1', 'stale'),
+    ).toBe('stale');
+  });
+
   it('clearActiveTodoReminders clears reminders, owners, and cadence counters', () => {
     const config = Object.create(Config.prototype) as Config;
     config.startActiveTodoWorkChain('prompt-user');

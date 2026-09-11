@@ -7927,8 +7927,15 @@ export class Config {
       // The todo_write result itself just presented the full state.
       this.getOwnActiveTodoReminderTurns().set(owner, 0);
     } else {
-      reminders.delete(owner);
-      this.getOwnActiveTodoReminderTurns().delete(owner);
+      // `todo_write` passes `undefined` only once the list has no unfinished
+      // items, and the plan file it just wrote is session-scoped. Clearing
+      // only the caller's owner strands the foreground reminder when a
+      // related automatic turn (cron/notification/subagent/Goal) completes
+      // the shared plan, so the next ordinary turn re-chains a finished plan
+      // (#10953). A non-completion write always passes a reminder string, so
+      // `undefined` here is unambiguous completion: clear session-wide.
+      reminders.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
     }
   }
 
@@ -7957,6 +7964,13 @@ export class Config {
     for (const [mappedPromptId, mappedOwner] of owners) {
       if (mappedOwner !== owner) owners.delete(mappedPromptId);
     }
+    // Drop the superseded foreground head: every continuing ordinary turn
+    // re-points the chain, and without pruning the previous head each of them
+    // would accumulate as a dead `promptId -> owner` entry for the life of
+    // the session. Still-live related automatic turns mapping to `owner` are
+    // preserved by the loop above, so their completion todo_write still
+    // reaches the shared owner.
+    owners.delete(continuedFrom);
     owners.set(promptId, owner);
   }
 

@@ -1226,6 +1226,20 @@ export class SubagentManager {
     (subagentContext as any).clearSessionWorkflowPlanRevision = (): void => {
       runtimeContext.clearSessionWorkflowPlanRevision();
     };
+    // The active-todo reminder maps are isolated per derived Config (a
+    // subagent's todo_write would otherwise mutate only its wrapper's maps),
+    // but the plan file is session-scoped. Forward the reminder mutation so a
+    // subagent's completing todo_write clears the parent's foreground reminder
+    // instead of stranding it (#10953). `setActiveTodoReminder(promptId,
+    // undefined)` is the completion signal and clears session-wide on the
+    // base Config.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).setActiveTodoReminder = (
+      promptId: string,
+      reminder: string | undefined,
+    ): void => {
+      runtimeContext.setActiveTodoReminder(promptId, reminder);
+    };
 
     // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
     // session-level servers on key collision (more-specific-wins, matching
