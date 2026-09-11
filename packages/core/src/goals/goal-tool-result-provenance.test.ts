@@ -61,6 +61,26 @@ describe('goalToolResultProvenance', () => {
     },
   );
 
+  it.each(['GET_GOAL', 'Get_Goal', 'UPDATE_GOAL', 'Update_Goal'])(
+    'marks a case-variant bridged %s result as the Goal’s own bookkeeping',
+    (name) => {
+      // resolveDeferredToolCall matches target names case-insensitively, so
+      // the bridge executes these as get_goal / update_goal; the exclusion
+      // must follow the same identity or the result lands in the evidence
+      // catalog as an ordinary external_fact.
+      expect(
+        goalToolResultProvenance({
+          name: ToolNames.TOOL_CALL,
+          args: { name, arguments: {} },
+          goalContext: permit,
+        }),
+      ).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+    },
+  );
+
   it.each([
     { name: 'read_file', arguments: {} },
     { name: 42, arguments: {} },

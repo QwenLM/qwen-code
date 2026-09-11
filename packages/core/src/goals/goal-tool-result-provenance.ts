@@ -48,7 +48,17 @@ export function goalToolResultProvenance(
     requestName === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
       ? canonicalToolName(bridgedName)
       : requestName;
-  if (toolName === ToolNames.GET_GOAL || toolName === ToolNames.UPDATE_GOAL) {
+  // The bridge resolves target names case-insensitively (tool-call.ts), so a
+  // bridged "GET_GOAL" executes as get_goal; the exclusion must classify by
+  // the same identity or the Goal's own bookkeeping leaks into the evidence
+  // catalog as an ordinary external_fact. GET_GOAL / UPDATE_GOAL are already
+  // lowercase.
+  const lowerToolName =
+    typeof toolName === 'string' ? toolName.toLowerCase() : toolName;
+  if (
+    lowerToolName === ToolNames.GET_GOAL ||
+    lowerToolName === ToolNames.UPDATE_GOAL
+  ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
   return { goalContext: { ...goalContext } };

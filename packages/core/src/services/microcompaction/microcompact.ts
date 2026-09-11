@@ -76,6 +76,9 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function resolveTrackedToolName(name: string): string {
+  // History parts are unvalidated: a malformed bridged entry may carry a
+  // truthy non-string name, and canonical.toLowerCase() would throw on it.
+  if (typeof name !== 'string' || name === '') return name;
   const canonical = canonicalToolName(name);
   const lower = canonical.toLowerCase();
   let match = canonical;
@@ -104,6 +107,18 @@ function getFunctionCallIdentity(
   };
 }
 
+/**
+ * Recorded for a call that has an id but whose identity could not be parsed.
+ * Dropping it would let the unanimity check in getResponseToolIdentity pass
+ * on incomplete evidence; the sentinel makes the check fail closed instead,
+ * so a reused id with an unparseable sibling is never compacted on a guess
+ * (the over-disarm rule above, issue #4239).
+ */
+const UNPARSEABLE_CALL_IDENTITY: ToolCallIdentity = {
+  name: '__unparseable__',
+  args: {},
+};
+
 function buildToolCallIdentityById(history: Content[]): ToolCallIdentityById {
   const map: ToolCallIdentityById = new Map();
   for (const content of history) {
@@ -111,8 +126,8 @@ function buildToolCallIdentityById(history: Content[]): ToolCallIdentityById {
     for (const part of content.parts) {
       const call = part.functionCall;
       if (!call?.id) continue;
-      const identity = getFunctionCallIdentity(call);
-      if (!identity) continue;
+      const identity =
+        getFunctionCallIdentity(call) ?? UNPARSEABLE_CALL_IDENTITY;
       const existing = map.get(call.id);
       if (existing) existing.push(identity);
       else map.set(call.id, [identity]);

@@ -936,6 +936,70 @@ describe('microcompactHistory', () => {
     expect(result.history).toBe(history);
   });
 
+  it('does not throw on non-string tool names in unvalidated history', () => {
+    // Resumed or hand-edited session files can carry truthy non-string
+    // names; the identity resolution must not throw on them.
+    const history = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'n', name: 42, args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'n',
+              name: {},
+              response: { output: 'x'.repeat(5000) },
+            },
+          },
+        ],
+      },
+    ] as unknown as Content[];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not guess when a bridged call id has an unparseable sibling call', () => {
+    // The reused id pairs one well-formed bridged read_file with a call
+    // whose envelope target cannot be parsed; the safe outcome is refusal,
+    // not compaction on the one identity that did parse.
+    const malformedCall = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'reused',
+            name: 'tool_call',
+            args: { name: 42 },
+          },
+        },
+      ],
+    } as unknown as Content;
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'read_file', { file_path: '/proj/a.ts' }),
+      malformedCall,
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
   it('size-compacts old skill results and keeps the most recent result', () => {
     const oldSkillContent = 'old skill instructions '.repeat(20);
     const recentSkillContent = 'recent skill instructions';

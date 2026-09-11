@@ -2817,7 +2817,16 @@ export class LlmClient {
         if (call.id && !completedCallIds.has(call.id)) {
           continue;
         }
-        this.rememberCompletedToolName(call.name);
+        // Bridged calls replay from history under the tool_call envelope;
+        // seed the resolved target name so resume matches what the live
+        // path records (recordCompletedToolCall sees the resolved name).
+        const callArgs = call.args as Record<string, unknown> | undefined;
+        const bridgedName = callArgs?.['name'];
+        this.rememberCompletedToolName(
+          call.name === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
+            ? bridgedName
+            : call.name,
+        );
       }
     }
   }

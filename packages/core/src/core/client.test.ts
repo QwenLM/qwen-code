@@ -945,6 +945,54 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
+    it('seeds the resolved target name for bridged calls in resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      args: { name: 'web_fetch', arguments: { url: 'u' } },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['web_fetch']);
+    });
+
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(

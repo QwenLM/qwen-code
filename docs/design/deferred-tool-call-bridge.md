@@ -59,6 +59,18 @@ continues to declare ordinary deferred schemas eagerly — tools demoted by
 (per-session warning). Permission allowlists keep both bridge tools registered
 unless an explicit deny rule removes them.
 
+## Known limitations
+
+`tool_call` routes a hidden deferred tool by name alone: it does not record a
+per-session presentation mark when `tool_search` delivers a schema, and it does
+not compare a captured schema fingerprint against the live schema at call time.
+A model can therefore invoke a hidden tool whose schema never entered the
+active model context (the startup reminder already lists every hidden deferred
+tool's name and description), or whose schema changed after a mid-session MCP
+re-discovery. Whether the v1 proxy must close this — the presentation-mark and
+fingerprint precondition proposed in #6721 — is the open scope decision tracked
+in #11321.
+
 ## Verification
 
 - `tool_search` returns schemas without calling `setTools()` or changing the
