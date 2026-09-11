@@ -352,6 +352,13 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const result = { ...part };
 
+    // `partMetadata` is client-side bookkeeping only (the reattach boundary
+    // from issue #11627), never part of the wire payload. The Gemini Developer
+    // API route (`partToMldev`) copies it through, but the Vertex AI route
+    // (`partToVertex`) rejects it unconditionally when building the request,
+    // so drop it before the SDK sees it.
+    delete result.partMetadata;
+
     // Strip displayName from inlineData
     if (result.inlineData) {
       const { displayName: _, ...inlineDataWithoutDisplayName } =

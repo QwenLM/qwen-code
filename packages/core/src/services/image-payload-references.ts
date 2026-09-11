@@ -143,8 +143,10 @@ export function buildReattachParts(
  * request, so the DashScope cache pass uses this marker to place the
  * conversation breakpoint *before* the reattached images instead of after
  * them — keeping the cached prefix stable across turns (issue #11627).
- * It is client-side metadata only: the OpenAI converter never serializes
- * `partMetadata`, so it never reaches the wire.
+ * It is client-side metadata only: the OpenAI-compatible converters never
+ * serialize `partMetadata`, and the native SDK generator strips it in
+ * `LlmContentGenerator.stripPartFields` before the request is built, so it
+ * never reaches the wire.
  */
 export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
 
