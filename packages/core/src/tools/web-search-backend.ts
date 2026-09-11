@@ -51,7 +51,12 @@ export interface WebSearchOutcome {
    * text when no narration arrived; may be empty.
    */
   answerText: string;
-  /** Opened pages first, then the unopened candidates. De-duplicated. */
+  /**
+   * Opened pages first, then the unopened candidates. Each tier is
+   * de-duplicated by {@link sourceKey}. A candidate can be the same page as an
+   * opened page; the tool lists it only when that opened page is not itself
+   * listed, so a page cut by the opened-list cap still appears once.
+   */
   sources: WebSearchSource[];
   executedQueries: string[];
   /** Search calls performed — the count shown in the tool's display line. */
@@ -90,25 +95,50 @@ export interface WebSearchBackend {
 }
 
 /**
- * Identity of a page for matching, title lookup and de-duplication. Scheme,
- * host case, trailing slashes, percent-encoding in the path and the fragment
- * do not distinguish pages; the port and the query string do. Every
- * comparison between URLs from different places goes through this one
- * function, so no code path mixes exact and normalized keys.
+ * Identity of a page for matching, title lookup and de-duplication. For
+ * http(s) URLs the scheme, host case, a trailing slash, percent-encoding of
+ * ordinary path characters and the fragment do not distinguish pages; a
+ * non-default port, the query string, and an encoded `/`, `?`, `#` or `%` in
+ * the path do, because decoding those would move the path/query boundary or
+ * merge distinct path segments. Other schemes keep their scheme, and text that
+ * does not parse as a URL gets its own namespace so it can never collide with
+ * a parsed key. Every comparison between URLs from different places goes
+ * through this one function, so no code path mixes exact and normalized keys.
  */
 export function sourceKey(url: string): string {
+  let parsed: URL;
   try {
-    const parsed = new URL(url.trim());
-    let path = parsed.pathname.replace(/\/+$/, '');
-    try {
-      path = decodeURIComponent(path);
-    } catch {
-      // An undecodable escape still identifies the page as written.
-    }
-    return `${parsed.host.toLowerCase()}${path}${parsed.search}`;
+    parsed = new URL(url.trim());
   } catch {
-    return url.trim().toLowerCase();
+    return `raw:${url.trim().toLowerCase()}`;
   }
+  const scheme =
+    parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      ? ''
+      : parsed.protocol;
+  const path = decodeOrdinaryPathEscapes(parsed.pathname).replace(/\/+$/, '');
+  return `${scheme}${parsed.host.toLowerCase()}${path}${parsed.search}`;
+}
+
+const RESERVED_PATH_ESCAPE_RE = /(%2F|%3F|%23|%25)/i;
+
+/**
+ * Decode percent-escapes in a path except those for `/`, `?`, `#` and `%`,
+ * which stay encoded (upper-cased) so they keep meaning a literal character.
+ * An undecodable run is kept as written.
+ */
+function decodeOrdinaryPathEscapes(path: string): string {
+  return path
+    .split(RESERVED_PATH_ESCAPE_RE)
+    .map((part, index) => {
+      if (index % 2 === 1) return part.toUpperCase();
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    })
+    .join('');
 }
 
 /**

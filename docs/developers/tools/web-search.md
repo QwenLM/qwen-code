@@ -11,9 +11,9 @@ The built-in tool issues a self-contained search request to a small auxiliary mo
 
 ### What the model receives
 
-One tool result carries three parts: the search agent's narrated answer, the pages it opened and read in full, and the remaining search hits it did not open. The two page lists are kept apart so the model can tell strong evidence from weak. The narration is passed through unchanged and may open with the agent's own `Sources:` list.
+One tool result carries three parts. The first is the search agent's narration — or, when the stream ends before any narration arrives, the salvaged text of the pages it opened. Its content is not edited, though it is trimmed and, when the result would exceed 100,000 characters, truncated with a note. The second lists the pages the extractor opened without reporting failure, and the third lists the remaining search hits it did not open; the two lists are kept apart so the model can tell stronger evidence from weaker. The narration may open with the agent's own `Sources:` list.
 
-DashScope's search results carry URLs without page titles, so the agent is asked to name the pages it relied on. A named title is attached to a page only when that URL is one the search returned or the agent opened; each page is then listed as a markdown link when it has a usable title and as a bare URL otherwise. To read a returned page in full, the model can call [`web_fetch`](./web-fetch.md) with its URL.
+DashScope's search results have not carried page titles so far, so the agent is asked to open its reply with a list naming the pages it relied on. A title from that list, or one the search response declares itself, is attached to a page only when that URL is one the search returned or the agent opened. A page is listed as a markdown link when it has a usable title and a URL that can be a link target (http(s) with a host, no whitespace, at most one level of balanced parentheses), and as a bare URL otherwise; a title that itself reads as a different URL, host or path is not used. The model is told to take link text only from these two lists. To look at a page's content, the model can call [`web_fetch`](./web-fetch.md) with its URL, which returns a model-generated extraction of the fetched page rather than the page verbatim.
 
 ### When it turns on by itself
 

@@ -1412,8 +1412,13 @@ describe('WebSearchTool execute', () => {
     expect(params.store).toBe(false);
     expect(params.stream).toBe(true);
     expect(params.instructions).toContain('untrusted');
-    // The side model is the only source of page titles.
+    // Relayed titles come from this list; titles the response declares on
+    // its search items are the other source. The entry form is what the
+    // parser reads, so it is pinned here too.
     expect(params.instructions).toContain('"Sources:"');
+    expect(params.instructions).toContain(
+      'in the form "- <page title> — <url>"',
+    );
     expect(params.input).toBe('Perform a web search for the query: test query');
     expect(params.tools).toEqual([
       { type: 'web_search' },
@@ -2052,6 +2057,10 @@ describe('WebSearchTool source titles', () => {
     expect(content).toContain('- Fake — https://evil.example/x');
     expect(evidence(content)).not.toContain('evil.example');
     expect(evidence(content)).toContain('- [Page B](https://example.com/b)');
+    // The narration's own list is unverified, and the policy says so.
+    expect(content).toContain(
+      'a title that appears only in the narrated answer is not verified',
+    );
   });
 
   it('uses a title the search response itself carried', async () => {
@@ -2159,37 +2168,94 @@ describe('WebSearchTool source titles', () => {
   });
 
   it('lists the bare URL when a title names a different destination', async () => {
+    const cases: Array<{ url: string; title: string; linked: boolean }> = [
+      {
+        url: 'https://example.com/a',
+        title: 'https://other.example/x',
+        linked: false,
+      },
+      { url: 'https://example.com/b', title: 'attacker.com', linked: false },
+      { url: 'https://notexample.com/x', title: 'example.com', linked: false },
+      { url: 'https://attacker.example/x', title: '8.8.8.8', linked: false },
+      { url: 'https://attacker.example/y', title: '127.1', linked: false },
+      { url: 'https://attacker.example/z', title: '[::1]:8080', linked: false },
+      { url: 'https://example.org/p', title: 'Example․com', linked: false },
+      { url: 'https://example.org/q', title: 'еxample.org', linked: false },
+      {
+        url: 'https://github.com/attacker/evil-repo',
+        title: 'github.com/qwen-code/qwen-code',
+        linked: false,
+      },
+      {
+        url: 'https://medium.com/@attacker/fake',
+        title: 'medium.com/@official/announcement',
+        linked: false,
+      },
+      { url: 'https://example.com/c', title: 'www.example.com', linked: true },
+      { url: 'https://docs.example.com/d', title: 'example.com', linked: true },
+      {
+        url: 'https://github.com/qwen-code/qwen-code',
+        title: 'github.com/qwen-code/qwen-code',
+        linked: true,
+      },
+      {
+        url: 'https://nodejs.org/en/about',
+        title: 'Node.js Releases',
+        linked: true,
+      },
+      {
+        url: 'https://nodejs.org/en/eol',
+        title: 'The support matrix is published on endoflife.date',
+        linked: true,
+      },
+      { url: 'https://example.com/year', title: '2026', linked: true },
+    ];
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith(
+            cases.map(({ url, title }) => ({ type: 'url', url, title })),
+          ),
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const lists = evidence(
+      (await runSearch(makeConfig())).llmContent as string,
+    );
+    for (const { url, title, linked } of cases) {
+      if (linked) {
+        expect(lists).toContain(`- [${title}](${url})`);
+      } else {
+        expect(lists).toContain(`- ${url}\n`);
+        expect(lists).not.toContain(`](${url})`);
+      }
+    }
+  });
+
+  it('lists the bare URL for a page whose URL cannot be a link target', async () => {
     mockCreate.mockResolvedValueOnce(
       makeStream(
         completedEvents([
           searchItemWith([
-            { type: 'url', url: 'https://example.com/a' },
-            { type: 'url', url: 'https://example.com/b' },
-            { type: 'url', url: 'https://example.com/c' },
-            { type: 'url', url: 'https://nodejs.org/en/about' },
+            {
+              type: 'url',
+              url: 'https://exa mple.com/a',
+              title: 'example.com',
+            },
+            { type: 'url', url: 'https://', title: 'Plain title' },
           ]),
-          narrationItem(
-            [
-              'Sources:',
-              '- https://other.example/x — https://example.com/a',
-              '- attacker.com — https://example.com/b',
-              '- www.example.com — https://example.com/c',
-              '- Node.js Releases — https://nodejs.org/en/about',
-              '',
-              'Answer.',
-            ].join('\n'),
-          ),
+          MESSAGE_ITEM,
         ]),
       ),
     );
-    const content = (await runSearch(makeConfig())).llmContent as string;
-    const lists = evidence(content);
-    expect(lists).not.toContain('](https://example.com/a)');
-    expect(lists).not.toContain('](https://example.com/b)');
-    expect(lists).toContain('- [www.example.com](https://example.com/c)');
-    expect(lists).toContain(
-      '- [Node.js Releases](https://nodejs.org/en/about)',
+    const lists = evidence(
+      (await runSearch(makeConfig())).llmContent as string,
     );
+    expect(lists).toContain('- https://exa mple.com/a');
+    expect(lists).toContain('- https://\n');
+    expect(lists).not.toContain('[example.com]');
+    expect(lists).not.toContain('[Plain title]');
   });
 
   it('links a URL with one level of parentheses and leaves deeper nesting bare', async () => {
@@ -2230,5 +2296,123 @@ describe('WebSearchTool source titles', () => {
     expect(content).toContain('answer truncated to fit');
     expect(evidence(content)).toContain('- [Page A](https://example.com/a)');
     expect(content.length).toBeLessThan(102_000);
+  });
+  it('lists a page opened under several spellings once', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          { ...EXTRACTOR_ITEM, urls: ['https://example.com/a'] },
+          {
+            ...EXTRACTOR_ITEM,
+            urls: ['https://example.com/a/', 'https://example.com/a#part'],
+          },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const openedSection = content.slice(
+      content.indexOf('Opened evidence pages'),
+      content.indexOf('Additional search candidates'),
+    );
+    expect(openedSection.match(/example\.com\/a/g)).toHaveLength(1);
+  });
+
+  it('still lists a candidate whose opened spelling fell past the opened-page cap', async () => {
+    const opened = Array.from(
+      { length: 25 },
+      (_, i) => `https://example.com/opened${i}`,
+    );
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://example.com/kept' },
+            { type: 'url', url: 'https://example.com/p26/' },
+          ]),
+          { ...EXTRACTOR_ITEM, urls: [...opened, 'https://example.com/p26'] },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('1 more opened page(s) omitted');
+    expect(
+      content.slice(content.indexOf('Additional search candidates')),
+    ).toContain('- https://example.com/p26/');
+  });
+
+  it('labels a section only with a title given for that section or for the whole page', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://nodejs.org/api/fs.html#fsreadfile' },
+            { type: 'url', url: 'https://nodejs.org/api/path.html' },
+          ]),
+          {
+            ...EXTRACTOR_ITEM,
+            urls: ['https://nodejs.org/api/fs.html#fswritefile'],
+          },
+          narrationItem(
+            [
+              'Sources:',
+              '- Reading files — https://nodejs.org/api/fs.html#fsreadfile',
+              '- Joining paths — https://nodejs.org/api/path.html#pathjoin',
+              '',
+              'Answer.',
+            ].join('\n'),
+          ),
+        ]),
+      ),
+    );
+    const lists = evidence(
+      (await runSearch(makeConfig())).llmContent as string,
+    );
+    expect(lists).toContain('- https://nodejs.org/api/fs.html#fswritefile');
+    expect(lists).not.toContain('[Reading files]');
+    expect(lists).toContain('- https://nodejs.org/api/path.html\n');
+    expect(lists).not.toContain('[Joining paths]');
+
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://nodejs.org/api/fs.html' },
+          ]),
+          {
+            ...EXTRACTOR_ITEM,
+            urls: ['https://nodejs.org/api/fs.html#fswritefile'],
+          },
+          narrationItem(
+            'Sources:\n- File system — https://nodejs.org/api/fs.html\n\nAnswer.',
+          ),
+        ]),
+      ),
+    );
+    expect(
+      evidence((await runSearch(makeConfig())).llmContent as string),
+    ).toContain('- [File system](https://nodejs.org/api/fs.html#fswritefile)');
+  });
+
+  it('reads titles from a list that only arrived as streamed text', async () => {
+    mockCreate.mockResolvedValueOnce({
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'response.created' };
+        yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+        yield {
+          type: 'response.output_text.delta',
+          delta: 'Sources:\n- Streamed A — https://example.com/a\n',
+        };
+        yield { type: 'response.output_text.delta', delta: '\nThe answer is' };
+        throw new Error('stream reset');
+      },
+    });
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('[Partial result:');
+    expect(evidence(content)).toContain(
+      '- [Streamed A](https://example.com/a)',
+    );
   });
 });

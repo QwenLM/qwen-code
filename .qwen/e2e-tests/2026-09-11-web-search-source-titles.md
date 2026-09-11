@@ -16,9 +16,9 @@ opened page and candidate as a bare `- <url>` line.
    `functionResponse`.
 3. Verify the narration at the top is unmodified and opens with the search
    agent's own `Sources:` list.
-4. Verify the opened-pages and candidates sections list `- [title](url)` for
-   pages named in that list and `- <url>` for the rest, and that no page
-   appears in both sections.
+4. Verify that pages named in that list whose title and URL are usable as a
+   link are listed as `- [title](url)`, that every other page is listed as
+   `- <url>`, and that no page appears in both page lists.
 5. Verify the model's final answer cites those pages with the same titles.
 6. Repeat with
    `Search the web for the orbital period of Mercury (planet) on Wikipedia, then answer with sources.`
