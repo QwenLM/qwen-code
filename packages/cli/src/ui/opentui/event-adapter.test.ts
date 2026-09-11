@@ -103,41 +103,46 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       else expect(result).not.toHaveProperty('detailedDisplay');
     },
   );
-  it('carries real response metadata through the mapper for Focus and full details', () => {
-    const map = createEventMapper();
-    map({
-      type: 'tool_call_request',
-      value: {
-        callId: 'read1',
-        name: 'read_file',
-        args: { file_path: 'main.ts' },
-      },
-    } as unknown as AnyEv);
-    const events = map({
-      type: 'tool_call_response',
-      value: {
-        callId: 'read1',
-        resultDisplay: 'Read 1 line',
-        responseParts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: 'FULL_READ' },
-              parts: [{ inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
+  it.each(['Read 1 line', ''])(
+    'carries response metadata with display %j',
+    (resultDisplay) => {
+      const map = createEventMapper();
+      map({
+        type: 'tool_call_request',
+        value: {
+          callId: 'read1',
+          name: 'read_file',
+          args: { file_path: 'main.ts' },
+        },
+      } as unknown as AnyEv);
+      const events = map({
+        type: 'tool_call_response',
+        value: {
+          callId: 'read1',
+          resultDisplay,
+          responseParts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'FULL_READ' },
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+                ],
+              },
             },
-          },
-        ],
-      },
-    } as unknown as AnyEv);
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: 'tool-result',
-        id: 'read1',
-        detailedDisplay: 'FULL_READ\n<media: image/png>',
-        imageMimeTypes: ['image/png'],
-      }),
-    );
-  });
+          ],
+        },
+      } as unknown as AnyEv);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'tool-result',
+          id: 'read1',
+          detailedDisplay: 'FULL_READ\n<media: image/png>',
+          imageMimeTypes: ['image/png'],
+        }),
+      );
+    },
+  );
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(

@@ -69,58 +69,61 @@ describe('transcriptToEvents subtyped user records', () => {
       });
     },
   );
-  it('preserves file arguments and detailed responses when resuming', () => {
-    const events = transcriptToEvents(
-      [
-        JSON.stringify({
-          type: 'assistant',
-          message: {
-            parts: [
-              {
-                functionCall: {
-                  id: 'read1',
-                  name: 'read_file',
-                  args: { file_path: 'src/main.ts' },
+  it.each(['Read 2 lines', ''])(
+    'preserves file arguments and detailed responses when resuming display %j',
+    (resultDisplay) => {
+      const events = transcriptToEvents(
+        [
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'read1',
+                    name: 'read_file',
+                    args: { file_path: 'src/main.ts' },
+                  },
                 },
-              },
-            ],
-          },
-        }),
-        JSON.stringify({
-          type: 'tool_result',
-          toolCallResult: {
-            callId: 'read1',
-            status: 'success',
-            resultDisplay: 'Read 2 lines',
-          },
-          message: {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'read1',
-                  name: 'read_file',
-                  response: { output: 'FULL_READ_RESULT' },
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'read1',
+              status: 'success',
+              resultDisplay,
+            },
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'read1',
+                    name: 'read_file',
+                    response: { output: 'FULL_READ_RESULT' },
+                  },
                 },
-              },
-            ],
-          },
-        }),
-      ].join('\n'),
-    );
-    expect(events).toContainEqual({
-      type: 'tool-args',
-      id: 'read1',
-      args: '{"file_path":"src/main.ts"}',
-    });
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: 'tool-result',
+              ],
+            },
+          }),
+        ].join('\n'),
+      );
+      expect(events).toContainEqual({
+        type: 'tool-args',
         id: 'read1',
-        detailedDisplay: expect.stringContaining('FULL_READ_RESULT'),
-      }),
-    );
-  });
+        args: '{"file_path":"src/main.ts"}',
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'tool-result',
+          id: 'read1',
+          detailedDisplay: expect.stringContaining('FULL_READ_RESULT'),
+        }),
+      );
+    },
+  );
 
   it('replays a mid_turn_user_message (U-32 steering) as a user event', () => {
     const events = transcriptToEvents(

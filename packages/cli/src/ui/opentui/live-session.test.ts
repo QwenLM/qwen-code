@@ -307,6 +307,27 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('emits presentation metadata when the result display is empty', async () => {
+    const config = createFakeConfig(
+      oneToolBatchStream({
+        callId: 'memory1',
+        name: 'write_file',
+        args: {
+          file_path: `${getAutoMemoryRoot('/tmp/focus-test-project')}/MEMORY.md`,
+          __resultDisplay: '',
+        },
+      }),
+    );
+    const events = await drain(livePromptEvents(config, 'start'));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-result',
+        id: 'memory1',
+        display: '',
+        isMemoryOp: 'write',
+      }),
+    );
+  });
   it('projects successful memory and structured notices through the scheduler', async () => {
     const config = createFakeConfig(
       oneToolBatchStream({
