@@ -69,6 +69,10 @@ interface RecoveryLock {
   contents: string;
 }
 
+// A recovery lock is held only for the milliseconds recovery takes; an
+// unidentifiable owner older than this is a crash remnant, not a live peer.
+const RECOVERY_LOCK_STALE_MS = 60_000;
+
 export class ChromeExtensionTransport implements ChromeBridge {
   readonly socketPath: string;
 
@@ -480,13 +484,32 @@ async function acquireRecoveryLock(
     } catch (error) {
       if (!hasErrorCode(error, 'EEXIST')) throw error;
       const owner = await readRecoveryLockOwner(path);
-      if (owner === undefined || processIsAlive(owner)) return undefined;
+      if (owner !== undefined) {
+        if (processIsAlive(owner)) return undefined;
+      } else if (!(await recoveryLockAbandoned(path))) {
+        // An empty, malformed, or unreadable lock is not proof of life; only
+        // a foreign-owned or fresh one still refuses recovery.
+        return undefined;
+      }
       await unlink(path).catch((unlinkError: unknown) => {
         if (!hasErrorCode(unlinkError, 'ENOENT')) throw unlinkError;
       });
     }
   }
   return undefined;
+}
+
+async function recoveryLockAbandoned(path: string): Promise<boolean> {
+  const info = await lstat(path).catch((error: unknown) => {
+    if (hasErrorCode(error, 'ENOENT')) return undefined;
+    throw error;
+  });
+  if (info === undefined) return true;
+  // Never weaker than removeStaleSocket: another user's lock is never ours
+  // to delete.
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid())
+    return false;
+  return Date.now() - info.mtimeMs > RECOVERY_LOCK_STALE_MS;
 }
 
 async function readRecoveryLockOwner(

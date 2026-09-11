@@ -56,6 +56,11 @@ export interface ScreenshotEnvelope {
   };
   devicePixelRatio: number;
   coordinateSpace: 'css-pixels';
+  /** Document point of the image's top-left pixel. */
+  origin: {
+    x: number;
+    y: number;
+  };
 }
 
 export interface LogEntry {

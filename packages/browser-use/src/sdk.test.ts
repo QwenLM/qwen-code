@@ -42,6 +42,7 @@ const backend = vi.hoisted(() => ({
         viewport: { width: 1280, height: 720 },
         devicePixelRatio: 2,
         coordinateSpace: 'css-pixels',
+        origin: { x: 0, y: 0 },
       };
     }
     throw new Error(`unexpected call: ${method}`);
@@ -296,6 +297,7 @@ describe('Browser SDK in the existing Node REPL', () => {
         viewport: { width: 1280, height: 720 },
         devicePixelRatio: 2,
         coordinateSpace: 'css-pixels',
+        origin: { x: 0, y: 0 },
       },
     });
   });

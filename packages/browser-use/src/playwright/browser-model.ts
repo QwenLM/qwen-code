@@ -147,6 +147,9 @@ export class BrowserModel {
       event.method === 'qwenBrowser.sessionDetached' &&
       event.sessionId !== undefined
     ) {
+      // Playwright's OOPIF teardown looks the frame session up by the child
+      // target id, so the event must carry it before the entry is dropped.
+      const child = tabSession.childSessions.get(event.sessionId);
       tabSession.childSessions.delete(event.sessionId);
       this.detachExplicitSessions(
         (session) =>
@@ -156,7 +159,10 @@ export class BrowserModel {
       this.emit({
         sessionId: tabSession.sessionId,
         method: 'Target.detachedFromTarget',
-        params: { sessionId: event.sessionId },
+        params: {
+          sessionId: event.sessionId,
+          ...(child === undefined ? {} : { targetId: child.targetId }),
+        },
       });
       return;
     }

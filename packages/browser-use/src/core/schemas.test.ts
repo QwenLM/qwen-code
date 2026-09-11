@@ -14,7 +14,10 @@ describe('recursive locator plans', () => {
     const probe = spawnSync(
       process.execPath,
       [
-        '--max-old-space-size=256',
+        // The cap bounds the probe's own allocations; it must also clear the
+        // tsx loader's startup footprint, which alone exceeds 512MB on some
+        // hosts.
+        '--max-old-space-size=1024',
         '--import',
         'tsx',
         '--input-type=module',
@@ -64,6 +67,23 @@ describe('recursive locator plans', () => {
         },
       ]).success,
     ).toBe(false);
+  });
+});
+
+describe('locator matcher flags', () => {
+  it('accepts stateless flags and rejects stateful g/y flags', () => {
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'Save|Cancel', flags: 'ims' } },
+      ]).success,
+    ).toBe(true);
+    for (const flags of ['g', 'y', 'gi', 'iy']) {
+      expect(
+        locatorStepsSchema.safeParse([
+          { kind: 'getByText', text: { regex: 'Save', flags } },
+        ]).success,
+      ).toBe(false);
+    }
   });
 });
 

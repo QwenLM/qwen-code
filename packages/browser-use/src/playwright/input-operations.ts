@@ -11,10 +11,10 @@ import type { DispatchResult } from '../core/primitives.js';
 import type { SupportedCommand } from '../core/schemas.js';
 import {
   clickOptions,
-  keyChord,
   mouseButton,
   modifiers,
   numberArg,
+  pressKeyChord,
   stringArg,
   withModifiers,
 } from './runtime-helpers.js';
@@ -43,7 +43,7 @@ export async function executeDomCuaOperation(
       await tab.page.keyboard.insertText(stringArg(args, 'text'));
       return null;
     case 'dom_cua.keypress':
-      await tab.page.keyboard.press(keyChord(args.keys));
+      await pressKeyChord(tab.page, args.keys);
       return null;
     case 'dom_cua.scroll': {
       if (typeof args.node_id === 'string') {
@@ -103,7 +103,7 @@ export async function executeCuaOperation(
       return null;
     }
     case 'cua.keypress':
-      await page.keyboard.press(keyChord(args.keys));
+      await pressKeyChord(page, args.keys);
       return null;
     case 'cua.move':
       await withModifiers(page, args.keys, async () => {

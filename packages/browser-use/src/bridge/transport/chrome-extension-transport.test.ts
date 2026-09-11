@@ -219,6 +219,69 @@ describe('ChromeExtensionTransport', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'recovers a stale socket guarded by an abandoned unidentifiable lock',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))",
+          socketPath,
+        ],
+        { timeout: 15_000 },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      const lockPath = `${socketPath}.recovery-lock`;
+      fs.writeFileSync(lockPath, '');
+      const abandoned = new Date(Date.now() - 120_000);
+      fs.utimesSync(lockPath, abandoned, abandoned);
+
+      const transport = new ChromeExtensionTransport({ socketPath });
+      transports.push(transport);
+      await transport.start();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      const socket = connect(socketPath);
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.destroy();
+    },
+    30_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses recovery while a fresh unidentifiable lock may be a live peer',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))",
+          socketPath,
+        ],
+        { timeout: 15_000 },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      const lockPath = `${socketPath}.recovery-lock`;
+      fs.writeFileSync(lockPath, '');
+
+      const transport = new ChromeExtensionTransport({ socketPath });
+      transports.push(transport);
+      await expect(transport.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+      });
+      expect(fs.existsSync(lockPath)).toBe(true);
+    },
+    30_000,
+  );
+
   it('validates the fixed extension identity and correlates responses', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
     roots.push(root);

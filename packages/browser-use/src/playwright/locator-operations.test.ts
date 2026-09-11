@@ -45,7 +45,9 @@ function fixture(initial = new InputFixture() as ElementFixture) {
         return handle;
       },
     ),
-    pressSequentially: vi.fn(async () => undefined),
+    pressSequentially: vi.fn(
+      async (_value: string, _options?: { timeout: number }) => undefined,
+    ),
     fill: vi.fn(async () => undefined),
     dispatchEvent: vi.fn(async () => {
       throw new Error('Target was removed');
@@ -61,6 +63,7 @@ function fixture(initial = new InputFixture() as ElementFixture) {
     initial,
     handle,
     locator,
+    tab,
     replace(next: ElementFixture) {
       target = next;
     },
@@ -150,5 +153,140 @@ describe('locator input completion', () => {
     const f = fixture();
     await expect(f.type('')).resolves.toBeNull();
     expect(f.locator.evaluateHandle).not.toHaveBeenCalled();
+  });
+
+  it('grows the typing deadline with the input length unless one is given', async () => {
+    const input = new InputFixture();
+    const f = fixture(input);
+    f.locator.pressSequentially.mockImplementation(async (value: string) => {
+      input.value = value;
+    });
+    const steps = [{ kind: 'locator', selector: '#target' }] as const;
+    await executeLocatorOperation(
+      'locator.type',
+      { steps, value: 'a'.repeat(10_000) },
+      f.tab,
+    );
+    expect(f.locator.pressSequentially).toHaveBeenCalledWith(
+      'a'.repeat(10_000),
+      { timeout: 20_000 },
+    );
+    await executeLocatorOperation(
+      'locator.type',
+      { steps, value: 'a'.repeat(100_000) },
+      f.tab,
+    );
+    expect(f.locator.pressSequentially).toHaveBeenLastCalledWith(
+      'a'.repeat(100_000),
+      { timeout: 120_000 },
+    );
+    await executeLocatorOperation(
+      'locator.type',
+      { steps, value: 'a'.repeat(10_000), timeoutMs: 500 },
+      f.tab,
+    );
+    expect(f.locator.pressSequentially).toHaveBeenLastCalledWith(
+      'a'.repeat(10_000),
+      { timeout: 500 },
+    );
+  });
+});
+
+describe('locator.downloadMedia', () => {
+  function downloadFixture(media: Record<string, unknown>) {
+    const anchor = {
+      href: '',
+      download: '',
+      rel: '',
+      style: {} as Record<string, string>,
+      click: vi.fn(),
+      remove: vi.fn(),
+    };
+    const fetchMock = vi.fn(
+      async (
+        _url: string,
+      ): Promise<{
+        ok: boolean;
+        status?: number;
+        blob: () => Promise<Blob>;
+      }> => ({
+        ok: true,
+        blob: async () => new Blob(['bytes']),
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('document', {
+      createElement: () => anchor,
+      body: { append: vi.fn() },
+    });
+    vi.stubGlobal(
+      'setTimeout',
+      vi.fn(() => 0),
+    );
+    const element = {
+      scrollIntoView: vi.fn(),
+      closest: vi.fn(() => media),
+      querySelector: vi.fn(() => null),
+    };
+    const locator = {
+      evaluate: vi.fn(async (read: (element: unknown) => unknown) =>
+        read(element),
+      ),
+    };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    const args = {
+      steps: [{ kind: 'locator', selector: 'img' }],
+      timeoutMs: 100,
+    };
+    return { anchor, fetchMock, locator, tab, args };
+  }
+
+  it('downloads a fetched object URL so a cross-origin URL cannot navigate the tab', async () => {
+    const f = downloadFixture({
+      currentSrc: 'https://cdn.example.com/media/video.mp4',
+    });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/media/video.mp4',
+    );
+    expect(f.anchor.href.startsWith('blob:')).toBe(true);
+    expect(f.anchor.download).toBe('video.mp4');
+    expect(f.anchor.click).toHaveBeenCalledOnce();
+  });
+
+  it('falls back past an unloaded element\u2019s empty currentSrc', async () => {
+    const f = downloadFixture({
+      currentSrc: '',
+      src: 'https://cdn.example.com/image.png',
+    });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/image.png',
+    );
+  });
+
+  it('fails loudly when the fetch yields no body', async () => {
+    const f = downloadFixture({ src: 'https://cdn.example.com/a.png' });
+    f.fetchMock.mockResolvedValue({
+      ok: false,
+      status: 403,
+      blob: async () => new Blob([]),
+    });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).rejects.toThrow('HTTP 403');
+    expect(f.anchor.click).not.toHaveBeenCalled();
+  });
+
+  it('fails when the element exposes no downloadable URL', async () => {
+    const f = downloadFixture({ currentSrc: '', src: '', href: '' });
+    await expect(
+      executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+    ).rejects.toThrow('does not expose a downloadable URL');
+    expect(f.fetchMock).not.toHaveBeenCalled();
   });
 });

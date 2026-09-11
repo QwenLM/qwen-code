@@ -56,6 +56,30 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.request).not.toHaveBeenCalled();
   });
 
+  it('classifies an uncompilable locator regex as INVALID_ARGUMENT', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    for (const text of [{ regex: '(' }, { regex: 'a', flags: 'uv' }]) {
+      await expect(
+        fixture.runtime.dispatch('locator.count', {
+          tabId: tab.id,
+          steps: [{ kind: 'getByText', text }],
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+  });
+
+  it.each(['constructor', 'hasOwnProperty', '__proto__'])(
+    'rejects inherited Object.prototype keys as unknown methods: %s',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      await expect(fixture.runtime.dispatch(method, {})).rejects.toMatchObject({
+        code: 'UNKNOWN_METHOD',
+      });
+      expect(fixture.request).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     'playwright.evaluate',
     'locator.evaluate',

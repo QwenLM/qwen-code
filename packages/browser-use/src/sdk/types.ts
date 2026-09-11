@@ -312,6 +312,11 @@ export interface BrowserScreenshot {
     };
     readonly devicePixelRatio: number;
     readonly coordinateSpace: 'css-pixels';
+    /** Document point of the image's top-left pixel. */
+    readonly origin: {
+      readonly x: number;
+      readonly y: number;
+    };
   };
 }
 
