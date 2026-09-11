@@ -13997,4 +13997,40 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
     expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
   });
+
+  it('keeps live related automatic-turn mappings when continuing a chain', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    // The branch an ordinary turn now routes through when a reminder is
+    // registered (#10953). It must re-point the chain without orphaning the
+    // live automatic turn's mapping.
+    config.startActiveTodoWorkChain('prompt-user-2', 'prompt-user');
+
+    // The automatic turn completes the whole plan: its todo_write must reach
+    // the shared owner and delete the finished plan's reminder.
+    config.setActiveTodoReminder('prompt-auto', undefined);
+
+    expect(config.getActiveTodoReminder('prompt-user-2')).toBeUndefined();
+  });
+
+  it('clearActiveTodoReminders clears reminders, owners, and cadence counters', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'R');
+    config.startAutomaticActiveTodoWorkChain('prompt-auto', 'prompt-user');
+
+    config.clearActiveTodoReminders();
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('prompt-user')).toBe(
+      'prompt-user',
+    );
+    expect(config.getActiveTodoWorkChainOwner('prompt-auto')).toBe(
+      'prompt-auto',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBeUndefined();
+  });
 });

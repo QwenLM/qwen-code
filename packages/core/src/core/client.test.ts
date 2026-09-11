@@ -596,6 +596,7 @@ describe('Gemini Client (client.ts)', () => {
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
+      clearActiveTodoReminders: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -2339,6 +2340,16 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-user-followup',
         'prompt-userQuery',
       );
+
+      // Once the plan completes (todo_write deleted the reminder), the next
+      // ordinary turn must start a fresh chain — the cleared-reminder branch
+      // of the continuation guard must not keep carrying the previous chain.
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(undefined);
+      await runTurn(SendMessageType.UserQuery);
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        'prompt-userQuery',
+        undefined,
+      );
     });
 
     it('includes active Todo context on the first retry request', async () => {
@@ -3387,6 +3398,40 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(getHistoryLength).toHaveBeenCalled();
       expect(getHistory).not.toHaveBeenCalled();
+    });
+
+    it('setHistory clears active-todo reminder state', () => {
+      mockFileReadCacheClear();
+      client['chat'] = { setHistory: vi.fn() } as unknown as LlmChat;
+      // Pretend a chain is active so the reset is observable.
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory clears active-todo reminder state when entries are actually removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBeUndefined();
+    });
+
+    it('truncateHistory does NOT clear active-todo reminder state when nothing was removed', () => {
+      mockFileReadCacheClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client['activeTodoWorkChainPromptId'] = 'prompt-old';
+
+      client.truncateHistory(2);
+
+      expect(mockConfig.clearActiveTodoReminders).not.toHaveBeenCalled();
+      expect(client['activeTodoWorkChainPromptId']).toBe('prompt-old');
     });
 
     it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {

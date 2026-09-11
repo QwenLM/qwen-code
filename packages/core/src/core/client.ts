@@ -1118,6 +1118,10 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    // The active-todo reminder describes the discarded timeline: clear it and
+    // its chain so the next turn cannot continue work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
+    this.config.clearActiveTodoReminders();
     this.forceFullIdeContext = true;
   }
 
@@ -1139,6 +1143,11 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      // A rewind discards the timeline the active-todo reminder described:
+      // clear it and its chain so the next turn starts fresh instead of
+      // continuing work that was rewound away.
+      this.activeTodoWorkChainPromptId = undefined;
+      this.config.clearActiveTodoReminders();
     }
     this.forceFullIdeContext = true;
   }

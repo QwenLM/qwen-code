@@ -4482,6 +4482,10 @@ export class Session implements SessionContext {
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
+    // Rewinding discards the timeline the active-todo reminder described:
+    // clear the chain head so the next turn starts fresh instead of
+    // continuing work that was rewound away.
+    this.activeTodoWorkChainPromptId = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4536,6 +4540,10 @@ export class Session implements SessionContext {
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
+    // Restoring history discards the timeline the active-todo reminder
+    // described: clear the chain head so the next turn starts fresh instead
+    // of continuing work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
