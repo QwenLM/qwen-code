@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SESSION_TRANSCRIPT_MAX_LIMIT } from '@qwen-code/qwen-code-core';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -67,10 +68,23 @@ const SCOPES = new Set([
   'live-session-owner',
   'legacy-primary',
 ]);
+/** Media types the published document is allowed to claim. */
+const CONTENT_TYPES = new Set([
+  'application/json',
+  'application/jsonl',
+  'text/event-stream',
+  'text/html',
+  'text/markdown',
+]);
 
 interface OpenApiOperation {
   operationId?: string;
   requestBody?: unknown;
+  parameters?: Array<{
+    name?: string;
+    in?: string;
+    schema?: { minimum?: number; maximum?: number };
+  }>;
   responses?: Record<string, { content?: Record<string, unknown> }>;
   security?: Array<Record<string, unknown>>;
   externalDocs?: { url?: string };
@@ -199,14 +213,18 @@ function openApiOperations(
   return found;
 }
 
-/** GitHub/Nextra heading slug, so anchor links can be checked. */
+/**
+ * GitHub heading slug, so anchor links can be checked. Matches github-slugger:
+ * punctuation is dropped, but underscores survive and each space becomes one
+ * hyphen (a run of spaces is not collapsed).
+ */
 function slug(heading: string): string {
   return heading
     .replace(/`/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9 -]/g, '')
+    .replace(/[^\p{L}\p{N}\p{M}\p{Pc}\- ]/gu, '')
     .trim()
-    .replace(/\s+/g, '-');
+    .replace(/ /g, '-');
 }
 
 /** Protocol headings outside fenced code blocks, where # starts a comment. */
@@ -346,7 +364,7 @@ describe('REST integration documentation contract', () => {
         ),
       ).toBe(true);
       const anchor = operation.externalDocs?.url?.match(
-        /qwen-serve-protocol\/#([a-z0-9-]+)$/,
+        /qwen-serve-protocol\/#([a-z0-9_-]+)$/,
       )?.[1];
       expect(anchor).toBeTruthy();
       if (anchor) {
@@ -369,10 +387,29 @@ describe('REST integration documentation contract', () => {
         if (code === '204' || code === '205') {
           continue;
         }
-        expect(Object.keys(response.content ?? {}).length).toBeGreaterThan(0);
+        const mediaTypes = Object.keys(response.content ?? {});
+        expect(mediaTypes.length).toBeGreaterThan(0);
+        expect(mediaTypes.every((type) => CONTENT_TYPES.has(type))).toBe(true);
       }
     }
     expect(new Set(operationIds).size).toBe(operationIds.length);
+    expect(
+      Object.keys(
+        openApi.paths?.['/session/{id}/events']?.get?.responses?.['200']
+          ?.content ?? {},
+      ),
+    ).toEqual(['text/event-stream']);
+    expect(
+      Object.keys(
+        openApi.paths?.['/session/{id}/export']?.get?.responses?.['200']
+          ?.content ?? {},
+      ).sort(),
+    ).toEqual([
+      'application/json',
+      'application/jsonl',
+      'text/html',
+      'text/markdown',
+    ]);
 
     const refs = new Set<string>();
     collectRefs(openApi, refs);
@@ -395,7 +432,7 @@ describe('REST integration documentation contract', () => {
     for (const row of rows) {
       const cells = row.split('|').map((cell) => cell.trim());
       const link = cells[1]?.match(
-        /^\[`([^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9-]+)\)$/,
+        /^\[`([^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)$/,
       );
       expect(link).toBeTruthy();
       if (!link) {
@@ -408,6 +445,11 @@ describe('REST integration documentation contract', () => {
       }
       seen.add(link[1]);
       expect(anchors.has(link[2])).toBe(true);
+      expect(link[2]).toBe(
+        operation.externalDocs?.url?.match(
+          /qwen-serve-protocol\/#([a-z0-9_-]+)$/,
+        )?.[1],
+      );
       const capability = operation['x-qwen-capability'];
       expect(cells[2]).toBe(capability === null ? '—' : `\`${capability}\``);
       expect(cells[3]).toBe(`\`${operation['x-qwen-scope']}\``);
@@ -440,7 +482,7 @@ describe('REST integration documentation contract', () => {
 
     const anchors = protocolAnchors();
     const broken = [
-      ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9-]+)\)/g),
+      ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g),
     ]
       .map((match) => match[1])
       .filter((anchor) => !anchors.has(anchor));
@@ -464,7 +506,9 @@ describe('REST integration documentation contract', () => {
       [],
     );
     const origins = new Set(
-      [...guide.matchAll(/http:\/\/[^/\s"')]+/g)].map((match) => match[0]),
+      [...guide.matchAll(/http:\/\/[^/\s"')`\],;]+/g)].map((match) =>
+        match[0].replace(/\.$/, ''),
+      ),
     );
     expect(
       [...origins].filter((origin) => origin !== openApi.servers?.[0]?.url),
@@ -514,7 +558,14 @@ describe('REST integration documentation contract', () => {
       requestFields(openApi.paths?.['/session/{id}/resume']?.post),
     ).toEqual(['approvalMode', 'cwd', 'sourceId', 'sourceType']);
     const loadPost = openApi.paths?.['/session/{id}/load']?.post;
-    expect(requestFields(loadPost)).toContain('historyPageSize');
+    expect(requestFields(loadPost)).toEqual([
+      'approvalMode',
+      'cwd',
+      'historyPageSize',
+      'liveReplayMode',
+      'sourceId',
+      'sourceType',
+    ]);
     const loadSchema = resolveRef(
       openApi,
       (
@@ -523,7 +574,15 @@ describe('REST integration documentation contract', () => {
           | undefined
       )?.content?.['application/json']?.schema?.$ref as string,
     ) as { properties?: Record<string, { maximum?: number }> };
-    expect(loadSchema.properties?.['historyPageSize']?.maximum).toBe(500);
+    expect(loadSchema.properties?.['historyPageSize']?.maximum).toBe(
+      SESSION_TRANSCRIPT_MAX_LIMIT,
+    );
+    const transcriptLimit = (
+      openApi.paths?.['/session/{id}/transcript']?.get?.parameters ?? []
+    ).find(
+      (parameter) => parameter.in === 'query' && parameter.name === 'limit',
+    );
+    expect(transcriptLimit?.schema?.maximum).toBe(SESSION_TRANSCRIPT_MAX_LIMIT);
   });
 
   it('still sees the bulk of the route surface', () => {

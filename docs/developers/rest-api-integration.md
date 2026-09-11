@@ -62,20 +62,28 @@ authentication; it is inert until a channel webhook source is configured.
 
 ## Start the daemon
 
+Export these once with the printed token, then repeat them in **every other
+terminal** you use — exported shell variables do not cross terminals:
+
 ```bash
 export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"
 export DAEMON_URL=http://127.0.0.1:4170
+```
 
+Terminal 1 — this command blocks, so leave it running:
+
+```bash
 qwen serve --no-web --require-auth \
   --hostname 0.0.0.0 --port 4170 \
   --workspace /srv/project
 ```
 
-`DAEMON_URL` is the loopback base URL every client command below uses, and
-matches `servers[0].url` in the
-[OpenAPI artifact](./daemon-rest-api-reference.md). The daemon still binds
-`0.0.0.0` so a remote host can reach it; point `DAEMON_URL` at that host in that
-case.
+`DAEMON_URL` is the loopback base URL every client command below uses — export
+it, with the same value, in each terminal you run them in — and it matches
+`servers[0].url` in the [OpenAPI artifact](./daemon-rest-api-reference.md). The
+daemon still binds `0.0.0.0` so a remote host can reach it, but do not point
+`DAEMON_URL` at that host in plaintext: a bearer token that can drive a shell is
+readable by anyone on the path. Reach a non-loopback host over TLS (see below).
 
 `--no-web` preserves the routes listed below, but disables Web Shell assets and
 dependent surfaces: on macOS the `/live/*` routes and `/live/host` socket, and on
@@ -85,7 +93,9 @@ every platform `GET /mcp-app-sandbox`. Pass the token by environment rather than
 The Bash examples below pass the Authorization header through a file descriptor
 using the shell's `printf` builtin, keeping the token out of curl's arguments.
 They require Bash, curl, and jq. For cross-device access, terminate TLS as
-described in [HTTPS / TLS for mobile and cross-device access](../users/qwen-serve.md#https--tls-for-mobile--cross-device-access).
+described in [HTTPS / TLS for mobile and cross-device access](../users/qwen-serve.md#https--tls-for-mobile--cross-device-access);
+the daemon then serves `https://` on the same port, so re-export `DAEMON_URL`
+with the `https://` scheme before running the commands below.
 
 ## The routes an integration actually uses
 
@@ -126,14 +136,16 @@ These are the ones a REST integration needs. Treat the rest as internal.
 | [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export the persisted transcript · list queued prompts  |
 
 Token usage is not part of this surface: `GET /session/:id/context` returns the
-live model, mode, and configuration-option state, while the usage counters live
-on `GET /session/:id/context-usage`, outside the curated contract.
+live model, mode, and configuration-option state, while the usage counters sit on
+`GET /session/:id/context-usage`, a route this contract does not specify — it
+carries the `session_context_usage` capability tag and is described only in the
+internal [session lifecycle notes](./daemon/08-session-lifecycle.md#context-usage-session_context_usage-capability-tag).
 
 ### Permissions
 
 | Route                                                                                                   | Purpose                                                                                                                                                                                                                                                                                     |
 | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`POST /session/:id/permission/:requestId`](./qwen-serve-protocol.md#post-sessionidpermissionrequestid) | Answer a `permission_request`. Routed to the runtime that owns the session, so it is correct in every workspace state                                                                                                                                                                       |
+| [`POST /session/:id/permission/:requestId`](./qwen-serve-protocol.md#post-sessionidpermissionrequestid) | Answer a `permission_request`. Routed to the runtime that owns the session and never to the primary bridge, but it fails closed when no single owner can be resolved                                                                                                                        |
 | [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid)                      | Process-global form, wired to the **primary** workspace's bridge only: it `404`s for a session owned by another registered runtime, with the same body as a lost vote under the default `first-responder` policy — so a `404` here does not by itself mean the request was already answered |
 
 ### Read-only workspace context
@@ -171,9 +183,10 @@ export SID
 
 **3. Subscribe before prompting.** Run this in a second terminal with the same
 `QWEN_SERVER_TOKEN` and `DAEMON_URL`, and with `SID` set to the `sessionId` step
-2 printed: exports do not cross terminals, so paste or re-export it there. The
-block keeps `SID` as a placeholder, so pasting it back into terminal 1 cannot
-clobber the value steps 4-6 use. `Last-Event-ID: 0` replays from the oldest
+2 printed: exports do not cross terminals, so re-export the token and
+`DAEMON_URL` there and set `SID` to that `sessionId` yourself. Do not paste the
+block back into terminal 1 — its `SID=` assignment would overwrite the value
+steps 4-6 use. `Last-Event-ID: 0` replays from the oldest
 retained event, which is how you catch events fired between create and
 subscribe — notably `model_switch_failed`. On an **attach** (the default
 `sessionScope: "single"` reusing an existing session) that event is the only
@@ -233,9 +246,13 @@ integration depends on approval gating, pin `tools.approvalMode` explicitly and
 decide up front how it answers: auto-approval can already be in effect without
 anyone having chosen it.
 
-Answer on the session-scoped route: it is routed to the runtime that owns the
-session, so it works whatever the workspace configuration. Copy `data.requestId`
-from the `permission_request` event and set it before voting:
+Answer on the session-scoped route: it reaches the owning workspace whenever
+exactly one live runtime owns the session, and never falls back to the primary
+bridge. When the owner cannot be resolved it fails closed instead of voting on
+the wrong runtime — `404 session_not_found`, `500 ambiguous_session_owner`,
+`403 untrusted_workspace`, or `503 workspace_runtime_unavailable` with
+`Retry-After: 1` (retry; the vote was not recorded). Copy `data.requestId` from
+the `permission_request` event and set it before voting:
 
 ```bash
 export REQUEST_ID='<data.requestId>'

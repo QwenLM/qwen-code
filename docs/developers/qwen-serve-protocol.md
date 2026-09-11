@@ -2430,7 +2430,7 @@ Pre-flight `caps.features.session_status`.
 
 The response is the `DaemonSessionSummary` wire shape. Optional fields include
 display and source metadata, `activeWorkState`, `updatedAt`, `turnError`,
-organization state, worktree or branch metadata, and PR bindings. `404` means
+worktree or branch metadata, and PR bindings. `404` means
 no live owner exists; a bootstrapping, draining, or unavailable owner returns
 `503` instead of falling back. An untrusted non-primary owner returns
 `403 untrusted_workspace`, and an id live in more than one workspace returns
@@ -3086,10 +3086,10 @@ Request:
 }
 ```
 
-| Field         | Required | Notes                                                                                                                                                                                      |
-| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `displayName` | no       | String. Values longer than 256 characters are truncated. An empty or whitespace-only value is rejected with `400 invalid_metadata`; omit the field to leave the name unchanged.            |
-| `pr`          | no       | Bind one pull request. Requires a positive integer `number`, an HTTP(S) `url` of at most 2,048 characters without control characters, and optional `state`: `open`, `merged`, or `closed`. |
+| Field         | Required | Notes                                                                                                                                                                                                                                                                                                   |
+| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `displayName` | no       | String. Values longer than 256 UTF-16 code units are truncated, and the cut is not surrogate-pair aware, so a name ending in a non-BMP character can lose a lone surrogate half. An empty or whitespace-only value is rejected with `400 invalid_metadata`; omit the field to leave the name unchanged. |
+| `pr`          | no       | Bind one pull request. Requires a positive integer `number`, an HTTP(S) `url` of at most 2,048 characters without control characters, and optional `state`: `open`, `merged`, or `closed`.                                                                                                              |
 
 Response:
 
@@ -3109,7 +3109,11 @@ Response:
 
 `prs` is the effective bounded binding history and may include refreshed issue
 links. Publishes a `session_metadata_updated` event on the session's SSE stream
-with the effective metadata.
+carrying only the field group that changed: a rename emits `displayName` (plus
+`titleSource` when the name is set) and leaves `prs` absent, while a PR binding
+change emits `prs` and echoes the current `displayName` when one is set. Treat a
+field absent from the event as unchanged, not cleared, and re-read the `200` body
+or the session list when you need the full metadata.
 
 ### `PATCH /session/:id/organization` and `PATCH /workspaces/:workspace/session/:id/organization`
 

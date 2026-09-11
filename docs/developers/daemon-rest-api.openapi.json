@@ -1315,9 +1315,9 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
             },
-            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. A stale token is answered with 200 plus an id-less state_resync_required frame before replay; a malformed value is treated as not provided and never fails the request."
+            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. Read only when a Last-Event-ID resume cursor is present: a stale token is then answered with 200 plus an id-less state_resync_required frame before replay, while a value the published pattern rejects is treated as not provided. Without a cursor the header is ignored, and a malformed value never fails the request."
           },
           {
             "name": "maxQueued",
@@ -1371,7 +1371,7 @@
         ],
         "responses": {
           "200": {
-            "description": "SSE stream. Each data line is an EventEnvelope. A stale X-Qwen-Event-Epoch token, or a Last-Event-ID the replay ring no longer holds, is reported in band: the stream stays open and emits an id-less state_resync_required frame before replay. Treat that frame as state is stale and rebuild via POST /session/{id}/load, not as a transport error.",
+            "description": "SSE stream. Each data line is an EventEnvelope. A stale X-Qwen-Event-Epoch token presented together with a Last-Event-ID resume cursor, or a Last-Event-ID the replay ring no longer holds, is reported in band: the stream stays open and emits an id-less state_resync_required frame before replay. Treat that frame as state is stale and rebuild via POST /session/{id}/load, not as a transport error.",
             "headers": {
               "X-Qwen-SSE-Stream-Id": {
                 "schema": {
@@ -3396,7 +3396,7 @@
         "properties": {
           "displayName": {
             "type": "string",
-            "description": "Values longer than 256 characters are truncated. An empty or whitespace-only value is rejected with 400 invalid_metadata; omit the field to leave the name unchanged."
+            "description": "Values longer than 256 UTF-16 code units are truncated, and the cut is not surrogate-pair aware, so a name ending in a non-BMP character can lose a lone surrogate half. An empty or whitespace-only value is rejected with 400 invalid_metadata; omit the field to leave the name unchanged."
           },
           "pr": {
             "$ref": "#/components/schemas/SessionPrInput"
@@ -3615,10 +3615,6 @@
           "displayName": {
             "type": "string"
           },
-          "titleSource": {
-            "type": "string",
-            "enum": ["manual", "auto"]
-          },
           "parentSessionId": {
             "type": "string"
           },
@@ -3672,22 +3668,6 @@
             "items": {
               "$ref": "#/components/schemas/PendingInteraction"
             }
-          },
-          "isArchived": {
-            "type": "boolean"
-          },
-          "isPinned": {
-            "type": "boolean"
-          },
-          "pinnedAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "groupId": {
-            "type": ["string", "null"]
-          },
-          "color": {
-            "type": ["string", "null"]
           },
           "worktree": {
             "type": "object",

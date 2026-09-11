@@ -20,9 +20,12 @@ of it.
 Outside it are the first-party Web Shell routes, conditional internal surfaces,
 and other public but non-core routes: file mutation, workspace registration,
 session organization and generation, and workspace MCP, skills, and providers
-among them. Those surfaces are documented in the
-[HTTP protocol reference](./qwen-serve-protocol.md) and advertised by their own
-capability tags; they are outside this contract, not deprecated.
+among them. Those surfaces are advertised by their own capability tags; the
+[HTTP protocol reference](./qwen-serve-protocol.md) documents the session,
+workspace-status, and file surfaces, and MCP server management, auth providers,
+and device-flow sign-in are covered by the
+[daemon auth and security notes](./daemon/12-auth-security.md). They are outside
+this contract, not deprecated.
 
 ## Reading the index
 
