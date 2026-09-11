@@ -671,6 +671,97 @@ describe('ExtensionsManagerPage split-runtime trust gating', () => {
     );
     expect(container.textContent).not.toContain('Extension "demo" updated.');
   });
+
+  it('keeps a failed update notice after the next signal-driven load', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    let capabilityState: 'error' | 'ready' = 'error';
+    mocks.ensureRuntime.mockImplementation(async () => ({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: capabilityState,
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          ...(capabilityState === 'error'
+            ? { error: { message: 'runtime prep exploded' } }
+            : {}),
+        },
+      },
+    }));
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+      ],
+    });
+    const updateUserExtension = vi.fn(async () => ({ operationId: 'op-1' }));
+    state.client.updateUserExtension = updateUserExtension;
+    state.actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-1',
+      operation: 'update',
+      name: 'demo',
+      status: 'failed',
+      createdAt: 1,
+      updatedAt: 2,
+      error: 'probe update failed: disk full',
+    });
+
+    await mountPage();
+    // The load-latched runtime error is on screen when the mutation starts.
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('runtime prep exploded'),
+    );
+
+    // Drive the update from the detail view; it fails while polled.
+    const row = container.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    const trigger = container.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('probe update failed: disk full'),
+    );
+
+    // The runtime recovers; the next signal-driven load succeeds and must
+    // clear only a notice the load path itself wrote, not the mutation's.
+    capabilityState = 'ready';
+    await act(async () => {
+      state.signals = { extensionsVersion: 1 };
+      render();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.textContent).toContain('probe update failed: disk full');
+  });
 });
 
 describe('ExtensionsManagerPage activation refresh', () => {
@@ -870,7 +961,7 @@ describe('ExtensionsManagerPage activation refresh', () => {
     },
   );
 
-  it.each([undefined, 'a'.repeat(64)])(
+  it.each([undefined, 'a'.repeat(64), 'demo'])(
     'shows recovered operation notices with owner %s',
     async (name) => {
       const running = {
@@ -882,12 +973,23 @@ describe('ExtensionsManagerPage activation refresh', () => {
         createdAt: 1,
         updatedAt: 2,
       };
-      state.actions.activeExtensionOperations.mockResolvedValue({
-        v: 1,
-        operations: [running],
-      });
+      // Recovery that settles only after the initial catalog load: the
+      // load's own setMessageOwner(null) must not mask the owner claim.
+      let releaseOperations!: (value: {
+        v: 1;
+        operations: Array<typeof running>;
+      }) => void;
+      state.actions.activeExtensionOperations.mockReturnValue(
+        new Promise((resolve) => {
+          releaseOperations = resolve;
+        }),
+      );
       state.actions.extensionOperationStatus.mockResolvedValue(running);
       await renderPage();
+      await act(async () => {
+        releaseOperations({ v: 1, operations: [running] });
+        await Promise.resolve();
+      });
       await vi.waitFor(() => expect(findButton('Add').disabled).toBe(true));
       expect(container.textContent).toContain('Extension action queued');
       state.actions.extensionOperationStatus.mockResolvedValue({
@@ -1903,6 +2005,7 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
   });
 
   it('does not refresh the runtime after a user-scope toggle on an untrusted secondary', async () => {
+    let defaultActivation: 'enabled' | 'disabled' = 'enabled';
     const workspaceExtensions = vi.fn(async () => ({
       v: 1 as const,
       workspaceId: 'id-other',
@@ -1915,9 +2018,9 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
           extensionId: 'ext-demo',
           name: 'demo',
           version: '1.0.0',
-          defaultActivation: 'enabled' as const,
+          defaultActivation,
           workspaceActivation: null,
-          effectiveActivation: 'enabled' as const,
+          effectiveActivation: defaultActivation,
           activationSource: 'default' as const,
         },
       ],
@@ -1941,14 +2044,19 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
     state.client.setExtensionDefaultActivation.mockResolvedValue(
       state.activationHandle,
     );
-    state.client.waitForExtensionOperation.mockResolvedValue({
-      v: 1,
-      operationId: 'activate',
-      operation: 'activation',
-      status: 'succeeded',
-      createdAt: 1,
-      updatedAt: 2,
-      result: { status: 'disabled', name: 'demo' },
+    // The projection observes the policy commit: the toggle's own reload
+    // reads the flipped default activation.
+    state.client.waitForExtensionOperation.mockImplementation(async () => {
+      defaultActivation = 'disabled';
+      return {
+        v: 1 as const,
+        operationId: 'activate',
+        operation: 'activation',
+        status: 'succeeded' as const,
+        createdAt: 1,
+        updatedAt: 2,
+        result: { status: 'disabled', name: 'demo' },
+      };
     });
     state.workspace.capabilities = {
       features: [
@@ -1987,6 +2095,11 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
     // already reported trusted:false — the refresh must stay suppressed.
     expect(refreshExtensionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('session refresh failed');
+    // The tolerated runtime-catalog 403 must not freeze the row: the flipped
+    // projection the toggle's reload fetched still reaches the badge.
+    expect(container.querySelector('h1')?.parentElement?.textContent).toContain(
+      'disabled',
+    );
   });
 
   it('decides the refresh on the trust the activation reload observes, even when the runtime leg fails', async () => {

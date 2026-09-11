@@ -656,7 +656,13 @@ export function ExtensionsManagerPage({
             setMessage(null);
           }
           const coordinator = await workspaceClient.ensureRuntime();
-          const runtime = await workspaceClient.workspaceRuntimeExtensions();
+          // Tolerated like the projection leg above: a trust-gated 403 or a
+          // transient failure must not discard the catalog and projection
+          // this load already fetched; the merge renders without the live
+          // runtime overlay instead.
+          const runtime = await workspaceClient
+            .workspaceRuntimeExtensions()
+            .catch(() => undefined);
           if (requestId !== loadRequestRef.current) return observedTrusted;
           if (
             !extensionSnapshotsCurrent(
@@ -827,7 +833,6 @@ export function ExtensionsManagerPage({
             operation.operation !== 'check-updates',
         );
         if (activeMutation) {
-          setMessageOwner(activeMutation.name ?? 'extension');
           mutationInFlightRef.current = true;
           if (activeMutation.operation === 'uninstall') {
             uninstallInFlightNameRef.current =
@@ -860,7 +865,7 @@ export function ExtensionsManagerPage({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions, setMessageOwner]);
+  }, [actions]);
 
   const extensionsVersionRef = useRef(signals?.extensionsVersion ?? 0);
   useEffect(() => {
@@ -1009,6 +1014,7 @@ export function ExtensionsManagerPage({
     // uninstall the release runs after the exit's own reload, mirroring the
     // success settle below.
     const settleFailedMutation = () => {
+      loadNoticeRef.current = false;
       clearInteraction(pendingMutation.operationId);
       setPendingMutation(null);
       setBusyName(null);
@@ -1286,6 +1292,7 @@ export function ExtensionsManagerPage({
       }
       setBusyName(name);
       setRefreshError(null);
+      loadNoticeRef.current = false;
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1375,6 +1382,7 @@ export function ExtensionsManagerPage({
             : 'inherit';
       setRefreshError(null);
       setBusyName(extension.name);
+      loadNoticeRef.current = false;
       setMessageOwner(extension.name);
       setMessageTone('progress');
       setMessage(

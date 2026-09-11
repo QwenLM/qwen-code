@@ -587,8 +587,9 @@ export function registerWorkspaceExtensionRoutes(
   // install's name is only known once preparation resolves, and the sweep is
   // what breaks the two-interactive-installs deadlock. An update knows its
   // target up front, so it supersedes only the same extension's parked
-  // operations — cancelling an unrelated extension's install would discard
-  // work and credentials the user already supplied.
+  // update that is still waiting for input — a parked install carries no
+  // resolved name to compare, and cancelling an unrelated extension's
+  // operation would discard work and credentials the user already supplied.
   const supersedeActiveInstallOperations = (
     controller: ExtensionsController,
     currentOperationId: string,
@@ -604,9 +605,8 @@ export function registerWorkspaceExtensionRoutes(
         if (operation.operation !== 'install') continue;
       } else if (
         operation.name?.toLowerCase() !== targetName.toLowerCase() ||
-        (operation.operation !== 'install' &&
-          (operation.operation !== 'update' ||
-            operation.status !== 'waiting_for_input'))
+        operation.operation !== 'update' ||
+        operation.status !== 'waiting_for_input'
       ) {
         continue;
       }
