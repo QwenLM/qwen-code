@@ -4209,8 +4209,13 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
-        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      const scheduledTaskMarker = isScheduledTaskSession(session) ? (
+        <span
+          className={styles.sessionSourceIcon}
+          data-web-shell-scheduled-task-session
+        >
+          <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+        </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
@@ -4265,17 +4270,6 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
-            {scheduledTaskIcon && (
-              <span className={styles.sessionStatusSlot}>
-                <span
-                  className={styles.sessionSourceIcon}
-                  data-web-shell-scheduled-task-session
-                  title={t('sidebar.scheduledTasks')}
-                >
-                  {scheduledTaskIcon}
-                </span>
-              </span>
-            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4313,6 +4307,7 @@ export function WebShellSidebar({
                   : undefined
               }
             >
+              {scheduledTaskMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -4403,8 +4398,6 @@ export function WebShellSidebar({
       const isCurrent = standalone?.active ?? isCurrentSession(session);
       const sessionWorkActive =
         !session.hasActivePrompt && session.activeWorkState === 'active';
-      const activityUnknown =
-        !session.hasActivePrompt && session.activeWorkState === 'unknown';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
@@ -4483,28 +4476,14 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {scheduledTaskIcon ? (
-              <span
-                className={styles.sessionSourceIcon}
-                data-web-shell-scheduled-task-session
-                title={t('sidebar.scheduledTasks')}
-              >
-                {scheduledTaskIcon}
-              </span>
-            ) : null}
             {completedUnread ? (
               <span
-                className={cx(
-                  styles.sessionStatusDot,
-                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
-                )}
+                className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {session.hasActivePrompt &&
-            !scheduledTaskIcon &&
-            !completedUnread ? (
+            {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4513,19 +4492,12 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !scheduledTaskIcon && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
-            ) : activityUnknown && !scheduledTaskIcon && !completedUnread ? (
-              <span
-                className={styles.sessionStatusUnknown}
-                aria-label={t('sidebar.activityUnknown')}
-              >
-                ?
-              </span>
             ) : null}
           </span>
           {isEditing && showRename ? (
@@ -4576,6 +4548,7 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
+                {scheduledTaskMarker}
                 {attention && (
                   <span
                     className={cx(

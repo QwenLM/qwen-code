@@ -25,6 +25,10 @@ import type {
 } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
+import {
+  assertChannelControlWorkspaceCapacity,
+  ChannelControlWorkspaceLimitError,
+} from './channel-control-capacity.js';
 
 export type ChannelWorkerControlTransition =
   | 'idle'
@@ -324,7 +328,8 @@ export function createChannelWorkerManager(
   const classifyFailure = (
     error: unknown,
     fallbackCode: 'channel_worker_start_failed' | 'channel_worker_stop_failed',
-  ): ChannelWorkerControlError => {
+  ): ChannelWorkerControlError | ChannelControlWorkspaceLimitError => {
+    if (error instanceof ChannelControlWorkspaceLimitError) return error;
     if (error instanceof ChannelWorkerReconcileError) {
       return new ChannelWorkerControlError(
         error.stopFailed ? 'channel_worker_stop_failed' : fallbackCode,
@@ -373,6 +378,9 @@ export function createChannelWorkerManager(
         resolvedGroups ??
         (await opts.resolveGroups(selection, initial ? 'initial' : 'set'));
       if (hardKilled) throw drainingError();
+      assertChannelControlWorkspaceCapacity(
+        targetGroups.map((target) => target.workspaceCwd),
+      );
       reserve(selection);
     } catch (error) {
       setTransition('idle');
@@ -393,6 +401,12 @@ export function createChannelWorkerManager(
           }
         }
         setTransition('idle');
+        if (
+          error instanceof ChannelControlWorkspaceLimitError &&
+          !cleanupError
+        ) {
+          throw error;
+        }
         throw new ChannelWorkerControlError(
           'channel_worker_start_failed',
           errorMessage(error),

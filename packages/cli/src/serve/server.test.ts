@@ -47,6 +47,7 @@ import {
   getServeAppLifecycle,
   type ServeAppLifecycle,
 } from './serve-app-lifecycle.js';
+import { ChannelControlWorkspaceLimitError } from './channel-control-capacity.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import { tagListener } from './local-control/index.js';
 import {
@@ -4713,6 +4714,90 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([undefined, '25', '256'])(
+      'freezes registration capacity %s and does not infer an injected channel limit',
+      async (configured) => {
+        const daemonEnv = { QWEN_SERVE_MAX_WORKSPACES: configured };
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv,
+          getChannelWorkerSnapshot: () => ({
+            enabled: false,
+            state: 'disabled',
+            channels: [],
+          }),
+        });
+        daemonEnv.QWEN_SERVE_MAX_WORKSPACES = '2';
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.body.limits.maxRegisteredWorkspaces).toBe(
+          configured === undefined ? 256 : Number(configured),
+        );
+        expect(response.body.limits).not.toHaveProperty(
+          'maxChannelControlWorkspaces',
+        );
+        expect(response.body.limits).not.toHaveProperty('maxTotalSessions');
+      },
+    );
+
+    it('rejects an injected registry above registration capacity', () => {
+      const runtimes = [WS_BOUND, '/workspace/secondary'].map((cwd, index) =>
+        makeWorkspaceRuntimeForTest({
+          workspaceId: `id-${index}`,
+          workspaceCwd: cwd,
+          primary: index === 0,
+          bridge: fakeBridge(),
+        }),
+      );
+      expect(() =>
+        createServeApp({ ...baseOpts, maxRegisteredWorkspaces: 1 }, undefined, {
+          workspaceRegistry: createWorkspaceRegistry(runtimes),
+        }),
+      ).toThrow(/Initial workspace registry exceeds/);
+    });
+
+    it('exempts the internal Conversations runtime from that limit', () => {
+      const runtimes: WorkspaceRuntime[] = [
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'user-0',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: fakeBridge(),
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'live-0',
+            workspaceCwd: '/workspace/conversations',
+            primary: false,
+            bridge: fakeBridge(),
+          }),
+          provenance: 'live-conversation',
+        },
+      ];
+      expect(() =>
+        createServeApp({ ...baseOpts, maxRegisteredWorkspaces: 1 }, undefined, {
+          workspaceRegistry: createWorkspaceRegistry(runtimes),
+        }),
+      ).not.toThrow();
+    });
+
+    it('advertises an explicitly enforced channel limit and total admission with one workspace', async () => {
+      const app = createServeApp(
+        { ...baseOpts, maxTotalSessions: 800 },
+        undefined,
+        { bridge: fakeBridge(), maxChannelControlWorkspaces: 25 },
+      );
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.body.limits).toMatchObject({
+        maxRegisteredWorkspaces: 256,
+        maxChannelControlWorkspaces: 25,
+        maxTotalSessions: 800,
+      });
+    });
+
     it.each([
       [undefined, 5_000],
       ['', 5_000],
@@ -18620,6 +18705,62 @@ describe('createServeApp', () => {
       }
     });
 
+    it('requires explicit submission provenance and never upgrades a rejected worker', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const cases = [
+        { meta: undefined, expected: undefined },
+        {
+          meta: { 'qwen.daemon.submittedPrompt': 'forged' },
+          expected: undefined,
+        },
+        {
+          meta: { 'qwen.submittedPrompt': ' original question\n' },
+          expected: ' original question\n',
+        },
+        { meta: { 'qwen.submittedPrompt': 42 }, expected: undefined },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            [CHANNEL_PROMPT_META_KEY]: true,
+          },
+          expected: undefined,
+        },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'revoked-worker',
+          },
+          expected: undefined,
+        },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            'qwen.daemon.promptDisplayText': 'label',
+          },
+          expected: undefined,
+        },
+      ];
+      for (const { meta, expected } of cases) {
+        const result = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'request wrapper' }],
+            ...(meta ? { _meta: meta } : {}),
+          });
+        expect(result.status).toBe(202);
+        const call = bridge.promptCalls.at(-1);
+        expect(call?.context?.submittedPrompt).toBe(expected);
+        expect(call?.req._meta ?? {}).not.toHaveProperty(
+          'qwen.submittedPrompt',
+        );
+        expect(call?.req._meta ?? {}).not.toHaveProperty(
+          'qwen.daemon.submittedPrompt',
+        );
+      }
+    });
+
     it('accepts channel-prompt classification only from the workspace worker', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection;
       // a forged key from an unauthorized caller must be dropped at the
@@ -26655,6 +26796,26 @@ describe('createServeApp', () => {
           primary: true,
         },
       ],
+    });
+
+    it('returns 409 for a channel control owner capacity rejection', async () => {
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelControlWorkspaceLimitError();
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+      });
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'names', names: ['bot'] },
+      });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe(
+        'channel_control_workspace_limit_reached',
+      );
     });
 
     it('exposes disabled state and advertises control but not reload', async () => {
@@ -42365,6 +42526,7 @@ class FakeLiveHostSocket extends EventEmitter {
           instanceNonce,
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -42520,7 +42682,7 @@ describe('Live Appshot server integration', () => {
         );
         const captureHandler = setup.captureHandler;
         expect(captureHandler).toEqual(expect.any(Function));
-        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const capture = vi.spyOn(setup.coordinator, 'captureVisualContext');
         const discovery = await import('./live/discovery.js');
         const assertPublisher = vi.spyOn(
           discovery,

@@ -15,6 +15,7 @@ import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider'
 import {
   getDaemonBaseUrl,
   getDaemonToken,
+  hasReloadSurvivableDaemonToken,
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
@@ -204,6 +205,20 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     DaemonProductSessionContext | undefined
   >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  // One-shot ?theme=/?language=/?lang= params are consumed by the useState
+  // initializers above; strip them once mounted so a bookmarked URL cannot
+  // keep overriding stored preferences on later loads. (The reload retry
+  // re-adds the live values, which the next boot consumes and strips again.)
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const before = url.search;
+    url.searchParams.delete('theme');
+    url.searchParams.delete('language');
+    url.searchParams.delete('lang');
+    if (url.search !== before) {
+      window.history.replaceState(null, '', url);
+    }
+  }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the React theme so mobile status bars / overscroll backgrounds stay
   // consistent when the user toggles or when ?theme= lands via URL.
@@ -255,11 +270,43 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   return (
     <ErrorBoundary
       label="web-shell-root"
-      fallback={(error, reset) => (
-        <RootErrorFallback error={error} onRetry={reset} language={language} />
-      )}
+      fallback={(error, reset) => {
+        // A reload rebuilds the module graph — the only recovery for a crash
+        // rooted in page-level module state (e.g. a duplicated context module
+        // in dev). Reload is only safe when it cannot strand a credential:
+        // either no token was resolved at boot (tokenless trusted loopback —
+        // nothing to strand; reads the prop, never getDaemonToken(), whose
+        // in-memory cache always reports a token after boot), or a token
+        // survives in the URL or per-tab storage. Otherwise fall back to an
+        // in-place reset, which keeps the in-memory token.
+        const canReload = !daemonToken || hasReloadSurvivableDaemonToken();
+        return (
+          <RootErrorFallback
+            error={error}
+            onRetry={() => {
+              if (!canReload) {
+                reset();
+                return;
+              }
+              // Session switches strip the one-shot theme/language params
+              // from the URL; carry the live values so the reloaded page
+              // comes back as the user had it.
+              const url = new URL(window.location.href);
+              url.searchParams.set('theme', theme);
+              url.searchParams.set('language', language);
+              window.history.replaceState(null, '', url);
+              window.location.reload();
+            }}
+            retryMode={canReload ? 'reload' : 'reset'}
+            language={language}
+          />
+        );
+      }}
     >
-      <BrowserTurnNotifications language={language}>
+      <BrowserTurnNotifications
+        language={language}
+        options={{ defaultEnabled: true }}
+      >
         <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
           <WorkspaceSessionProvider
             sessionId={sessionId}

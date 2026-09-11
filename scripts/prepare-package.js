@@ -79,6 +79,7 @@ function verifyBundleArtifacts(rootDir, distDir) {
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
     path.join(distDir, 'export-transcript-document.js'),
+    path.join(distDir, 'export-transcript-document.css'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -320,6 +321,7 @@ function writeDistPackageJson(rootDir, distDir) {
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'codeModeHost.js',
       'chunks',
       'vendor',
       '*.sb',
@@ -330,6 +332,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'bundled',
       'web-shell',
       'export-transcript-document.js',
+      'export-transcript-document.css',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
       // web-tree-sitter wasm, native render library) are intentionally NOT
       // published in the npm package — a multi-megabyte tree dominated by the

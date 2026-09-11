@@ -123,6 +123,7 @@ function truncateQueuedPromptParts(parts: readonly QueuedPromptPreviewPart[]): {
 }
 
 export interface QueuedPrompt {
+  submittedPrompt?: string;
   id: number;
   sessionId?: string;
   text: string;
