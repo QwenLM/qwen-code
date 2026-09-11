@@ -1517,16 +1517,8 @@ function parseAgentConfig(
     });
     return undefined;
   }
-  // Reject names that shadow a built-in subagent. Without this check a
-  // client could `POST /workspace/agents { name: "general-purpose" }`
-  // and write a project-level file at `<workspace>/.qwen/agents/
-  // general-purpose.md`. List/load resolve the project entry first
-  // (project > builtin), but `SubagentManager.deleteSubagent` rejects
-  // by name alone (`subagent-manager.ts:302`) — so DELETE returns 403
-  // `agent_readonly` and the file becomes undeleteable through the
-  // API. Surface the conflict at create time instead. The check is
-  // case-insensitive (`BuiltinAgentRegistry.isBuiltinAgent` lowercases
-  // both sides), matching `loadSubagent`'s case-insensitive cascade.
+  // API-created definitions reserve builtin names even though manually authored
+  // project/user definitions can shadow builtins and remain deletable.
   if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
     res.status(422).json({
       error: `"${name}" shadows a built-in subagent and cannot be used as a project- or user-level agent name. Choose a different name.`,

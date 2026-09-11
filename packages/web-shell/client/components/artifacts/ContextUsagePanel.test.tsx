@@ -267,7 +267,7 @@ describe('ContextUsagePanel', () => {
     expect(container.textContent).toContain('context-model');
   });
 
-  it('renders full detail names because the panel opts out of the cap', async () => {
+  it('renders full detail names', async () => {
     const snapshot = fixture();
     snapshot.usage.showDetails = true;
     const longName = 'mcp__github__create_repository_issue';
