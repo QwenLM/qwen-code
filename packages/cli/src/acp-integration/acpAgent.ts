@@ -2954,53 +2954,80 @@ export async function runAcpAgent(
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
   let managedShutdownPromise: Promise<void> | undefined;
-  let sessionEndFired = false;
+  let sessionEndPromise: Promise<void> | undefined;
 
   // Helper to fire SessionEnd hook once, preventing double-fire from both
   // shutdown handler path and connection.closed path.
-  const fireSessionEndOnce = async (
+  const fireSessionEndOnce = (
     reason: SessionEndReason,
     managedConfigs?: Config[],
-  ) => {
-    if (sessionEndFired) return;
-    sessionEndFired = true;
+  ): Promise<void> => {
+    if (sessionEndPromise) return sessionEndPromise;
 
-    const configs = new Set<Config>(managedConfigs ?? [config]);
-    if (!managedConfigs) {
-      const sessions = agentInstance?.getActiveSessions();
-      if (sessions) {
-        for (const session of sessions) {
-          const sessionConfig = session.getConfig?.();
-          if (sessionConfig) {
-            configs.add(sessionConfig);
+    sessionEndPromise = (async () => {
+      const configs = new Set<Config>(managedConfigs ?? [config]);
+      if (!managedConfigs) {
+        const sessions = agentInstance?.getActiveSessions();
+        if (sessions) {
+          for (const session of sessions) {
+            const sessionConfig = session.getConfig?.();
+            if (sessionConfig) {
+              configs.add(sessionConfig);
+            }
           }
         }
       }
-    }
 
-    const failures: unknown[] = [];
-    for (const cfg of configs) {
-      const hookSystem = cfg.getHookSystem?.();
-      const hooksEnabled = !cfg.getDisableAllHooks?.();
-      if (
-        !hooksEnabled ||
-        !hookSystem ||
-        !cfg.hasHooksForEvent?.('SessionEnd')
-      ) {
-        continue;
-      }
+      // IDE disconnects have a bounded hook budget. The signal path still
+      // joins this promise when it overlaps the IDE close, so it cannot
+      // dispose sessions or drain the MCP pool underneath a live hook.
+      const ideCloseHookTimeoutMs = 30_000;
+      const hookAbortController =
+        reason === SessionEndReason.PromptInputExit
+          ? new AbortController()
+          : undefined;
+      const hookTimeout = hookAbortController
+        ? setTimeout(() => hookAbortController.abort(), ideCloseHookTimeoutMs)
+        : undefined;
+      hookTimeout?.unref();
+
       try {
-        await hookSystem.fireSessionEndEvent(reason);
-      } catch (err) {
-        if (managedConfigs) failures.push(err);
-        debugLogger.warn(
-          `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        const failures: unknown[] = [];
+        for (const cfg of configs) {
+          const hookSystem = cfg.getHookSystem?.();
+          const hooksEnabled = !cfg.getDisableAllHooks?.();
+          if (
+            !hooksEnabled ||
+            !hookSystem ||
+            !cfg.hasHooksForEvent?.('SessionEnd')
+          ) {
+            continue;
+          }
+          try {
+            if (hookAbortController) {
+              await hookSystem.fireSessionEndEvent(
+                reason,
+                hookAbortController.signal,
+              );
+            } else {
+              await hookSystem.fireSessionEndEvent(reason);
+            }
+          } catch (err) {
+            if (managedConfigs) failures.push(err);
+            debugLogger.warn(
+              `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
+        }
+      } finally {
+        if (hookTimeout) clearTimeout(hookTimeout);
       }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
-    }
+    })();
+
+    return sessionEndPromise;
   };
 
   const shutdownManagedAgent = (

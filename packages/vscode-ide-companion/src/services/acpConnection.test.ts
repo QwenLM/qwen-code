@@ -21,10 +21,10 @@ const sdkClientFactory = vi.hoisted(() => ({
 // literal here on purpose: the escalation tests step to just before and just
 // after the deadline, so a grace that changes without these tests changing
 // fails them instead of silently widening or vacating the pin.
-const SHUTDOWN_GRACE_MS = 45_000;
+const SHUTDOWN_GRACE_MS = 75_000;
 // Same pin for the second rung of the POSIX escalation ladder
 // (SIGTERM_GRACE_MS): SIGKILL must not land until this long after SIGTERM.
-const SIGTERM_GRACE_MS = 10_000;
+const SIGTERM_GRACE_MS = 45_000;
 // Same pin for the refused-close backoff rungs (CLOSE_RETRY_BASE_MS and
 // CLOSE_RETRY_CEILING_MS): 60s, doubling, capped at 1h.
 const CLOSE_RETRY_BASE_MS = 60_000;
@@ -621,6 +621,39 @@ describe('AcpConnection child exit cleanup', () => {
     await Promise.resolve();
   });
 
+  it('does not wire replacement streams into a retired startup', async () => {
+    vi.useFakeTimers();
+    try {
+      const oldChild = createMockChild({
+        stdout: new PassThrough(),
+        stdin: new PassThrough(),
+        on: vi.fn(),
+      });
+      const newChild = createMockChild({
+        stdout: new PassThrough(),
+        stdin: new PassThrough(),
+        on: vi.fn(),
+      });
+      const conn = createConnection({ child: oldChild });
+      const setup = (
+        conn as unknown as {
+          setupChildProcessHandlers: () => Promise<void>;
+        }
+      ).setupChildProcessHandlers();
+      const setupFailure = await expect(setup).rejects.toThrow(
+        /failed to start|superseded/i,
+      );
+
+      conn.child = newChild;
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await setupFailure;
+      expect(conn.sdkConnection).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a live child exiting clears the connection and fires onDisconnected', async () => {
     // The exit-handler teardown is keyed on the connection still being
     // current. For the CURRENT direction (no supersede), a live child exit
@@ -842,10 +875,12 @@ describe('AcpConnection child exit cleanup', () => {
     // both assertions below.
     await expect(newPromise).rejects.toMatchObject({
       code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
       data: { details: 'connection superseded' },
     });
     await expect(loadPromise).rejects.toMatchObject({
       code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
       data: { details: 'connection superseded' },
     });
 
@@ -895,15 +930,17 @@ describe('AcpConnection child exit cleanup', () => {
 
     resolveNewSession({ sessionId: 'stale-from-retired-cli' });
     resolveLoadSession({});
-    // Same return-value pin as the disconnect() case, on the re-connect path:
+    // Same stale-result pin as the disconnect() case, on the re-connect path:
     // the retired CLI's payload must not reach the caller, or it is applied to
     // the replacement connection's live webview state.
     await expect(newPromise).rejects.toMatchObject({
       code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
       data: { details: 'connection superseded' },
     });
     await expect(loadPromise).rejects.toMatchObject({
       code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
       data: { details: 'connection superseded' },
     });
 
@@ -941,8 +978,46 @@ describe('AcpConnection child exit cleanup', () => {
     conn.sessionId = 'session-2';
 
     resolvePrompt({ stopReason: 'end_turn' });
-    await promptPromise;
+    await expect(promptPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
+      data: { details: 'connection superseded' },
+    });
 
+    expect(onEndTurn).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onEndTurn when the prompt session is superseded in place', async () => {
+    let resolvePrompt!: (value: unknown) => void;
+    const sdk = {
+      prompt: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolvePrompt = resolve;
+          }),
+      ),
+    };
+    const onEndTurn = vi.fn();
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+    (conn as unknown as AcpConnection).onEndTurn = onEndTurn;
+    const acp = conn as unknown as AcpConnection;
+
+    const promptPromise = acp.sendPrompt('hi');
+    // Session replacement on the same live connection leaves the SDK object
+    // unchanged, so the session identity must be part of the stale-result
+    // guard as well.
+    conn.sessionId = 'session-b';
+
+    resolvePrompt({ stopReason: 'end_turn' });
+    await expect(promptPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      message: expect.stringContaining('connection superseded'),
+      data: { details: 'connection superseded' },
+    });
     expect(onEndTurn).not.toHaveBeenCalled();
   });
 });
@@ -1140,9 +1215,8 @@ describe('AcpConnection superseded session close (#11303)', () => {
       await vi.advanceTimersByTimeAsync(CLOSE_RETRY_BASE_MS);
       expect(extMethod).toHaveBeenCalledTimes(2);
 
-      // Second refusal doubles the rung: another 120s, not 60s.
-      await vi.advanceTimersByTimeAsync(CLOSE_RETRY_BASE_MS);
-      expect(extMethod).toHaveBeenCalledTimes(2);
+      // A refusal is evidence that the session still has active work, not a
+      // transport failure, so each probe stays on the base rung.
       await vi.advanceTimersByTimeAsync(CLOSE_RETRY_BASE_MS);
       expect(extMethod).toHaveBeenCalledTimes(3);
     });
@@ -1178,6 +1252,44 @@ describe('AcpConnection superseded session close (#11303)', () => {
       expect(countClosesFor(extMethod, 'session-a')).toBe(1);
     });
 
+    it('waits for an in-flight close before loading that session again', async () => {
+      let resolveClose!: (value: unknown) => void;
+      const extMethod = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveClose = resolve;
+          }),
+      );
+      const loadSession = vi.fn().mockResolvedValue({});
+      const sdk = {
+        newSession: vi.fn().mockResolvedValue({ sessionId: 'session-b' }),
+        loadSession,
+        extMethod,
+      };
+      const conn = createConnection({
+        child: createMockChild(),
+        sdkConnection: sdk,
+        sessionId: 'session-a',
+      });
+      const acp = conn as unknown as AcpConnection;
+
+      await acp.newSession();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(extMethod).toHaveBeenCalledTimes(1);
+
+      const loadPromise = acp.loadSession('session-a');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(loadSession).not.toHaveBeenCalled();
+
+      resolveClose({ closed: false, holds: ['running-task'] });
+      await loadPromise;
+      expect(loadSession).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    });
+
     it('stops retrying superseded closes after disconnect', async () => {
       const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
       try {
@@ -1205,6 +1317,50 @@ describe('AcpConnection superseded session close (#11303)', () => {
       } finally {
         killSpy.mockRestore();
       }
+    });
+
+    it('clears and cancels an in-flight close when disconnect retires the connection', async () => {
+      let resolveClose!: (value: unknown) => void;
+      const extMethod = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveClose = resolve;
+          }),
+      );
+      const sdk = {
+        newSession: vi.fn().mockResolvedValue({ sessionId: 'session-b' }),
+        extMethod,
+      };
+      const conn = createConnection({
+        child: createMockChild(),
+        sdkConnection: sdk,
+        sessionId: 'session-a',
+      });
+      const acp = conn as unknown as AcpConnection;
+
+      await acp.newSession();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(extMethod).toHaveBeenCalledTimes(1);
+      expect(
+        (acp as unknown as { supersededCloseInFlight: Set<string> })
+          .supersededCloseInFlight.size,
+      ).toBe(1);
+
+      acp.disconnect();
+      expect(
+        (acp as unknown as { supersededCloseInFlight: Set<string> })
+          .supersededCloseInFlight.size,
+      ).toBe(0);
+
+      resolveClose({ closed: false, holds: ['running-task'] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        (
+          acp as unknown as {
+            supersededCloseRetries: Map<string, unknown>;
+          }
+        ).supersededCloseRetries.size,
+      ).toBe(0);
     });
 
     it('re-drives an expired close retry on the next session replacement', async () => {
@@ -1241,10 +1397,10 @@ describe('AcpConnection superseded session close (#11303)', () => {
       expect(countClosesFor(extMethod, 'session-b')).toBe(1);
     });
 
-    it('retries a close that errors (older CLI) without failing the new session', async () => {
+    it('does not retry an unsupported close method on an older CLI', async () => {
       // Old-CLI compatibility: the ext method rejects, the replacement
-      // session still succeeds, and the failure lands on the same retry
-      // table instead of being dropped.
+      // session still succeeds, and an operation the CLI cannot implement is
+      // not retried forever.
       const extMethod = vi
         .fn()
         .mockRejectedValue(new Error('Method not found'));
@@ -1267,7 +1423,7 @@ describe('AcpConnection superseded session close (#11303)', () => {
       expect(conn.sessionId).toBe('session-b');
 
       await vi.advanceTimersByTimeAsync(CLOSE_RETRY_BASE_MS);
-      expect(extMethod).toHaveBeenCalledTimes(2);
+      expect(extMethod).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -42,6 +42,11 @@ import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
+import {
+  ACTIVE_WORK_CLOSE_RETRY_BASE_MS,
+  ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
+  sessionCloseDrainBudgetMs,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 
 /**
  * How long the CLI gets to shut itself down after its stdin is closed, before
@@ -50,28 +55,22 @@ import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
  * This has to outlast the CLI's own wind-down, or the escalation lands in the
  * middle of a shutdown that is progressing correctly and skips the
  * `process.on('exit')` cleanup this teardown exists to protect. On the
- * ide_close path the CLI budgets 8s for the MCP pool drain
- * (`shutdownMcpPool(8_000)`) plus 30s for the session drain
- * (`SESSION_DRAIN_TIMEOUT_MS`), both in acpAgent.ts, plus up to 5s for
- * `runExitCleanup()` (`OVERALL_CLEANUP_TIMEOUT_MS`) in the `finally` wrapping
- * `runAcpAgent` (llm.tsx) — 43s bounded — so 45s covers all three stages
- * that always run. SessionEnd hooks are user-configured and can still
- * exceed it (`DEFAULT_HOOK_TIMEOUT` is 60s each), so the escalation stays as
- * the backstop rather than being removed; on POSIX it starts with a catchable
- * SIGTERM so even an over-budget hook run gets the CLI's exit-time reaper
- * before the SIGKILL rung.
+ * ide_close path SessionEnd hooks are capped at 30s, followed by the CLI's
+ * 8s MCP pool drain, 30s session drain, and 5s exit cleanup: 73s bounded.
+ * Keep a small margin above that bound. The escalation remains a backstop for
+ * a CLI that is genuinely wedged.
  */
-const SHUTDOWN_GRACE_MS = 45_000;
+const SHUTDOWN_GRACE_MS = 75_000;
 
 /**
  * How long the POSIX escalation waits between the SIGTERM rung and the
- * SIGKILL rung. SIGTERM triggers the CLI's `shutdownHandler`, whose remaining
- * work at that point is bounded by `runExitCleanup()`
- * (`OVERALL_CLEANUP_TIMEOUT_MS` = 5s) — the SessionEnd hook and MCP pool
- * drain either already ran or join the in-flight ide_close ones — so 10s
- * covers the cleanup ceiling plus margin.
+ * SIGKILL rung. SIGTERM triggers the CLI's `shutdownHandler`. If it overlaps
+ * an IDE close, the handler joins the in-flight SessionEnd hook, session
+ * dispose and MCP drain; otherwise it may owe the full 30s session drain, 8s
+ * MCP drain and 5s exit cleanup. Keep this rung above that 43s bound so
+ * SIGKILL remains a last resort and the CLI's exit-time reaper gets a chance.
  */
-const SIGTERM_GRACE_MS = 10_000;
+const SIGTERM_GRACE_MS = 45_000;
 
 // Resolve taskkill by absolute System32 path, never the bare name: on Windows
 // a bare command is resolved through PATH *and* the current directory, so a
@@ -79,16 +78,8 @@ const SIGTERM_GRACE_MS = 10_000;
 // environment.
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
-// Drain budget handed to the CLI on a conditional superseded-session close,
-// aligned with the daemon's sessionCloseDrainBudgetMs(10_000) = 8s.
-const SUPERSEDED_CLOSE_DRAIN_MS = 8_000;
-
-// Backoff rungs for refused/failed superseded-session closes, aligned with
-// the daemon's activeWorkCloseRetryDelayMs (bridgeTypes.ts): 60s, doubling,
-// capped at 1h. Duplicated here rather than imported: the extension host
-// cannot reach into the bridge package's internals.
-const CLOSE_RETRY_BASE_MS = 60_000;
-const CLOSE_RETRY_CEILING_MS = 3_600_000;
+// Drain budget handed to the CLI on a conditional superseded-session close.
+const SUPERSEDED_CLOSE_DRAIN_MS = sessionCloseDrainBudgetMs(10_000);
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -109,7 +100,10 @@ export class AcpConnection {
     { failures: number; retryAt: number }
   >();
   private supersededCloseInFlight = new Set<string>();
+  private supersededClosePromises = new Map<string, Promise<void>>();
+  private supersededCloseCancels = new Map<string, () => void>();
   private supersededCloseTimer: NodeJS.Timeout | null = null;
+  private connectionGeneration = 0;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -267,7 +261,7 @@ export class AcpConnection {
       throw spawnError;
     }
 
-    if (!this.child || this.child.killed) {
+    if (this.child !== ownChild || ownChild.killed) {
       const code = this.lastExitCode ?? this.child?.exitCode ?? null;
       const signal = this.lastExitSignal;
       const stderrOutput = stderrChunks.join('').trim();
@@ -281,9 +275,9 @@ export class AcpConnection {
 
     // Convert Node.js child process streams to Web Streams for SDK
     const stdout = Readable.toWeb(
-      this.child.stdout!,
+      ownChild.stdout!,
     ) as ReadableStream<Uint8Array>;
-    const stdin = Writable.toWeb(this.child.stdin!) as WritableStream;
+    const stdin = Writable.toWeb(ownChild.stdin!) as WritableStream;
 
     const stream = ndJsonStream(stdin, stdout);
 
@@ -311,9 +305,10 @@ export class AcpConnection {
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
           if (this.sdkConnection !== wiredConnection) {
-            throw RequestError.internalError({
-              details: 'connection superseded',
-            });
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
           }
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
@@ -402,9 +397,10 @@ export class AcpConnection {
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> => {
           if (this.sdkConnection !== wiredConnection) {
-            throw RequestError.internalError({
-              details: 'connection superseded',
-            });
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
           }
           try {
             const result = await this.fileHandler.handleReadTextFile({
@@ -423,9 +419,10 @@ export class AcpConnection {
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> => {
           if (this.sdkConnection !== wiredConnection) {
-            throw RequestError.internalError({
-              details: 'connection superseded',
-            });
+            throw RequestError.internalError(
+              { details: 'connection superseded' },
+              'connection superseded',
+            );
           }
           await this.fileHandler.handleWriteTextFile({
             path: params.path,
@@ -455,7 +452,7 @@ export class AcpConnection {
     // if the CLI crashes before responding.
     logger.log('[ACP] Sending initialize request...');
     const initResponse = await Promise.race([
-      this.sdkConnection.initialize({
+      wiredConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
           fs: {
@@ -466,6 +463,13 @@ export class AcpConnection {
       }),
       processExitPromise,
     ]);
+
+    if (this.sdkConnection !== wiredConnection || this.child !== ownChild) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
+    }
 
     logger.log('[ACP] Initialize successful');
     logger.log(
@@ -569,11 +573,9 @@ export class AcpConnection {
 
   /**
    * The agent keeps every session alive until told otherwise, and a retained
-   * session still fires autonomous model turns when its background tasks
-   * complete — each turn can spawn shells, which is what grew conhost.exe
-   * without bound in #11303 while the window stayed open. Replacing the
-   * current session (session/new, session/load) therefore closes the
-   * superseded one.
+   * session can continue autonomous work after it leaves the foreground.
+   * Replacing the current session (session/new, session/load) therefore asks
+   * the CLI to close the superseded one.
    *
    * The close is conditional (`onlyIfUnheld`): navigation is automatic
    * cleanup, not explicit destruction, so a session that still holds active
@@ -601,6 +603,13 @@ export class AcpConnection {
     this.driveDueSupersededCloseRetries();
   }
 
+  private isUnsupportedSupersededCloseError(error: unknown): boolean {
+    return (
+      (error instanceof RequestError && error.code === -32601) ||
+      (error instanceof Error && /method not found/i.test(error.message))
+    );
+  }
+
   private sendSupersededClose(sessionId: string): void {
     // Always send on the CURRENT connection: by the time a retry fires, the
     // connection the session was superseded on may have been replaced.
@@ -612,19 +621,32 @@ export class AcpConnection {
     ) {
       return;
     }
+    const generation = this.connectionGeneration;
     this.supersededCloseInFlight.add(sessionId);
-    conn
-      .extMethod('qwen/control/session/close', {
-        sessionId,
-        requireFlush: true,
-        onlyIfUnheld: true,
-        drainTimeoutMs: SUPERSEDED_CLOSE_DRAIN_MS,
-      })
+    let cancelClose!: () => void;
+    const cancelled = new Promise<void>((resolve) => {
+      cancelClose = resolve;
+    });
+    this.supersededCloseCancels.set(sessionId, cancelClose);
+
+    const operation = Promise.resolve()
+      .then(() =>
+        conn.extMethod('qwen/control/session/close', {
+          sessionId,
+          requireFlush: true,
+          onlyIfUnheld: true,
+          drainTimeoutMs: SUPERSEDED_CLOSE_DRAIN_MS,
+        }),
+      )
       .then((result) => {
-        this.supersededCloseInFlight.delete(sessionId);
+        if (
+          generation !== this.connectionGeneration ||
+          this.sdkConnection !== conn
+        ) {
+          return;
+        }
         if (result['closed'] === true) {
           this.supersededCloseRetries.delete(sessionId);
-          this.armSupersededCloseTimer();
         } else {
           // Refused while the session still holds active work; keep it and
           // probe again on the backoff rungs.
@@ -633,27 +655,55 @@ export class AcpConnection {
             sessionId,
             result['holds'],
           );
-          this.scheduleSupersededCloseRetry(sessionId);
+          this.scheduleSupersededCloseRetry(sessionId, true);
         }
       })
       .catch((error: unknown) => {
-        this.supersededCloseInFlight.delete(sessionId);
+        if (
+          generation !== this.connectionGeneration ||
+          this.sdkConnection !== conn
+        ) {
+          return;
+        }
+        if (this.isUnsupportedSupersededCloseError(error)) {
+          // Older CLIs do not implement this optional extension method. Keep
+          // the replacement session usable, but do not retry an operation
+          // that can never succeed on this process.
+          this.supersededCloseRetries.delete(sessionId);
+          return;
+        }
         // Older CLIs have no session/close ext method; count it as a failure
-        // and keep retrying on the same table so the leak stays tracked.
+        // and keep retrying on the same table so transient failures stay
+        // tracked.
         logger.warn(
           '[ACP] Failed to close superseded session:',
           error instanceof Error ? error.message : String(error),
         );
         this.scheduleSupersededCloseRetry(sessionId);
       });
+
+    const tracked = Promise.race([operation, cancelled]).finally(() => {
+      this.supersededCloseInFlight.delete(sessionId);
+      if (this.supersededClosePromises.get(sessionId) === tracked) {
+        this.supersededClosePromises.delete(sessionId);
+        this.supersededCloseCancels.delete(sessionId);
+      }
+      this.armSupersededCloseTimer();
+    });
+    this.supersededClosePromises.set(sessionId, tracked);
   }
 
-  private scheduleSupersededCloseRetry(sessionId: string): void {
+  private scheduleSupersededCloseRetry(
+    sessionId: string,
+    resetFailures = false,
+  ): void {
     const failures =
-      (this.supersededCloseRetries.get(sessionId)?.failures ?? 0) + 1;
+      (resetFailures
+        ? 0
+        : (this.supersededCloseRetries.get(sessionId)?.failures ?? 0)) + 1;
     const delay = Math.min(
-      CLOSE_RETRY_BASE_MS * 2 ** (failures - 1),
-      CLOSE_RETRY_CEILING_MS,
+      ACTIVE_WORK_CLOSE_RETRY_BASE_MS * 2 ** (failures - 1),
+      ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
     );
     this.supersededCloseRetries.set(sessionId, {
       failures,
@@ -684,7 +734,7 @@ export class AcpConnection {
         this.supersededCloseTimer = null;
         this.driveDueSupersededCloseRetries();
       },
-      Math.max(earliest - Date.now(), 0),
+      Math.max(earliest - Date.now(), 1_000),
     );
   }
 
@@ -723,9 +773,10 @@ export class AcpConnection {
     // stamp the dead session's id onto the replacement connection's field, so
     // fail instead — the same shape the inbound callback guards use above.
     if (this.sdkConnection !== conn) {
-      throw RequestError.internalError({
-        details: 'connection superseded',
-      });
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
     }
     this.sessionId = response.sessionId || null;
     logger.log('[ACP] Session created with ID:', this.sessionId);
@@ -735,7 +786,8 @@ export class AcpConnection {
 
   async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
     const conn = this.ensureConnection();
-    if (!this.sessionId) {
+    const promptSessionId = this.sessionId;
+    if (!promptSessionId) {
       throw new Error('No active ACP session');
     }
     const promptBlocks =
@@ -743,14 +795,17 @@ export class AcpConnection {
         ? [{ type: 'text' as const, text: prompt }]
         : prompt;
     const response: PromptResponse = await conn.prompt({
-      sessionId: this.sessionId,
+      sessionId: promptSessionId,
       prompt: promptBlocks,
     });
-    // A stale prompt can resolve after disconnect() (or a re-connect) retired
-    // this connection. Firing onEndTurn then would clear the replacement
-    // session's streaming state, so bail out before touching onEndTurn.
-    if (this.sdkConnection !== conn) {
-      return response;
+    // A stale prompt can resolve after disconnect(), re-connect(), or an
+    // in-place session replacement. Firing onEndTurn then would clear the
+    // replacement session's streaming state, so fail before touching it.
+    if (this.sdkConnection !== conn || this.sessionId !== promptSessionId) {
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
     }
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
@@ -795,6 +850,19 @@ export class AcpConnection {
   ): Promise<LoadSessionResponse> {
     const conn = this.ensureConnection();
     const previousSessionId = this.sessionId;
+    // The daemon rejects a load while its conditional close gate is active.
+    // Wait for that close to settle before loading the same session again;
+    // disconnect() resolves the tracked wait when the connection is retired.
+    const pendingClose = this.supersededClosePromises.get(sessionId);
+    if (pendingClose) {
+      await pendingClose;
+      if (this.sdkConnection !== conn) {
+        throw RequestError.internalError(
+          { details: 'connection superseded' },
+          'connection superseded',
+        );
+      }
+    }
     logger.log('[ACP] Sending session/load request for session:', sessionId);
     const cwd = cwdOverride || this.workingDir;
     let response: LoadSessionResponse;
@@ -820,9 +888,10 @@ export class AcpConnection {
     // the catch above so a supersede is not logged as a request failure, and
     // before the success log so a discarded load prints no success line.
     if (this.sdkConnection !== conn) {
-      throw RequestError.internalError({
-        details: 'connection superseded',
-      });
+      throw RequestError.internalError(
+        { details: 'connection superseded' },
+        'connection superseded',
+      );
     }
     logger.log('[ACP] Session load succeeded for session:', sessionId);
     this.sessionId = sessionId;
@@ -961,6 +1030,13 @@ export class AcpConnection {
   }
 
   disconnect(): void {
+    this.connectionGeneration += 1;
+    for (const cancel of this.supersededCloseCancels.values()) {
+      cancel();
+    }
+    this.supersededCloseCancels.clear();
+    this.supersededClosePromises.clear();
+    this.supersededCloseInFlight.clear();
     const child = this.child;
     this.child = null;
     this.sdkConnection = null;

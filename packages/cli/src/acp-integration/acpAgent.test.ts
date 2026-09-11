@@ -1756,6 +1756,51 @@ describe('runAcpAgent shutdown cleanup', () => {
     expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
   });
 
+  it('SIGTERM during ide_close SessionEnd waits for the in-flight hook', async () => {
+    let resolveHook!: () => void;
+    const fireSessionEndEvent = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveHook = resolve;
+        }),
+    );
+    mockConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionEndEvent,
+    });
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    expect(agent).toBeDefined();
+    const disposeSessions = vi.fn().mockResolvedValue(undefined);
+    const shutdownMcpPool = vi.fn().mockResolvedValue(undefined);
+    Object.assign(agent!, { disposeSessions, shutdownMcpPool });
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    mockConnectionState.resolve();
+    await vi.waitFor(() => {
+      expect(fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.PromptInputExit,
+        expect.any(AbortSignal),
+      );
+    });
+
+    sigTermListeners[0]('SIGTERM');
+    await flushImmediate();
+    expect(disposeSessions).not.toHaveBeenCalled();
+    expect(processExitSpy).not.toHaveBeenCalledWith(0);
+
+    resolveHook();
+    await agentPromise;
+    await vi.waitFor(() => {
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+  });
+
   it('still exits even if runExitCleanup throws', async () => {
     mockRunExitCleanup.mockRejectedValueOnce(new Error('cleanup failed'));
 
@@ -2064,6 +2109,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.PromptInputExit,
+        expect.any(AbortSignal),
       );
     });
 
@@ -21256,12 +21302,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(bootstrapHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
     expect(sessionHookSystemA.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
     expect(sessionHookSystemB.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
   });
 
