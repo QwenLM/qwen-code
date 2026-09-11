@@ -7630,3 +7630,187 @@ describe('Feishu inbound media delivery (#11554)', () => {
     });
   });
 });
+
+describe('Feishu quoted-message permission relay (#11554)', () => {
+  afterEach(() => vi.restoreAllMocks());
+  function setupApprovalRelay() {
+    const bridge = createMockBridge();
+    const channel = new ObservedContactFeishuChannel(
+      'independent',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel, {
+      tokenCache: { token: 'mock', expiresAt: Date.now() + 60000 },
+      botOpenId: 'ou_bot',
+    });
+    const receive = (message: Record<string, unknown>) =>
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        {
+          message: {
+            chat_id: 'oc_test',
+            chat_type: 'p2p',
+            message_id: 'om_current',
+            ...message,
+          },
+          sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+        },
+      );
+    return { channel, bridge, receive };
+  }
+  it.each([
+    ['approve', 'allow'],
+    ['approve-always', 'always'],
+  ])('p2p quoted turn accepts ordinary %s', async (command, optionId) => {
+    const { channel, bridge, receive } = setupApprovalRelay();
+    const respond = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { respondToPermission: respond });
+    let finish!: () => void;
+    vi.mocked(bridge.prompt).mockImplementation(
+      () =>
+        new Promise<string>((r) => {
+          finish = () => r('');
+        }),
+    );
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      Response.json({ code: 0, data: { items: [] } }),
+    );
+    vi.spyOn(channel as never, 'sendThreadMessage').mockResolvedValue(
+      undefined,
+    );
+    receive({
+      message_id: 'om_reply',
+      message_type: 'text',
+      root_id: 'om_root',
+      parent_id: 'om_file',
+      content: JSON.stringify({ text: '/review read file' }),
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    await channel.dispatchPermissionRequest({
+      sessionId: 'session-1',
+      requestId: 'req',
+      request: {
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'tool',
+          title: 'Read file',
+          kind: 'read',
+          status: 'pending',
+        },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'always', name: 'Always', kind: 'allow_always' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      },
+    });
+    receive({
+      message_id: 'om_approve',
+      message_type: 'text',
+      content: JSON.stringify({ text: '/review /' + command }),
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(respond).toHaveBeenCalledWith('req', {
+          outcome: { outcome: 'selected', optionId },
+        }),
+      );
+    } finally {
+      finish();
+    }
+  });
+  it('group approval keeps thread and sender boundaries', async () => {
+    const { channel, bridge, receive } = setupApprovalRelay();
+    const respond = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { respondToPermission: respond });
+    let finish!: () => void;
+    vi.mocked(bridge.prompt).mockImplementation(
+      () =>
+        new Promise<string>((r) => {
+          finish = () => r('');
+        }),
+    );
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      Response.json({ code: 0, data: { items: [] } }),
+    );
+    const sends = vi
+      .spyOn(channel as never, 'sendThreadMessage')
+      .mockResolvedValue(undefined);
+    const mentions = [
+      { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Bot' },
+    ];
+    receive({
+      message_id: 'om_group_read',
+      chat_type: 'group',
+      root_id: 'om_group_root',
+      mentions,
+      message_type: 'text',
+      content: JSON.stringify({ text: '/review read file' }),
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    await channel.dispatchPermissionRequest({
+      sessionId: 'session-1',
+      requestId: 'group_req',
+      request: {
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'tool',
+          title: 'Read file',
+          kind: 'read',
+          status: 'pending',
+        },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      },
+    });
+    receive({
+      message_id: 'om_wrong_thread',
+      chat_type: 'group',
+      root_id: 'om_other',
+      mentions,
+      message_type: 'text',
+      content: JSON.stringify({ text: '/review /approve' }),
+    });
+    await vi.waitFor(() =>
+      expect(
+        sends.mock.calls.some((c) => String(c[2]).includes('No pending')),
+      ).toBe(true),
+    );
+    expect(respond).not.toHaveBeenCalled();
+    (channel as unknown as { onMessage: (d: unknown) => void }).onMessage({
+      message: {
+        message_id: 'om_wrong_sender',
+        chat_id: 'oc_test',
+        chat_type: 'group',
+        root_id: 'om_group_root',
+        mentions,
+        message_type: 'text',
+        content: JSON.stringify({ text: '/review /approve group_req' }),
+      },
+      sender: { sender_id: { open_id: 'ou_other' }, sender_type: 'user' },
+    });
+    await vi.waitFor(() =>
+      expect(
+        sends.mock.calls.some((c) => String(c[2]).includes('with that id')),
+      ).toBe(true),
+    );
+    expect(respond).not.toHaveBeenCalled();
+    receive({
+      message_id: 'om_correct',
+      chat_type: 'group',
+      root_id: 'om_group_root',
+      mentions,
+      message_type: 'text',
+      content: JSON.stringify({ text: '/review /approve' }),
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(respond).toHaveBeenCalledWith('group_req', {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        }),
+      );
+    } finally {
+      finish();
+    }
+  });
+});

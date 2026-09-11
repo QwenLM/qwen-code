@@ -12,6 +12,8 @@ A package-local content parser returns readable text, mention names, whether tex
 
 Direct messages and fetched references share parsing. Each downloadable resource retains its source message ID. After existing preflight authorization, download images to base64 attachments and files to temporary paths using the existing size limit and download helper. Quoted content remains wrapped as untrusted context; files/images from the parent are delivered via existing attachments. Preserve original filenames in metadata while sanitizing filesystem paths. Show unavailable-resource context for failed downloads. Keep card quote extraction unchanged and do not download card or merged-forward resources.
 
+Private-chat quotes retain their parent message for context and resource lookup but do not create a Channel thread. Permission replies therefore share the private-chat scope. Group messages continue to use root_id for thread isolation.
+
 ## Boundaries and risks
 
 No outbound upload, arbitrary reference recursion, cloud document fetch, new credential, or larger size limit. Structured media order is retained; duplicate resource keys in one message are downloaded once. Markdown URLs are not fetched. Shared collect buffering and temporary-file lifetime are deferred: the current collect drain clears image attachments, and the adapter still uses a fixed 60-second cleanup timer. The timer risk needs full queue-lifecycle verification and a shared ownership design. Merged-forward expansion and explicit unsupported-type handling also remain follow-up work in #11554; this PR does not close the issue. Rich content supports transport of video/audio as local files, not a promise that every model decodes them.

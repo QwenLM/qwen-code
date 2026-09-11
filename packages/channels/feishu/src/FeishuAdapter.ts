@@ -2703,7 +2703,7 @@ export class FeishuChannel extends ChannelBase {
         ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
         messagePrefixText: messagePrefixText.trim(),
         messageId: msgId,
-        threadId: msg.root_id || undefined,
+        threadId: isGroup ? msg.root_id || undefined : undefined,
         isGroup,
         isMentioned,
         isReplyToBot: Boolean(msg.parent_id),
