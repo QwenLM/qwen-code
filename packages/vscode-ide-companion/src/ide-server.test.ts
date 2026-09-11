@@ -236,13 +236,58 @@ describe('IDEServer', () => {
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
+  it('should restore the persisted path when folders appear after activation', async () => {
+    vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_WORKSPACE_PATH'
+          ? ({
+              value: '/remote/workspace',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
+
+    await ideServer.start(mockContext);
+
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: { fsPath: '/remote/workspace' } },
+    ];
+    await ideServer.syncEnvVars();
+
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_WORKSPACE_PATH',
+      '/remote/workspace',
+    );
+
+    const port = getPortFromMock(replaceMock);
+    const lockFile = path.join('/home/test', '.qwen', 'ide', `${port}.lock`);
+    expect(fs.writeFile).toHaveBeenLastCalledWith(
+      lockFile,
+      JSON.stringify({
+        port: parseInt(port, 10),
+        workspacePath: '/remote/workspace',
+        ppid: process.ppid,
+        authToken: 'test-auth-token',
+        ideName: 'VS Code',
+      }),
+    );
+  });
+
   it('should keep a persisted workspace path when no folders are open', async () => {
     vscodeMock.workspace.workspaceFolders = [];
-    vi.mocked(mockContext.environmentVariableCollection.get).mockReturnValue({
-      value: '/remote/workspace',
-      type: 1,
-      options: {},
-    } as unknown as vscode.EnvironmentVariableMutator);
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_WORKSPACE_PATH'
+          ? ({
+              value: '/remote/workspace',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
 
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;
@@ -266,7 +311,7 @@ describe('IDEServer', () => {
     );
     const expectedContent = JSON.stringify({
       port: parseInt(port, 10),
-      workspacePath: '',
+      workspacePath: '/remote/workspace',
       ppid: process.ppid,
       authToken: 'test-auth-token',
       ideName: 'VS Code',
@@ -524,6 +569,7 @@ describe('IDEServer HTTP endpoints', () => {
       environmentVariableCollection: {
         replace: vi.fn(),
         clear: vi.fn(),
+        get: vi.fn(),
       },
     } as unknown as vscode.ExtensionContext;
     await ideServer.start(mockContext);
