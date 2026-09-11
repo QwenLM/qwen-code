@@ -8,7 +8,7 @@ detailed lifecycle semantics.
 
 ## OpenAPI
 
-The curated core integration contract is available as
+The curated 25-operation contract is available as
 [OpenAPI 3.1 JSON](https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/developers/daemon-rest-api.openapi.json).
 Import that URL into an OpenAPI-compatible renderer, client generator, or
 validation tool. The checked-in JSON is the portable interface contract for the
@@ -33,9 +33,8 @@ capability tags; they are outside this contract, not deprecated.
   daemon-wide state, `selected-runtime` uses the request's workspace selection,
   `persisted-workspace` resolves persisted session storage, `live-session-owner`
   routes by the live session, and `legacy-primary` always targets the daemon's
-  primary workspace. One `persisted-workspace` route is the exception:
-  `GET /session/:id/export` is primary-pinned, resolving only managed internal
-  runtimes before falling back to the primary workspace.
+  primary workspace. `GET /session/:id/export` is primary-pinned: it resolves
+  only managed internal runtimes before falling back to the primary workspace.
 - All operations in this index are **stable** in the v1 REST contract. The
   deprecated `unstable_session_resume` capability name is only an alias; use
   `session_resume` for the stable resume route.
@@ -49,15 +48,15 @@ capability tags; they are outside this contract, not deprecated.
 
 ## Session lifecycle
 
-| Operation                                                                         | Capability          | Scope                 | TypeScript SDK                       |
-| --------------------------------------------------------------------------------- | ------------------- | --------------------- | ------------------------------------ |
-| [`POST /session`](./qwen-serve-protocol.md#post-session)                          | `session_create`    | `selected-runtime`    | `DaemonClient.createOrAttachSession` |
-| [`POST /session/:id/load`](./qwen-serve-protocol.md#post-sessionidload)           | `session_load`      | `persisted-workspace` | `DaemonClient.loadSession`           |
-| [`POST /session/:id/resume`](./qwen-serve-protocol.md#post-sessionidresume)       | `session_resume`    | `persisted-workspace` | `DaemonClient.resumeSession`         |
-| [`POST /session/:id/heartbeat`](./qwen-serve-protocol.md#post-sessionidheartbeat) | `client_heartbeat`  | `live-session-owner`  | `DaemonClient.heartbeat`             |
-| [`PATCH /session/:id/metadata`](./qwen-serve-protocol.md#patch-sessionidmetadata) | `session_metadata`  | `live-session-owner`  | `DaemonClient.updateSessionMetadata` |
-| [`POST /session/:id/model`](./qwen-serve-protocol.md#post-sessionidmodel)         | `session_set_model` | `live-session-owner`  | `DaemonClient.setSessionModel`       |
-| [`DELETE /session/:id`](./qwen-serve-protocol.md#delete-sessionid)                | `session_close`     | `live-session-owner`  | `DaemonClient.closeSession`          |
+| Operation                                                                         | Capability          | Scope                | TypeScript SDK                       |
+| --------------------------------------------------------------------------------- | ------------------- | -------------------- | ------------------------------------ |
+| [`POST /session`](./qwen-serve-protocol.md#post-session)                          | `session_create`    | `selected-runtime`   | `DaemonClient.createOrAttachSession` |
+| [`POST /session/:id/load`](./qwen-serve-protocol.md#post-sessionidload)           | `session_load`      | `selected-runtime`   | `DaemonClient.loadSession`           |
+| [`POST /session/:id/resume`](./qwen-serve-protocol.md#post-sessionidresume)       | `session_resume`    | `selected-runtime`   | `DaemonClient.resumeSession`         |
+| [`POST /session/:id/heartbeat`](./qwen-serve-protocol.md#post-sessionidheartbeat) | `client_heartbeat`  | `live-session-owner` | `DaemonClient.heartbeat`             |
+| [`PATCH /session/:id/metadata`](./qwen-serve-protocol.md#patch-sessionidmetadata) | `session_metadata`  | `live-session-owner` | `DaemonClient.updateSessionMetadata` |
+| [`POST /session/:id/model`](./qwen-serve-protocol.md#post-sessionidmodel)         | `session_set_model` | `live-session-owner` | `DaemonClient.setSessionModel`       |
+| [`DELETE /session/:id`](./qwen-serve-protocol.md#delete-sessionid)                | `session_close`     | `live-session-owner` | `DaemonClient.closeSession`          |
 
 ## Prompts and events
 
@@ -69,7 +68,7 @@ capability tags; they are outside this contract, not deprecated.
 | [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)               | `session_events`     | `live-session-owner`  | `DaemonClient.subscribeEvents`          |
 | [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript)           | `session_transcript` | `persisted-workspace` | `DaemonClient.getSessionTranscriptPage` |
 | [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                 | `session_context`    | `live-session-owner`  | `DaemonClient.sessionContext`           |
-| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport)                   | `session_export`     | `persisted-workspace` | `DaemonClient.exportSession`            |
+| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport)                   | `session_export`     | `legacy-primary`      | `DaemonClient.exportSession`            |
 | [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | —                    | `live-session-owner`  | `DaemonClient.getPendingPrompts`        |
 
 `POST /session/:id/prompt` returns `202` when the prompt enters the queue, not

@@ -2524,8 +2524,8 @@ Query parameters:
 | ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cursor`         | no       | Opaque base64url cursor returned by the previous page. Omit for the first page. The cursor is daemon-issued and tamper-checked; modifying it returns `400 invalid_transcript_cursor`. It binds to the transcript file identity and frozen first-page byte size; deleting, truncating, replacing, or archiving the file invalidates it and returns `409`. |
 | `limit`          | no       | Target number of active `ChatRecord`s in a page. Defaults to `100`, maximum `500`. A backward page may expand to at most `3 * limit` records to preserve turn and tool-call/result boundaries. One record can produce multiple replay frames, so `events.length` may be larger still. Invalid values return `400 invalid_transcript_limit`.              |
-| `direction`      | no       | `backward` only; forward paging is what omitting the parameter gives you. A backward first page starts at the newest records, and `backward` cannot be combined with `cursor` or any record anchor.                                                                                                                                                      |
-| `beforeRecordId` | no       | Start before this record id, which implies backward. It cannot be combined with `cursor`, `atRecordId`, `snapshot`, or the `direction` parameter.                                                                                                                                                                                                        |
+| `direction`      | no       | The only accepted value is `backward`, which starts a page at the newest records. Omit the parameter to page forward on a first page, or to continue the direction frozen in `cursor`. Cannot be combined with `cursor`, `beforeRecordId`, `atRecordId`, or `snapshot`.                                                                                  |
+| `beforeRecordId` | no       | Start a backward page before this record id. Implies backward, so do not also send `direction`. Cannot be combined with `cursor` or `atRecordId`; may be paired with `snapshot`.                                                                                                                                                                         |
 
 Response:
 
@@ -2615,7 +2615,9 @@ The route reads only `chats/archive/<id>.jsonl` in the selected trusted workspac
 
 Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
-Same request shape as `/load`. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
+Accepts the same `cwd`, `approvalMode`, `sourceType`, and `sourceId` fields
+as `/load`; the load-only `historyPageSize` and `liveReplayMode` are not
+accepted here. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
 
 Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
 
@@ -3648,13 +3650,24 @@ instead of the legacy process-global route. Pre-flight
 The request body, mediation policies, outcomes, and success response are
 identical to `POST /permission/:requestId`. The optional
 `X-Qwen-Client-Id` header participates in designated and consensus policy.
-Errors are `400` for invalid input or client identity, `403` when policy rejects
-the voter (`permission_forbidden`) or the owning workspace is not trusted
-(`untrusted_workspace`), `404` for an unknown live session or pending request,
-`500` for a permission contract violation (`cancel_sentinel_collision`) or an
-ambiguous session owner (`ambiguous_session_owner`), `501` for an unimplemented
-policy, and `503` when the owning runtime is unavailable. It never retries against the primary
-bridge. The TypeScript SDK method is `respondToSessionPermission()`.
+Every failure names a stable `code`:
+
+- `400` — a malformed vote body (no `code`) or an invalid client identity
+  (`invalid_client_id`).
+- `403` — `permission_forbidden` when the active policy rejects the voter, or
+  `untrusted_workspace` when the owning workspace is not trusted.
+- `404` — `session_not_found` when no live owner exists, or no `code` when the
+  request is not pending.
+- `500` — `cancel_sentinel_collision` when the agent's `allowedOptionIds`
+  contains the reserved `__cancelled__` sentinel, or `ambiguous_session_owner`
+  when more than one workspace claims the session.
+- `501` — `permission_policy_not_implemented` for a policy this build does not
+  implement.
+- `503` — `workspace_runtime_unavailable` when the owning runtime is
+  unavailable.
+
+It never retries against the primary bridge. The TypeScript SDK method is
+`respondToSessionPermission()`.
 
 ### `POST /permission/:requestId`
 

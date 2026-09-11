@@ -163,9 +163,9 @@ SESSION_JSON="$(curl -sX POST "$DAEMON_URL/session" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
   -d '{"sessionScope":"thread"}')" || echo "create failed (curl exit $?)" >&2
 printf '%s\n' "$SESSION_JSON"
-SID="$(printf '%s' "$SESSION_JSON" | jq -er '.sessionId // empty')" || echo "create returned no sessionId" >&2
+SID="$(printf '%s' "$SESSION_JSON" | jq -er '.sessionId // empty')"
 export SID
-[ -n "$SID" ] || echo "SID is empty: fix step 2 before running steps 3-6" >&2
+: "${SID:?no sessionId in the create response}"
 # → {"sessionId":"…","workspaceCwd":"/srv/project","attached":false}
 ```
 
@@ -185,7 +185,9 @@ deterministic one to act on rather than an event on a bounded ring. A create
 without `modelServiceId` has no `modelApplied` key at all.
 
 ```bash
-# terminal 2 — set this to the sessionId step 2 printed
+# terminal 2 — re-export what you need; shell variables do not cross terminals
+# export QWEN_SERVER_TOKEN='<the token from step 1>'
+# export DAEMON_URL=http://127.0.0.1:4170
 SID='<sessionId from step 2>'
 curl -N "$DAEMON_URL/session/$SID/events" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") \
