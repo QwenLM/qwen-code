@@ -214,6 +214,29 @@ describe('qwen sandbox', () => {
       expect(process.exitCode).toBe(1);
     });
 
+    // `touch` on a root-owned directory answers EACCES for an ordinary user with
+    // or without a sandbox, so treating that as a denial would make this check
+    // pass while nothing is confined. Only EROFS proves a read-only mount.
+    it('fails when the refusal is EACCES rather than a read-only mount', async () => {
+      respond([
+        [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
+        [
+          /usr\/local\/bin/,
+          {
+            status: 1,
+            stdout: '',
+            stderr: "touch: cannot touch '/usr/local/bin/x': Permission denied",
+          },
+        ],
+        [/ls \/proc/, { status: 0, stdout: '137\n', stderr: '' }],
+      ]);
+
+      await run({ verify: true });
+
+      expect(report()).toContain('FAIL  write outside the roots is denied');
+      expect(process.exitCode).toBe(1);
+    });
+
     it('fails when host PIDs are hidden, which would break owner arbitration', async () => {
       respond([
         [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],

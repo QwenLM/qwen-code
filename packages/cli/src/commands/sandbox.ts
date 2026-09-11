@@ -200,7 +200,17 @@ export const sandboxCommand: CommandModule = {
     }
 
     writeStdoutLine('');
-    const denied = /Read-only file system|Permission denied/;
+    // EROFS only, deliberately not `Permission denied` as well. Writing to a
+    // root-owned directory as an ordinary user yields EACCES with or without
+    // bwrap in front of it, so accepting that string would let the one check
+    // whose entire job is to answer "does the confinement hold?" report success
+    // when nothing is confining anything. EROFS is the only one of the two that
+    // proves a read-only mount. This is also what the design's own rule
+    // requires: a denial signature belongs to one backend's dialect, and a
+    // cross-backend union is never a valid match — Landlock denies with EACCES,
+    // so when that backend lands it needs its own signature rather than a
+    // widened shared one.
+    const denied = /Read-only file system/;
     const cases: VerifyCase[] = [
       {
         name: 'write inside the workspace succeeds',
