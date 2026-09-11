@@ -58,6 +58,9 @@ import type {
   CronJobInfo,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
+import { approvalModeToPermissionMode } from './permission-mode.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
@@ -425,6 +428,7 @@ export class HookEventHandler {
     permissionMode: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
@@ -438,6 +442,7 @@ export class HookEventHandler {
       ),
       tool_use_id: toolUseId,
       ...(tool_call_id && { tool_call_id }),
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -464,6 +469,7 @@ export class HookEventHandler {
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
@@ -474,6 +480,7 @@ export class HookEventHandler {
       tool_input: toolInput,
       error: errorMessage,
       is_interrupt: isInterrupt,
+      ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -972,6 +979,9 @@ export class HookEventHandler {
     const sourceType = this.config.getSessionSourceType();
     const sourceId = this.config.getSessionSourceId();
 
+    const agentId = getCurrentAgentId();
+    const promptId = promptIdContext.getStore();
+
     return {
       session_id: this.config.getSessionId(),
       ...(sourceType !== undefined ? { source_type: sourceType } : {}),
@@ -980,6 +990,12 @@ export class HookEventHandler {
       cwd: this.config.getWorkingDir(),
       hook_event_name: eventName,
       timestamp: new Date().toISOString(),
+      // Tool and subagent events spread this first and set their own mode.
+      permission_mode: approvalModeToPermissionMode(
+        this.config.getApprovalMode(),
+      ),
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(promptId ? { prompt_id: promptId } : {}),
     };
   }
 

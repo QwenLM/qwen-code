@@ -1284,9 +1284,17 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
   const funcResponse = sdkResponse?.[0]?.functionResponse;
   const mcpContent = funcResponse?.response?.['content'] as McpContentBlock[];
   const toolName = funcResponse?.name || 'unknown tool';
+  // Structured MCP output can contain required follow-up arguments (for
+  // example CUA snapshot IDs and element tokens) absent from the text summary.
+  // Preserve it for both ordinary tool turns and nested exec calls.
+  const structured = funcResponse?.response?.['structuredContent'];
+  const structuredParts: Part[] =
+    structured !== undefined ? [{ text: JSON.stringify(structured) }] : [];
 
   if (!Array.isArray(mcpContent)) {
-    return [{ text: '[Error: Could not parse tool response]' }];
+    return structuredParts.length
+      ? structuredParts
+      : [{ text: '[Error: Could not parse tool response]' }];
   }
 
   const transformed = mcpContent.flatMap(
@@ -1307,7 +1315,14 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
     },
   );
 
-  return transformed.filter((part): part is Part => part !== null);
+  const contentParts = transformed.filter(
+    (part): part is Part => part !== null,
+  );
+  // Servers may already provide the compatibility JSON block recommended by
+  // MCP. Do not double it when the exact serialized payload is already present.
+  return contentParts.some((part) => part.text === structuredParts[0]?.text)
+    ? contentParts
+    : [...structuredParts, ...contentParts];
 }
 
 function getMcpErrorImageContent(rawResponseParts: Part[]): Part[] | undefined {
