@@ -320,6 +320,11 @@ describe('AcpConnection child exit cleanup', () => {
     expect(acpConn.currentSessionId).toBeNull();
   });
 
+  it('disconnect is a no-op when there is no child', () => {
+    const conn = createConnection({ child: null });
+    expect(() => (conn as unknown as AcpConnection).disconnect()).not.toThrow();
+  });
+
   it('disconnect closes the CLI stdin instead of killing it (#11303)', () => {
     // `child.kill()` is TerminateProcess on Windows: the CLI's
     // `process.on('exit')` cleanup never runs, so every PTY, ConPTY host and
@@ -524,6 +529,26 @@ describe('AcpConnection child exit cleanup', () => {
     }
   });
 
+  it('does not signal after exitCode or signalCode is observed', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      for (const exitInfo of [
+        { exitCode: 0, signalCode: null },
+        { exitCode: null, signalCode: 'SIGTERM' },
+      ]) {
+        const conn = createConnection({
+          child: createMockChild(exitInfo),
+        });
+        (conn as unknown as AcpConnection).disconnect();
+        vi.advanceTimersByTime(SHUTDOWN_GRACE_MS + SIGTERM_GRACE_MS);
+      }
+      expect(killSpy).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
   it('escalates through taskkill /t on Windows, not a bare kill', () => {
     // Windows CI is skipped on PRs, so the platform is faked here rather than
     // left to whichever runner happens to execute the suite.
@@ -609,10 +634,14 @@ describe('AcpConnection child exit cleanup', () => {
     // connect() has since replaced the child.
     const newChild = createMockChild();
     conn.child = newChild;
+    conn.sdkConnection = {};
+    conn.sessionId = 'replacement-session';
 
     exitHandler?.(0, null);
 
     expect(conn.child).toBe(newChild);
+    expect(conn.sdkConnection).toEqual({});
+    expect(conn.sessionId).toBe('replacement-session');
     expect(onDisconnected).not.toHaveBeenCalled();
     // The exit also rejects the promise initialize() races. Nothing has
     // attached to it at this point, so it must already be marked handled or
@@ -779,6 +808,7 @@ describe('AcpConnection child exit cleanup', () => {
         stdin: new PassThrough(),
         on: vi.fn(),
       });
+      const oldStdinEnd = vi.spyOn(oldChild.stdin as PassThrough, 'end');
       spawnMock.mockReset();
       spawnMock.mockReturnValueOnce(oldChild).mockReturnValueOnce(newChild);
 
@@ -808,6 +838,7 @@ describe('AcpConnection child exit cleanup', () => {
       await second;
 
       expect(conn.child).toBe(newChild);
+      expect(oldStdinEnd).toHaveBeenCalledOnce();
 
       const writeTextFile = (
         oldClient as unknown as {
@@ -1290,6 +1321,59 @@ describe('AcpConnection superseded session close (#11303)', () => {
       });
     });
 
+    it('deduplicates concurrent close attempts for one session', async () => {
+      let resolveClose!: (value: unknown) => void;
+      const extMethod = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveClose = resolve;
+          }),
+      );
+      const sdk = { extMethod };
+      const conn = createConnection({
+        child: createMockChild(),
+        sdkConnection: sdk,
+        sessionId: 'session-b',
+      });
+      const acp = conn as unknown as AcpConnection;
+      const sendClose = (
+        acp as unknown as { sendSupersededClose: (id: string) => void }
+      ).sendSupersededClose;
+
+      sendClose.call(acp, 'session-a');
+      sendClose.call(acp, 'session-a');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(extMethod).toHaveBeenCalledTimes(1);
+
+      resolveClose({ closed: true });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    it('caps transient close retry backoff at one hour', () => {
+      const conn = createConnection({
+        child: createMockChild(),
+        sdkConnection: { extMethod: vi.fn() },
+        sessionId: 'session-b',
+      });
+      const acp = conn as unknown as AcpConnection;
+      const scheduleRetry = (
+        acp as unknown as {
+          scheduleSupersededCloseRetry: (id: string) => void;
+        }
+      ).scheduleSupersededCloseRetry;
+
+      for (let i = 0; i < 10; i += 1) {
+        scheduleRetry.call(acp, 'session-a');
+      }
+
+      const entry = (
+        acp as unknown as {
+          supersededCloseRetries: Map<string, { retryAt: number }>;
+        }
+      ).supersededCloseRetries.get('session-a');
+      expect(entry?.retryAt - Date.now()).toBe(CLOSE_RETRY_CEILING_MS);
+    });
+
     it('stops retrying superseded closes after disconnect', async () => {
       const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
       try {
@@ -1392,6 +1476,9 @@ describe('AcpConnection superseded session close (#11303)', () => {
       vi.setSystemTime(Date.now() + CLOSE_RETRY_BASE_MS + 1000);
 
       await acp.newSession();
+      // closeSupersededSession() must drive the expired entry immediately;
+      // observe that synchronous catch-up before advancing any timers.
+      expect(countClosesFor(extMethod, 'session-a')).toBe(2);
       await vi.advanceTimersByTimeAsync(0);
       expect(countClosesFor(extMethod, 'session-a')).toBe(2);
       expect(countClosesFor(extMethod, 'session-b')).toBe(1);
