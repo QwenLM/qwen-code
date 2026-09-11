@@ -1145,7 +1145,7 @@ export class AcpConnection {
       }
       killTimer = setTimeout(() => {
         killTimer = undefined;
-        // Re-check before signalling: after 45+s the pid may have been
+        // Re-check before signalling: after 75+s the pid may have been
         // recycled by an unrelated process group.
         if (child.exitCode !== null || child.signalCode !== null) {
           return;
