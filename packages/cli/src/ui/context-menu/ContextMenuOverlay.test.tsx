@@ -55,7 +55,14 @@ function MenuOpener({
 function InnocentBystander({ onKey }: { onKey: (key: string) => void }) {
   useKeypress(
     (key) => {
-      onKey(key.sequence ?? key.name);
+      // Record the decoded identity, not the raw bytes: the kitty
+      // provider decodes `\u001b[13;2u` into name='return' + shift=true,
+      // and the assertions care about WHICH key leaked, not its bytes.
+      const parts = [key.name];
+      if (key.ctrl) parts.push('ctrl');
+      if (key.meta) parts.push('meta');
+      if (key.shift) parts.push('shift');
+      onKey(parts.join('+'));
     },
     { isActive: true },
   );
@@ -141,9 +148,11 @@ describe('ContextMenuOverlay', () => {
 
   it('ArrowDown + Enter executes the second item', async () => {
     const handlers = { open: vi.fn(), copy: vi.fn() };
+    const bystanderKeys: string[] = [];
     const { lastFrame, stdin } = renderWithProviders(
       <Scene>
         <ContextMenuProvider>
+          <InnocentBystander onKey={(k) => bystanderKeys.push(k)} />
           <MenuOpener items={makeItems(handlers)} />
           <ContextMenuOverlay />
         </ContextMenuProvider>
@@ -155,6 +164,11 @@ describe('ContextMenuOverlay', () => {
     stdin.write('\r'); // Enter
     await waitFor(() => expect(handlers.copy).toHaveBeenCalledTimes(1));
     expect(handlers.open).not.toHaveBeenCalled();
+    // R1-5: the arrows and the executing Return are CONSUMED by the open
+    // menu — flipping any claim branch's `return true` to `false` leaks
+    // the key to ordinary subscribers (the exact collision #11228
+    // describes) and turns this red.
+    expect(bystanderKeys).toEqual([]);
   });
 
   // #11228: while the menu is open its overlay owns the keyboard. The
@@ -252,8 +266,41 @@ describe('ContextMenuOverlay', () => {
 
       expect(handlers.open).not.toHaveBeenCalled();
       expect(handlers.copy).not.toHaveBeenCalled();
-      expect(bystanderKeys.length).toBeGreaterThan(0);
+      // The exact key must reach the bystander: if kitty decoding
+      // regressed, the sequence would shred into an escape plus
+      // printables instead of one decoded 'return+shift'.
+      expect(bystanderKeys).toEqual(['return+shift']);
     });
+
+    // R2-4: the claim predicate has three modifier axes; pin every cell
+    // of the matrix that must fall through (modified keys reach ordinary
+    // handlers instead of being consumed by the menu).
+    it.each([
+      ['Shift+Up', '\u001b[1;2A', 'up+shift'],
+      ['Shift+Down', '\u001b[1;2B', 'down+shift'],
+      ['Ctrl+Enter', '\u001b[13;5u', 'return+ctrl'],
+      ['Alt+Enter', '\u001b[13;3u', 'return+meta'],
+    ] as const)(
+      '%s dismisses the menu and falls through without moving or firing',
+      async (_label, sequence, expectedBystander) => {
+        const handlers = { open: vi.fn(), copy: vi.fn() };
+        const bystanderKeys: string[] = [];
+        const { lastFrame, stdin } = renderWithProviders(
+          <ExclusiveScene
+            items={makeItems(handlers)}
+            onKey={(k) => bystanderKeys.push(k)}
+          />,
+        );
+        await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+
+        stdin.write(sequence);
+        await waitFor(() => expect(lastFrame()).not.toContain('Open Link'));
+
+        expect(handlers.open).not.toHaveBeenCalled();
+        expect(handlers.copy).not.toHaveBeenCalled();
+        expect(bystanderKeys).toEqual([expectedBystander]);
+      },
+    );
 
     it('ordinary handlers receive keys again after the menu closes', async () => {
       const handlers = { open: vi.fn(), copy: vi.fn() };
