@@ -17,6 +17,7 @@ import { isRateLimitError } from './rateLimit.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
 import { classifyRetryError } from './retryErrorClassification.js';
 import { retryContext } from './retryContext.js';
+import { ResponsesHttpError } from './responses-http-error.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -109,6 +110,9 @@ function defaultShouldRetry(
   error: Error | unknown,
   extraRetryErrorCodes?: readonly number[],
 ): boolean {
+  if (error instanceof ResponsesHttpError) {
+    return error.shouldRetry(extraRetryErrorCodes);
+  }
   const status = getErrorStatus(error);
   // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
   // so an explicit `status === 429` check here would be redundant.
@@ -425,9 +429,11 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
@@ -488,9 +494,11 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         let actualDelayMs: number;
         if (retryAfterMs !== null && retryAfterMs > 0) {

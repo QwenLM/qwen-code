@@ -74,6 +74,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
@@ -654,6 +655,26 @@ function planNamesPr(planPath: string | undefined): boolean {
     // `'0'` this one rejects, so the budget reserved marker room on a plan
     // the anchor consumers read as PR-less.
     return isPositivePrNumber(plan?.prNumber);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this plan carry the focused navigation profile? Read for the
+ * mechanism-health note alone: that profile withholds the ledger anchor BY
+ * DESIGN on every round (its disclosed coverage gap caps the verdict), so
+ * an unanchored recovered round is the profile working, not a stopped
+ * chain — the note must not report it as a malfunction on every round of a
+ * navigation-only PR.
+ */
+function planIsFocusedNavigation(planPath: string | undefined): boolean {
+  try {
+    if (!planPath) return false;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      reviewProfile?: unknown;
+    };
+    return plan?.reviewProfile === DOCS_NAV_PROFILE;
   } catch {
     return false;
   }
@@ -8157,6 +8178,7 @@ function composeReviewBody(
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
+          !planIsFocusedNavigation(input.planPath) &&
           !convergence.prev.anchored &&
           (convergence.prev.round ?? 0) > 0 &&
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),
