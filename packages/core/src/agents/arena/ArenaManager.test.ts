@@ -74,6 +74,7 @@ const createMockConfig = (
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  getCodeModeOnly: () => false,
   isTodoWriteEnabled: () => false,
   // Read by resolveMainSessionOutputStyle: the peer inherits the style the
   // main session actually carries, so the main session's prompt-override and

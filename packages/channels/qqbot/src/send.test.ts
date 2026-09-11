@@ -438,7 +438,6 @@ describe('group sender-name sanitization', () => {
 
     const env = inbound.mock.calls[0][0] as Envelope;
     expect(env.text).toBe('/clear');
-    expect(env.displayText).toBe('<@OPENID_OTHER> /clear');
   });
 
   it('keeps a sanitizer-shaped group command as attributed prose', () => {

@@ -514,6 +514,7 @@ describe('CLI entry import boundary', () => {
       '@qwen-code/acp-bridge/spawnChannel',
       '@qwen-code/acp-bridge/bridgeClient',
       '@qwen-code/acp-bridge/bridgeErrors',
+      '@qwen-code/qwen-code-core',
     ];
     const forbiddenImports = [...graph.externalValueImports].filter(
       (specifier) => forbiddenExternalImports.includes(specifier),
