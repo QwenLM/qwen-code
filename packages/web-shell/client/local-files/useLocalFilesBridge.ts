@@ -21,6 +21,8 @@ import {
   LocalFilesBridge,
   openBrowserSocket,
   withOwnerLock,
+  DEFAULT_LOCK_RETRY_DELAY_MS,
+  LOCAL_FILES_LOCK_NAME,
   type AcpWorkspaceSelector,
   type LocalFilesBridgeState,
   type LockManagerLike,
@@ -208,6 +210,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const bridgeHandleRef = useRef<FileSystemDirectoryHandle | undefined>(
     undefined,
   );
+  /**
+   * The start() promise of the latest bridge: resolves once its run ended
+   * and the owner-lock release completed, i.e. once the release is visible
+   * to other contexts. disconnect() awaits it (bounded) on the owned path so
+   * a probe decline afterwards can only mean a peer holds the lock.
+   */
+  const runSettledRef = useRef<Promise<void> | undefined>(undefined);
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   /**
    * True once this mount's current bridge reached a phase that only runs
@@ -318,6 +327,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const namedRecordRef = useRef<FileSystemDirectoryHandle | undefined>(
     undefined,
   );
+  /**
+   * Set when this mount's own revoke actually cleared the record: the grant
+   * is released, so effect-driven naming writes must not adopt — for the
+   * panel or as revoke ownership evidence — a record a peer writes
+   * afterwards. Cleared where detachedRef is (connect's binding exits),
+   * when a new grant re-establishes ownership.
+   */
+  const releasedRecordRef = useRef(false);
 
   const stopBridge = useCallback(() => {
     const bridge = bridgeRef.current;
@@ -422,9 +439,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const blocker = capabilityRef.current.blocker;
       if (blocker !== null) {
         // Name the grant: the panel's Disconnect — the only store.clear()
-        // caller — must stay reachable over a persisted handle.
-        namedRecordRef.current = handle;
-        setStatus({ phase: 'unavailable', blocker, rootName: handle.name });
+        // caller — must stay reachable over a persisted handle. A released
+        // grant must not adopt whatever the record holds now.
+        if (releasedRecordRef.current) {
+          setStatus({ phase: 'unavailable', blocker });
+        } else {
+          namedRecordRef.current = handle;
+          setStatus({ phase: 'unavailable', blocker, rootName: handle.name });
+        }
         return;
       }
       // Remember the grant even when we cannot use it yet: a session may not
@@ -484,7 +506,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // evidence alive for a revoke that outlives the bridge itself (a
       // stopped bridge gates bridgeHandleRef out of the decision).
       namedRecordRef.current = handle;
-      void bridge.start();
+      // Kept so disconnect can await the run's lock release becoming
+      // visible before blaming a probe decline on a peer.
+      runSettledRef.current = bridge.start();
     },
     [stopBridge],
   );
@@ -508,7 +532,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (prev.phase !== 'unavailable' || prev.rootName !== undefined) {
           return prev;
         }
-        const rootName = recordRootName(persisted.name);
+        const rootName = releasedRecordRef.current
+          ? undefined
+          : recordRootName(persisted.name);
         // The stash follows the name: a write that does not name the record
         // must not point the revoke's ownership evidence at it. Idempotent
         // under a double-invoked updater (same prev, same persisted).
@@ -552,7 +578,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // and the phase must follow the blocker or the panel renders the
       // withheld affordance without its explanation.
       const blocker = capabilityRef.current.blocker;
-      const rootName = recordRootName(stored.name);
+      const rootName = releasedRecordRef.current
+        ? undefined
+        : recordRootName(stored.name);
       if (rootName !== undefined) namedRecordRef.current = stored;
       setStatus(
         blocker !== null
@@ -577,7 +605,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // matches startBridge: a withhold landing mid-restore must not be
       // clobbered by this parked continuation.
       const blocker = capabilityRef.current.blocker;
-      const rootName = recordRootName(stored.name);
+      const rootName = releasedRecordRef.current
+        ? undefined
+        : recordRootName(stored.name);
       if (rootName !== undefined) namedRecordRef.current = stored;
       setStatus(
         blocker !== null
@@ -825,6 +855,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
             return;
           }
           detachedRef.current = false;
+          releasedRecordRef.current = false;
           connectWroteStatusRef.current = true;
           startBridge(stored, { force: true });
           return;
@@ -915,6 +946,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (connectSavedRef.current) foreignRecordRef.current = false;
       if (stale()) return;
       detachedRef.current = false;
+      releasedRecordRef.current = false;
       connectWroteStatusRef.current = true;
       startBridge(result.handle, { force: true });
     } finally {
@@ -1130,7 +1162,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         foreignRecordRef.current = true;
         return false;
       }
-      return (await store?.clear()) ?? true;
+      const cleared = (await store?.clear()) ?? true;
+      if (cleared) {
+        releasedRecordRef.current = true;
+        // The display stash must not outlive the release: left in place it
+        // would self-certify a peer's re-grant of the same entry.
+        namedRecordRef.current = undefined;
+      }
+      return cleared;
     };
     const locks =
       optionsRef.current.locks === undefined
@@ -1145,10 +1184,42 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // started THIS mount's bridge, whose lock must short-circuit the
       // arbitration the same way (a no-op for the direct caller, where
       // stopBridge() already cleared the latch).
-      if (owned || ownedRunRef.current || locks === null) {
+      if (ownedRunRef.current || locks === null) {
         // No lock manager: no cross-tab arbitration exists, so this context
         // is the only possible owner of the record.
         return { cleared: await revoke(), declined: false };
+      }
+      if (owned) {
+        // The click-time latch. While this mount's own lock release is still
+        // invisible, no peer could have acquired the lock at all, so the
+        // unarbitrated revoke stays correct (and lands inside a peer's
+        // retry budget). Once the release is visible, a probe decline can
+        // only mean a peer holds the lock: the revoke must then arbitrate
+        // against it instead of deleting the record out from under it.
+        const settled = runSettledRef.current;
+        let visible = true;
+        if (settled !== undefined) {
+          const budget = new Promise<boolean>((resolve) => {
+            setTimeout(() => resolve(false), DEFAULT_LOCK_RETRY_DELAY_MS);
+          });
+          visible = await Promise.race([settled.then(() => true), budget]);
+        }
+        if (!visible) {
+          return { cleared: await revoke(), declined: false };
+        }
+        let free = false;
+        await locks.request(
+          LOCAL_FILES_LOCK_NAME,
+          { ifAvailable: true },
+          async (lock) => {
+            if (lock === null || lock === undefined) return;
+            free = true;
+          },
+        );
+        if (free) {
+          return { cleared: await revoke(), declined: false };
+        }
+        // Fall through: a peer holds the freshly freed lock.
       }
       // The store is origin-global and a peer tab's live bridge depends on
       // it, so a mount that never owned a run revokes only while no other

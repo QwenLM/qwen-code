@@ -151,9 +151,15 @@ function exclusiveLocks(): LockManagerLike {
  * Owner lock whose decline cause can be a still-settling release: an
  * `ifAvailable` request declines while a peer holds the lock or while the
  * settling counter lasts, so an arbitration's first attempt can be declined
- * with the lock itself already free.
+ * with the lock itself already free. An optional settleGate models a release
+ * that stays invisible until it resolves: the holder keeps `held` (and its
+ * start() promise, which awaits this request) until then.
  */
-function settlingLocks(lock: { held: boolean; settling: number }) {
+function settlingLocks(lock: {
+  held: boolean;
+  settling: number;
+  settleGate?: Promise<void>;
+}) {
   const locks: LockManagerLike = {
     request: async (_name, options, callback) => {
       if (options.ifAvailable && (lock.held || lock.settling > 0)) {
@@ -164,6 +170,7 @@ function settlingLocks(lock: { held: boolean; settling: number }) {
       try {
         await callback({});
       } finally {
+        if (lock.settleGate) await lock.settleGate;
         lock.held = false;
       }
       return undefined;
@@ -3089,10 +3096,14 @@ describe('useLocalFilesBridge restore', () => {
   it('revokes on the owner side even when its release outlasts the budget', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
-    // The release never settles inside the attempt budget: only the owned
-    // run latch can keep this disconnect from arbitrating against the tab's
-    // own still-settling lock.
-    const lock = { held: false, settling: 0 };
+    // The release never becomes visible inside the attempt budget: only the
+    // owned run latch can keep this disconnect from arbitrating against the
+    // tab's own still-settling lock.
+    const lock = {
+      held: false,
+      settling: 0,
+      settleGate: new Promise<void>(() => {}),
+    };
     const locks: LockManagerLike = settlingLocks(lock);
     const h = render({
       sessionId: 'session-1',
@@ -3113,6 +3124,65 @@ describe('useLocalFilesBridge restore', () => {
     expect(store.clears).toBe(1);
     expect(await store.load()).toBeUndefined();
     h.unmount();
+  });
+
+  it('arbitrates when a peer takes the lock the disconnect freed', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    // A's release stays invisible until gateA resolves; B parks in its
+    // retry delay on gateB. Resolving both at once lets B acquire the freed
+    // lock before A's release-visibility probe runs.
+    let releaseGateA!: () => void;
+    const gateA = new Promise<void>((resolve) => {
+      releaseGateA = resolve;
+    });
+    let releaseGateB!: () => void;
+    const gateB = new Promise<void>((resolve) => {
+      releaseGateB = resolve;
+    });
+    const lock = { held: false, settling: 0, settleGate: gateA };
+    const locks: LockManagerLike = settlingLocks(lock);
+    const common = {
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+    };
+    const a = render({ ...common, delay: async () => {} });
+    await a.flush();
+    await a.flush();
+    expect(a.sockets).toHaveLength(1);
+    const b = render({
+      ...common,
+      sessionId: 'session-2',
+      delay: () => gateB,
+    });
+    await b.flush();
+    expect(b.sockets).toHaveLength(0);
+
+    const disconnecting = a.get().disconnect();
+    releaseGateA();
+    releaseGateB();
+    await act(async () => {
+      await disconnecting;
+    });
+    await a.flush();
+    await b.flush();
+    await b.flush();
+
+    // B holds the freed lock and is starting its bridge on the record: the
+    // owned latch must not skip arbitration and delete it out from under B.
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(b.sockets).toHaveLength(1);
+
+    await act(async () => {
+      b.get().disconnect();
+    });
+    await b.flush();
+    a.unmount();
+    b.unmount();
   });
 
   it('revokes over a connect the disconnect already invalidated', async () => {
@@ -4759,6 +4829,72 @@ describe('useLocalFilesBridge restore', () => {
     });
     await connectingC3;
     await h.flush();
+    h.unmount();
+  });
+
+  it('does not adopt a peer record written after this mount released', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+
+    // A peer re-grant of the very entry this mount released must not
+    // self-certify through the stale display stash.
+    await store.save(mine);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.rootName).toBeUndefined();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBe(mine);
+
+    // Same for a different directory: neither the panel nor the revoke may
+    // adopt a record written after the release.
+    const foreign = fakeHandle('peer-dir', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.rootName).toBeUndefined();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBe(foreign);
     h.unmount();
   });
 
