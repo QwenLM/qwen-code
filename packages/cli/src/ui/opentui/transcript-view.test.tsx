@@ -167,6 +167,52 @@ describe('OpenTuiTranscriptView', () => {
     act(() => mocks.keyboard?.({ ...key, name: 'up' }));
     expect(view.container.textContent).not.toContain('TAIL');
   });
+  it('selects independent pagers with the keyboard and pauses navigation behind dialogs', () => {
+    const items = [
+      toolItem({ id: 'first', output: `${'first\n'.repeat(110)}FIRST_TAIL` }),
+      toolItem({
+        id: 'second',
+        output: `${'second\n'.repeat(110)}SECOND_TAIL`,
+      }),
+    ];
+    const view = render(
+      <OpenTuiTranscriptView fullDetail canNavigateDetails items={items} />,
+    );
+    const preventDefault = vi.fn();
+    const press = (name: string) =>
+      act(() =>
+        mocks.keyboard?.({ ctrl: true, meta: true, name, preventDefault }),
+      );
+    press('left');
+    press('down');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).not.toContain('SECOND_TAIL');
+    press('right');
+    press('down');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).toContain('SECOND_TAIL');
+    press('up');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).not.toContain('SECOND_TAIL');
+    view.rerender(
+      <OpenTuiTranscriptView
+        fullDetail
+        canNavigateDetails={false}
+        items={items}
+      />,
+    );
+    preventDefault.mockClear();
+    press('left');
+    press('up');
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    view.rerender(
+      <OpenTuiTranscriptView fullDetail canNavigateDetails items={items} />,
+    );
+    press('left');
+    press('up');
+    expect(view.container.textContent).not.toContain('FIRST_TAIL');
+  });
   it('parses resumed focus arguments once and reuses them across renders', () => {
     const args = '{"file_path":"src/main.ts","content":"BODY"}';
     const spy = vi.spyOn(JSON, 'parse');
