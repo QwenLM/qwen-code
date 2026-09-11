@@ -287,6 +287,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
+      if (!registry.isToolDeclared(canonical)) {
+        missing.push(requested);
+        continue;
+      }
       if (
         isPlanLifecycleToolUnavailableInSubagent(canonical) ||
         isLeaderOnlyToolUnavailableInSubagent(canonical)

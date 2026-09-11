@@ -353,12 +353,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       ),
       true,
     );
-    const isMentionTrigger =
-      todo.action_name === 'mentioned' ||
-      todo.action_name === 'directly_addressed';
-    if (!isNoteMention && !isMentionTrigger) {
-      envelope.bypassMessagePrefix = true;
-    }
 
     if (isNoteMention) {
       this.reactions.set(messageId, {
