@@ -74,6 +74,11 @@ import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
+import {
+  redactUrlCredentials,
+  REDACTED_URL_CREDENTIAL,
+} from '../../extension/redaction.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 
 // Usage statistics collection endpoint
 const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
@@ -102,6 +107,46 @@ const MAX_EVENTS = 1000;
  * Maximum events to retry after a failed RUM flush
  */
 const MAX_RETRY_EVENTS = 100;
+
+/**
+ * Error-text keys in `properties` that can carry raw shell output or error
+ * text (command lines, HTTP headers, provider error bodies).
+ */
+const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt'];
+
+/**
+ * `Authorization: Bearer <token>` / `authorization=token <value>` inside a
+ * shell command line. The value runs to the next whitespace or quote.
+ */
+const AUTHORIZATION_PATTERN =
+  /\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s"'`]+/gi;
+
+/**
+ * Secret-bearing long flags: `--token x`, `--password=y`, `--_authToken w`.
+ */
+const SECRET_FLAG_PATTERN =
+  /(--(?:token|password|secret|api-key|access-token|auth-token|_authToken|_password)(?:\s*[=:]\s*|\s+))[^\s"'`]+/gi;
+
+/**
+ * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_xxx`,
+ * `NPM_TOKEN=npm_xxx`, `DB_PASSWORD=secret`. The key must name a secret, so
+ * ordinary assignments like `USER=alice` pass through untouched.
+ */
+const ENV_SECRET_PATTERN =
+  /\b([A-Za-z0-9_]*(?:token|password|secret|credential)[A-Za-z0-9_]*\s*=\s*)[^\s"'`]+/gi;
+
+/**
+ * Redacts error text before it enters the usage-statistics sink. Shell
+ * command lines are the dominant leak vector — they can embed URL
+ * credentials, Authorization headers, or secret flags — so this pass runs on
+ * the single enqueue choke point rather than each call site.
+ */
+function redactTelemetryError(text: string): string {
+  return redactUrlCredentials(stripAnsiAndControl(text))
+    .replace(AUTHORIZATION_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
+    .replace(SECRET_FLAG_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
+    .replace(ENV_SECRET_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`);
+}
 
 export interface LogResponse {
   nextRequestWaitMs?: number;
@@ -181,6 +226,7 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      this.redactEventErrorText(event);
       // Manually handle overflow for FixedDeque, which throws when full.
       const wasAtCapacity = this.events.size >= MAX_EVENTS;
 
@@ -197,6 +243,23 @@ export class QwenLogger {
       }
     } catch (error) {
       this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
+    }
+  }
+
+  private redactEventErrorText(event: RumEvent): void {
+    const properties = event.properties;
+    if (properties) {
+      for (const key of ERROR_TEXT_PROPERTY_KEYS) {
+        const value = properties[key];
+        if (typeof value === 'string') {
+          properties[key] = redactTelemetryError(value);
+        }
+      }
+    }
+
+    const message = (event as RumExceptionEvent).message;
+    if (typeof message === 'string') {
+      (event as RumExceptionEvent).message = redactTelemetryError(message);
     }
   }
 
@@ -1172,4 +1235,5 @@ export const TEST_ONLY = {
   MAX_RETRY_EVENTS,
   MAX_EVENTS,
   FLUSH_INTERVAL_MS,
+  redactTelemetryError,
 };

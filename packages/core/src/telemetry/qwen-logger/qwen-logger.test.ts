@@ -28,6 +28,7 @@ import {
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
   SubagentExecutionEvent,
+  InvalidChunkEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -1130,6 +1131,91 @@ describe('QwenLogger', () => {
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
+    });
+  });
+
+  describe('error text redaction', () => {
+    it('redacts URL credentials from telemetry error text', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'Command: git clone https://x-access-token:ghs_testsecret123@github.com/org/repo.git',
+      );
+      expect(redacted).not.toContain('ghs_testsecret123');
+      expect(redacted).toContain('***REDACTED***');
+    });
+
+    it('redacts Authorization headers from telemetry error text', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'curl -H "Authorization: Bearer ghs_testsecret123" https://api.github.com/repos',
+      );
+      expect(redacted).not.toContain('ghs_testsecret123');
+    });
+
+    it('redacts secret flags from telemetry error text', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'npm publish --_authToken npm_testsecret123 --registry https://registry.npmjs.org',
+      );
+      expect(redacted).not.toContain('npm_testsecret123');
+    });
+
+    it('redacts KEY=value env-style secrets from telemetry error text', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'env GITHUB_TOKEN=ghs_testsecret123 npm publish',
+      );
+      expect(redacted).not.toContain('ghs_testsecret123');
+      expect(redacted).toContain('***REDACTED***');
+    });
+
+    it('redacts database DSN credentials', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'connect postgres://user:supersecret123@db.internal:5432/app',
+      );
+      expect(redacted).not.toContain('supersecret123');
+    });
+
+    it('preserves non-sensitive error text', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError('Request failed with status 429'),
+      ).toBe('Request failed with status 429');
+    });
+
+    it('redacts error_message on the enqueue boundary', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T12:00:00.000Z',
+        function_name: 'shell',
+        function_args: {},
+        duration_ms: 1,
+        status: 'error',
+        success: false,
+        error:
+          'Command: git clone https://token:ghs_testsecret123@github.com/org/repo.git',
+        error_type: 'exit_code',
+        prompt_id: 'prompt-tool',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      const errorMessage = enqueueSpy.mock.calls[0][0].properties?.[
+        'error_message'
+      ] as string;
+      expect(errorMessage).not.toContain('ghs_testsecret123');
+      expect(errorMessage).toContain('***REDACTED***');
+    });
+
+    it('redacts top-level message on the enqueue boundary', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logInvalidChunkEvent(
+        new InvalidChunkEvent('Authorization: Bearer ghs_testsecret123'),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0][0] as { message?: string };
+      expect(rumEvent.message).not.toContain('ghs_testsecret123');
+      expect(rumEvent.message).toContain('***REDACTED***');
     });
   });
 });
