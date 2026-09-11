@@ -2651,6 +2651,26 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     }
   });
 
+  it.runIf(bashSemanticsLane)(
+    'does not blanket-deny here-strings and arithmetic shifts',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // No heredoc body exists in either shape, so the fail-closed heredoc
+      // gate has nothing to deny: <<< feeds data on the same line and a <<
+      // inside arithmetic is a bitwise shift.
+      for (const command of [
+        'git log <<< "x"',
+        'echo $((1 << 20)) && git status',
+        'echo $[1 << 5] && git status',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
+
   // Heredocs are bash syntax; on the cmd.exe lane these shapes never execute
   // as heredocs and the divergent-syntax gate owns what is provable there.
   it.runIf(bashSemanticsLane)(

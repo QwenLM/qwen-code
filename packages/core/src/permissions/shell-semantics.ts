@@ -35,7 +35,10 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegmentsForStateTracking } from './rule-parser.js';
+import {
+  heredocSafetyForStateTracking,
+  splitCompoundCommandSegmentsForStateTracking,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2188,6 +2191,13 @@ function walkCompoundCommand(
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
+  // A heredoc whose structure or receiver the projection cannot prove makes
+  // every tracked state transition unreliable: body lines can be child-shell
+  // phantoms or vanish outright, and a later absolute cd would wash a plain
+  // cwdUnknown flag clean again. The daemon guard refuses such commands
+  // outright; here every extracted op stays cwd-unknown so it escalates.
+  const heredocUnmodelled =
+    command.includes('<<') && !heredocSafetyForStateTracking(command).safe;
 
   for (const { command: sub, terminator } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -2234,7 +2244,7 @@ function walkCompoundCommand(
     }
 
     const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
+    if (cwdUnknown || heredocUnmodelled) {
       ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
     } else {
       ops.push(...subOps);

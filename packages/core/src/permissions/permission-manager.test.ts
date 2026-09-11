@@ -826,6 +826,20 @@ describe('splitCompoundCommandSegments', () => {
       true,
     );
   });
+
+  it('re-expands a retained heredoc body after a single-quoted backslash', async () => {
+    // A backslash inside single quotes is literal in bash, so 'a\' below is a
+    // CLOSED string and the && after it is real structure. The raw splitter
+    // used to read the backslash as an escape and hold the quote open across
+    // the newline, gluing the heredoc body placeholder into the opener
+    // segment: rules then saw the sentinel instead of the body bash runs.
+    const segments = splitCompoundCommandSegments(
+      "echo 'a\\' && bash <<EOF\nrm -rf /tmp/pwn\nEOF",
+    );
+    const commands = segments.map((segment) => segment.command);
+    expect(commands).toContain('rm -rf /tmp/pwn');
+    expect(commands.some((c) => c.includes('__QWEN_HEREDOC_BODY'))).toBe(false);
+  });
 });
 
 // Witnesses from the round-5 bot review of #9417: every one of these shipped
@@ -1020,6 +1034,18 @@ describe('state-tracking heredoc projection', () => {
     const command = "echo 'a\\' && cat <<EOF\nbody\nEOF";
     expect(projectHeredocBodiesForStateTracking(command)).toBe(
       "echo 'a\\' && cat <<EOF",
+    );
+  });
+
+  it('does not fail closed on here-strings and arithmetic shifts', () => {
+    // Neither shape arms a heredoc body in bash: a here-string carries its
+    // data on the same line and << inside arithmetic is a bitwise shift. The
+    // projection is byte-identical for them, so the gate has nothing to deny.
+    expect(heredocSafetyForStateTracking('git log <<< "x"').safe).toBe(true);
+    expect(heredocSafetyForStateTracking('echo $((1 << 20))').safe).toBe(true);
+    expect(heredocSafetyForStateTracking('echo $[1 << 5]').safe).toBe(true);
+    expect(heredocSafetyForStateTracking('((a << 1))\ncd /tmp').safe).toBe(
+      true,
     );
   });
 });

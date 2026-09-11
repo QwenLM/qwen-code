@@ -1190,6 +1190,65 @@ export function projectHeredocBodiesForStateTracking(command: string): string {
 }
 
 /**
+ * Whether a line can arm a heredoc in bash at all. A `<<` inside quotes or
+ * arithmetic is not an operator, and `<<<` is a here-string whose data lives
+ * on the same line; neither has a body to mis-track. parseSimpleHeredocLine
+ * bails (null) on all of them alike, and the projections keep such lines
+ * byte-identical, so only a line with a genuine opener candidate justifies
+ * failing closed.
+ */
+function lineHasHeredocCandidate(line: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let arithmeticDepth = 0;
+  let bracketArithmetic = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      else if (quote === '"' && ch === '\\') i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === '[') {
+      bracketArithmetic = true;
+      i++;
+      continue;
+    }
+    if (bracketArithmetic && ch === ']') {
+      bracketArithmetic = false;
+      continue;
+    }
+    if (ch === '(' && line[i + 1] === '(') {
+      arithmeticDepth++;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 && ch === ')' && line[i + 1] === ')') {
+      arithmeticDepth--;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 || bracketArithmetic) continue;
+    if (ch === '<' && line[i + 1] === '<') {
+      if (line[i + 2] === '<') {
+        // Here-string: the payload is on this line, there is no body.
+        i += 2;
+        continue;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Whether a guard can evaluate a command's heredoc structure at all. Safe
  * means every body goes to a provably inert consumer with provable
  * structure; anything else (a receiver that executes the body, structure
@@ -1205,7 +1264,6 @@ export function heredocSafetyForStateTracking(command: string): {
   const lines = command.split('\n');
   let pending: HeredocDelimiter[] = [];
   let quoteOpen: "'" | '"' | undefined;
-  let arithmeticDepth = 0;
 
   if (UNPROVABLE_RESOLUTION.test(command)) {
     return { safe: false };
@@ -1237,19 +1295,6 @@ export function heredocSafetyForStateTracking(command: string): {
       quoteOpen = scan.end;
       continue;
     }
-    for (let i = 0; i + 1 < line.length; i++) {
-      if (line[i] === '(' && line[i + 1] === '(') {
-        arithmeticDepth++;
-        i++;
-      } else if (
-        line[i] === ')' &&
-        line[i + 1] === ')' &&
-        arithmeticDepth > 0
-      ) {
-        arithmeticDepth--;
-        i++;
-      }
-    }
     let trailingBackslashes = 0;
     for (let k = line.length - 1; k >= 0 && line[k] === '\\'; k--) {
       trailingBackslashes++;
@@ -1261,13 +1306,18 @@ export function heredocSafetyForStateTracking(command: string): {
       quoteOpen = quoteStateAtLineEnd(line, undefined).end;
       continue;
     }
-    if (arithmeticDepth > 0) {
-      return { safe: false };
-    }
 
     const parsed = parseSimpleHeredocLine(line);
     if (parsed === null) {
-      return { safe: false };
+      // null mixes two shapes: an opener this grammar cannot prove (deny)
+      // and a `<<` that is provably no heredoc at all — a here-string or an
+      // arithmetic shift — where the projection stays byte-identical and
+      // denying would reject legitimate commands for no security gain.
+      if (lineHasHeredocCandidate(line)) {
+        return { safe: false };
+      }
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
     }
     if (parsed === 'none') continue;
     if (!receiverConsumesData(parsed.receiver)) {
@@ -1283,7 +1333,7 @@ export function heredocSafetyForStateTracking(command: string): {
     pending = parsed.delimiters;
   }
 
-  if (pending.length > 0 || quoteOpen !== undefined || arithmeticDepth > 0) {
+  if (pending.length > 0 || quoteOpen !== undefined) {
     return { safe: false };
   }
   return { safe: true };
@@ -1370,16 +1420,19 @@ function splitCompoundCommandSegmentsRaw(
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      continue;
+    }
+    // A backslash escapes the next character except inside single quotes,
+    // where it is a literal. quoteStateAtLineEnd reads it the same way, so
+    // the two quote trackers cannot disagree about where a string ends.
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
       continue;
     }
     if (inSingle || inDouble) {
