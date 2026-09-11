@@ -456,6 +456,8 @@ export function EmbeddedApp() {
         // so fetch until a full page of presentable rows is collected or the
         // cursor is exhausted.
         const HISTORY_PAGE_SIZE = 20;
+        const MAX_HISTORY_SCAN_PAGES = 10;
+        let pages = 0;
         let nextCursor = cursor;
         const collected: DaemonSessionSummary[] = [];
         do {
@@ -471,7 +473,12 @@ export function EmbeddedApp() {
             : [];
           collected.push(...pageSessions);
           nextCursor = page.nextCursor;
-        } while (nextCursor && collected.length < HISTORY_PAGE_SIZE);
+          pages += 1;
+        } while (
+          nextCursor &&
+          collected.length < HISTORY_PAGE_SIZE &&
+          pages < MAX_HISTORY_SCAN_PAGES
+        );
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),

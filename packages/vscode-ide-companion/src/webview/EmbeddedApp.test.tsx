@@ -910,6 +910,7 @@ describe('EmbeddedApp host wiring', () => {
 
     // The request itself must not scope by source — that filter is what hid
     // the CLI and pre-attribution sessions.
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
     for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
       expect((options as { sourceType?: string }).sourceType).toBeUndefined();
       expect(options).toMatchObject({ archiveState: 'active' });
@@ -960,9 +961,46 @@ describe('EmbeddedApp host wiring', () => {
         await Promise.resolve();
       });
     }
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
     for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
       expect((options as { sourceType?: string }).sourceType).toBeUndefined();
     }
+  });
+
+  it('caps the history scan at MAX_HISTORY_SCAN_PAGES', async () => {
+    // A workspace dominated by machine-owned rows (channel workers,
+    // scheduled-task fires) must not walk the entire catalog on every
+    // dropdown open. The scan caps at 10 pages so the worst case is
+    // bounded; "Load more" resumes from the cursor.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => ({
+      sessions: [
+        {
+          sessionId: 'channel-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Channel worker',
+          sourceType: 'channel',
+          updatedAt: '2026-09-08T12:00:00.000Z',
+        },
+      ],
+      nextCursor: 'c1',
+    }));
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalled();
+    });
+
+    // Must stop at 10 pages, not walk forever.
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(10);
   });
 });
 
