@@ -2946,6 +2946,7 @@ export abstract class ChannelBase {
     // Mirror onSessionDied: a retirement racing an in-flight side question
     // aborts it instead of leaving it running against the discarded session.
     this.cancelBtw(sessionId);
+    this.onSessionRetiring(sessionId);
     this.purgeSessionState(sessionId);
     // Rotation retires the ID permanently and defers until no turn is
     // running or queued, so it reclaims what the death path must keep: a

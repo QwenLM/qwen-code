@@ -1210,6 +1210,18 @@ export class SessionRouter {
       return;
     }
     this.invalidateRouteOperation(key);
+    // The one route-replacement site follows the same suspension protocol as
+    // the removal paths: tombstone the key and drop the displaced session's
+    // outstanding wipe capture. Kept off deleteByKey so the displaced
+    // session stays live and re-attachable through loadManagedSession's fast
+    // path; a successor restore keeps its own capture because its
+    // reservation pass re-creates it after this cleanup runs.
+    const priorWipe = this.wipedRouteState.get(key);
+    this.wipedRouteState.delete(key);
+    if (priorWipe?.wipedSessionId) {
+      this.rotationDeltas.delete(priorWipe.wipedSessionId);
+    }
+    this.tombstoneSuspendedKey(key);
     this.toSession.set(key, sessionId);
     this.toTarget.set(sessionId, target);
     this.toCwd.set(sessionId, cwd);
@@ -1686,7 +1698,15 @@ export class SessionRouter {
             }
             restored++;
           } catch (err) {
-            if (err === operation.invalidationError) {
+            // Dispatch on key ownership, not error identity: a restore this
+            // one superseded still rejects its bridge load with an
+            // independent per-session error, and the generic branch would
+            // then tombstone the key, delete the successor's wipe capture,
+            // and discard the session the successor is loading.
+            const superseded =
+              this.creatingSessions.has(key) &&
+              this.creatingSessions.get(key) !== operation;
+            if (superseded || err === operation.invalidationError) {
               // A later restore's reservation pass took the key over; the
               // captured wipe state and the rotation delta now belong to the
               // successor. A deliberate removal leaves no successor — reclaim
@@ -1727,7 +1747,17 @@ export class SessionRouter {
               // below instead of re-planting (and, via the flush, persisting)
               // the route the user just retired.
               const removed = this.suspendedDeletionKeys.has(key);
-              if (!removed && reserved.wipedBridgeLive && leases > 0) {
+              // A session that died mid-restore (lazy mode records the death
+              // in this restore's load window without tombstoning) must not
+              // be re-planted either: it would be handed to the next message
+              // as live and skip the lazy reload that replaces it. Consult
+              // without consuming — endSessionLoad owns the window.
+              if (
+                !removed &&
+                !loadWindow.has(wipedId) &&
+                reserved.wipedBridgeLive &&
+                leases > 0
+              ) {
                 // Messages routed to the wiped session before this restore
                 // took the key are still in flight on it: keep the route so
                 // they are not killed mid-turn. If the failed load means the
@@ -1778,19 +1808,23 @@ export class SessionRouter {
 
       if (aborted) {
         for (const [key, reserved] of reservations) {
+          const entry = entries[key];
+          if (!entry) continue;
+          // Settle the reservation even when there is no route to re-add: a
+          // key removed mid-restore lost both its operation and its wipe
+          // capture, but an inbound message can still be parked on the
+          // reservation, and nothing else can settle it.
+          reserved.reservation.reject(
+            new BridgeConnectivityError(
+              'Session restore aborted: bridge disconnected',
+            ),
+          );
           if (
             !this.creatingSessions.has(key) &&
             !this.wipedRouteState.has(key)
           ) {
             continue;
           }
-          const entry = entries[key];
-          if (!entry) continue;
-          reserved.reservation.reject(
-            new BridgeConnectivityError(
-              'Session restore aborted: bridge disconnected',
-            ),
-          );
           this.readdAbortedRoute(key, entry, reserved);
           if (this.creatingSessions.get(key) === reserved.operation) {
             this.creatingSessions.delete(key);

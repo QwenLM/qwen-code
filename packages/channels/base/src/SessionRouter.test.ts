@@ -2686,7 +2686,9 @@ describe('SessionRouter', () => {
       router.removeSession('ch', 'alice', 'chat1');
       finishLoad('worktree-session');
 
-      await expect(restore).resolves.toEqual({ restored: 0, failed: 1 });
+      // A deliberate removal mid-restore is neither restored nor failed: the
+      // invalidation branch accounts it the same way the generic path does.
+      await expect(restore).resolves.toEqual({ restored: 0, failed: 0 });
       expect(bridge.discardSession).toHaveBeenCalledWith('worktree-session');
       expect(released).toBe(true);
       expect(router.isSessionLive('worktree-session')).toBe(false);
@@ -3940,6 +3942,81 @@ describe('SessionRouter', () => {
       expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
     });
 
+    it('does not let a superseded restore failure destroy the successor route', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loads: Array<{
+        resolve: (sessionId: string) => void;
+        reject: (error: unknown) => void;
+      }> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            loads.push({ resolve, reject });
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loads[0]!.resolve('old-alice');
+      await drainMicrotasks();
+
+      // A reconnect READY supersedes the first restore's in-flight bob load:
+      // the second restore's reservation pass invalidates that operation and
+      // re-reserves the key, but nothing rejects the parked bridge load.
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      expect(loads).toHaveLength(3);
+
+      // The superseded load rejects with its own per-session error rather
+      // than the invalidation error, so an error-identity dispatch misses it:
+      // the failure handling must leave the successor's capture, key and
+      // in-flight session alone.
+      loads[1]!.reject(new Error('transient resume error'));
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
+
+      loads[2]!.resolve('old-alice');
+      await drainMicrotasks();
+      expect(loads).toHaveLength(4);
+      loads[3]!.resolve('old-bob');
+
+      await expect(second).resolves.toEqual({ restored: 2, failed: 0 });
+      expect(router.getSession('ch', 'bob', 'chat2')).toBe('old-bob');
+      expect(
+        (bridge.discardSession as ReturnType<typeof vi.fn>).mock.calls.map(
+          (call) => call[0],
+        ),
+      ).not.toContain('old-bob');
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].sessionId).toBe('old-alice');
+      expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+    });
+
     it('does not resurrect a rotated route when a second restore overlaps', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);
@@ -4677,6 +4754,58 @@ describe('SessionRouter', () => {
         'replacement-session',
       );
       expect(rotationCounters(router).toTurns.has('old-session')).toBe(false);
+    });
+
+    it('reclaims the load a managed activation supersedes mid-restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      let finishLoad!: (sessionId: string) => void;
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            finishLoad = resolve;
+          }),
+      );
+
+      const restore = router.restoreSessions();
+      await drainMicrotasks();
+
+      // A named-task activation re-points the key while the restore's load is
+      // still parked. Like the removal paths, it must tombstone the key and
+      // drop the captured wipe state — otherwise the superseded load below
+      // keeps the capture, skips both the settle discard and the reclaim, and
+      // leaks the session it loaded on the bridge with no owner.
+      router.activateManagedSession(
+        'managed-1',
+        { channelName: 'ch', senderId: 'alice', chatId: 'chat1' },
+        '/tmp',
+      );
+      finishLoad('old-session');
+
+      await expect(restore).resolves.toEqual({ restored: 0, failed: 0 });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('managed-1');
+      expect(bridge.discardSession).toHaveBeenCalledWith(
+        'old-session',
+        expect.anything(),
+      );
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].sessionId).toBe('managed-1');
     });
 
     it('keeps rotating when discarding the retired session throws', async () => {
@@ -5564,6 +5693,67 @@ describe('SessionRouter', () => {
       );
     });
 
+    it('does not re-plant a session that died mid-restore when the load fails under held leases', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      // A message routes to the restored session and stays in flight (its
+      // lease is never released) when a reconnect restore wipes the route.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-alice');
+      const loads: Array<{
+        resolve: (sessionId: string) => void;
+        reject: (error: unknown) => void;
+      }> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            loads.push({ resolve, reject });
+          }),
+      );
+
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+
+      // Lazy mode records the death in this restore's load window without
+      // tombstoning, so the failure path's keep-the-route fallback must
+      // consult that window: re-planting the dead session would hand it to
+      // the next message as live and skip the lazy reload that replaces it.
+      router.handleSessionDied('old-alice');
+      loads[0]!.reject(new Error('transient resume error'));
+
+      await expect(second).resolves.toEqual({ restored: 0, failed: 1 });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.isSessionLive('old-alice')).toBe(false);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1']).toBeUndefined();
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+        'old-alice',
+      );
+    });
+
     it('does not resurrect a route forgotten inside the restore wipe window', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);
@@ -5748,6 +5938,70 @@ describe('SessionRouter', () => {
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1']).toBeUndefined();
       expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+    });
+
+    it('settles a waiter whose route was cleared before the connectivity abort', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loads: Array<{
+        resolve: (sessionId: string) => void;
+        reject: (error: unknown) => void;
+      }> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            loads.push({ resolve, reject });
+          }),
+      );
+
+      const restore = router.restoreSessions();
+      await drainMicrotasks();
+
+      // A message for bob parks on the restore's reservation, then /clear
+      // retires the route: the removal deletes both the operation and the
+      // wipe capture, leaving the reservation as the parked waiter's only
+      // lifeline. The abort must still settle it — nothing else can.
+      const waiter = router.resolve('ch', 'bob', 'chat2');
+      await drainMicrotasks();
+      expect(router.removeSession('ch', 'bob', 'chat2')).toEqual([]);
+
+      loads[0]!.reject(
+        new BridgeConnectivityError(
+          'ACP agent process exited while a session request was in flight',
+        ),
+      );
+
+      await expect(restore).resolves.toEqual({ restored: 0, failed: 0 });
+      await expect(waiter).rejects.toThrow(
+        'Session route operation was invalidated',
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-alice');
+      expect(router.getSession('ch', 'bob', 'chat2')).toBeUndefined();
     });
 
     it('does not re-add a route rotated mid-restore when the bridge dies mid-restore', async () => {

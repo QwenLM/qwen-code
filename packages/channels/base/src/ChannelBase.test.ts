@@ -15528,6 +15528,35 @@ describe('ChannelBase', () => {
       expect(ch.sent.some((m) => m.text.includes('side answer'))).toBe(false);
     });
 
+    it('fires the adapter retirement hook when a session is rotated', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const ch = createChannel({}, { router });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      (
+        router as unknown as {
+          rotateRoute(
+            key: string,
+            sessionId: string,
+            channelName: string,
+            target: SessionTarget | undefined,
+          ): void;
+        }
+      ).rotateRoute('test-chan:user1:chat1', sessionId, 'test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+      });
+
+      // Rotation retires the ID permanently, so it must fire the same
+      // retirement hook the loop-timeout, task-close and /clear paths fire —
+      // adapters park per-session state that only that hook reclaims.
+      expect(ch.retiringSessions).toContain(sessionId);
+    });
+
     it('collect: buffered messages count once against maxTurns', async () => {
       let settleFirst!: (value: string) => void;
       let callCount = 0;
