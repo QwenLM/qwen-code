@@ -31,6 +31,8 @@ import {
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
+import { ResponsesHttpError } from '../utils/responses-http-error.js';
+import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
@@ -1163,6 +1165,146 @@ describe('LlmChat', async () => {
       expect(modelTurn?.parts?.length).toBe(1);
       expect(modelTurn?.parts![0]!.text).toBe('Hello World!');
     });
+
+    it('preserves Responses message phases across text consolidation and JSON history', async () => {
+      const commentary = { id: 'msg_commentary', phase: 'commentary' };
+      const final = { id: 'msg_final', phase: 'final_answer' };
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          for (const part of [
+            { text: 'Working', responsesMessage: commentary },
+            { text: ' now.', responsesMessage: commentary },
+            { text: 'Done.', responsesMessage: final },
+          ]) {
+            yield {
+              candidates: [{ content: { role: 'model', parts: [part] } }],
+            } as unknown as GenerateContentResponse;
+          }
+          yield {
+            candidates: [
+              { finishReason: 'STOP', content: { role: 'model', parts: [] } },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      for await (const _ of await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'phase-test',
+      )) {
+        /* drain */
+      }
+      const history = JSON.parse(
+        JSON.stringify(chat.getHistory()),
+      ) as Content[];
+      expect(history[1]?.parts).toEqual([
+        { text: 'Working now.', responsesMessage: commentary },
+        { text: 'Done.', responsesMessage: final },
+      ]);
+      const { input } = convertGeminiContentsToResponsesInput({
+        model: 'test-model',
+        contents: history,
+      });
+      expect(
+        input.filter(
+          (item) => item.type === 'message' && item.role === 'assistant',
+        ),
+      ).toEqual([
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'Working now.',
+          phase: 'commentary',
+        },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'Done.',
+          phase: 'final_answer',
+        },
+      ]);
+    });
+
+    it.each([
+      'Request contains an invalid argument',
+      'maximum schema depth exceeded',
+    ])(
+      'honors a Responses retry directive despite legacy message %s',
+      async (message) => {
+        vi.useFakeTimers();
+        try {
+          const { retryWithBackoff } =
+            await vi.importActual<typeof import('../utils/retry.js')>(
+              '../utils/retry.js',
+            );
+          mockRetryWithBackoff.mockImplementation(retryWithBackoff);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              new ResponsesHttpError(
+                404,
+                JSON.stringify({ error: { message } }),
+                new Headers({
+                  'x-should-retry': 'true',
+                  'retry-after-ms': '1',
+                }),
+              ),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'Recovered' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'retry-directive',
+          );
+          await collectStreamWithFakeTimers(stream, 100);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(chat.getHistory().at(-1)?.parts).toEqual([
+            { text: 'Recovered' },
+          ]);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([429, 503])(
+      'does not restart an HTTP %i explicitly marked nonretryable',
+      async (status) => {
+        const error = new ResponsesHttpError(
+          status,
+          '{}',
+          new Headers({ 'x-should-retry': 'false' }),
+        );
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          error,
+        );
+        const consume = async () => {
+          for await (const _ of await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'no-retry',
+          )) {
+            /* drain */
+          }
+        };
+        await expect(consume()).rejects.toBe(error);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it('should consolidate adjacent text parts that arrive in separate stream chunks', async () => {
       // 1. Mock the API to return a stream of multiple, adjacent text chunks.
@@ -4023,7 +4165,9 @@ describe('LlmChat', async () => {
         parts: expect.arrayContaining([
           { text: 'continue' },
           {
-            text: expect.stringContaining('Recent images reattached'),
+            text: expect.stringContaining(
+              'Images read earlier in this session',
+            ),
           },
           {
             inlineData: {
@@ -11084,6 +11228,153 @@ describe('LlmChat', async () => {
         ]![0].contents as Content[];
       }
 
+      it('keeps unfinished reasoning when a textless transport continuation is cancelled', async () => {
+        vi.useFakeTimers();
+        try {
+          const controller = new AbortController();
+          const recordAssistantTurn = vi.fn();
+          const recordingChat = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Delivered prefix.')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Still thinking', thought: true }],
+                      },
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+          const stream = await recordingChat.sendMessageStream(
+            'test-model',
+            { message: 'test', config: { abortSignal: controller.signal } },
+            'cancel-transport-thought',
+          );
+          expect((await stream.next()).value?.type).toBe(StreamEventType.CHUNK);
+          expect((await stream.next()).value).toMatchObject({
+            type: StreamEventType.RETRY,
+            isContinuation: true,
+          });
+          const resumed = stream.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect((await resumed).value?.type).toBe(StreamEventType.CHUNK);
+          controller.abort('qwen:user-cancel');
+          await stream.return(undefined);
+          const parts = [
+            { text: 'Still thinking', thought: true },
+            { text: 'Delivered prefix.' },
+          ];
+          expect(recordingChat.getHistory().at(-1)?.parts).toEqual(parts);
+          expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ message: parts }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each(['success', 'retry yield', 'resumed output'])(
+        'preserves Responses phases across a transport cut and %s',
+        async (outcome) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            const commentary = {
+              text: 'Working on the requested answer.',
+              responsesMessage: { id: 'msg_c', phase: 'commentary' },
+            };
+            const final = {
+              text: 'The completed final answer.',
+              responsesMessage: { id: 'msg_f', phase: 'final_answer' },
+            };
+            const chunk = (part: Part, finishReason?: string) =>
+              ({
+                candidates: [
+                  {
+                    content: { parts: [part] },
+                    ...(finishReason ? { finishReason } : {}),
+                  },
+                ],
+              }) as unknown as GenerateContentResponse;
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(
+                cutAfter([
+                  chunk({ ...commentary, text: 'Working on ' }),
+                  chunk({ ...commentary, text: 'the requested answer.' }),
+                ]),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield chunk(final, 'STOP');
+                })(),
+              );
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              { message: 'test', config: { abortSignal: controller.signal } },
+              'transport-phases',
+            );
+            if (outcome === 'success') {
+              await collectStreamWithFakeTimers(stream, 5_000);
+            } else {
+              expect((await stream.next()).value?.type).toBe(
+                StreamEventType.CHUNK,
+              );
+              expect((await stream.next()).value?.type).toBe(
+                StreamEventType.CHUNK,
+              );
+              expect((await stream.next()).value).toMatchObject({
+                type: StreamEventType.RETRY,
+                isContinuation: true,
+              });
+              if (outcome === 'resumed output') {
+                const resumed = stream.next();
+                await vi.advanceTimersByTimeAsync(5_000);
+                expect((await resumed).value?.type).toBe(StreamEventType.CHUNK);
+              }
+              controller.abort('qwen:user-cancel');
+              await stream.return(undefined);
+            }
+            const parts =
+              outcome === 'retry yield' ? [commentary] : [commentary, final];
+            const history = JSON.parse(
+              JSON.stringify(recordingChat.getHistory()),
+            ) as Content[];
+            expect(history.at(-1)?.parts).toEqual(parts);
+            expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ message: parts }),
+            );
+            if (outcome !== 'retry yield') {
+              expect(requestContentsOfCall(1).at(-2)?.parts).toEqual([
+                commentary,
+              ]);
+            }
+            expect(
+              convertGeminiContentsToResponsesInput({
+                model: 'test-model',
+                contents: history,
+              }).input.filter(
+                (item) => item.type === 'message' && item.role === 'assistant',
+              ),
+            ).toEqual(
+              parts.map((part) => ({
+                type: 'message',
+                role: 'assistant',
+                content: part.text,
+                phase: part.responsesMessage.phase,
+              })),
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
       it.each([
         ['retry yield', 1],
         ['retry delay', 1],
@@ -17367,6 +17658,39 @@ describe('LlmChat', async () => {
       );
     });
 
+    it.each(['', ' and the rest of the answer'])(
+      'keeps a distinct final phase when a MAX_TOKENS continuation overlaps%s',
+      async (suffix) => {
+        const commentary = {
+          text: 'The shared recovery text is long enough to deduplicate.',
+          responsesMessage: { id: 'msg_c', phase: 'commentary' },
+        };
+        const final = {
+          text: commentary.text + suffix,
+          responsesMessage: { id: 'msg_f', phase: 'final_answer' },
+        };
+        const streams = [
+          makeStream([
+            makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS'),
+          ]),
+          makeStream([makeChunk([commentary], 'MAX_TOKENS')]),
+          makeStream([makeChunk([final], 'STOP')]),
+        ];
+        let index = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[index++]!);
+        for await (const _ of await chat.sendMessageStream(
+          'test-model',
+          { message: 'write an answer' },
+          'recovery-phases',
+        )) {
+          /* drain */
+        }
+        expect(chat.getHistory().at(-1)?.parts).toEqual([commentary, final]);
+      },
+    );
+
     it('should keep the recovery thought before the merged text part (thought-signature provenance)', async () => {
       // Thinking-model providers (Gemini 2.5+, Anthropic, OpenAI o-series)
       // validate thought-signature provenance and expect a thought to
@@ -21013,48 +21337,55 @@ describe('LlmChat', async () => {
         return events;
       }
 
-      it('classifies a model-request 413 as recoverable and compacts once before retrying', async () => {
-        const compressSpy = noopThen({
-          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
-          info: {
-            originalTokenCount: 90_000,
-            newTokenCount: 4_000,
-            compressionStatus: CompressionStatus.COMPRESSED,
-          },
-        });
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockRejectedValueOnce(sdkStyle413())
-          .mockImplementationOnce(async () =>
-            streamResponse(
-              stopResponse([{ text: 'recovered after compaction' }]),
-            ),
+      it.each(['sdk', 'responses'])(
+        'classifies a %s model-request 413 as recoverable and compacts once before retrying',
+        async (wire) => {
+          const compressSpy = noopThen({
+            newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+            info: {
+              originalTokenCount: 90_000,
+              newTokenCount: 4_000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              wire === 'responses'
+                ? new ResponsesHttpError(413, 'Request Entity Too Large')
+                : sdkStyle413(),
+            )
+            .mockImplementationOnce(async () =>
+              streamResponse(
+                stopResponse([{ text: 'recovered after compaction' }]),
+              ),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'next prompt' },
+            'prompt-id-413-recovery',
           );
+          const events = await consumeStream(stream);
 
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'next prompt' },
-          'prompt-id-413-recovery',
-        );
-        const events = await consumeStream(stream);
-
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expect(compressSpy.mock.calls[1]?.[1]).toEqual(
-          expect.objectContaining({ requestPayloadTooLarge: true }),
-        );
-        expect(
-          events.some((event) => event.type === StreamEventType.COMPRESSED),
-        ).toBe(true);
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(true);
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        const retryRequest = vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mock.calls[1]![0] as { contents: Content[] };
-        expect(JSON.stringify(retryRequest.contents)).toContain('summary');
-      });
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expect(compressSpy.mock.calls[1]?.[1]).toEqual(
+            expect.objectContaining({ requestPayloadTooLarge: true }),
+          );
+          expect(
+            events.some((event) => event.type === StreamEventType.COMPRESSED),
+          ).toBe(true);
+          expect(
+            events.some((event) => event.type === StreamEventType.RETRY),
+          ).toBe(true);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retryRequest = vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mock.calls[1]![0] as { contents: Content[] };
+          expect(JSON.stringify(retryRequest.contents)).toContain('summary');
+        },
+      );
 
       it('anchors the reactive 413 accounting on the real history, not the context window', async () => {
         // A bare HTTP 413 carries no provider token counts. The reactive
