@@ -59,6 +59,17 @@ export function isEmbeddedServerEnabled(): boolean {
   return false;
 }
 
+/**
+ * Runtime-evaluated check for the sources panel "add source" header button.
+ *
+ * Defaults to disabled. Override with CRAFT_FEATURE_ADD_SOURCE_BUTTON=1|0.
+ */
+export function isAddSourceButtonEnabled(): boolean {
+  const override = parseBooleanEnv(getEnv('CRAFT_FEATURE_ADD_SOURCE_BUTTON'));
+  if (override !== undefined) return override;
+  return false;
+}
+
 export const FEATURE_FLAGS = {
   /** Enable Opus 4.7 fast mode (speed:"fast" + beta header). 6x pricing. */
   fastMode: false,
@@ -88,5 +99,13 @@ export const FEATURE_FLAGS = {
    */
   get embeddedServer(): boolean {
     return isEmbeddedServerEnabled();
+  },
+  /**
+   * Show the "add source" button in the sources panel header.
+   *
+   * Defaults to disabled. Override with CRAFT_FEATURE_ADD_SOURCE_BUTTON=1|0.
+   */
+  get addSourceButton(): boolean {
+    return isAddSourceButtonEnabled();
   },
 } as const;

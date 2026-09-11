@@ -4970,8 +4970,8 @@ function AppShellContent({
                           </StyledDropdownMenuContent>
                         </DropdownMenu>
                       )}
-                      {/* Add Source button (only for sources mode) - uses filter-aware edit config */}
-                      {isSourcesNavigation(navState) && activeWorkspace && (
+                      {/* Add Source button (only for sources mode) - uses filter-aware edit config. Hidden unless enabled via launch flag. */}
+                      {isSourcesNavigation(navState) && activeWorkspace && window.electronAPI.isAddSourceButtonEnabled() && (
                         <EditPopover
                           trigger={
                             <HeaderIconButton

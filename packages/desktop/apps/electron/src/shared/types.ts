@@ -519,6 +519,8 @@ export interface ElectronAPI {
   getVersions(): { node: string; chrome: string; electron: string };
   /** Returns the renderer host environment without going through RPC. */
   getRuntimeEnvironment(): 'electron' | 'web';
+  /** Whether the sources panel "add source" header button is shown. Preload-local launch flag. */
+  isAddSourceButtonEnabled(): boolean;
   getHomeDir(): Promise<string>;
   isDebugMode(): Promise<boolean>;
 

@@ -23,6 +23,7 @@ import { RoutedClient } from '../transport/routed-client'
 import { buildClientApi } from '../transport/build-api'
 import { CHANNEL_MAP } from '../transport/channel-map'
 import { createCallbackServer } from '@craft-agent/shared/auth/callback-server'
+import { isAddSourceButtonEnabled } from '@craft-agent/shared/feature-flags'
 import {
   CLIENT_OPEN_EXTERNAL,
   CLIENT_OPEN_PATH,
@@ -187,6 +188,7 @@ client.handleCapability(CLIENT_OPEN_FILE_DIALOG, async (spec: FileDialogSpec) =>
 const api = buildClientApi(client, CHANNEL_MAP, (ch) => client.isChannelAvailable(ch))
 
 ;(api as any).getRuntimeEnvironment = (): 'electron' | 'web' => 'electron'
+;(api as any).isAddSourceButtonEnabled = (): boolean => isAddSourceButtonEnabled()
 
 // ---------------------------------------------------------------------------
 // Transport connection state logging (for remote connections)

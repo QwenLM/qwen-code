@@ -141,6 +141,9 @@ export const mockElectronAPI = {
   // branch between Electron and web-UI rendering. Must be synchronous.
   getRuntimeEnvironment: (): 'electron' | 'web' => 'electron',
 
+  // Keep the sources panel "add source" button visible in the playground.
+  isAddSourceButtonEnabled: () => true,
+
   openFileDialog: async () => {
     console.log('[Playground] openFileDialog called')
     return [] // Let user use file input or drag-drop
