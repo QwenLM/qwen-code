@@ -82,7 +82,12 @@ describe('resolveAgentPersona', () => {
     expect(result.systemPrompt).toContain(
       'an independent persistent workspace Agent',
     );
-    expect(result.systemPrompt).not.toContain('subagent');
+    // The word appears on purpose: the identity line states the contrast
+    // rather than avoiding it, so asserting its absence tested the wording and
+    // not the contract. What must hold is that the prompt denies the subagent
+    // framing, never adopts it.
+    expect(result.systemPrompt).toContain('not a subagent');
+    expect(result.systemPrompt).not.toMatch(/You are a subagent/i);
     expect(loadSubagent).not.toHaveBeenCalled();
   });
 

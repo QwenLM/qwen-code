@@ -12,6 +12,15 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  // Workspace-agent collaboration surface. Named the same way core names them
+  // so the drift test above stays a real check rather than two lists that
+  // happen to agree.
+  thread_post: 'ThreadPost',
+  thread_wait: 'ThreadWait',
+  thread_block: 'ThreadBlock',
+  thread_review: 'ThreadReview',
+  thread_create: 'ThreadCreate',
+  thread_read: 'ThreadRead',
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',

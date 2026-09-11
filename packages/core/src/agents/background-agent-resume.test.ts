@@ -981,10 +981,20 @@ describe('BackgroundAgentResumeService', () => {
     await service.resumeBackgroundAgent(agentId, 'continue');
 
     const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1)!;
+    // The ceiling this path restores is the workspace-Agent one, which is
+    // read-only: `run_shell_command` is denied, not merely absent, and the six
+    // thread tools are always added. Expecting SHELL here described a ceiling
+    // that no workspace Agent has.
     expect(createCall[2]?.toolConfigOverride).toMatchObject({
-      tools: expect.arrayContaining([ToolNames.READ_FILE, ToolNames.SHELL]),
+      tools: expect.arrayContaining([
+        ToolNames.READ_FILE,
+        ToolNames.THREAD_POST,
+      ]),
       disallowedTools: expect.arrayContaining([ToolNames.EDIT]),
     });
+    expect(createCall[2]?.toolConfigOverride?.tools).not.toContain(
+      ToolNames.SHELL,
+    );
     const guard = (createCall[1] as Config).getToolInvocationGuard();
     await expect(
       guard?.({

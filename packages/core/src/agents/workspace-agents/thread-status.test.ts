@@ -113,7 +113,12 @@ describe('resolveThreadStatus', () => {
     );
 
     expect(result.status).toBe('in_review');
-    expect(result.reason).toContain('rn_alice');
+    // The reason is prose for a person now, not a run id. Which run produced
+    // the status is carried in `outstanding`, which is where a caller that
+    // needs the id reads it.
+    expect(result.outstanding).toContainEqual(
+      expect.objectContaining({ runId: 'rn_alice', kind: 'review' }),
+    );
   });
 
   it('lets a blocker outrank a review from another agent', () => {
@@ -127,7 +132,9 @@ describe('resolveThreadStatus', () => {
     );
 
     expect(result.status).toBe('blocked');
-    expect(result.reason).toContain('rn_bob');
+    expect(result.outstanding).toContainEqual(
+      expect.objectContaining({ runId: 'rn_bob', kind: 'blocked' }),
+    );
   });
 
   it('does not pin the thread to a failure that later work superseded', () => {

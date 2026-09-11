@@ -13806,7 +13806,14 @@ describe('applyWorkspaceAgentPersona', () => {
   };
 
   const agentSession = () => {
-    const config = new Config(baseParams);
+    // The opt-in as well as the source type. Collaboration is off by default,
+    // and `sourceType: 'agent'` alone deliberately does not open the surface —
+    // these cases are about what an opted-in agent session gets, so they have
+    // to say so.
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+    });
     config.setSessionSource('agent', 'ag_alice');
     return config;
   };
@@ -13823,15 +13830,23 @@ describe('applyWorkspaceAgentPersona', () => {
   });
 
   it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
-    const agent = await agentSession().createToolRegistry(undefined, {
+    // `registerFactory` is a single mock on the prototype, so every registry
+    // shares one call log. Snapshot and clear between the two, or the ordinary
+    // session inherits the agent's registrations and the negative half of this
+    // test can never fail.
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    await agentSession().createToolRegistry(undefined, { skipDiscovery: true });
+    const agentTools = factory.mock.calls.map(([name]) => name as string);
+
+    factory.mockClear();
+    await new Config(baseParams).createToolRegistry(undefined, {
       skipDiscovery: true,
     });
-    const ordinary = await new Config(baseParams).createToolRegistry(
-      undefined,
-      {
-        skipDiscovery: true,
-      },
-    );
+    const ordinaryTools = factory.mock.calls.map(([name]) => name as string);
+    // Asserted against the recorded registrations, not `getAllToolNames`:
+    // that method is stubbed to `[]` at module scope, so the positive half
+    // could never pass and the negative half could never fail.
     for (const name of [
       'thread_post',
       'thread_read',
@@ -13840,8 +13855,8 @@ describe('applyWorkspaceAgentPersona', () => {
       'thread_block',
       'thread_review',
     ]) {
-      expect(agent.getAllToolNames()).toContain(name);
-      expect(ordinary.getAllToolNames()).not.toContain(name);
+      expect(agentTools).toContain(name);
+      expect(ordinaryTools).not.toContain(name);
     }
   });
 

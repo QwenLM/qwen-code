@@ -165,9 +165,18 @@ describe('agent run lifecycle', () => {
 
   it('allows a wait once a sub-thread is open, and not for a mere sibling', async () => {
     const parent = await seed();
+    // Assigned and posted to, not merely created: an `open` child with no run
+    // and no pending parent report cannot wake anyone, so waiting on it would
+    // strand the thread — which is what `no_live_dependency` refuses. The
+    // dependency has to be something that can actually come back.
     const child = await createThread(PROJECT_ROOT, {
       title: 'read the code',
       parentThreadId: parent.id,
+      assigneeAgentId: BOB.id,
+    });
+    await postMessage(PROJECT_ROOT, child.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'over to you',
     });
 
     const waited = await closeRun(PROJECT_ROOT, {
@@ -187,8 +196,12 @@ describe('agent run lifecycle', () => {
       { ...sibling, status: 'done' as const },
     ];
     expect(hasLiveDescendant(threads, parent.id)).toBe(false);
-    expect(hasLiveDescendant([{ ...parent }, { ...child }], parent.id)).toBe(
-      true,
+    // The live child is the one with a run on it; the bare `open` sibling is
+    // not a dependency even though it is not done.
+    const liveChild = (await readThread(PROJECT_ROOT, child.id))!;
+    expect(hasLiveDescendant([{ ...parent }, liveChild], parent.id)).toBe(true);
+    expect(hasLiveDescendant([{ ...parent }, { ...sibling }], parent.id)).toBe(
+      false,
     );
   });
 
@@ -225,8 +238,16 @@ describe('agent run lifecycle', () => {
         ?.closeAcknowledgedAtSequence,
     ).toBe(1);
 
+    // The named property: the discharged wait does not leave the thread
+    // reading as blocked. It does not settle to `in_review` here any more,
+    // because the close @-mentions the waiter and books it a run — the thread
+    // is genuinely in progress again, with someone to answer. What that woken
+    // run then records is a separate subject, covered by the `unclosed` case
+    // below.
     const finished = await finish(thread.id, 'rn_bob', { status: 'completed' });
-    expect(finished.status).toBe('in_review');
+    expect(finished.status).not.toBe('blocked');
+    expect(finished.status).toBe('in_progress');
+    expect(finished.runs.some((entry) => entry.status === 'queued')).toBe(true);
   });
 
   it('records a clean exit with no closing tool as unclosed and blocks', async () => {
@@ -318,10 +339,13 @@ describe('agent run lifecycle', () => {
 
     expect(posted.dispatched).toHaveLength(1);
     expect(posted.thread.status).toBe('in_progress');
+    // Tied to the post that cleared it rather than to a literal: a failed run
+    // also records a `run_failure` system message, so pinning the number
+    // pinned how many messages precede this one.
     expect(
       posted.thread.runs.find((entry) => entry.id === 'rn_alice')
         ?.closeAcknowledgedAtSequence,
-    ).toBe(1);
+    ).toBe(posted.message.sequence);
   });
 
   it('blocks a quiescent thread whose post books nothing at all', async () => {

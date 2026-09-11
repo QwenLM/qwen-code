@@ -19,9 +19,16 @@ describe('agent capability boundary', () => {
     expect(new Set(Object.keys(AGENT_TOOL_CLASSIFICATION))).toEqual(
       new Set([...Object.values(ToolNames), ...THREAD_TOOL_NAMES]),
     );
-    expect(Object.values(ToolNames).map(classifyAgentTool)).not.toContain(
-      'thread',
-    );
+    // `THREAD_TOOL_NAMES` is built from `ToolNames`, so the six are core wire
+    // names too. What must hold is that nothing else joins their class: an
+    // ordinary tool classified `thread` would be handed to every agent as part
+    // of the collaboration surface.
+    const threadNames = new Set<string>(THREAD_TOOL_NAMES);
+    expect(
+      Object.values(ToolNames)
+        .filter((name) => !threadNames.has(name))
+        .map(classifyAgentTool),
+    ).not.toContain('thread');
     expect(THREAD_TOOL_NAMES.map(classifyAgentTool)).toEqual(
       THREAD_TOOL_NAMES.map(() => 'thread'),
     );

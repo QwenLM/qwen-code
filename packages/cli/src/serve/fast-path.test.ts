@@ -740,10 +740,25 @@ describe('serve fast path argument parsing', () => {
         ['--external-tool-guard-timeout-ms', '3000'],
       ],
       ['channel', ['--channel', 'telegram']],
+      // The managed Agent Host worker flags. A Host runs its own `qwen serve`
+      // that only reaches out, so these have to be reachable the same way
+      // every other serve option is.
+      ['agent-host-server', ['--agent-host-server', 'https://example.invalid']],
+      ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
+      ['agent-host-name', ['--agent-host-name', 'builder']],
+      ['agent-host-provider', ['--agent-host-provider', 'codex']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      // The fast path exists to start a plain daemon without loading the full
+      // CLI. A managed Agent Host is a different mode — it enrols, polls and
+      // launches an executor — so these hand off rather than being taught to
+      // the fast path.
+      'agent-host-name',
+      'agent-host-provider',
+      'agent-host-server',
+      'agent-host-workspace-id',
       'channel',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',

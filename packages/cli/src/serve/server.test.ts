@@ -763,6 +763,11 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'session_agent_trace') {
       return [feature, 'scheduled_task_session_reuse'];
     }
+    // Conditional, so it is absent from the stage1 baseline above but present
+    // in the registry, declared immediately after `workspace_agent_generate`.
+    if (feature === 'workspace_agent_generate') {
+      return [feature, 'agent_collaboration_v1'];
+    }
     if (feature === 'session_export') {
       return [
         feature,
@@ -3913,6 +3918,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
           ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'agent_collaboration_v1') {
+          expect(predicate({ agentCollaborationEnabled: true })).toBe(true);
+          expect(predicate({ agentCollaborationEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
           continue;
         }
         // Future conditional tag. Authors must add a branch above with

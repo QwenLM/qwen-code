@@ -14,6 +14,7 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import type { ResidentAgentContinuationResult } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
@@ -6130,9 +6131,11 @@ describe('AgentTool', () => {
           );
           const resident = mockRegistry.registerResidentAgent.mock
             .calls[0]?.[1] as {
-            continue: (message: string) => boolean;
+            continue: (message: string) => ResidentAgentContinuationResult;
           };
-          expect(resident.continue('Continue externally')).toBe(true);
+          // A string union now, not a boolean: 'continued' is the success
+          // value, and the other members say why a continuation did not happen.
+          expect(resident.continue('Continue externally')).toBe('continued');
           await vi.waitFor(() =>
             expect(mockAgent.execute).toHaveBeenCalledTimes(2),
           );

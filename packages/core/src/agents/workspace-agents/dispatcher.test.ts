@@ -360,10 +360,17 @@ describe('dispatchOnce', () => {
     expect(started.status).toBe('running');
     expect(started.sessionId).toBe('se_1');
     expect(started.attempts).toBe(1);
-    // The initial prompt is consumed the moment the turn starts, so the
-    // watermark moves with it.
+    // The window the turn was sent is recorded on the run, but starting is not
+    // consuming: since `954c1ffa29` the local port reports
+    // `consumedOnStart: false` and the initial input is confirmed after the
+    // transcript flush. So the run accepts the message here and the delivery
+    // watermark stays put until that confirmation arrives.
     expect(started.contextThroughSequence).toBe(1);
-    expect(stored!.deliveryByAgent[ALICE.id]?.committedThroughSequence).toBe(1);
+    // The posted message, not the seeded thread's own first entry.
+    expect(started.acceptedMessageIds.length).toBeGreaterThan(0);
+    expect(
+      stored!.deliveryByAgent[ALICE.id]?.committedThroughSequence ?? 0,
+    ).toBe(0);
     // The prompt the port received is the envelope, not a bare task string.
     const prompt = driver.start.mock.calls[0]![0].prompt as string;
     expect(prompt).toContain('YOUR RUN');

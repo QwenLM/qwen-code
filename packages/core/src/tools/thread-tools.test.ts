@@ -206,7 +206,9 @@ describe('thread tools', () => {
         .execute(new AbortController().signal),
     );
 
-    expect(result.llmContent).toContain('They have been woken');
+    // The wording is now "queued", which is what booking through admission
+    // actually does — the assignee has a run waiting, not a turn in flight.
+    expect(result.llmContent).toContain('Their work has been queued');
     const { threads } = await import(
       '../agents/workspace-agents/store.js'
     ).then((m) => m.listThreads(PROJECT_ROOT));

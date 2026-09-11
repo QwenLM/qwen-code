@@ -192,9 +192,7 @@ describe('assembleAgentPrompt', () => {
 
     expect(result.delivery).toBe('replay-after-gap');
     expect(result.gapCount).toBe(5);
-    expect(result.text).toContain(
-      'GAP — 5 earlier post(s) are no longer retained',
-    );
+    expect(result.text).toContain('GAP — 5 post(s) are no longer retained');
   });
 
   it('labels a retry without hiding that history is also missing', () => {
@@ -210,7 +208,7 @@ describe('assembleAgentPrompt', () => {
     expect(result.delivery).toBe('retry');
     expect(result.gapCount).toBe(5);
     expect(result.text).toContain('delivery=retry');
-    expect(result.text).toContain('GAP — 5 earlier post(s)');
+    expect(result.text).toContain('GAP — 5 post(s)');
   });
 
   it('reports a first entry into a thread whose start was already trimmed', () => {
