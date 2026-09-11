@@ -1171,6 +1171,7 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
