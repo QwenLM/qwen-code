@@ -120,7 +120,7 @@ export function WorktreeExitDialog({
     let cancelled = false;
     async function loadDirtyState() {
       const [statusRes, commitsRes] = await Promise.all<GitResult>([
-        execGit(['status', '--porcelain'], worktreePath),
+        execGit(['--no-optional-locks', 'status', '--porcelain'], worktreePath),
         originalHeadCommit
           ? execGit(
               ['rev-list', '--count', `${originalHeadCommit}..HEAD`],

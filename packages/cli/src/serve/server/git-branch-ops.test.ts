@@ -97,6 +97,41 @@ describe('isDirtyTree', () => {
       expect(fs.existsSync(canary)).toBe(false);
     },
   );
+
+  // `post-index-change` fires when a `status` *writes* the index — a
+  // tree-shipped program no `-c core.fsmonitor=` can suppress, so only
+  // `--no-optional-locks` skips the write. The control lives in its own case
+  // with a fresh repo, because one ungated status consumes the stat dirt that
+  // would otherwise make the guarded probe's hook fire.
+  it.skipIf(process.platform === 'win32')(
+    'does not run a tree-shipped post-index-change hook',
+    async () => {
+      const canary = path.join(repo, 'PIC');
+      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+      fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+      fs.chmodSync(hook, 0o755);
+      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+
+      await expect(isDirtyTree(repo)).resolves.toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'an ungated status on a dirty tree runs the tree-shipped post-index-change hook (control)',
+    async () => {
+      const canary = path.join(repo, 'PIC');
+      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+      fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+      fs.chmodSync(hook, 0o755);
+      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+
+      git(repo, 'status', '--porcelain', '--untracked-files=no');
+      expect(fs.existsSync(canary)).toBe(true);
+    },
+  );
 });
 
 describe('getHeadCommit', () => {
@@ -162,6 +197,31 @@ describe('checkoutRef', () => {
   it('rejects for an unknown ref', async () => {
     await expect(checkoutRef(repo, 'no-such-ref')).rejects.toThrow();
   });
+
+  // The plant is a `/bin/sh` script, so the attack does not exist on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'does not run a helper the repository names in its own config',
+    async () => {
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'plant.sh');
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'core.fsmonitor', helper);
+      git(repo, 'branch', 'other');
+
+      // Control: the fixture is a live attack when the checkout is ungated.
+      git(repo, 'checkout', '-q', 'other');
+      expect(fs.existsSync(canary)).toBe(true);
+      fs.unlinkSync(canary);
+
+      // Guarded: `checkoutRef` must not run the helper.
+      await checkoutRef(repo, 'main');
+      expect(fs.existsSync(canary)).toBe(false);
+      expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(
+        'main',
+      );
+    },
+  );
 });
 
 describe('deleteBranch', () => {

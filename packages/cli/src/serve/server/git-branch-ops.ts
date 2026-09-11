@@ -35,7 +35,13 @@ export async function branchExists(
 export async function isDirtyTree(cwd: string): Promise<boolean> {
   const { stdout } = await execFileAsync(
     'git',
-    [...NO_EXEC_CONFIG, 'status', '--porcelain', '--untracked-files=no'],
+    [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+    ],
     {
       cwd,
       maxBuffer: 10 * 1024 * 1024,
@@ -55,7 +61,9 @@ export async function getHeadCommit(cwd: string): Promise<string | undefined> {
 }
 
 // A checkout runs the repository's own `post-checkout` hook whatever config it
-// is given, so the guard below narrows these two calls rather than sealing them.
+// is given — `core.hooksPath` is deliberately not emptied, because qwen installs
+// it in every worktree it creates — so the guard below narrows these two calls
+// rather than sealing them.
 export async function createBranch(cwd: string, name: string): Promise<void> {
   await execFileAsync('git', [...NO_EXEC_CONFIG, 'checkout', '-b', name], {
     cwd,
