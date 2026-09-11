@@ -928,11 +928,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.inboundFailures = [];
       // History floors are policy-scoped, not identity-scoped: they survive
       // this reset so a stale redelivery cannot reopen a disabled window. A
-      // watermark survives only alongside a floor whose tag is absent or
-      // matches the new identity — otherwise it is the old account's served
-      // position, and the window restarts from this connect.
+      // watermark survives only while it still sits exactly on that floor's
+      // re-enable boundary with no mismatched tag — then it encodes the
+      // boundary itself, not a served position. Once a poll has advanced it,
+      // the position belongs to whichever identity served it, and the window
+      // restarts from this connect.
       if (
         this.cursor.notificationHistoryFloor === undefined ||
+        this.cursor.notificationWatermark !==
+          this.cursor.notificationHistoryFloor +
+            NOTIFICATION_HISTORY_OVERLAP_MS ||
         (this.cursor.notificationHistoryFloorProfile !== undefined &&
           this.cursor.notificationHistoryFloorProfile !== identity.profile)
       ) {
@@ -940,6 +945,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
       if (
         this.cursor.mentionHistoryFloor === undefined ||
+        this.cursor.mentionWatermark !==
+          this.cursor.mentionHistoryFloor + NOTIFICATION_HISTORY_OVERLAP_MS ||
         (this.cursor.mentionHistoryFloorProfile !== undefined &&
           this.cursor.mentionHistoryFloorProfile !== identity.profile)
       ) {

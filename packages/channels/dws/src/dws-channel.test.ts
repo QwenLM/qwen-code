@@ -8303,6 +8303,248 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('restarts group history when a served watermark outlives its floor tag', async () => {
+    const name = 'served-watermark-matching-tag-group-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({
+          profile: 'corp-two',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
+        name,
+      );
+      first.disconnect();
+
+      // Re-enable group access under corp-two: floor 20_000 tagged corp-two,
+      // boundary watermark 25_000, and the poll moves the watermark on.
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      const { channel: second } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ profile: 'corp-two', dmPolicy: 'disabled' }),
+        name,
+      );
+      await second.poll();
+      second.disconnect();
+
+      // corp-one takes over and serves mention history up to t=150_000.
+      now.mockReturnValue(150_000);
+      const thirdClient = new FakeDwsClient();
+      thirdClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: third } = await readyPolicyChannel(
+        thirdClient,
+        makeConfig({ profile: 'corp-one', dmPolicy: 'disabled' }),
+        name,
+      );
+      await third.poll();
+      third.disconnect();
+
+      // Back under corp-two the floor tag matches again, but the watermark
+      // records corp-one's served position and must not reopen that era.
+      now.mockReturnValue(500_000);
+      const fourthClient = new FakeDwsClient();
+      fourthClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      fourthClient.mentionedMessages = [
+        message(
+          'user_im_message_receive_at',
+          'served-era-mention',
+          'dated inside the era corp-one served',
+          { eventTime: 200_000 },
+        ),
+      ];
+      const { channel: fourth, bridge } = await readyPolicyChannel(
+        fourthClient,
+        makeConfig({ profile: 'corp-two', dmPolicy: 'disabled' }),
+        name,
+      );
+
+      await fourth.poll();
+
+      expect(fourthClient.listMentionedMessages).toHaveBeenCalledWith(
+        495_000,
+        500_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('restarts direct history when a served watermark outlives its floor tag', async () => {
+    const name = 'served-watermark-matching-tag-direct-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({
+          profile: 'corp-two',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
+        name,
+      );
+      first.disconnect();
+
+      // Re-enable direct access under corp-two, then let a poll advance the
+      // watermark off the re-enable boundary.
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      const { channel: second } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ profile: 'corp-two', groupPolicy: 'disabled' }),
+        name,
+      );
+      await second.poll();
+      second.disconnect();
+
+      // corp-one serves direct history up to t=150_000.
+      now.mockReturnValue(150_000);
+      const thirdClient = new FakeDwsClient();
+      thirdClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: third } = await readyPolicyChannel(
+        thirdClient,
+        makeConfig({ profile: 'corp-one', groupPolicy: 'disabled' }),
+        name,
+      );
+      await third.poll();
+      third.disconnect();
+
+      now.mockReturnValue(500_000);
+      const fourthClient = new FakeDwsClient();
+      fourthClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      fourthClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'served-era-direct',
+          'dated inside the era corp-one served',
+          { eventTime: 200_000 },
+        ),
+      ];
+      const { channel: fourth, bridge } = await readyPolicyChannel(
+        fourthClient,
+        makeConfig({ profile: 'corp-two', groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await fourth.poll();
+
+      expect(fourthClient.listDirectMessages).toHaveBeenCalledWith(
+        495_000,
+        500_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('restarts direct history served under an untagged floor when the profile changes', async () => {
+    const name = 'served-watermark-untagged-floor-direct-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      // No configured profile: every floor this channel writes is untagged.
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        name,
+      );
+      first.disconnect();
+
+      now.mockReturnValue(60_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: second } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+      await second.poll();
+      second.disconnect();
+
+      // The active login switches with no configured profile, so nothing
+      // about the floor can vouch for the watermark corp-one advanced.
+      now.mockReturnValue(500_000);
+      const thirdClient = new FakeDwsClient();
+      thirdClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      thirdClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'served-era-direct-untagged',
+          'dated inside the era corp-one served',
+          { eventTime: 200_000 },
+        ),
+      ];
+      const { channel: third, bridge } = await readyPolicyChannel(
+        thirdClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await third.poll();
+
+      expect(thirdClient.listDirectMessages).toHaveBeenCalledWith(
+        495_000,
+        500_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('drops disabled direct startup delivery after initial authentication fails', async () => {
     const name = 'fresh-disabled-direct-startup-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
