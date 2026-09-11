@@ -21,6 +21,7 @@ import {
   findOpenIssue,
   isRequest,
   JUDGMENT_CAP,
+  RESULT_RECORD_CAP,
   main,
   readState,
 } from './resolve-health.mjs';
@@ -1010,13 +1011,30 @@ describe('resolve-health: assessment', () => {
       decide(silent, null).map((a) => a.type),
       ['create'],
     );
-    // One acknowledgement anywhere switches the per-request reading back
-    // on: the lane demonstrably ran, so an unacknowledged request is a
-    // refusal again — and the acknowledged one, still owed its result,
-    // counts alone.
+    // An acknowledgement alone does NOT switch the per-request reading
+    // back on: the projected count cannot say who reacted, so one 👀 from
+    // any account would otherwise silence the never-ran arm for the whole
+    // window. Until a classified result lands somewhere every stale request
+    // counts — the acknowledged one included.
     const acked = request('2026-08-27T09:00:00Z', 90);
-    const alive = assess(
+    const noOutput = assess(
       [...lane, { number: 90, state: 'open', comments: [acked] }],
+      { now },
+    );
+    assert.equal(noOutput.unanswered.length, 4);
+    assert.equal(noOutput.alarm, true);
+    // A result comment — bot-authored and unedited — is what proves the
+    // lane ran: the three unacknowledged requests read as refusals again,
+    // and the acknowledged one, still owed its result, counts alone.
+    const alive = assess(
+      [
+        ...lane,
+        {
+          number: 90,
+          state: 'open',
+          comments: [acked, result('2026-08-27T08:55:00Z', PUSHED, 90)],
+        },
+      ],
       { now },
     );
     assert.deepEqual(
@@ -1024,6 +1042,102 @@ describe('resolve-health: assessment', () => {
       [acked.id],
     );
     assert.equal(alive.alarm, false);
+  });
+
+  it('treats a reaction from just anyone as no sign of life', () => {
+    // The laneSilent arm exists for the outage that produces NOTHING — no
+    // run, no result, no ack — so its life signal must be one whose author
+    // the watch can check. The projected eyes count cannot say WHO reacted:
+    // one 👀 from an account with no repository access, on a closed PR and
+    // edited after posting, would otherwise switch the never-ran arm off
+    // for the whole window, renewable at will. (isOwed keeps reading the
+    // count: both its consumers move toward alarming, where the
+    // unattributed read is safe.)
+    const outage = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${6 + h}:00:00Z`,
+          51 + h,
+          'maintainer',
+          undefined,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const driveBy = {
+      number: 60,
+      state: 'closed',
+      comments: [
+        request(
+          '2026-08-27T05:00:00Z',
+          60,
+          'passer-by',
+          '2026-08-27T05:30:00Z',
+          'NONE',
+          1,
+        ),
+      ],
+    };
+    const a = assess([...outage, driveBy], { now });
+    assert.equal(a.unanswered.length, 3);
+    assert.equal(a.alarm, true);
+  });
+
+  it('keeps the life signal when the only result in the window was edited after recording', () => {
+    // laneSilent's bot arm carries its own copy of the unedited check, so
+    // editing the window's one result flips the lane back to silent and
+    // every stale refused request joins the roster at once — an alarm
+    // against a lane that demonstrably ran. A result the record carries
+    // was seen unedited by an earlier tick, so the later edit cannot take
+    // back the life the lane showed.
+    const served = result('2026-08-26T09:05:00Z', PUSHED, 41);
+    const refused = () =>
+      [0, 1, 2].map((h) => ({
+        number: 51 + h,
+        state: 'open',
+        comments: [
+          request(
+            `2026-08-26T0${6 + h}:00:00Z`,
+            51 + h,
+            'read-only-collaborator',
+            undefined,
+            'COLLABORATOR',
+            0,
+          ),
+        ],
+      }));
+    const tick1 = assess(
+      [{ number: 41, state: 'open', comments: [served] }, ...refused()],
+      { now },
+    );
+    assert.equal(tick1.unanswered.length, 0);
+    const refresh = decide(tick1, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [],
+    })[0];
+    assert.equal(refresh.type, 'comment');
+    const record = readState([refresh.body]);
+    const tick2 = assess(
+      [
+        {
+          number: 41,
+          state: 'open',
+          comments: [{ ...served, updated_at: '2026-08-26T10:00:00Z' }],
+        },
+        ...refused(),
+      ],
+      {
+        now,
+        recorded: record.requests,
+        recordedResults: record.resultsSeen,
+      },
+    );
+    assert.equal(tick2.unanswered.length, 0);
+    assert.equal(tick2.alarm, false);
   });
 
   it('keeps the close-gate veto for an unacknowledged request on a PR the lane has served', () => {
@@ -1209,6 +1323,53 @@ describe('resolve-health: assessment', () => {
     );
   });
 
+  it('keeps a request answered by a result that was edited after serving it', () => {
+    // The edit exclusion above guards CLASSIFICATION — a failure edited
+    // into a success must not pose as recovery evidence. Applied to every
+    // reader, though, an edit after the fact also un-answers the request
+    // the result already served: the roster reports it unanswered and the
+    // close gate's pairing runs out on it, vetoing a recovery the lane
+    // earned. The first-sight record carries the answer across the edit:
+    // a result seen unedited is recorded, and the roster and the pairing
+    // read the record beside the live set.
+    const ask = request('2026-08-26T03:00:00Z', 41);
+    const served = result('2026-08-26T03:05:00Z', PUSHED, 41);
+    // The failing lane the issue is filed on: five failures AFTER the push,
+    // so the streak the create rides on survives it.
+    const failures = [4, 5, 6, 7, 8].map((h) =>
+      result(`2026-08-26T0${h}:00:00Z`, AGENT_FAILED, 30),
+    );
+    const lane = (comments) => [
+      { number: 30, state: 'open', comments: [...failures] },
+      { number: 41, state: 'open', comments },
+    ];
+    // Tick 1 files the issue on the failing lane, recording the unedited
+    // result that served the request.
+    const tick1 = assess(lane([ask, served]), { now });
+    assert.equal(tick1.unanswered.length, 0);
+    assert.equal(tick1.unserved, null);
+    const record = readState([decide(tick1, null)[0].record]);
+    assert.ok(
+      record.resultsSeen.some(([id]) => id === served.id),
+      'the filing tick records the result it saw unedited',
+    );
+    // Tick 2: the result comment has been edited since (a redaction, an
+    // annotation). The answer it gave must survive the edit — while the
+    // edited body still counts as nothing toward the streak or recovery.
+    const tick2 = assess(
+      lane([ask, { ...served, updated_at: '2026-08-26T08:00:00Z' }]),
+      {
+        now,
+        recorded: record.requests,
+        recordedResults: record.resultsSeen,
+      },
+    );
+    assert.equal(tick2.unanswered.length, 0);
+    assert.equal(tick2.unserved, null);
+    assert.equal(tick2.streak, 5);
+    assert.equal(tick2.latestAttempt.kind, 'agent_failed');
+  });
+
   it('counts no-conflict and dry-run results neither way', () => {
     // Neither pushes anything: they must not break a push-failure streak
     // (masking a push outage) and cannot serve as recovery evidence.
@@ -1269,6 +1430,7 @@ describe('resolve-health: decisions', () => {
       unanswered: [],
       newestRequest: null,
       requests: [],
+      resultsSeen: failing.resultSightings,
       latest: failing.latestAttempt.id,
     });
     assert.ok(
@@ -1305,6 +1467,7 @@ describe('resolve-health: decisions', () => {
       unanswered: stale.unanswered.map((u) => u.id),
       newestRequest: stale.unanswered.at(-1).at,
       requests: stale.unanswered.map((u) => [u.id, u.at, 'COLLABORATOR', u.pr]),
+      resultsSeen: [],
       latest: null,
     });
   });
@@ -1538,10 +1701,18 @@ describe('resolve-health: decisions', () => {
       { now },
     );
     assert.equal(belowThreshold.alarm, false);
-    assert.deepEqual(decide(belowThreshold, existing), []);
+    // The quiet tick records the newly sighted failures; what it must not
+    // do is close — nothing has been shown to work.
+    assert.deepEqual(
+      decide(belowThreshold, existing).map((a) => a.type),
+      ['comment'],
+    );
     // The shared `healthy` push (2026-08-26) PREDATES this issue's requests
     // (2026-08-27), so it is no evidence that anything ran after them.
-    assert.deepEqual(decide(healthy, existing), []);
+    assert.deepEqual(
+      decide(healthy, existing).map((a) => a.type),
+      ['comment'],
+    );
     // A success NEWER than the requests is what closes it.
     const recovered = assess(
       [
@@ -1588,7 +1759,12 @@ describe('resolve-health: decisions', () => {
       { now },
     );
     assert.equal(afterMoved.streak, 0); // the streak reset stays
-    assert.deepEqual(decide(afterMoved, existing), []);
+    // The moved-head sighting is recorded, but it pushes nothing, so the
+    // close stays refused.
+    assert.deepEqual(
+      decide(afterMoved, existing).map((a) => a.type),
+      ['comment'],
+    );
     const afterNoPush = assess(
       [
         {
@@ -1661,11 +1837,13 @@ describe('resolve-health: decisions', () => {
     const asked = [0, 1, 2].map((i) =>
       request(`2026-08-2${5 + i}T01:00:00Z`, 25 + i),
     );
+    // Hoisted for the same reason: the result record compares ids too.
+    const stalePush = result('2026-08-24T00:00:00Z', PUSHED, 24);
     const prsWith = (states) => [
       {
         number: 24,
         state: 'open',
-        comments: [result('2026-08-24T00:00:00Z', PUSHED, 24)],
+        comments: [stalePush],
       },
       ...states.map((state, i) => ({
         number: 25 + i,
@@ -1693,7 +1871,12 @@ describe('resolve-health: decisions', () => {
     partialPrs[1].comments.push(result('2026-08-25T02:00:00Z', SKIPPED, 25));
     const partial = assess(partialPrs, { now });
     assert.equal(partial.alarm, false);
-    assert.deepEqual(decide(partial, existing), []);
+    // The skip that answered one request is recorded — and the deficit it
+    // shrank from — but the stale push still cannot close the issue.
+    assert.deepEqual(
+      decide(partial, existing).map((a) => a.type),
+      ['comment'],
+    );
 
     // A push that postdates the requests still closes once the alarm clears.
     const healedPrs = prsWith(['closed', 'closed', 'closed']);
@@ -1780,7 +1963,17 @@ describe('resolve-health: decisions', () => {
     assert.equal(tick3.latestAttempt.kind, 'pushed');
     assert.equal(tick3.unserved, null, 'every readable request has a result');
     assert.equal(tick3.newestRequest, '2026-08-26T01:00:00Z');
-    assert.deepEqual(decide(tick3, issue(texts)), []);
+    // The push sighting is newly recorded; the write must not close, and
+    // must carry the floor the live scan can no longer see.
+    const final = decide(tick3, issue(texts));
+    assert.deepEqual(
+      final.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState(final.map((a) => a.body)).newestRequest,
+      '2026-08-27T01:00:00Z',
+    );
   });
 
   it('records a barrier that rose while the alarm stayed below threshold', () => {
@@ -1934,6 +2127,7 @@ describe('resolve-health: decisions', () => {
           unanswered: [],
           newestRequest: r2.created_at,
           requests: recorded,
+          resultsSeen: [[report.id, 100, report.created_at]],
           latest: null,
         })} -->`,
       ],
@@ -2137,6 +2331,7 @@ describe('resolve-health: decisions', () => {
           unanswered: [],
           newestRequest: r2.created_at,
           requests: recorded,
+          resultsSeen: [[report.id, 100, report.created_at]],
           latest: null,
         })} -->`,
       ],
@@ -2263,6 +2458,7 @@ describe('resolve-health: decisions', () => {
           unanswered: [],
           newestRequest: r2.created_at,
           requests: recorded,
+          resultsSeen: [[report.id, 31, report.created_at]],
           latest: null,
         })} -->`,
       ],
@@ -2759,6 +2955,29 @@ describe('resolve-health: decisions', () => {
     );
   });
 
+  it('caps the result record so a run wave cannot wedge the write', () => {
+    // The result sightings ride the same marker, so they need their own
+    // bound: a request wave means a run wave, and an unbounded record
+    // overflows the comment the state rides in. Kept newest-first — the
+    // recent results are the ones that can still answer a live request.
+    const flood = [];
+    for (let i = 0; i < RESULT_RECORD_CAP + 50; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-21T00:00:00Z') + i * 60_000,
+      ).toISOString();
+      flood.push(result(at, AGENT_FAILED, 7));
+    }
+    const a = assess([{ number: 7, state: 'open', comments: flood }], {
+      now,
+    });
+    const body = decide(a, null)[0].body;
+    const recorded = readState([body]).resultsSeen;
+    assert.equal(recorded.length, RESULT_RECORD_CAP);
+    assert.equal(recorded.at(-1)[0], flood.at(-1).id, 'newest kept');
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(marker.length < 30000, `state marker is ${marker.length} bytes`);
+  });
+
   it('carries first-sight judgments forward and prunes the ones that aged out', () => {
     // The record rides in the state marker: entries from earlier ticks
     // survive only while their comments are still inside the window — an
@@ -2823,6 +3042,36 @@ describe('resolve-health: decisions', () => {
       decide(quiet, { ...existing, texts: [actions[0].body] }),
       [],
     );
+  });
+
+  it('records a newly sighted result on an unchanged quiet picture', () => {
+    // The result record's own write key: a result that lands on a quiet
+    // tick moves neither the barrier nor the request record, so without its
+    // own key the sighting waits for a tick that writes — and an edit before
+    // then un-answers the request the result served.
+    const ask = request('2026-08-26T01:00:00Z', 31);
+    const served = result('2026-08-26T02:00:00Z', PUSHED, 31);
+    const seeded = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: 0,
+      unanswered: [],
+      newestRequest: '2026-08-26T03:00:00Z',
+      requests: [[ask.id, ask.created_at, 'COLLABORATOR', 31]],
+      resultsSeen: [],
+      latest: null,
+    })} -->`;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const a = assess([{ number: 31, state: 'open', comments: [ask, served] }], {
+      now,
+    });
+    assert.equal(a.alarm, false);
+    const actions = decide(a, existing);
+    assert.deepEqual(
+      actions.map((x) => x.type),
+      ['comment'],
+    );
+    assert.deepEqual(readState(actions.map((x) => x.body)).resultsSeen, [
+      [served.id, 31, '2026-08-26T02:00:00Z'],
+    ]);
   });
 
   it('records a newly sighted refused request while the alarm holds its picture', () => {
@@ -3200,6 +3449,11 @@ describe('resolve-health: reading state back', () => {
       '{"streak":0,"unanswered":[],"requests":[["a","b","c"]]}',
       '{"streak":0,"unanswered":[],"requests":[[1,"b",2]]}',
       '{"streak":0,"unanswered":[],"requests":[[1,"b"]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":"all"}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[1]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[["a",1,"b"]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[[1,2]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[[1,"a","b"]]}',
       '[]',
       'null',
       'not json at all',
@@ -3232,6 +3486,14 @@ describe('resolve-health: reading state back', () => {
         ),
       ]).requests,
       [[9, '2026-08-27T00:00:00Z', 'OWNER']],
+    );
+    assert.deepEqual(
+      readState([
+        wrap(
+          '{"streak":0,"unanswered":[],"resultsSeen":[[9,31,"2026-08-27T00:00:00Z"]]}',
+        ),
+      ]).resultsSeen,
+      [[9, 31, '2026-08-27T00:00:00Z']],
     );
   });
 });
@@ -4015,6 +4277,96 @@ describe('resolve-health: end to end against a recording gh', () => {
     assert.equal(tick2.assessment.unanswered.length, 3);
     assert.equal(tick2.assessment.alarm, true);
     assert.deepEqual(tick2.actions, []);
+  });
+
+  it('holds the recorded deficit across the heal tick until the requests leave the window', () => {
+    // A never-ran outage files the issue with the starved requests recorded
+    // as unanswered. At the heal tick the live rules read them as refusals
+    // — their PRs show no result and no ack ever landed — so a live-only
+    // reading closes the issue over requests that were never served, and
+    // the quiet tick's refresh erases the deficit from the record. The
+    // recorded deficit must hold the close gate until the requests it
+    // names actually leave the window.
+    const asks = [0, 1, 2].map((h) =>
+      request(
+        `2026-08-24T0${6 + h}:00:00Z`,
+        11 + h,
+        'maintainer',
+        undefined,
+        'COLLABORATOR',
+        0,
+      ),
+    );
+    const lane = (state13) => [
+      { number: 11, state: 'open', comments: [asks[0]] },
+      { number: 12, state: 'open', comments: [asks[1]] },
+      { number: 13, state: state13, comments: [asks[2]] },
+    ];
+    const store = {
+      prs: lane('open'),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-24T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    const filed = store.issues[0];
+    assert.deepEqual(
+      readState(store.comments[filed.number].map((c) => c.body)).unanswered,
+      asks.map((a) => a.id),
+    );
+
+    // The heal tick: the lane demonstrably works again — a fresh request
+    // on another PR is acknowledged and pushed — while two of the starved
+    // requests still sit live, open and result-less (the third's PR was
+    // closed, the ordinary end of an incident, so it no longer holds the
+    // gate). The recorded deficit must still veto the close, and the
+    // quiet tick's refresh must not erase it.
+    const healed = {
+      number: 14,
+      state: 'open',
+      comments: [
+        request('2026-08-26T11:00:00Z', 14),
+        result('2026-08-26T11:30:00Z', PUSHED, 14),
+      ],
+    };
+    store.prs = [...lane('closed'), healed];
+    store.now = '2026-08-26T12:00:00Z';
+    const heal = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      heal.actions.map((a) => a.type),
+      ['comment'],
+      'the heal tick must not close over the recorded deficit',
+    );
+    assert.deepEqual(
+      readState(store.comments[filed.number].map((c) => c.body)).unanswered,
+      [asks[0].id, asks[1].id],
+      'the refresh carries the still-outstanding deficit forward',
+    );
+
+    // A later quiet tick with an unchanged world: still no close.
+    store.now = '2026-08-26T18:00:00Z';
+    const quiet = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      quiet.actions.map((a) => a.type),
+      [],
+      'the deficit survives until the requests leave the window',
+    );
+
+    // Once the starved requests age out of the window, the ordinary
+    // recovery close proceeds.
+    store.now = '2026-09-01T12:00:00Z';
+    const drained = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      drained.actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
   });
 
   it('recovers even when a stranger forged the state marker', () => {

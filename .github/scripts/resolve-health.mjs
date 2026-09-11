@@ -222,6 +222,12 @@ export const ANSWERABLE_ASSOCIATIONS = new Set([
 // options.recorded: [[id, created_at, association], ...] — the first-sight
 // judgments carried in the tracking issue's state; a recorded id is judged
 // by the record, never by the live field (see ANSWERABLE_ASSOCIATIONS).
+// options.recordedResults: [[id, pr, created_at], ...] — the first-sight
+// record of result comments from the same state: a recorded result still
+// answers the request it served after its comment is edited (see the
+// gateResults build below). options.deficit: [id, ...] — the requests the
+// last tick recorded as unanswered; a recorded id stays admitted while the
+// request is still live, open and result-less (see the deficit arms below).
 export function assess(prs, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const now = opts.now instanceof Date ? opts.now : new Date();
@@ -270,7 +276,32 @@ export function assess(prs, options = {}) {
   const recorded = new Map(
     (opts.recorded ?? []).map(([id, , association]) => [id, association]),
   );
+  // A result comment an earlier tick saw unedited: the edit exclusion below
+  // guards classification, but an edit after the fact must not un-answer
+  // the request the result already served. Entries older than the window
+  // can answer no live request — the request would have aged out first —
+  // so they are dropped on read.
+  const recordedResults = (opts.recordedResults ?? []).filter(
+    (e) => e[2] >= windowStart,
+  );
+  const recordedResultsByPr = new Map();
+  for (const entry of recordedResults) {
+    const list = recordedResultsByPr.get(entry[1]) ?? [];
+    list.push(entry);
+    recordedResultsByPr.set(entry[1], list);
+  }
+  // The deficit the last tick recorded (the state's `unanswered` ids). The
+  // live rules re-derive the roster from what is visible NOW, which at the
+  // heal tick reads the outage's starved requests as refusals — no ack ever
+  // landed, their PRs show no result — and drops them, closing the issue
+  // over requests never served and erasing the deficit without a trace. A
+  // recorded id is the watch's own prior judgment, so it stays admitted
+  // while the request is still live, open and result-less, and leaves only
+  // when the request does (aged out, deleted, PR closed, or answered at
+  // last).
+  const deficit = new Set(opts.deficit ?? []);
   const requestSightings = [];
+  const resultSightings = [];
   const isRequestShaped = (c) =>
     c.user !== opts.bot &&
     ANSWERABLE_ASSOCIATIONS.has(recorded.get(c.id) ?? c.author_association) &&
@@ -309,25 +340,32 @@ export function assess(prs, options = {}) {
   // owed gate reads the outage this file exists for (the thirteen days in
   // the header) as a lane full of refusals, and the roster goes quiet for
   // as long as the outage lasts. What no per-request signal can say, the
-  // window can: requests exist and the lane produced NO observable output
-  // anywhere — no classified result comment, no acknowledgement on any
-  // request. Then the missing reactions are the outage, not refusals, and
-  // every stale request counts whatever its reaction. One live result or
-  // one acknowledgement anywhere switches the per-request reading back on,
-  // so a refused request on a demonstrably healthy lane still never alarms.
-  let laneSilent = true;
+  // window can: requests exist and the lane produced NO classified result
+  // comment anywhere. Then the missing reactions are the outage, not
+  // refusals, and every stale request counts whatever its reaction. One
+  // live result anywhere switches the per-request reading back on, so a
+  // refused request on a demonstrably healthy lane still never alarms.
+  //
+  // Life is a classified result comment — the only signal whose author the
+  // watch can check. The acknowledgement count cannot serve here: it
+  // cannot say WHO reacted, so one 👀 from any account — on a closed PR,
+  // edited after posting — would switch the never-ran arm off for the whole
+  // window, renewable at will. (isOwed keeps reading the count: both its
+  // consumers move toward alarming, where the unattributed read is safe.)
+  // An edited result is not the producer's word and proves nothing either;
+  // a result the RECORD carries was seen unedited by an earlier tick, so an
+  // edit after the fact cannot take back the life the lane showed.
+  let laneSilent = recordedResults.length === 0;
   for (const pr of prs) {
     for (const c of pr.comments) {
       if (c.created_at < windowStart) {
         continue;
       }
-      if (c.user === opts.bot) {
-        // An edited result comment is not the producer's word (below), so
-        // it is not evidence of life either.
-        if (c.updated_at === c.created_at && classifyResult(c.body)) {
-          laneSilent = false;
-        }
-      } else if ((c.eyes ?? 0) > 0 && isRequest(c.body)) {
+      if (
+        c.user === opts.bot &&
+        c.updated_at === c.created_at &&
+        classifyResult(c.body)
+      ) {
         laneSilent = false;
       }
     }
@@ -376,6 +414,7 @@ export function assess(prs, options = {}) {
       }
       const kind = classifyResult(c.body);
       if (kind) {
+        resultSightings.push([c.id, pr.number, c.created_at]);
         prResults.push({
           pr: pr.number,
           id: c.id,
@@ -387,6 +426,19 @@ export function assess(prs, options = {}) {
       }
     }
     results.push(...prResults);
+    // The roster, the pairing and the close gate read the live results plus
+    // the ones the record carries for this PR: the edit exclusion above
+    // guards CLASSIFICATION — a failure edited into a success must not pose
+    // as recovery evidence — but an edit after the fact must not un-answer
+    // the request the result already served. Keyed by comment id, so a
+    // result still live is never spent twice in the pairing.
+    const liveResultIds = new Set(prResults.map((r) => r.id));
+    const gateResults = [
+      ...prResults,
+      ...(recordedResultsByPr.get(pr.number) ?? [])
+        .filter((e) => !liveResultIds.has(e[0]))
+        .map(([id, , at]) => ({ id, at })),
+    ].sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
     // The close gate's pairing runs for EVERY PR, open or not. The roster
     // below skips a closed one because the producer only runs on open PRs, so
     // a request there can never be answered and must not alarm; the gate
@@ -441,7 +493,7 @@ export function assess(prs, options = {}) {
           // ANSWERABLE_ASSOCIATIONS reads on the live side.
           ANSWERABLE_ASSOCIATIONS.has(e[2]) &&
           !liveShapedIds.has(e[0]) &&
-          prResults.some((r) => r.at > e[1]),
+          gateResults.some((r) => r.at > e[1]),
       )
       .map((e) => ({ id: e[0], created_at: e[1] }));
     // The live arm owes a result to a request the producer acknowledged
@@ -460,10 +512,15 @@ export function assess(prs, options = {}) {
     // A request on a PR with no in-window result at all still reads as
     // refused, or one read-only collaborator re-arms the veto this gate
     // exists to drop. The veto only ever refuses a close, so the
-    // conservative side is the safe side.
+    // conservative side is the safe side. The deficit arm re-admits what
+    // the watch itself recorded unanswered: those ids were judged at a tick
+    // that saw the outage, and re-judging them by the live rules at the
+    // heal tick is exactly the erasure the record exists to prevent.
     const gateRequests = [
       ...comments.filter(
-        (c) => isRequestShaped(c) && (isOwed(c) || prResults.length > 0),
+        (c) =>
+          deficit.has(c.id) ||
+          (isRequestShaped(c) && (isOwed(c) || gateResults.length > 0)),
       ),
       ...vanished,
     ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
@@ -490,11 +547,11 @@ export function assess(prs, options = {}) {
     // and still runs until the deficient ask leaves the window. Separating a
     // stale deficit from a live one needs the result comment to name the
     // request that triggered it, which the producer does not write.
-    let cursor = prResults.length - 1;
+    let cursor = gateResults.length - 1;
     let prUnserved = null;
     for (let i = gateRequests.length - 1; i >= 0; i -= 1) {
       const req = gateRequests[i];
-      while (cursor >= 0 && prResults[cursor].at <= req.created_at) {
+      while (cursor >= 0 && gateResults[cursor].at <= req.created_at) {
         cursor -= 1;
       }
       if (cursor >= 0) {
@@ -529,14 +586,16 @@ export function assess(prs, options = {}) {
     if (pr.state !== 'open') {
       continue;
     }
-    const requests = comments.filter(isAnswerableRequest);
+    const requests = comments.filter(
+      (c) => isAnswerableRequest(c) || deficit.has(c.id),
+    );
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
       // serialised by the workflow's concurrency group, so a later result
       // implies the earlier run finished — and a retry typed before the
       // first run reported must not leave the first request "unanswered"
       // forever because its result landed after the retry's timestamp.
-      const answered = prResults.some((r) => r.at > req.created_at);
+      const answered = gateResults.some((r) => r.at > req.created_at);
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {
         unanswered.push({
@@ -592,6 +651,7 @@ export function assess(prs, options = {}) {
     pushFailedInStreak: pushFailed,
     unanswered,
     requestSightings,
+    resultSightings,
     newestRequest,
     unserved,
     latestAttempt: attempts.at(-1) ?? null,
@@ -606,7 +666,9 @@ export function assess(prs, options = {}) {
 // skip while another ages past the stale window, the count holds and the
 // roster the issue shows would otherwise freeze on week one. `requests` is
 // the first-sight association judgments, each [id, created_at, association]
-// (see ANSWERABLE_ASSOCIATIONS).
+// (see ANSWERABLE_ASSOCIATIONS); `resultsSeen` the first-sight record of
+// result comments, each [id, pr, created_at] — the roster, the pairing and
+// the life signal read it beside the live set (see assess()).
 // Kept single-line (STATE_RE) — JSON.stringify of a flat object never emits
 // a newline.
 // The record rides in one comment, and GitHub refuses a body over 65,536
@@ -644,6 +706,18 @@ function capJudgments(entries) {
     }
   }
   return entries.filter((e) => keep.has(e));
+}
+
+// The result sightings share the marker, so they need their own bound. It
+// is a plain newest-kept slice — the room check capJudgments needs exists
+// for its answerable-first asymmetry, which results do not have — and at
+// ~45 bytes an entry the cap holds this list near 18 KB beside the request
+// record's 17 KB, still inside GitHub's 65,536-character body limit with
+// the report.
+export const RESULT_RECORD_CAP = 400;
+
+function capResults(entries) {
+  return entries.slice(-RESULT_RECORD_CAP);
 }
 
 function stateOf(assessment, previous = null) {
@@ -695,11 +769,30 @@ function stateOf(assessment, previous = null) {
   const kept = [...judgments.values()].sort(
     (a, b) => a[1].localeCompare(b[1]) || a[0] - b[0],
   );
+  // The result sightings carry the same way, first sight wins: the record
+  // exists so an edit after the fact cannot un-answer the request a result
+  // served. Entries age out with the window — a result older than it can
+  // answer no live request, since the request would have left first.
+  const resultsSeen = new Map();
+  for (const entry of previous?.resultsSeen ?? []) {
+    if (entry[2] >= assessment.windowStart) {
+      resultsSeen.set(entry[0], entry);
+    }
+  }
+  for (const s of assessment.resultSightings) {
+    if (!resultsSeen.has(s[0])) {
+      resultsSeen.set(s[0], s);
+    }
+  }
+  const keptResults = [...resultsSeen.values()].sort(
+    (a, b) => a[2].localeCompare(b[2]) || a[0] - b[0],
+  );
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
     newestRequest: carried && (!seen || carried > seen) ? carried : seen,
     requests: capJudgments(kept),
+    resultsSeen: capResults(keptResults),
     latest: assessment.latestAttempt?.id ?? null,
   };
 }
@@ -723,10 +816,11 @@ function sameState(previous, current) {
 // to be re-derived from the live field after it drifts. Keyed on the record
 // GAINING an id, never on the record changing: the write carries the id, so
 // the next tick gains nothing and stays quiet — one comment per newly
-// sighted request, never one per tick.
-function recordGained(previous, carried) {
-  const known = new Set((previous?.requests ?? []).map(([id]) => id));
-  return carried.some(([id]) => !known.has(id));
+// sighted entry, never one per tick. Reads one list at a time: the request
+// judgments and the result sightings gain ids independently.
+function recordGained(previousList, carriedList) {
+  const known = new Set((previousList ?? []).map(([id]) => id));
+  return carriedList.some(([id]) => !known.has(id));
 }
 
 // The shape the watch writes, and the only shape it will read back. A marker
@@ -745,8 +839,15 @@ function validState(state) {
   // A field that is absent reads as "not recorded", which every gate already
   // handles; a field that is PRESENT must have the type the watch writes.
   const ok = (v, type) => v === undefined || v === null || typeof v === type;
-  const { streak, unanswered, newestRequest, latest, recovered, requests } =
-    state;
+  const {
+    streak,
+    unanswered,
+    newestRequest,
+    latest,
+    recovered,
+    requests,
+    resultsSeen,
+  } = state;
   if (!ok(streak, 'number') || !ok(newestRequest, 'string')) {
     return null;
   }
@@ -776,6 +877,21 @@ function validState(state) {
           typeof v[1] !== 'string' ||
           typeof v[2] !== 'string' ||
           (v.length === 4 && typeof v[3] !== 'number'),
+      ))
+  ) {
+    return null;
+  }
+  if (
+    resultsSeen !== undefined &&
+    resultsSeen !== null &&
+    (!Array.isArray(resultsSeen) ||
+      resultsSeen.some(
+        (v) =>
+          !Array.isArray(v) ||
+          v.length !== 3 ||
+          typeof v[0] !== 'number' ||
+          typeof v[1] !== 'number' ||
+          typeof v[2] !== 'string',
       ))
   ) {
     return null;
@@ -968,7 +1084,7 @@ export function decide(assessment, existing, options = {}) {
         const carried = stateOf(assessment, previous);
         if (
           (carried.newestRequest ?? '') > (previous.newestRequest ?? '') ||
-          recordGained(previous, carried.requests)
+          recordGained(previous?.requests, carried.requests)
         ) {
           // A request can arrive without moving the picture `sameState`
           // compares: below `staleHours` it is not on the roster yet, and
@@ -1057,7 +1173,8 @@ export function decide(assessment, existing, options = {}) {
     } else if (
       !previous ||
       (carried.newestRequest ?? '') > (previous.newestRequest ?? '') ||
-      recordGained(previous, carried.requests)
+      recordGained(previous?.requests, carried.requests) ||
+      recordGained(previous?.resultsSeen, carried.resultsSeen)
     ) {
       // Persist the barrier while the alarm is quiet. The live scan only
       // reads requests still in the window whose comments still exist, so a
@@ -1068,8 +1185,11 @@ export function decide(assessment, existing, options = {}) {
       // barrier, so only the record key writes it down. Keyed on the
       // barrier that RISES or the record that GAINS, never on the
       // creation-time floor, which is constant and would say nothing;
-      // either moves only when a new request appears, so a quiet lane gets
-      // one comment per request and never chatters.
+      // either moves only when a new request appears or a new result is
+      // sighted, so a quiet lane gets one comment per sighting and never
+      // chatters — and the result key is what keeps an edit after the fact
+      // from un-answering the request the result served before any writing
+      // tick saw it.
       actions.push({
         type: 'comment',
         number: existing.number,
@@ -1353,7 +1473,12 @@ export function main({
   // The issue's state carries the first-sight association judgments; without
   // them assess() would judge every request by the live, read-time field.
   const previous = existing ? readState(existing.texts) : null;
-  const assessment = assess(prs, { ...opts, recorded: previous?.requests });
+  const assessment = assess(prs, {
+    ...opts,
+    recorded: previous?.requests,
+    recordedResults: previous?.resultsSeen,
+    deficit: previous?.unanswered,
+  });
   const actions = decide(assessment, existing, opts);
   console.log(
     `resolve-health: ${prs.length} PRs since ${since}, ${assessment.attempts.length} attempts, streak=${assessment.streak}, unanswered=${assessment.unanswered.length}, alarm=${assessment.alarm}, issue=${existing?.number ?? 'none'}, actions=${actions.map((a) => a.type).join(',') || 'none'}`,
