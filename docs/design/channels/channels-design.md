@@ -50,7 +50,7 @@ Normalized message format all platforms convert to:
 - **Content**: `text`, optional `imageBase64`/`imageMimeType`, optional `referencedText`
 - **Context**: `isGroup`, `isMentioned`, `isReplyToBot`, optional `threadId`
 
-Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic. Adapters decide whether `text` retains platform @mentions; a retained leading mention means slash-command parsing sees the complete body.
+Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic. Adapters decide whether `text` retains platform @mentions; a retained leading mention means slash-command parsing sees the complete body. When the adapter also supplies its non-empty body projection, ChannelBase may use that projection for memory controls, recall, and the group/shared-session `!` gate without changing the model-visible text.
 
 ### Message Flow
 

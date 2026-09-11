@@ -154,6 +154,8 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
+If an adapter retains a routing mention in `Envelope.text`, a command behind that mention remains ordinary model input. In a mention-required group, send local commands as a reply to the bot without adding a mention.
+
 **ChannelBaseOptions:**
 
 | Option                 | Description                                                                                                                                                |
@@ -337,7 +339,7 @@ interface Envelope {
   chatId: string; // distinguishes DMs from groups
   chatName?: string; // inbound group display name, when provided
   text: string; // message text; adapters decide whether to retain @mentions
-  localControlText?: string; // text after a bounded routing mention, for memory/! controls
+  localControlText?: string; // non-empty body after a routing mention, for memory/recall/! controls
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions
   isGroup: boolean; // true for group chats

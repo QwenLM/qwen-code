@@ -93,15 +93,15 @@ export interface Envelope {
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
   /**
-   * Adapter-provided text after a routing-gated, whitespace-delimited leading
-   * mention. Used only for channel-memory controls and the group/shared-session
-   * `!` safety gate. Slash commands, display, history, and model prompting
-   * continue to use `text`.
+   * Non-empty adapter-provided body after a leading routing mention. It must be
+   * the trimmed suffix of `text`. Used for channel-memory controls, recall
+   * matching, and the group/shared-session `!` safety gate. Slash commands,
+   * display, history, and model prompting continue to use `text`.
    */
   localControlText?: string;
   /**
-   * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
-   * message)`, `(file: …)`) rather than something the user typed.
+   * `text` has no user-authored text, such as an adapter-synthesized media
+   * placeholder or rendered mention label.
    *
    * It is never recorded as quoted group history, where it would reach
    * the next prompt as if a member had typed it.

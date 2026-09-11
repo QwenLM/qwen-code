@@ -100,26 +100,28 @@ If your adapter exposes shell-command or BTW side-question behavior, check that 
 
 The normalized message object you build from platform data. The boolean flags drive gate logic, so they must be accurate.
 
-| Field              | Type         | Required | Notes                                                                      |
-| ------------------ | ------------ | -------- | -------------------------------------------------------------------------- |
-| `channelName`      | string       | Yes      | Use `this.name`                                                            |
-| `senderId`         | string       | Yes      | Must be stable across messages (used for session routing + access control) |
-| `senderName`       | string       | Yes      | Display name                                                               |
-| `chatId`           | string       | Yes      | Must distinguish DMs from groups                                           |
-| `chatName`         | string       | No       | Group/conversation name when supplied by the platform                      |
-| `text`             | string       | Yes      | Message body; bot @mention handling is adapter-specific                    |
-| `localControlText` | string       | No       | Body after a bounded routing mention, for memory and `!` controls only     |
-| `threadId`         | string       | No       | For `sessionScope: "thread"`                                               |
-| `messageId`        | string       | No       | Platform message ID — useful for response correlation                      |
-| `isGroup`          | boolean      | Yes      | GroupGate relies on this                                                   |
-| `isMentioned`      | boolean      | Yes      | GroupGate relies on this                                                   |
-| `isReplyToBot`     | boolean      | Yes      | GroupGate relies on this                                                   |
-| `referencedText`   | string       | No       | Quoted message — prepended as context                                      |
-| `imageBase64`      | string       | No       | Base64-encoded image (legacy — prefer `attachments`)                       |
-| `imageMimeType`    | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
-| `attachments`      | Attachment[] | No       | Structured media attachments (see below)                                   |
+| Field              | Type         | Required | Notes                                                                                |
+| ------------------ | ------------ | -------- | ------------------------------------------------------------------------------------ |
+| `channelName`      | string       | Yes      | Use `this.name`                                                                      |
+| `senderId`         | string       | Yes      | Must be stable across messages (used for session routing + access control)           |
+| `senderName`       | string       | Yes      | Display name                                                                         |
+| `chatId`           | string       | Yes      | Must distinguish DMs from groups                                                     |
+| `chatName`         | string       | No       | Group/conversation name when supplied by the platform                                |
+| `text`             | string       | Yes      | Message body; bot @mention handling is adapter-specific                              |
+| `localControlText` | string       | No       | Non-empty body after a bounded routing mention, for memory, recall, and `!` controls |
+| `threadId`         | string       | No       | For `sessionScope: "thread"`                                                         |
+| `messageId`        | string       | No       | Platform message ID — useful for response correlation                                |
+| `isGroup`          | boolean      | Yes      | GroupGate relies on this                                                             |
+| `isMentioned`      | boolean      | Yes      | GroupGate relies on this                                                             |
+| `isReplyToBot`     | boolean      | Yes      | GroupGate relies on this                                                             |
+| `referencedText`   | string       | No       | Quoted message — prepended as context                                                |
+| `imageBase64`      | string       | No       | Base64-encoded image (legacy — prefer `attachments`)                                 |
+| `imageMimeType`    | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                                   |
+| `attachments`      | Attachment[] | No       | Structured media attachments (see below)                                             |
 
-Adapters may retain a leading bot mention in `text`. In that case local slash-command parsing still uses the complete body, so `/command` behind the mention remains ordinary message text. An adapter that has already confirmed mention-based routing and can identify a whitespace-delimited leading mention may additionally provide `localControlText` so channel-memory controls and the group/shared-session `!` safety gate still recognize the body.
+Adapters may retain a leading bot mention in `text`. In that case local slash-command parsing still uses the complete body, so `/command` behind the mention remains ordinary message text. An adapter that has confirmed mention-based routing and knows the leading mention boundary may additionally provide a non-empty `localControlText`; it must equal the trimmed body suffix of `text`. ChannelBase uses the projection for channel-memory controls, recall matching, and the group/shared-session `!` safety gate, while preserving the complete `text` for display, history, and the model. Private shell execution always reads `text`.
+
+In a mention-required group, a retained `@bot /command` is ordinary model input and a bare unmentioned command is rejected by the group gate. Users can send a local slash command by replying to the bot without adding a mention, or the channel can disable `requireMention` for that group.
 
 ### Attachments
 

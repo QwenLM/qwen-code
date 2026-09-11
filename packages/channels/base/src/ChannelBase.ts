@@ -1919,7 +1919,7 @@ export abstract class ChannelBase {
     target: ChannelMemoryTarget,
     read: ChannelMemoryReadToken,
   ): Promise<ChannelMemoryRecallSelection> {
-    const message = envelope.text;
+    const message = envelope.localControlText?.trim() || envelope.text;
     const channelMemory = this.channelMemory;
     if (!channelMemory) return { entries: [], cache: 'bypass' };
     if (!channelMemory.getChannelMemoryRevision) {
@@ -2030,7 +2030,13 @@ export abstract class ChannelBase {
       ...lastEnvelope,
       text: coalesced,
       displayText: coalescedDisplayText,
-      localControlText: undefined,
+      localControlText:
+        buffer
+          .map(
+            (entry) =>
+              entry.envelope.localControlText?.trim() || entry.envelope.text,
+          )
+          .join('\n\n') || undefined,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -3743,7 +3749,11 @@ export abstract class ChannelBase {
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
-    const bangText = (envelope.localControlText ?? envelope.text).trimStart();
+    const bangText = (
+      envelope.alreadyPrefixed
+        ? envelope.text
+        : envelope.localControlText?.trim() || envelope.text
+    ).trimStart();
     return (
       bangText.startsWith('!') &&
       (envelope.isGroup || this.isSharedSession(envelope))
@@ -6519,7 +6529,9 @@ export abstract class ChannelBase {
     );
 
     const parsed = this.parseCommand(envelope.text);
-    const localControlText = envelope.localControlText ?? envelope.text;
+    const localControlText = envelope.alreadyPrefixed
+      ? envelope.text
+      : envelope.localControlText?.trim() || envelope.text;
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
         ? null
@@ -6743,8 +6755,9 @@ export abstract class ChannelBase {
     // Bang (!) execution — a private 1:1 session has a single operator, so
     // direct shell execution stays allowed. Group/shared contexts were refused
     // above, before the session was resolved.
-    if (bangText.startsWith('!')) {
-      const cmd = bangText.slice(1).trim();
+    const privateBangText = envelope.text.trimStart();
+    if (privateBangText.startsWith('!')) {
+      const cmd = privateBangText.slice(1).trim();
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
         try {
@@ -6817,7 +6830,18 @@ export abstract class ChannelBase {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
-      promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      const projectedBody = envelope.localControlText?.trim();
+      const textWithoutTrailingSpace = promptText.trimEnd();
+      const prefixLength =
+        projectedBody && textWithoutTrailingSpace.endsWith(projectedBody)
+          ? textWithoutTrailingSpace.length - projectedBody.length
+          : undefined;
+      const sanitizedPromptText =
+        prefixLength !== undefined && prefixLength >= 0
+          ? sanitizePromptText(promptText.slice(0, prefixLength)) +
+            sanitizePromptText(promptText.slice(prefixLength))
+          : sanitizePromptText(promptText);
+      promptText = `[${who}] ${sanitizedPromptText}`;
       // Render the non-bot mention marker AFTER sanitization (like the
       // [Replying to:] wrapper below). Inside `text` it would pass through
       // sanitizePromptText, which strips brackets only on content <=64 chars
