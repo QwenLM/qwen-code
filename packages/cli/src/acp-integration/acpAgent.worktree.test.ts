@@ -28,11 +28,13 @@ import {
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 
 const { mockConnectionState } = vi.hoisted(() => {
@@ -105,7 +107,14 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
   };
 });
 
+// The agent imports the peer-messaging transport statically; its own core
+// imports would reach past this suite's exhaustive core mock, and nothing
+// here turns messaging on.
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: { start: vi.fn() },
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -163,6 +172,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
+  GOAL_MAX_TURNS_CAP: 10_000,
+  GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',

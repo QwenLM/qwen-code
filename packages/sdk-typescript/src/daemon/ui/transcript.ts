@@ -483,6 +483,7 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
+    case 'session.source.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;

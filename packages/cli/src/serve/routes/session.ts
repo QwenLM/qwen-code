@@ -38,6 +38,7 @@ import {
   toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
+  type SessionSourceInput,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -49,6 +50,8 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -6302,6 +6305,75 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/sources',
+    withOwnerReadSession(
+      'GET /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionSources(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/sources',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.upsertSessionSource(
+          sessionId,
+          req.body as SessionSourceInput,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/sources/:sourceId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'DELETE /session/:id/sources/:sourceId',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.removeSessionSource(
+          sessionId,
+          req.params['sourceId']!,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/artifacts',
     withOwnerReadSession(
       'GET /session/:id/artifacts',
@@ -6831,6 +6903,7 @@ export function registerSessionRoutes(
           !Array.isArray(forwardedBody['_meta'])
             ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
             : undefined;
+        const submittedPrompt = forwardedMeta?.[SUBMITTED_PROMPT_META_KEY];
         const promptAuthorization =
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
@@ -6839,6 +6912,8 @@ export function registerSessionRoutes(
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
+          delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
           delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
@@ -6908,6 +6983,12 @@ export function registerSessionRoutes(
                 : {}),
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
+                : {}),
+              ...(typeof submittedPrompt === 'string' &&
+              channelPrompt === undefined &&
+              promptAuthorization === undefined &&
+              promptDisplayText === undefined
+                ? { submittedPrompt }
                 : {}),
               ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined

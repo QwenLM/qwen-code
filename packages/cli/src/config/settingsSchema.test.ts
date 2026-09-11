@@ -8,6 +8,8 @@ import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
@@ -394,6 +396,28 @@ describe('SettingsSchema', () => {
       expect(timeout.showInDialog).toBe(false);
     });
 
+    it('should bound the Goal cadence ceilings and default them to no ceiling', () => {
+      const model = getSettingsSchema().model.properties;
+
+      for (const [key, cap] of [
+        ['goalMaxTurns', GOAL_MAX_TURNS_CAP],
+        ['goalMaxActiveMinutes', GOAL_MAX_ACTIVE_MINUTES_CAP],
+      ] as const) {
+        const setting = model[key];
+        expect(setting).toBeDefined();
+        expect(setting.type).toBe('integer');
+        expect(setting.category).toBe('Model');
+        // Absent means no ceiling: a cadence is what an operator asks for,
+        // not a number the project picks on their behalf.
+        expect(setting.default).toBeUndefined();
+        expect(setting.minimum).toBe(-1);
+        expect(setting.maximum).toBe(cap);
+        expect(setting.excludedValues).toEqual([0]);
+        expect(setting.requiresRestart).toBe(true);
+        expect(setting.showInDialog).toBe(false);
+      }
+    });
+
     it('should define count-based model limits as integers', () => {
       const model = getSettingsSchema().model.properties;
 
@@ -619,6 +643,24 @@ describe('SettingsSchema', () => {
         getSettingsSchema().advanced.properties.autoConfigureMemory
           .showInDialog,
       ).toBe(false);
+    });
+
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
     });
 
     it('should define Markdown render mode as a user-facing UI enum', () => {
