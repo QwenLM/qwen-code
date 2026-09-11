@@ -75,6 +75,11 @@ export function GoalStatusStrip({
   // terminal footer pill labels by its status instead. The failure text itself
   // is left to the Goals dialog, which has room for it.
   const checkpointStalls = goal.checkpointStalls ?? 0;
+  // Kept as the tooltip too: on a narrow pane the label is ellipsized.
+  const checkpointLabel = t('goal.checkpointStalled', {
+    count: checkpointStalls,
+    limit: GOAL_CHECKPOINT_STALL_LIMIT,
+  });
 
   return (
     <div
@@ -114,12 +119,10 @@ export function GoalStatusStrip({
             </span>
             <span
               className={styles.checkpoint}
+              title={checkpointLabel}
               data-testid="goal-checkpoint-stalls"
             >
-              {t('goal.checkpointStalled', {
-                count: checkpointStalls,
-                limit: GOAL_CHECKPOINT_STALL_LIMIT,
-              })}
+              {checkpointLabel}
             </span>
           </>
         ) : null}

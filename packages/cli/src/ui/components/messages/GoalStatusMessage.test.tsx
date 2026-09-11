@@ -301,6 +301,24 @@ describe('<GoalStatusMessage />', () => {
     expect(frame).not.toContain('\u202e');
   });
 
+  it('never writes control characters from a stop reason to the terminal', () => {
+    // A pause reason can embed a raw provider error.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot(
+          'paused',
+          'idle',
+          'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+        )}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Reason: paused');
+    expect(frame).not.toContain('\r');
+    expect(frame).not.toContain('\u0007');
+  });
+
   it('says nothing about checkpoints on a healthy card', () => {
     const { lastFrame } = render(
       <GoalStatusMessage snapshot={snapshot('active', 'running')} />,

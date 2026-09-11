@@ -9348,6 +9348,22 @@ describe('formatGoalState', () => {
     );
   });
 
+  it('writes no control sequence from a stop reason to stdout', () => {
+    // A pause reason can embed a raw provider error.
+    const output = formatGoalState(
+      goalSnapshot({
+        status: 'paused',
+        lastReason: 'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+      }),
+      'status',
+    );
+
+    expect(output).toContain('Reason: paused');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u0007');
+  });
+
   it('names the checkpoint failure below the stop reason', () => {
     // The stop reason names the kind of checkpoint failure; only this line
     // says which one it was.

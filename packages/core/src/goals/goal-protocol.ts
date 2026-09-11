@@ -146,6 +146,31 @@ export function goalCheckpointHealthVisible(goal: {
 }
 
 /**
+ * The checkpoint health a text surface prints -- the stall count, or the
+ * stall-free label, then the diagnostic -- or undefined when
+ * `goalCheckpointHealthVisible` hides it. Worded once so every terminal
+ * surface says the same thing. `clean` runs on the diagnostic before it is
+ * trimmed and joined, for a caller that writes straight to a terminal; a
+ * caller that sanitizes the rendered line itself passes nothing, so the text
+ * is not escaped twice.
+ */
+export function goalCheckpointHealthLine(
+  goal: Parameters<typeof goalCheckpointHealthVisible>[0],
+  clean: (text: string) => string = (text) => text,
+): string | undefined {
+  if (!goalCheckpointHealthVisible(goal)) return undefined;
+  const stalls = goal.checkpointStalls ?? 0;
+  return [
+    stalls > 0
+      ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+      : 'last check failed',
+    clean(goal.lastCheckpointFailure ?? '').trim(),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/**
  * Default autonomous spend window armed on a newly created Goal, in model
  * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
  * so a call's full input context counts every time it is sent).
@@ -412,17 +437,19 @@ export interface GoalRecord {
    */
   checkpointStalls?: number;
   /**
-   * What the most recent failed checkpoint check ran into, as a one-line
-   * diagnostic (`ErrorName: message`, or the runtime's own phrase for a full
-   * claim list), capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by
-   * every check that fails, whether or not it spends a stall, and kept on the
-   * record the stall breaker stops, so the stop can be diagnosed from the
-   * record alone. Cleared by a check that succeeds, by every control action
-   * that clears `checkpointStalls`, and by a checkpoint stop whose cause is not
-   * itself a failed check (missing recovery dependencies, an exhausted catalog,
-   * an unreadable transcript), so it can be absent while `checkpointStalls` is
-   * still non-zero. A check that proves nothing either way (a turn that
-   * recorded no evidence) leaves it as it was.
+   * What the most recent checkpoint check that gave no relief ran into, as a
+   * one-line diagnostic: `ErrorName: message` for a check that failed, or the
+   * runtime's own phrase for one that answered with a full claim list while
+   * the window overflowed -- so it does not always mean the check threw.
+   * Capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by every such check,
+   * whether or not it spends a stall, and kept on the record the stall breaker
+   * stops, so the stop can be diagnosed from the record alone. Cleared by a
+   * check that finds room or writes a checkpoint without stalling, by every
+   * control action that clears `checkpointStalls`, and by a checkpoint stop
+   * whose cause is not itself a check (missing recovery dependencies, an
+   * exhausted catalog, an unreadable transcript), so it can be absent while
+   * `checkpointStalls` is still non-zero. A check that proves nothing either
+   * way (a turn that recorded no evidence) leaves it as it was.
    */
   lastCheckpointFailure?: string;
   /**

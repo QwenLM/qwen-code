@@ -255,6 +255,12 @@ describe('GoalStatusStrip', () => {
       container.querySelector('[data-testid="goal-checkpoint-stalls"]')
         ?.textContent,
     ).toBe('2/3 checks stalled');
+    // The label is ellipsized on a narrow pane, so it is also the tooltip.
+    expect(
+      container
+        .querySelector('[data-testid="goal-checkpoint-stalls"]')
+        ?.getAttribute('title'),
+    ).toBe('2/3 checks stalled');
     // The failure text belongs to the Goals dialog; the strip has no room.
     expect(container.textContent).not.toContain('provider failed');
   });

@@ -93,11 +93,14 @@ export interface GoalRecord {
    */
   checkpointStalls?: number;
   /**
-   * A one-line diagnostic for the most recent checkpoint check that failed.
-   * Cleared by a check that succeeds, by every control action that clears
-   * `checkpointStalls`, and by a checkpoint stop whose cause is not itself a
-   * failed check, so it can be absent while `checkpointStalls` is still
-   * non-zero. Also absent when the daemon predates the field.
+   * A one-line diagnostic for the most recent checkpoint check that gave no
+   * relief: `ErrorName: message` for a check that failed, or the runtime's own
+   * phrase for one that answered with a full claim list while the window
+   * overflowed, so it does not always mean the check threw. Cleared by a check
+   * that finds room or writes a checkpoint without stalling, by every control
+   * action that clears `checkpointStalls`, and by a checkpoint stop whose cause
+   * is not itself a check, so it can be absent while `checkpointStalls` is
+   * still non-zero. Also absent when the daemon predates the field.
    */
   lastCheckpointFailure?: string;
   lastReason?: string;

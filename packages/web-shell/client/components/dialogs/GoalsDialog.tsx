@@ -8,7 +8,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/sdk/daemon';
 import { sanitizeControlChars } from '../messages/toolFormatting';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
-import { canResumeGoal } from '../../utils/goalGate';
+import {
+  canResumeGoal,
+  goalCheckpointHealthVisible,
+} from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
@@ -372,27 +375,16 @@ export function GoalsDialog({
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
-          // Checkpoint health, before the stall breaker has to stop the Goal.
-          // Same visibility rule as the terminal cards (core's
-          // goalCheckpointHealthVisible, which the web shell cannot import):
-          // never on a completed Goal, always during a stall streak, the
-          // failure that stopped a Goal whose checkpoint request was too large,
-          // and any other failure that spent no stall only while the Goal is
-          // active. The gate reads the raw value, as core does; sanitizing
+          // Checkpoint health, before the stall breaker has to stop the Goal,
+          // under the terminal cards' visibility rule (goalGate pins its copy
+          // to core's). The gate reads the raw value, as core does; sanitizing
           // escapes control characters rather than removing them, so it is
           // applied only to the text shown.
           const checkpointStalls = goal.checkpointStalls ?? 0;
-          const checkpointFailed = Boolean(goal.lastCheckpointFailure?.trim());
           const checkpointFailure = sanitizeControlChars(
             goal.lastCheckpointFailure ?? '',
           ).trim();
-          const checkpointVisible =
-            goal.status !== 'complete' &&
-            (checkpointStalls > 0 ||
-              (checkpointFailed &&
-                (goal.status === 'active' ||
-                  goal.limitKind === 'checkpoint_request')));
-          const checkpointLine = checkpointVisible
+          const checkpointLine = goalCheckpointHealthVisible(goal)
             ? [
                 checkpointStalls > 0
                   ? t('goal.checkpointStalled', {

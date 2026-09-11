@@ -7,8 +7,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import {
-  GOAL_CHECKPOINT_STALL_LIMIT,
-  goalCheckpointHealthVisible,
+  goalCheckpointHealthLine,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
@@ -129,31 +128,20 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
     );
   }
   const subtitle = stats.length > 0 ? stats.join(' · ') : null;
+  // This renderer writes straight to the terminal, so both lines below are
+  // sanitized here: a pause reason can embed a raw provider error, and the
+  // checkpoint diagnostic, though cleaned where it is written, can come back
+  // from a journal record verbatim.
   const reason =
     goal.status !== 'active' || snapshot.activity === 'verifying'
-      ? goal.lastReason?.trim()
+      ? sanitizeTerminalText(goal.lastReason ?? '').trim()
       : undefined;
   // Checkpoint health, shown before the stall breaker has to stop the Goal:
   // a Goal paying a failed checkpoint every turn otherwise looks like one
   // that is working. A Goal the breaker stopped keeps the line, since its stop
   // reason names the kind of failure but not the failure itself; which
-  // records show it at all is decided once, in goalCheckpointHealthVisible.
-  // The diagnostic is cleaned where it is written and again here, because
-  // this renderer writes straight to the terminal.
-  const stalls = goal.checkpointStalls ?? 0;
-  const checkpointFailure = sanitizeTerminalText(
-    goal.lastCheckpointFailure ?? '',
-  ).trim();
-  const checkpoint = goalCheckpointHealthVisible(goal)
-    ? [
-        stalls > 0
-          ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
-          : 'last check failed',
-        checkpointFailure,
-      ]
-        .filter(Boolean)
-        .join(' · ')
-    : undefined;
+  // records show it, and in what words, is decided once in core.
+  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
 
   return (
     <Box flexDirection="row">

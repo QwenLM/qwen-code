@@ -11,6 +11,7 @@ import {
   GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_CHECKPOINT_UNREACHABLE_REASON,
   GOAL_CHECKPOINT_UNUSABLE_REASON,
+  goalCheckpointHealthLine,
   goalCheckpointHealthVisible,
   goalCheckpointStalledReason,
   goalLimitKindForReason,
@@ -278,6 +279,56 @@ describe('goal checkpoint health visibility', () => {
     ['a healthy active Goal', { status: 'active' }, false],
   ] as const)('%s', (_label, goal, expected) => {
     expect(goalCheckpointHealthVisible(goal)).toBe(expected);
+  });
+});
+
+describe('goal checkpoint health line', () => {
+  const failure = 'Error: provider failed';
+
+  it('words the streak, or the stall-free failure, then the diagnostic', () => {
+    expect(
+      goalCheckpointHealthLine({
+        status: 'active',
+        checkpointStalls: 2,
+        lastCheckpointFailure: failure,
+      }),
+    ).toBe('2/3 stalled · Error: provider failed');
+    expect(
+      goalCheckpointHealthLine({
+        status: 'active',
+        lastCheckpointFailure: ` ${failure} `,
+      }),
+    ).toBe('last check failed · Error: provider failed');
+    // A bare streak carries no trailing separator.
+    expect(
+      goalCheckpointHealthLine({ status: 'paused', checkpointStalls: 2 }),
+    ).toBe('2/3 stalled');
+  });
+
+  it('shows nothing the visibility rule hides', () => {
+    expect(
+      goalCheckpointHealthLine({
+        status: 'complete',
+        checkpointStalls: 1,
+        lastCheckpointFailure: failure,
+      }),
+    ).toBeUndefined();
+    expect(
+      goalCheckpointHealthLine({
+        status: 'paused',
+        lastCheckpointFailure: failure,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('cleans the diagnostic before trimming and joining it', () => {
+    // A diagnostic the cleaner empties leaves no dangling separator.
+    expect(
+      goalCheckpointHealthLine(
+        { status: 'active', checkpointStalls: 1, lastCheckpointFailure: 'x' },
+        () => ' ',
+      ),
+    ).toBe('1/3 stalled');
   });
 });
 
