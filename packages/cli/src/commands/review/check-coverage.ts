@@ -59,6 +59,61 @@ interface CheckCoverageArgs {
  * model answer is a check that fails closed on good work, and the cost of that
  * is a relaunch of an agent that had already done its job.
  */
+/**
+ * The failure classes that mean the chunk's agents read NOTHING — the only
+ * ones the plain sentence below is true of.
+ *
+ * `no-agent` alone was too narrow: `blind-prompt` (launched with a prompt
+ * that never named the diff), `idle` (zero successful tool calls) and
+ * `unopened` (worked, never opened the diff) all say the same thing in the
+ * ledger's own docs, and putting them on the other arm told the operator
+ * reads existed and could not be accepted — contradicting the per-agent line
+ * printed a few lines above, and naming the wrong repair class (R36-1).
+ *
+ * What stays OFF this list is the residue the other sentence is for:
+ * `rewritten-prompt`, `declared-uncoverable` and `unknown` are chunks whose
+ * agents demonstrably read something this run could not accept.
+ */
+const READ_NOTHING: ReadonlySet<string> = new Set([
+  'no-agent',
+  'blind-prompt',
+  'idle',
+  'unopened',
+]);
+
+/**
+ * The half-sentence that says WHAT happened to the missing chunks, true of
+ * every one of them.
+ *
+ * Three answers, not two, because the line names a LIST: a set that mixes a
+ * chunk whose agents read nothing with one whose reads could not be accepted
+ * has no sentence true of both, and an all-or-nothing split has to post a
+ * false one for half the list. The mixed case therefore claims neither and
+ * sends the reader to the per-agent lines, which are per chunk and already
+ * printed above (undirected audit of R36-1's fix).
+ */
+function readWhatHappened(report: {
+  missingChunks: number[];
+  chunkItems: ReadonlyArray<{ id: number; classification?: string }>;
+}): string {
+  const classOf = (id: number) =>
+    report.chunkItems.find((i) => i.id === id)?.classification;
+  const readNothing = report.missingChunks.filter((id) => {
+    const cls = classOf(id);
+    return cls !== undefined && READ_NOTHING.has(cls);
+  }).length;
+  if (readNothing === report.missingChunks.length) {
+    return `Nobody read those lines. `;
+  }
+  if (readNothing === 0) {
+    return (
+      `Their reads could not be accepted for this plan — see the ` +
+      `per-agent lines above for which, and why. `
+    );
+  }
+  return `See the per-agent lines above for what happened to each. `;
+}
+
 function runCheckCoverage(args: CheckCoverageArgs): void {
   let report;
   try {
@@ -320,14 +375,7 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
           // not the remedy.
           `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
             `${report.missingChunks.join(', ')}. ` +
-            (report.missingChunks.every(
-              (id) =>
-                report.chunkItems.find((i) => i.id === id)?.classification ===
-                'no-agent',
-            )
-              ? `Nobody read those lines. `
-              : `Their reads could not be accepted for this plan — see the ` +
-                `per-agent lines above for which, and why. `) +
+            readWhatHappened(report) +
             `Do not aggregate findings over a diff that was not read.`,
     );
   }
