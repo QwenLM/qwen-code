@@ -1286,14 +1286,62 @@ describe('QwenLogger', () => {
       ).toBe('aws --aws-access-key ***REDACTED***');
     });
 
-    it('does not consume a lone backslash as a complete secret value', () => {
+    it('redacts a secret value with an interior quote', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError("--password P@ss'w0rd123"),
+      ).not.toContain('w0rd123');
+    });
+
+    it('redacts a quoted flag value containing spaces', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          "mysql -u root --password='my secret pw'",
+        ),
+      ).not.toContain('secret pw');
+    });
+
+    it('redacts a quoted env value containing spaces', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'export API_TOKEN="correct horse battery staple"',
+        ),
+      ).not.toContain('horse');
+    });
+
+    it('redacts a secret preceded by an ANSI escape sequence', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'Authorization: \x1b[31mBearer ghs_testsecret123\x1b[0m',
+        ),
+      ).not.toContain('ghs_testsecret123');
+    });
+
+    it('redacts a secret containing a form-feed control character', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError('GITHUB_TOKEN=ghs\fSECRET1234567'),
+      ).not.toContain('SECRET1234567');
+    });
+
+    it('redacts a secret value split by a shell line continuation', () => {
       const redacted = TEST_ONLY.redactTelemetryError(
         'npm publish --token=\\' + '\n' + 'greatsecret1234',
       );
-      // The trailing `\` is a shell line continuation, not a value. The
-      // redactor must not emit a redaction marker while leaving the real
-      // credential in cleartext immediately after it.
-      expect(redacted).not.toContain('***REDACTED***');
+      expect(redacted).not.toContain('greatsecret1234');
+      expect(redacted).toContain('***REDACTED***');
+    });
+
+    it('redacts a whitespace-separated secret split by a line continuation', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'npm publish --token \\\n ghs_secret123',
+        ),
+      ).not.toContain('ghs_secret123');
+    });
+
+    it('does not emit a marker for a lone trailing backslash', () => {
+      expect(TEST_ONLY.redactTelemetryError('npm publish --token=\\')).toBe(
+        'npm publish --token=\\',
+      );
     });
 
     it('does not swallow the next argument after an empty secret flag value', () => {
