@@ -5635,6 +5635,7 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
@@ -5646,6 +5647,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6210,6 +6212,7 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
@@ -6219,6 +6222,7 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -6865,6 +6869,7 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
           ? {
               notifySentCompletion: true,
@@ -6895,6 +6900,7 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,

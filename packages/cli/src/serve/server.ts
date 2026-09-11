@@ -1171,6 +1171,7 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
@@ -1591,7 +1592,7 @@ export function createServeApp(
     liveBoundRuntime = runtime;
     try {
       setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
-        liveCoordinator.captureScreenContext(callerSessionId),
+        liveCoordinator.captureVisualContext(callerSessionId),
       );
       setTaskHandler.call(runtime.bridge, (info) =>
         liveTaskService.handle(info),

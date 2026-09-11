@@ -442,6 +442,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -6120,7 +6121,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -14336,6 +14339,7 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
     if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
       config.setGoalProposalHostSupported(true);
     }
