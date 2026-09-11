@@ -93,7 +93,9 @@ function createMockStdin(end = vi.fn()) {
   return { end, destroyed: false, writableEnded: false, once: vi.fn() };
 }
 
-function createMockChild(overrides?: Record<string, unknown>) {
+function createMockChild(
+  overrides?: Record<string, unknown>,
+): NonNullable<AcpConnectionInternal['child']> {
   return {
     killed: false,
     exitCode: null,
@@ -103,7 +105,7 @@ function createMockChild(overrides?: Record<string, unknown>) {
     stdin: createMockStdin(),
     once: vi.fn(),
     ...overrides,
-  } as unknown as AcpConnectionInternal['child'];
+  } as unknown as NonNullable<AcpConnectionInternal['child']>;
 }
 
 describe('AcpConnection process spawning', () => {
@@ -1371,7 +1373,10 @@ describe('AcpConnection superseded session close (#11303)', () => {
           supersededCloseRetries: Map<string, { retryAt: number }>;
         }
       ).supersededCloseRetries.get('session-a');
-      expect(entry?.retryAt - Date.now()).toBe(CLOSE_RETRY_CEILING_MS);
+      if (!entry) {
+        throw new Error('expected a retry entry');
+      }
+      expect(entry.retryAt - Date.now()).toBe(CLOSE_RETRY_CEILING_MS);
     });
 
     it('stops retrying superseded closes after disconnect', async () => {
