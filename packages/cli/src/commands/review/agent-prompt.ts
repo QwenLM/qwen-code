@@ -815,9 +815,9 @@ export function buildChunkAgentPrompt(
             (e.seam && e.seam.kept < e.seam.total
               ? ` Its diff here is SEAM-BOUNDED: ${e.seam.kept} of ${e.seam.total} hunk(s) ` +
                 `republished — the ones displaying a line that imports or uses what ` +
-                `changed, and any hunk that only REMOVES lines (a removal leaves no ` +
-                `post-image line to match, so it is kept unread); the rest were cleared ` +
-                `by an earlier round and are not re-shown. ` +
+                `changed, and the ones whose REMOVED text does (a removed line has no ` +
+                `post-image to match, so its own text is read instead); the rest were ` +
+                `cleared by an earlier round and are not re-shown. ` +
                 `The seam question above is still yours in full, from the worktree.`
               : e.seam
                 ? ` The seam scan shed none of its ${e.seam.total} hunk(s), so its diff ` +

@@ -39,11 +39,15 @@
 // is unit-testable without a repository.
 
 import type { NarrowSelection } from './narrow-diff.js';
+import type { DiffHunk } from './diff-plan.js';
 import {
   dependentsOfChanged,
   discoverWorkspacePackages,
   loadTypeScript,
-  seamLines,
+  resolveSpecifier,
+  scanImportSpecifiers,
+  seamRead,
+  type WorkspacePackage,
 } from './import-graph.js';
 import { classifyHeavy } from './heavy.js';
 
@@ -111,6 +115,78 @@ export interface WidenedScope {
   hunkKeep?: Map<string, ReadonlySet<number>>;
 }
 
+/**
+ * A test for "this hunk deletes a line that displays the seam".
+ *
+ * The seam matcher reads POST-IMAGE line numbers, and a removed line has no
+ * post-image — so no mark can ever name it, and a hunk whose only seam
+ * content is a removal was structurally unkeepable (#10136 R20-5). The
+ * `newCount === 0` clause that first answered that covers only a hunk with
+ * no new-side line AT ALL, which under the pinned `--unified=3` means a
+ * file whose whole content is gone: never an interaction file. The removed
+ * text itself is the only evidence there is.
+ *
+ * `tokens` are the names and specifiers the seam is made of. A NAME is
+ * matched at identifier boundaries — `$` and `_` are identifier characters,
+ * so a boundary built from `\b` would fire inside `moved$1` — and a
+ * SPECIFIER as the substring it is, since a removed
+ * `import … from './changed.js'` leaves no surviving binding to look for.
+ *
+ * A regex heuristic over removed text, in the same budgeted direction as
+ * the widening's own edge scan: a false hit republishes one hunk more than
+ * needed, and a miss drops one hunk from republication while the file stays
+ * briefed to re-ask the seam question from the worktree.
+ */
+function removedSeamMatcher(
+  tokens: readonly string[],
+  /** The file the hunk belongs to — a removed specifier resolves from it. */
+  fromFile: string,
+  changed: ReadonlySet<string>,
+  packages: readonly WorkspacePackage[],
+): (diffLines: readonly string[], hunk: DiffHunk) => boolean {
+  const names: string[] = [];
+  const specifiers: string[] = [];
+  for (const t of tokens) {
+    if (t === '') continue;
+    (/^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(t)
+      ? names
+      : specifiers
+    ).push(t);
+  }
+  const escape = (t: string): string =>
+    t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameRe =
+    names.length === 0
+      ? null
+      : new RegExp(
+          `(?:^|[^\\p{ID_Continue}$])(?:${names.map(escape).join('|')})(?![\\p{ID_Continue}$])`,
+          'u',
+        );
+  return (diffLines, hunk) => {
+    if (nameRe === null && specifiers.length === 0) return false;
+    for (let ln = hunk.diffStart; ln <= hunk.diffEnd; ln++) {
+      const raw = diffLines[ln - 1];
+      // Removed lines only. The `---` file header cannot appear inside a
+      // hunk's own range, so a leading `-` here is a deletion.
+      if (raw === undefined || !raw.startsWith('-')) continue;
+      const text = raw.slice(1);
+      if (nameRe !== null && nameRe.test(text)) return true;
+      if (specifiers.some((spec) => text.includes(spec))) return true;
+      // A hunk that removes a whole import names a binding the head source
+      // no longer has and a specifier `resolvedSpecs` never saw — neither
+      // is in `tokens`. The removed line's own specifier is: read it the
+      // way the widening reads its edges, and resolve it against the same
+      // change set.
+      for (const spec of scanImportSpecifiers(text)) {
+        if (resolveSpecifier(fromFile, spec, changed, packages) !== null) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+}
+
 export interface WidenInput {
   /** Full sha of the anchor, for the report. */
   anchor: string;
@@ -175,7 +251,7 @@ export function widenScope(input: WidenInput): WidenedScope {
   const hunkKeep = new Map<string, ReadonlySet<number>>();
   const seams = new Map<string, { kept: number; total: number }>();
   // The oracle's unavailable state is named, not doubted through (#10136
-  // R18-2). `seamLines` answers the doubt shape for every file when no
+  // R18-2). `seamRead` answers the doubt shape for every file when no
   // parser resolves, which republishes everything whole correctly — but
   // the plan, the capture's note and the posted body could not then tell
   // "the oracle never ran" from "nothing needed bounding", and the round
@@ -222,7 +298,7 @@ export function widenScope(input: WidenInput): WidenedScope {
       ) {
         continue;
       }
-      const lines = seamLines(path, source, touched, packages);
+      const read = seamRead(path, source, touched, packages);
       // The doubt state — `null`, a read whose bindings cannot be proven
       // collected (#10136) — is detected before hunk matching:
       // `parseDiff` clamps a pure-deletion hunk at the top of a file
@@ -234,7 +310,19 @@ export function widenScope(input: WidenInput): WidenedScope {
       // marked" stopped being a shape a detector could read. Leave the
       // file unbounded with NO seam record, exactly like the
       // unreadable-source doubt state.
-      if (lines === null) continue;
+      if (read === null) continue;
+      const lines = read.lines;
+      // A REMOVED line has no post-image, so no mark can ever name it —
+      // which is why the post-image matcher below cannot see a seam a hunk
+      // DELETES (#10136 R20-5 round 22). Its own text is the only evidence
+      // there is, so it is tested against the names and specifiers the
+      // seam is made of.
+      const removesSeam = removedSeamMatcher(
+        read.tokens,
+        path,
+        touched,
+        packages,
+      );
       const kept = new Set<number>();
       section.hunks.forEach((h, i) => {
         // A pure-deletion hunk (`@@ -a,N +b,0 @@`) occupies no post-image
@@ -250,7 +338,8 @@ export function widenScope(input: WidenInput): WidenedScope {
         // text at all.
         if (
           h.newCount === 0 ||
-          lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)
+          lines.some((ln) => ln >= h.newStart && ln <= h.newEnd) ||
+          removesSeam(diffLines, h)
         ) {
           kept.add(i);
         }

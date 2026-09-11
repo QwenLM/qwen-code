@@ -799,6 +799,161 @@ describe('widenScope seam bound (#10104)', () => {
     expect(diff).not.toContain('+  return 1;');
   });
 
+  it('keeps a removal-only seam hunk that carries context (#10136 R20-5 round 22)', () => {
+    // The reachable shape, and the one the `newCount === 0` clause cannot
+    // see: under the pinned `--unified=3` git emits context wherever it
+    // exists, so a real removal hunk has `newCount > 0`. Its removed line
+    // has no post-image, so no mark can name it — the matcher tests the
+    // removed TEXT against the names and specifiers the seam is made of.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -10,7 +10,6 @@ function unrelated() {',
+      '   const a = 1;',
+      '   const b = 2;',
+      '   const c = 3;',
+      '-  moved();',
+      '   const d = 4;',
+      '   const e = 5;',
+      '   const f = 6;',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const hunk = parseDiff(impSection).files[0].hunks[0];
+    // The shape the reported fix could not reach: a real removal hunk
+    // carries context, so `newCount` is not 0.
+    expect(hunk.newCount).toBe(6);
+    // The head source still imports the changed module — that edge admits
+    // the file — and the seam marks sit on lines 1-2, nowhere near the
+    // hunk's post-image range of 10-15.
+    const source = [
+      "import { moved } from './changed.js';", // 1
+      'export const a = moved();', // 2
+      ...Array.from({ length: 20 }, () => ''),
+    ].join('\n');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 1 });
+    expect(
+      assembleSections(selection, widened.paths, widened.hunkKeep)?.toString(
+        'utf8',
+      ),
+    ).toContain('-  moved();');
+  });
+
+  it('keeps a hunk that removes a whole import of a changed file (#10136 R20-5 round 22)', () => {
+    // The headline case of the prose, and the one the token set alone
+    // cannot see: the removed line names a binding the head source no
+    // longer has and a specifier `resolvedSpecs` never saw. The removed
+    // line's OWN specifier is the evidence — read the way the widening
+    // reads its edges, resolved against the same change set. The file
+    // stays an interaction file through its second import.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -10,7 +10,6 @@ function unrelated() {',
+      '   const a = 1;',
+      '   const b = 2;',
+      '   const c = 3;',
+      "-import { gone } from './changed.js';",
+      '   const d = 4;',
+      '   const e = 5;',
+      '   const f = 6;',
+      '',
+    ].join('\n');
+    // BOTH files changed this round; the interaction file's surviving
+    // edge is to `other.ts`, and the hunk removes its import of the OTHER
+    // changed file.
+    const selection = selectNarrowing(
+      Buffer.from(
+        section('src/changed.ts') + section('src/other.ts') + impSection,
+        'utf8',
+      ),
+      Buffer.from(section('src/changed.ts') + section('src/other.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    // At head the file imports `other.ts` — that edge admits it — and
+    // nothing of `changed.ts` survives, so no mark and no token names it.
+    const source = [
+      "import { kept } from './other.js';", // 1
+      'export const a = kept();', // 2
+      ...Array.from({ length: 20 }, () => ''),
+    ].join('\n');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 1 });
+    expect(
+      assembleSections(selection, widened.paths, widened.hunkKeep)?.toString(
+        'utf8',
+      ),
+    ).toContain("-import { gone } from './changed.js';");
+  });
+
+  it('sheds a removal hunk whose removed text names no seam (#10136 R20-5 round 22)', () => {
+    // The control the keep must not swallow: a removal far from the seam,
+    // naming nothing the imports introduced, is still shed — the bound
+    // would be a no-op if every hunk with a `-` line survived.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,2 +1,3 @@',
+      " import { moved } from './changed.js';",
+      '+export const a = moved();',
+      ' const tail = 0;',
+      '@@ -10,7 +11,6 @@ function unrelated() {',
+      '   const a = 1;',
+      '   const b = 2;',
+      '   const c = 3;',
+      '-  unrelatedCall();',
+      '   const d = 4;',
+      '   const e = 5;',
+      '   const f = 6;',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const source = [
+      "import { moved } from './changed.js';", // 1
+      'export const a = moved();', // 2
+      ...Array.from({ length: 20 }, () => ''),
+    ].join('\n');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('+export const a = moved();');
+    expect(diff).not.toContain('-  unrelatedCall();');
+  });
+
   it('records nothing and drops nothing when the bound is off', () => {
     const selection = seamSelection();
     const widened = widenScope({

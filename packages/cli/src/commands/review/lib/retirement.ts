@@ -543,10 +543,25 @@ function entryRestsOf(list: string): string[] {
  * tag state stripped. Empty when the line names nothing.
  */
 function fileLineToken(rest: string): string {
-  return (
-    rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim().split(/\s+/)[0] ?? ''
-  );
+  const token =
+    rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim().split(/\s+/)[0] ?? '';
+  // …and it has to LOOK like one (#10136 R20-3 round 22). The anchor
+  // decides where an entry may start; it cannot tell an entry from a
+  // finding's own `**Anchor:**` block quoting `FINDING_FORMAT`'s template
+  // verbatim, which puts `- **File:** <file>:<line>` at a line start too.
+  // A genuine entry names a path and a line — the shape the format
+  // mandates — so a token that is not one (`<file`, `[list`) is a
+  // quotation the entry set must not gain. Dropping it can only SHRINK
+  // the set, and a list left with no token at all still reads as the
+  // unparseable doubt state.
+  return FILE_LINE_TOKEN_RE.test(token) ? token : '';
 }
+
+/**
+ * A `file:line` as `FINDING_FORMAT` mandates it: a path, a colon, a line
+ * number, and nothing a markdown template would leave behind.
+ */
+const FILE_LINE_TOKEN_RE = /^[^\s<>[\]{}`'"]+:\d+$/;
 
 /**
  * Whether a return's file line quotes this listed entry line. The listed
@@ -1213,7 +1228,23 @@ export function scheduleReverseAuditRound(
         // ordinary retirement rule, which must keep reading what it always
         // read.
         const staleWithinRound = latest.memberOutcomes.some((o) => o !== 'dry');
-        if (!staleAgainstYield && !staleWithinRound) {
+        // Arms 2 and 3 are both gated on `latest.fileLists.length > 0`, and
+        // arm 1 needs a shared digest a re-rendered list does not have — so
+        // when the latest round's list came back INLINE (the pointer read
+        // missed and `findingsListFor` fell back to the record's own
+        // prompt, which names no entries) and there IS an earlier round
+        // they would have ruled on, the whole staleness ruling goes silent
+        // and reads as "not stale" (#10136 R22-2). That is absence of
+        // evidence read as evidence of absence, on the one branch with no
+        // cold check and no return path — so it is the doubt state the
+        // arms themselves use: refuse, and the chunk stays hot for a round
+        // that can prove it. With no non-dry round in the history there is
+        // nothing the arms could have said, and the ordinary narrowing
+        // stands.
+        const listUnreadable =
+          latest.fileLists.length === 0 &&
+          audits.some((a) => a !== latest && a.outcome !== 'dry');
+        if (!staleAgainstYield && !staleWithinRound && !listUnreadable) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;
         }

@@ -459,6 +459,36 @@ export function seamLines(
   packages: readonly WorkspacePackage[] = [],
   ts: TypeScriptModule | null = loadTypeScript(),
 ): number[] | null {
+  return seamRead(fromFile, source, changed, packages, ts)?.lines ?? null;
+}
+
+/** What the oracle read: the marked lines, and the tokens it marked them by. */
+export interface SeamRead {
+  /** The sorted 1-based lines of `source` that touch the seam. */
+  lines: number[];
+  /**
+   * Every name and specifier the seam is made of — the bindings the
+   * resolving imports introduce, plus the specifiers themselves. The head
+   * source's LINE numbers cannot speak for a REMOVED line, which has no
+   * post-image at all, so the matcher tests a deletion's own text against
+   * these instead (#10136 R20-5 round 22). A regex heuristic over removed
+   * text, in the same budgeted direction as the widening's own edge scan:
+   * a false hit republishes one hunk more than needed.
+   */
+  tokens: string[];
+}
+
+/**
+ * `seamLines` with the tokens beside the lines — the read `widenScope`
+ * needs, since a removal hunk can only be matched on its own text.
+ */
+export function seamRead(
+  fromFile: string,
+  source: string,
+  changed: ReadonlySet<string>,
+  packages: readonly WorkspacePackage[] = [],
+  ts: TypeScriptModule | null = loadTypeScript(),
+): SeamRead | null {
   if (ts === null) return null;
   try {
     return seamLinesWith(ts, fromFile, source, changed, packages);
@@ -478,7 +508,7 @@ function seamLinesWith(
   source: string,
   changed: ReadonlySet<string>,
   packages: readonly WorkspacePackage[],
-): number[] | null {
+): SeamRead | null {
   // LF-only line accounting, computed once: the parser's own line map
   // counts CR, LS and PS as breaks, and a hunk's line numbers do not.
   const lineStarts: number[] = [0];
@@ -1122,18 +1152,53 @@ function seamLinesWith(
   };
   visit(sf);
   if (refused) return null;
-  // One reader for both halves (#10136 R18-1): a file enters
-  // `interaction` on `scanImportSpecifiers`' regex, so any specifier the
-  // regex can see resolving into `changed` that this walk never resolved
-  // is an edge the census cannot account for — a comment or string that
-  // merely MENTIONS the changed path, an import the walk's own rules
-  // refused to see. A confident census over it sheds the file on evidence
-  // nobody read.
+  // One reader for both halves (#10136 R18-1): a file ENTERS `interaction`
+  // on `scanImportSpecifiers`' regex, so any specifier the regex can see
+  // resolving into `changed` that this walk never resolved is an edge the
+  // census cannot account for — a comment or string that merely MENTIONS
+  // the changed path, an import the walk's own rules refused to see. A
+  // confident census over it sheds the file on evidence nobody read.
   for (const spec of scanImportSpecifiers(source)) {
     if (resolveSpecifier(fromFile, spec, changed, packages) !== null) {
       if (!resolvedSpecs.has(spec)) return null;
     }
   }
+  // The second half of the same check, keyed to the PARSER's own output
+  // rather than to those four regexes (#10136 R18-1 round 22). Every string the grammar
+  // says is a literal — an import specifier, a `require` argument, a
+  // module augmentation's name, an argument to a callee this walk cannot
+  // name (`createRequire(import.meta.url)('./changed.js')`,
+  // `globalThis[key]('./changed.js')`, `Reflect.apply(require, null,
+  // ['./changed.js'])`) — is tested against the change set. One that
+  // RESOLVES into it and which the walk never resolved is an edge this
+  // census cannot account for, whether or not any regex can see it: the
+  // binding model has a shape it does not cover, and a confident census
+  // over it would shed the file on evidence nobody read.
+  //
+  // The direction is deliberate and is the one the seam bound budgets:
+  // a literal that resolves but names no import — a path passed to
+  // `readFile`, a fixture string — refuses too, and the file republishes
+  // whole. Under-collection is the one error this oracle must not make;
+  // over-refusal costs a republication the unwidened round would have
+  // made anyway.
+  let unresolvedLiteral = false;
+  const literals = (node: TSNode): void => {
+    if (unresolvedLiteral) return;
+    if (ts.isStringLiteralLike(node)) {
+      const spec = node.text;
+      if (
+        spec !== '' &&
+        !resolvedSpecs.has(spec) &&
+        resolveSpecifier(fromFile, spec, changed, packages) !== null
+      ) {
+        unresolvedLiteral = true;
+        return;
+      }
+    }
+    eachChild(node, literals);
+  };
+  literals(sf);
+  if (unresolvedLiteral) return null;
   if (bindings.size > 0) {
     const mention = (node: TSNode): void => {
       // A binding use marks the whole statement it sits in
@@ -1161,7 +1226,10 @@ function seamLinesWith(
     };
     mention(sf);
   }
-  return [...marked].sort((a, b) => a - b);
+  return {
+    lines: [...marked].sort((a, b) => a - b),
+    tokens: [...bindings, ...resolvedSpecs],
+  };
 }
 
 function scriptExtension(file: string): string {

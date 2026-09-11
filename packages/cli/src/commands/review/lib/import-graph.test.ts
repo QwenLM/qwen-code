@@ -1033,17 +1033,19 @@ describe('seamLines', () => {
         changed,
       ),
     ).toEqual([3, 4]);
-    // A COMPUTED key names nothing the read can see — the same class as
-    // any dynamically dispatched call, which the oracle does not model
-    // and does not refuse over. It marks nothing here, and the file stays
-    // briefed for the seam from the worktree.
+    // A COMPUTED key names nothing the binding read can see — but the
+    // ARGUMENT is a string literal the parser does see, and it resolves
+    // into the change set while the walk resolved nothing. That is the
+    // doubt state, not a confident `[]` (#10136 R18-1 round 22): the
+    // callee shape is one this model does not cover, so the file
+    // republishes whole.
     expect(
       seamLines(
         'src/imp.js',
         "const m = globalThis[key]('./changed.js');\nlet x = 1;",
         changed,
       ),
-    ).toEqual([]);
+    ).toBeNull();
   });
 
   it('a JSDoc annotation is a seam on the declaration it types (#10136 R18-1 round 21)', () => {
@@ -1075,6 +1077,50 @@ describe('seamLines', () => {
       '}', // 7
     ].join('\n');
     expect(seamLines('src/imp.js', field, changed)).toEqual([2, 3, 4, 5]);
+  });
+
+  it('a resolving literal the walk never resolved is the doubt state (#10136 R18-1 round 22)', () => {
+    // The class, closed at the cross-check rather than entrance by
+    // entrance. Each of these is a legal way to load the changed module
+    // through a callee this binding model does not name, and in every one
+    // the walk sees no binding while the ARGUMENT is a string literal the
+    // parser does see. Keyed to the parser's own output — not to the four
+    // entrance regexes, which see none of these — a specifier that
+    // resolves into the change set while the walk resolved nothing is an
+    // edge the census cannot account for: doubt, never a confident `[]`.
+    for (const source of [
+      // The factory invoked inline, so no alias is ever bound.
+      "const m = createRequire(import.meta.url)('./changed.js');\nm.run();",
+      // The factory copied to a plain identifier before the call.
+      "const cr = createRequire;\nconst m = cr('./changed.js');\nm.run();",
+      // A computed callee — the shape the oracle does not model.
+      "const m = globalThis[key]('./changed.js');\nlet x = 1;",
+      // `require` reached through a reflective apply.
+      "const m = Reflect.apply(require, null, ['./changed.js']);\nm.run();",
+      // A module augmentation naming the changed file.
+      "declare module './changed.ts' {\n  const extra: number;\n}\n",
+    ]) {
+      expect(seamLines('src/imp.ts', source, changed)).toBeNull();
+    }
+    // The control the class must not swallow: a literal naming a file
+    // OUTSIDE the change set carries no edge, so it is no seam and no
+    // doubt — the file is still eligible for the bound.
+    expect(
+      seamLines(
+        'src/imp.ts',
+        "const m = globalThis[key]('./elsewhere.js');\nlet x = 1;",
+        changed,
+      ),
+    ).toEqual([]);
+    // …and a resolving literal the walk DID resolve is a seam, not a
+    // doubt: the cross-check asks only about specifiers the walk missed.
+    expect(
+      seamLines(
+        'src/imp.ts',
+        "import { moved } from './changed.js';\nmoved();",
+        changed,
+      ),
+    ).toEqual([1, 2]);
   });
 
   it('a property-named binding reads back through its bracket spelling (#10136 R18-1)', () => {
@@ -1590,11 +1636,19 @@ describe('the seam oracle and its parser (#10136)', () => {
     // produce.
     expect(importLines).toBeGreaterThan(2000);
     expect(markedLines).toBeGreaterThan(importLines * 3);
-    // Disclosed, not capped: the corpus carries a handful of lazy
-    // `import(variable)` loaders and escaping `import(…)` values (a
-    // `Promise.all([import(…)])`), each republished in full on a fix-audit
-    // round, and a change in that number is a fact to look at.
-    expect(doubted.length).toBeLessThan(files.length / 100);
+    // Disclosed, not capped, and this corpus is the WORST case by
+    // construction: the change set here is the corpus itself, so every
+    // string literal naming a sibling module resolves into it — and a
+    // literal that resolves while the walk resolved no import of it is
+    // the doubt state the parser-keyed cross-check returns (#10136 R18-1
+    // round 22). `vi.mock('./sibling.js')` is exactly that shape, which
+    // is why ~9 in 10 of these are test files. A real fix-audit round's
+    // change set is the round's delta — a handful of paths — so a
+    // literal has to name one of THOSE to refuse, and the measured rate
+    // on a real round is far below this. Beside them the corpus's
+    // handful of lazy `import(variable)` loaders and escaping `import(…)`
+    // values. A change in this number is a fact to look at.
+    expect(doubted.length).toBeLessThan(files.length / 10);
     expect(doubted.length).toBeGreaterThan(0);
   }, 180_000);
 });
