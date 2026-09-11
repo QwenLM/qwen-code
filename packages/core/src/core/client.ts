@@ -219,11 +219,6 @@ export interface SendMessageOptions {
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
   steerInput?: SteerInput;
-  /** Track stop hook iterations to prevent infinite loops and display loop info */
-  stopHookState?: {
-    iterationCount: number;
-    reasons: string[];
-  };
   /** Display text for notification messages (persisted for session resume). */
   notificationDisplayText?: string;
   /** Todo work chain that owns this automatic turn, when it is related. */
@@ -427,6 +422,15 @@ export class LlmClient {
     undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
   };
   private sessionTurnCount = 0;
+  /**
+   * Consecutive blocking Stop-hook decisions in the current prompt. Kept on
+   * the client rather than in the send options because a hook-forced
+   * continuation that calls a tool comes back through a fresh top-level
+   * sendMessageStream call from the caller.
+   */
+  private stopHookChain:
+    | { promptId: string; iterationCount: number; reasons: string[] }
+    | undefined;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
@@ -3411,15 +3415,16 @@ export class LlmClient {
 
       if (goalPermit) {
         goalOrigin ??= 'runtime';
+        if (messageType === SendMessageType.Goal) {
+          // A Goal-driven turn starts a new Stop-hook chain.
+          this.stopHookChain = undefined;
+        }
         options = {
           ...(options ?? { type: messageType }),
           type: messageType,
           goalPermit,
           goalTurnKey,
           goalOrigin,
-          ...(messageType === SendMessageType.Goal
-            ? { stopHookState: undefined }
-            : {}),
         };
       }
       if (goalRuntime) bindGoalStateEvents(goalRuntime);
@@ -4317,6 +4322,8 @@ export class LlmClient {
         const steerTurnBudget = boundedTurns - 1;
         const steerInput = await takeSteerInput(steerTurnBudget);
         if (steerInput) {
+          // A steered turn is user-driven, not forced by a Stop hook.
+          this.stopHookChain = undefined;
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
@@ -4357,6 +4364,11 @@ export class LlmClient {
         const responseText =
           this.getLastModelMessageText() || '[no response text]';
 
+        const stopHookChain =
+          this.stopHookChain?.promptId === prompt_id
+            ? this.stopHookChain
+            : undefined;
+
         const contextUsage = buildContextUsage(
           this.config.getContentGeneratorConfig()?.contextWindowSize ??
             DEFAULT_TOKEN_LIMIT,
@@ -4371,10 +4383,10 @@ export class LlmClient {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
             eventName: 'Stop',
             input: {
-              // True only when a Stop hook blocked the previous turn, so a hook
-              // can tell its own continuation apart and avoid re-blocking forever.
-              stop_hook_active:
-                (options?.stopHookState?.iterationCount ?? 0) > 0,
+              // True while this prompt is continuing because a Stop hook
+              // blocked, including after tool calls made along the way, so a
+              // hook can tell its own continuation apart and stop re-blocking.
+              stop_hook_active: stopHookChain !== undefined,
               last_assistant_message: responseText,
               ...contextUsage,
             },
@@ -4416,14 +4428,20 @@ export class LlmClient {
         ) {
           const continueReason = stopOutput.getEffectiveReason();
           const currentIterationCount =
-            (options?.stopHookState?.iterationCount ?? 0) + 1;
+            (stopHookChain?.iterationCount ?? 0) + 1;
           const currentReasons = [
-            ...(options?.stopHookState?.reasons ?? []),
+            ...(stopHookChain?.reasons ?? []),
             continueReason,
           ];
+          this.stopHookChain = {
+            promptId: prompt_id,
+            iterationCount: currentIterationCount,
+            reasons: currentReasons,
+          };
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
 
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.stopHookChain = undefined;
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
@@ -4484,10 +4502,6 @@ export class LlmClient {
                   type: SendMessageType.Hook,
                   submittedPrompt: undefined,
                   steerInput: pendingSteer,
-                  stopHookState: {
-                    iterationCount: currentIterationCount,
-                    reasons: currentReasons,
-                  },
                 },
                 hookTurnBudget,
               );
@@ -4519,11 +4533,16 @@ export class LlmClient {
 
           // Track stop hook iterations
           const currentIterationCount =
-            (options?.stopHookState?.iterationCount ?? 0) + 1;
+            (stopHookChain?.iterationCount ?? 0) + 1;
           const currentReasons = [
-            ...(options?.stopHookState?.reasons ?? []),
+            ...(stopHookChain?.reasons ?? []),
             continueReason,
           ];
+          this.stopHookChain = {
+            promptId: prompt_id,
+            iterationCount: currentIterationCount,
+            reasons: currentReasons,
+          };
 
           // Emit StopHookLoop starting with the first blocking decision so
           // /goal and configured Stop hooks both surface their reason before
@@ -4531,6 +4550,7 @@ export class LlmClient {
           // yield because a cap of 1 means no follow-up turn should run.
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.stopHookChain = undefined;
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
@@ -4592,10 +4612,6 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                stopHookState: {
-                  iterationCount: currentIterationCount,
-                  reasons: currentReasons,
-                },
               },
               hookTurnBudget,
             );
@@ -4623,6 +4639,8 @@ export class LlmClient {
           return hookTurn;
         }
 
+        // The stop was allowed, so any Stop-hook chain for this prompt ended.
+        this.stopHookChain = undefined;
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }

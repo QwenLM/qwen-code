@@ -6563,6 +6563,10 @@ export class Session implements SessionContext {
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
+    // Whether the turn reaching the next Stop check was forced by a blocking
+    // Stop hook. Kept apart from the iteration count, which also drives the
+    // consecutive-block cap and continuation prompt ids.
+    let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
@@ -6621,6 +6625,7 @@ export class Session implements SessionContext {
               this.todoStopGuard.blockUntilOrdinaryPromptStarts();
             }
           }
+          stopHookForcedTurn = false;
           this.todoStopGuard.acceptMidTurnUserInput();
           blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
@@ -6686,7 +6691,7 @@ export class Session implements SessionContext {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'Stop',
               input: {
-                stop_hook_active: stopHookIterationCount > 0,
+                stop_hook_active: stopHookForcedTurn,
                 last_assistant_message: responseText,
                 ...contextUsage,
               },
@@ -6726,6 +6731,7 @@ export class Session implements SessionContext {
                 this.todoStopGuard.blockUntilOrdinaryPromptStarts();
               }
             }
+            stopHookForcedTurn = false;
             this.todoStopGuard.acceptMidTurnUserInput();
             blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
@@ -6856,6 +6862,8 @@ export class Session implements SessionContext {
           stopHookCount,
         );
       }
+      // Only a continuation carrying a Stop hook's reason is hook-forced.
+      stopHookForcedTurn = Boolean(externalReason);
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -6885,6 +6893,10 @@ export class Session implements SessionContext {
           ...(channelTurn ? { channelTurn: true } : {}),
         },
       );
+      if (continuation.supersededAutomaticContinuation) {
+        // Queued user input replaced the continuation.
+        stopHookForcedTurn = false;
+      }
       if (continuation.supersededAutomaticContinuation && externalReason) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);

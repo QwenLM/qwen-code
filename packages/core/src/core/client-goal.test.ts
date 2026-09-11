@@ -1923,6 +1923,44 @@ describe('LlmClient Goal admission', () => {
     expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
   });
 
+  it('reports stop_hook_active on a goal-bound Stop hook continuation', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+
+    await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+      ),
+    );
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, true]);
+  });
+
   it('drains a concurrent pause before a non-blocking Stop true-stops', async () => {
     const { client, config, runtime } = setupGoalClient();
     const messageBus = {

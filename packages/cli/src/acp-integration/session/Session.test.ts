@@ -45381,12 +45381,14 @@ describe('Session', () => {
       queuePendingTodoThenNaturalStops();
       mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
       let stopCalls = 0;
+      const stopActiveFlags: unknown[] = [];
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => {
           if (request.eventName !== 'Stop') {
             return { success: true, output: {} };
           }
           stopCalls++;
+          stopActiveFlags.push(request.input?.stop_hook_active);
           return stopCalls === 1 || stopCalls === 3
             ? {
                 success: true,
@@ -45406,11 +45408,64 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(stopCalls).toBe(4);
+      // Hook-forced turns report true; the guard's own continuation does not.
+      expect(stopActiveFlags).toEqual([false, true, false, true]);
       expect(agentMessageChunks()).not.toContain(
         'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
       );
     });
 
+    it('reports stop_hook_active false after mid-turn user input replaces a hook-forced turn', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      Object.defineProperty(internals.todoStopGuard, 'needsStopInspection', {
+        configurable: true,
+        get: () => true,
+      });
+      let stopCalls = 0;
+      let userInputDelivered = false;
+      mockGuardBridge(() => {
+        // Deliver user input on the drain that follows the second Stop check,
+        // i.e. while the hook-forced turn is ending.
+        if (stopCalls === 2 && !userInputDelivered) {
+          userInputDelivered = true;
+          return {
+            messages: ['also update the changelog'],
+            hasQueuedPrompt: false,
+          };
+        }
+        return { messages: [], hasQueuedPrompt: false };
+      });
+      const stopActiveFlags: unknown[] = [];
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => {
+          if (request.eventName !== 'Stop') {
+            return { success: true, output: {} };
+          }
+          stopCalls++;
+          stopActiveFlags.push(request.input?.stop_hook_active);
+          return stopCalls === 1
+            ? {
+                success: true,
+                output: { decision: 'block', reason: 'Keep working' },
+              }
+            : { success: true, output: {} };
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+
+      await runGuardPrompt();
+
+      expect(userInputDelivered).toBe(true);
+      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+    });
     it('preserves a coalesced Stop-loop event when token rejection skips the final send', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
