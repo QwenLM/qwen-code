@@ -362,10 +362,28 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
     }
 
+    const restoreSkill = (requestedName: unknown, output: unknown) => {
+      if (typeof requestedName !== 'string' || typeof output !== 'string')
+        return;
+      const skill = skillByName.get(requestedName.toLowerCase());
+      if (
+        !skill ||
+        (output !== skill.output && !output.startsWith(`${skill.output}\n`))
+      ) {
+        return;
+      }
+      this.loadedSkillContents.add(skill.output);
+      this.loadedSkillNames.add(skill.name);
+    };
+
     const pendingSkillCalls = new Map<string, string>();
+    const pendingExecCalls = new Set<string>();
     for (const content of history) {
       for (const part of content.parts ?? []) {
         const call = part.functionCall;
+        if (call?.name === ToolNames.EXEC && typeof call.id === 'string') {
+          pendingExecCalls.add(call.id);
+        }
         const requestedSkill = call?.args?.['skill'];
         if (
           call?.name === ToolNames.SKILL &&
@@ -379,6 +397,44 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const response = part.functionResponse;
         const output = response?.response?.['output'];
         if (
+          response?.name === ToolNames.EXEC &&
+          typeof response.id === 'string' &&
+          pendingExecCalls.delete(response.id) &&
+          typeof output === 'string'
+        ) {
+          let payload: unknown;
+          try {
+            payload = JSON.parse(output.split('\n', 1)[0]);
+          } catch {
+            continue;
+          }
+          if (
+            !payload ||
+            typeof payload !== 'object' ||
+            !('toolResults' in payload) ||
+            !Array.isArray(payload.toolResults)
+          ) {
+            continue;
+          }
+          const results: unknown[] = payload.toolResults;
+          for (const result of results) {
+            if (
+              result &&
+              typeof result === 'object' &&
+              'name' in result &&
+              result.name === ToolNames.SKILL &&
+              'args' in result &&
+              result.args &&
+              typeof result.args === 'object' &&
+              'skill' in result.args &&
+              'output' in result
+            ) {
+              restoreSkill(result.args.skill, result.output);
+            }
+          }
+          continue;
+        }
+        if (
           response?.name !== ToolNames.SKILL ||
           typeof response.id !== 'string' ||
           typeof output !== 'string'
@@ -389,16 +445,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        const skill = skillByName.get(requestedName.toLowerCase());
-        if (
-          !skill ||
-          (output !== skill.output && !output.startsWith(`${skill.output}\n`))
-        ) {
-          continue;
-        }
-
-        this.loadedSkillContents.add(skill.output);
-        this.loadedSkillNames.add(skill.name);
+        restoreSkill(requestedName, output);
       }
     }
   }
