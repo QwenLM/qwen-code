@@ -642,10 +642,10 @@ The following events are logged:
 #### API Events
 
 - `qwen-code.api_request`: Outgoing request to the LLM API.
-  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, excluded if `log_prompts_enabled` is false), `subagent_name` (string, optional)
+  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, present when `log_prompts_enabled` is true; when false the key is empty on native OTLP log export and absent from `telemetry.outfile` and log-to-span bridge spans), `subagent_name` (string, optional)
 
 - `qwen-code.api_response`: Response received from LLM API.
-  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, excluded if `log_prompts_enabled` is false), `subagent_name` (string, optional)
+  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional — absent for internal prompt ids and for responses with no visible text such as tool-call-only or thought-only turns; when `log_prompts_enabled` is false it is empty rather than absent on native OTLP log export, and absent from `telemetry.outfile` and log-to-span bridge spans), `subagent_name` (string, optional)
 
 - `qwen-code.api_error`: API request failed.
   - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
