@@ -231,12 +231,20 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows above a pending card's expanded confirmation dialog: the transcript
- * rows that stay on screen above it (prompt echo plus the card's own
- * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
- * title, body margins, outcome list, footer ≈ 11).
+ * Rows around a pending card's expanded confirmation dialog that the card
+ * must yield: the banner (6), the startup transcript rows above the card
+ * (extension/context notices plus the prompt echo ≈ 4), the card's own
+ * hidden-tail and awaiting rows (2), and the dialog's chrome (frame, title,
+ * body margins, question line, outcome list, footer ≈ 12).
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 24;
+
+/**
+ * Collapsed row cap for a confirmation dialog's body (dialogs-confirm's
+ * TextBody and DiffBody). Longer plain-text bodies expand on ctrl-s, which
+ * is the transition pendingCardMaxRows's expanded-dialog bound keys on.
+ */
+export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
@@ -266,14 +274,19 @@ export function pendingCardMaxRows(
   const payloadRows = Math.ceil(
     descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
   );
+  const expandedDialogBound =
+    payloadRows > CONFIRM_BODY_COLLAPSED_ROWS
+      ? Math.floor(
+          (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) *
+            CARD_DESC_WRAP_RATIO,
+        )
+      : Number.POSITIVE_INFINITY;
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
       h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
-      Math.floor(
-        (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) * CARD_DESC_WRAP_RATIO,
-      ),
+      expandedDialogBound,
     ),
   );
 }
