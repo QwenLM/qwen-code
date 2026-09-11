@@ -101,9 +101,7 @@ function getPreviewData(config: Config, uiState: UIState) {
     sessionId: stats.sessionId,
     version: config.getCliVersion(),
     modelDisplayName: config.getModelDisplayName(),
-    reasoning: config.getEffectiveReasoning
-      ? config.getEffectiveReasoning()
-      : contentGeneratorConfig?.reasoning,
+    reasoning: config.getEffectiveReasoning(),
     currentDir: config.getTargetDir(),
     branch: uiState.branchName,
     contextWindowSize: contentGeneratorConfig?.contextWindowSize || 0,

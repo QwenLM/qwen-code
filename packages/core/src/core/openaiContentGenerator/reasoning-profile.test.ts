@@ -140,7 +140,11 @@ describe('explicit OpenAI thinking profiles', () => {
       ...generation,
       reasoningConfig: { profile: 'qwen-chat-template' },
       samplingParams: {
-        chat_template_kwargs: { enable_thinking: true },
+        chat_template_kwargs: {
+          enable_thinking: true,
+          parallel_tool_calls: true,
+          tools_in_user_message: true,
+        },
       },
       extra_body: {
         chat_template_kwargs: { tools_in_user_message: false },
@@ -148,6 +152,7 @@ describe('explicit OpenAI thinking profiles', () => {
     }) as unknown as Record<string, unknown>;
     expect(result['chat_template_kwargs']).toEqual({
       enable_thinking: true,
+      parallel_tool_calls: true,
       tools_in_user_message: false,
     });
   });
@@ -299,7 +304,11 @@ describe('explicit OpenAI thinking profiles', () => {
       baseUrl: 'https://proxy.example/v1',
       reasoningConfig: { defaultEffort: 'medium' },
     };
-    expect(wire(inferred, true)).not.toHaveProperty('reasoning');
+    expect(wire(inferred, true)).toEqual({
+      model: 'mistral-large',
+      messages: [],
+      temperature: 0.2,
+    });
     expect(
       wire({ ...inferred, baseUrl: 'https://openrouter.ai/api/v1' }, true),
     ).toMatchObject({ reasoning: { enabled: false } });
@@ -362,5 +371,99 @@ describe('explicit OpenAI thinking profiles', () => {
     expect(result['reasoning_effort']).toBe('low');
     expect(result).not.toHaveProperty('thinking_budget');
     expect(result).not.toHaveProperty('reasoning');
+  });
+
+  it.each([
+    {
+      profile: 'dashscope-thinking' as const,
+      extra_body: { enable_thinking: false },
+      expected: { enable_thinking: true },
+    },
+    {
+      profile: 'qwen-chat-template' as const,
+      extra_body: { enable_thinking: false },
+      expected: { chat_template_kwargs: { enable_thinking: true } },
+    },
+  ])('restores the $profile on-switch when thinking is mandatory', (input) => {
+    expect(
+      wire(
+        {
+          ...generation,
+          thinkingMandatory: true,
+          reasoningConfig: { profile: input.profile },
+          extra_body: input.extra_body,
+        },
+        true,
+      ),
+    ).toMatchObject(input.expected);
+  });
+
+  it.each([
+    { samplingParams: { reasoning_effort: '' } },
+    { extra_body: { reasoning_effort: null } },
+    {
+      samplingParams: { reasoning_effort: 'none' },
+      extra_body: { reasoning_effort: '' },
+    },
+    { samplingParams: { reasoning: { effort: '' } } },
+  ])('fills raw effort placeholders from the effective tier: %j', (raw) => {
+    expect(
+      wire({
+        ...generation,
+        reasoning: { effort: 'high' },
+        reasoningConfig: {
+          profile: 'openai-effort',
+          supportedEfforts: ['low', 'medium', 'high'],
+        },
+        ...raw,
+      }),
+    ).toMatchObject({ reasoning_effort: 'high' });
+  });
+
+  it.each([
+    {
+      profile: 'dashscope-thinking' as const,
+      raw: { extra_body: { reasoning_effort: 'high' } },
+      expected: { enable_thinking: true },
+    },
+    {
+      profile: 'qwen-chat-template' as const,
+      raw: { samplingParams: { reasoning_effort: 'medium' } },
+      expected: { chat_template_kwargs: { enable_thinking: true } },
+    },
+    {
+      profile: 'dashscope-thinking' as const,
+      raw: { extra_body: { reasoning: { effort: 'high' } } },
+      expected: { enable_thinking: true },
+    },
+    {
+      profile: 'qwen-chat-template' as const,
+      raw: { samplingParams: { reasoning: { effort: 'medium' } } },
+      expected: { chat_template_kwargs: { enable_thinking: true } },
+    },
+  ])('keeps the $profile on-switch above an inert raw effort', (input) => {
+    const result = wire({
+      ...generation,
+      reasoningConfig: { profile: input.profile },
+      ...input.raw,
+    });
+    expect(result).toMatchObject(input.expected);
+    expect(result).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('reports an off-ladder effort exactly as it appears on the wire', () => {
+    const config: ContentGeneratorConfig = {
+      model: 'gpt-5.1',
+      authType: AuthType.USE_OPENAI,
+      reasoningConfig: { supportedEfforts: ['low', 'medium', 'high'] },
+      reasoning: {
+        effort: 'minimal',
+      } as unknown as ContentGeneratorConfig['reasoning'],
+    };
+    const resolved = resolveModelReasoningConfig(config)!;
+    expect(wire(config)).toMatchObject({ reasoning_effort: 'minimal' });
+    expect(getOpenAIReasoningState(config, resolved)).toEqual({
+      effort: 'minimal',
+    });
   });
 });

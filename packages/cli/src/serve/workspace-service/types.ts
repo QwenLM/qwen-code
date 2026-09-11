@@ -284,6 +284,7 @@ export interface ReloadResponse {
   changedKeys: string[];
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
+  sessionFailures?: Array<{ sessionId: string; error: string }>;
   childReloaded: boolean;
   childError?: string;
   runtimeEnvironmentApplied?: boolean;

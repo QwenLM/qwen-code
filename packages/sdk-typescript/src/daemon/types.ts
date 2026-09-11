@@ -3982,6 +3982,7 @@ export interface DaemonReloadResponse {
   childReloaded: boolean;
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
+  sessionFailures?: Array<{ sessionId: string; error: string }>;
   childError?: string;
   runtimeEnvironmentApplied?: boolean;
 }

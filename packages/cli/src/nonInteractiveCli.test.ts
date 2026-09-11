@@ -2513,6 +2513,28 @@ describe('runNonInteractive', () => {
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 
+  it('does not apply staged providers for a notification turn', async () => {
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Background update',
+      'notification-prompt',
+      { sendMessageType: SendMessageType.Notification },
+    );
+
+    expect(mockConfig.applyPendingModelProvidersReload).not.toHaveBeenCalled();
+  });
+
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
     const setApprovalRequestCallback = vi.fn();
@@ -2660,6 +2682,7 @@ describe('runNonInteractive', () => {
     expect(
       mockConfig.consumePendingRecoveredAgentsNotice,
     ).not.toHaveBeenCalled();
+    expect(mockConfig.applyPendingModelProvidersReload).not.toHaveBeenCalled();
     const [request] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(request).toEqual([
       {

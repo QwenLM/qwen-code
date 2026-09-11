@@ -47,7 +47,9 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   getModelReasoningConfig,
   resolveEffectiveReasoning,
+  type ResolvedModelReasoningConfig,
 } from '../model-reasoning-config.js';
+import { getGptReasoningCapabilities } from '../reasoning-effort.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -399,7 +401,22 @@ export class ResponsesPipeline {
     // continued via previous_response_id, so context editing, compaction, and
     // mid-session model switching all keep working the same way they already
     // do for the other wires.
-    const reasoning = this.buildReasoning(request);
+    const resolvedReasoning = getModelReasoningConfig(
+      this.cliConfig,
+      this.config,
+    );
+    const gptReasoning = getGptReasoningCapabilities(this.config.model);
+    const thinkingMandatory =
+      resolvedReasoning?.canDisable === false ||
+      this.config.thinkingMandatory === true;
+    const reasoning = this.buildReasoning(
+      request,
+      resolvedReasoning,
+      thinkingMandatory,
+      this.config.thinkingMandatory === true
+        ? gptReasoning?.defaultEffort
+        : undefined,
+    );
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
@@ -482,7 +499,8 @@ export class ResponsesPipeline {
 
     if (this.config.extra_body) {
       const thinkingOptOut =
-        request.config?.thinkingConfig?.includeThoughts === false;
+        request.config?.thinkingConfig?.includeThoughts === false &&
+        !thinkingMandatory;
       const requestRecord = apiRequest as unknown as Record<string, unknown>;
       for (const [key, value] of Object.entries(this.config.extra_body)) {
         // `enable_thinking` is a DashScope/Qwen-specific knob with no meaning
@@ -490,13 +508,9 @@ export class ResponsesPipeline {
         // into `reasoning.effort` when present, so forwarding it verbatim
         // would only add an undefined field to the wire body.
         if (key === 'enable_thinking') continue;
-        // An explicit per-send `thinkingConfig.includeThoughts:false` is
-        // authoritative for the whole build, not just buildReasoning(): the
-        // opt-out is precisely what leaves `reasoning`/`include` off the
-        // request literal, so without this the fill-only merge below would
-        // hand a configured extra_body the empty slot and put thinking back
-        // on the wire the caller just turned off. `include` goes with it: the
-        // encrypted-reasoning include exists only to round-trip reasoning.
+        // When the route permits disabling, a per-send opt-out is
+        // authoritative for the whole build. `include` goes with reasoning:
+        // the encrypted-reasoning include exists only to round-trip it.
         if (thinkingOptOut && (key === 'reasoning' || key === 'include')) {
           continue;
         }
@@ -515,8 +529,10 @@ export class ResponsesPipeline {
 
   private buildReasoning(
     request: GenerateContentParameters,
+    resolved: ResolvedModelReasoningConfig | undefined,
+    thinkingMandatory: boolean,
+    gptDefaultEffort: ResponsesApiReasoning['effort'] | undefined,
   ): ResponsesApiReasoning | undefined {
-    const resolved = getModelReasoningConfig(this.cliConfig, this.config);
     // A per-send opt-out, mirroring the sibling Chat wire's
     // buildReasoningConfig: `includeThoughts:false` is the caller saying this
     // particular request wants no thinking, unless the route declares thinking
@@ -524,11 +540,16 @@ export class ResponsesPipeline {
     // thinkingConfig is given a meaning on this wire.
     if (
       request.config?.thinkingConfig?.includeThoughts === false &&
-      resolved?.canDisable !== false
+      !thinkingMandatory
     ) {
       return undefined;
     }
-    const r = resolveEffectiveReasoning(this.config, resolved);
+    const r = resolveEffectiveReasoning(
+      thinkingMandatory && this.config.reasoning === false
+        ? { reasoning: undefined }
+        : this.config,
+      resolved,
+    );
     if (r === false) return undefined;
     // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
     // toggle (predates the unified reasoning-effort ladder). It has no
@@ -537,14 +558,19 @@ export class ResponsesPipeline {
     // that only set it -- e.g. a settings.json carried over from another
     // wire -- would otherwise silently lose reasoning entirely on this wire.
     const legacyEnableThinking = this.config.extra_body?.['enable_thinking'];
-    if (r === undefined && legacyEnableThinking !== true) return undefined;
+    if (
+      r === undefined &&
+      legacyEnableThinking !== true &&
+      !(thinkingMandatory && gptDefaultEffort)
+    )
+      return undefined;
 
     const reasoning: ResponsesApiReasoning = {};
     // The Responses API reasoning.effort enum (none, minimal, low, medium,
     // high, xhigh, max) is a superset of the unified ladder, so every tier
     // passes through verbatim with no clamping.
-    if (r?.effort) {
-      reasoning.effort = r.effort;
+    if (r?.effort || (thinkingMandatory && gptDefaultEffort)) {
+      reasoning.effort = r?.effort ?? gptDefaultEffort;
     } else if (legacyEnableThinking === true) {
       reasoning.effort = 'medium';
     }

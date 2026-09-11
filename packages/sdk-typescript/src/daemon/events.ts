@@ -1139,6 +1139,7 @@ export interface DaemonSettingsReloadedData {
   childReloaded: boolean;
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
+  sessionFailures?: Array<{ sessionId: string; error: string }>;
   childError?: string;
   runtimeEnvironmentApplied?: boolean;
   [key: string]: unknown;

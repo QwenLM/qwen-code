@@ -22,6 +22,7 @@ import {
 } from './anthropic-reasoning.js';
 import { isDeepSeekHostname } from './openaiContentGenerator/provider/deepseek.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
+import { normalize } from './tokenLimits.js';
 
 export const REASONING_PROFILES = [
   'openai-reasoning',
@@ -89,7 +90,7 @@ function inferProfile(
   }
   if (isOpenRouterHostname(route)) return 'openai-reasoning';
   if (deepseek || legacy?.disableField === 'thinking') return 'deepseek-openai';
-  const qwen = /^(qwen|coder-model)/i.test(route.model);
+  const qwen = /^(qwen|coder-model)/i.test(normalize(route.model));
   const dashscope = isDashScopeProvider(route);
   if (legacy?.disableField === 'enable_thinking') return 'dashscope-thinking';
   if (qwen && dashscope)
@@ -175,8 +176,8 @@ export function resolveModelReasoningConfig(
   const gpt = getGptReasoningCapabilities(route.model);
   const mandatory =
     route.thinkingMandatory ??
-    (!explicitProfile &&
-      (legacy?.canDisable === false || gpt?.thinkingMandatory === true));
+    (legacy?.canDisable === false ||
+      (!explicitProfile && gpt?.thinkingMandatory === true));
   const common = {
     thinking: true as const,
     profile,
@@ -189,10 +190,14 @@ export function resolveModelReasoningConfig(
     ...(mandatory ? { canDisable: false as const } : {}),
   };
   if (toggleOnly) {
-    if (input.supportedEfforts !== undefined)
-      fail('supportedEfforts', 'this profile supports only thinking on/off');
-    if (input.defaultEffort !== undefined)
-      fail('defaultEffort', 'this profile supports only thinking on/off');
+    const profileLabel = explicitProfile
+      ? `profile "${profile}"`
+      : `the inferred profile "${profile}"`;
+    const detail = `${profileLabel} supports only thinking on/off${
+      explicitProfile ? '' : '; declare profile explicitly to choose another'
+    }`;
+    if (input.supportedEfforts !== undefined) fail('supportedEfforts', detail);
+    if (input.defaultEffort !== undefined) fail('defaultEffort', detail);
     return { ...common, toggleOnly: true };
   }
   const profileEfforts: readonly ReasoningEffort[] = profile.startsWith(

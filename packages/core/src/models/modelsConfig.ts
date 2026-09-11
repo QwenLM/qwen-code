@@ -1347,11 +1347,13 @@ export class ModelsConfig {
       }
 
       // Apply generation config
-      if (runtimeModelSnapshot.generationConfig) {
-        Object.assign(
-          this._generationConfig,
-          runtimeModelSnapshot.generationConfig,
-        );
+      for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this._generationConfig as any)[field] =
+          runtimeModelSnapshot.generationConfig?.[field];
+        const source = runtimeModelSnapshot.sources[field];
+        if (source) this.generationConfigSources[field] = { ...source };
+        else delete this.generationConfigSources[field];
       }
 
       const requiresRefresh = isAuthTypeChange;
@@ -1477,8 +1479,9 @@ export class ModelsConfig {
 
   /**
    * Stage providers for the next prompt. An omitted modelId preserves an
-   * already staged selection, null clears it, and a string replaces it.
-   * baseUrl is used only with a string modelId.
+   * already staged selection, null clears it, and a resolvable string replaces
+   * it. An unresolvable string drops the selection so it cannot block the
+   * provider snapshot. baseUrl is used only with a string modelId.
    */
   stageModelProvidersReload(
     modelProviders?: ModelProvidersConfig,
@@ -1491,22 +1494,33 @@ export class ModelsConfig {
       structuredClone(providerProtocol),
     );
     if (modelId !== undefined) {
-      this.pendingModelSelection =
-        modelId === null
-          ? undefined
-          : {
-              modelId,
-              ...(baseUrl !== undefined ? { baseUrl } : {}),
-            };
-      this.pendingModelSelectionSource =
-        modelId === null
-          ? undefined
-          : {
-              authType: this.currentAuthType,
-              modelId: this.getModel(),
-              baseUrl: this.currentRegistryBaseUrl,
-              revision: this.modelSelectionRevision,
-            };
+      const selectionResolves =
+        modelId !== null &&
+        (this.currentAuthType === undefined ||
+          this.pendingModelRegistry.hasModel(
+            this.currentAuthType,
+            modelId,
+            baseUrl,
+          ));
+      if (modelId !== null && !selectionResolves) {
+        debugLogger.warn(
+          `Ignoring staged model selection "${modelId}" because it is not present in the staged registry`,
+        );
+      }
+      this.pendingModelSelection = !selectionResolves
+        ? undefined
+        : {
+            modelId,
+            ...(baseUrl !== undefined ? { baseUrl } : {}),
+          };
+      this.pendingModelSelectionSource = !selectionResolves
+        ? undefined
+        : {
+            authType: this.currentAuthType,
+            modelId: this.getModel(),
+            baseUrl: this.currentRegistryBaseUrl,
+            revision: this.modelSelectionRevision,
+          };
     }
   }
 

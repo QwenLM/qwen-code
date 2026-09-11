@@ -67,7 +67,12 @@ describe('external model thinking controls', () => {
       model: 'gpt-5.5',
       reasoning: { effort: 'xhigh' as const },
     };
-    expect(getGptReasoningOverrideState(declared)).toBeUndefined();
+    expect(
+      getGptReasoningOverrideState({
+        ...declared,
+        samplingParams: { reasoning_effort: 'low' },
+      }),
+    ).toBeUndefined();
     expect(
       buildModelReasoningConfigPreview(
         declared.model,
@@ -84,6 +89,26 @@ describe('external model thinking controls', () => {
         { value: 'xhigh' },
       ],
     });
+  });
+
+  it('reports a provider-specific active effort without clamping it', () => {
+    const option = buildModelReasoningConfigOption(
+      'gpt-5.1',
+      {
+        enabled: true,
+        effort: 'minimal' as never,
+      },
+      resolveModelReasoningConfig({
+        model: 'gpt-5.1',
+        authType: AuthType.USE_OPENAI,
+        reasoningConfig: { supportedEfforts: ['low', 'medium', 'high'] },
+      }),
+    );
+
+    expect(option?.currentValue).toBe('minimal');
+    expect(option?.options).toContainEqual(
+      expect.objectContaining({ value: 'minimal' }),
+    );
   });
 
   it('shows the raw override that actually wins on the wire', () => {

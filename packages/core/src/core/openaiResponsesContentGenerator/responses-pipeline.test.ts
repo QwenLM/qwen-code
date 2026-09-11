@@ -419,6 +419,65 @@ describe('ResponsesPipeline', () => {
       expect(body.include).toEqual(['reasoning.encrypted_content']);
     });
 
+    it('keeps explicitly mandatory GPT reasoning on for a request opt-out', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'gpt-5',
+          thinkingMandatory: true,
+          reasoning: false,
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(
+        {
+          ...textRequest('hi'),
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'p1',
+      )) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'medium', summary: 'auto' });
+      expect(body.include).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('keeps configured reasoning when a mandatory route has no default effort', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          thinkingMandatory: true,
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['low', 'medium'],
+          },
+          extra_body: { reasoning: { effort: 'low' } },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(
+        {
+          ...textRequest('hi'),
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'p1',
+      )) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'low' });
+    });
+
     it('passes the effort straight through with no clamping, plus include + summary auto', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),

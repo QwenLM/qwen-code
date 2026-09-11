@@ -4622,6 +4622,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getEffectiveReasoning: vi.fn().mockReturnValue(undefined),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       setReasoningEffort: vi.fn(),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -11497,6 +11498,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
       );
       expect(generation.reasoning).toBeUndefined();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('accepts the current provider-native effort as an ACP no-op', async () => {
+    const sessionId = 'provider-native-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = {
+      model: 'gpt-5.1',
+      authType: AuthType.USE_OPENAI,
+      reasoningConfig: {
+        profile: 'openai-effort' as const,
+        supportedEfforts: ['low', 'medium', 'high'] as const,
+      },
+      reasoning: { effort: 'minimal' },
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('gpt-5.1');
+    innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getEffectiveReasoning = vi.fn(() => ({ effort: 'minimal' }));
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as SetSessionConfigOptionResponse;
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('minimal');
+      expect(option?.options).toContainEqual(
+        expect.objectContaining({ value: 'minimal' }),
+      );
+
+      const unchanged = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'minimal',
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        unchanged.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('minimal');
+      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(
+        lastSessionMock?.setSessionReasoningSelection,
+      ).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -29387,6 +29438,40 @@ describe('sessionLanguage multi-session propagation', () => {
     );
     expect(cfg.refreshAuth).not.toHaveBeenCalled();
     expect(reloadReasoningSelection).not.toHaveBeenCalled();
+
+    const selectedProviderConfig = {
+      idealab: [{ ...providerConfig.idealab[0], name: 'Qwen 3 updated' }],
+    };
+    reloadedSettings = {
+      modelProviders: selectedProviderConfig,
+      model: {
+        name: 'qwen3',
+        baseUrl: 'https://idealab.example/v1',
+      },
+    };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(cfg.stageModelProvidersReload).toHaveBeenLastCalledWith(
+      selectedProviderConfig,
+      {},
+      'qwen3',
+      'https://idealab.example/v1',
+    );
+    expect(reloadReasoningSelection).not.toHaveBeenCalled();
+
+    const clearedSelectionProviderConfig = {
+      idealab: [{ ...providerConfig.idealab[0], name: 'Qwen 3 final' }],
+    };
+    reloadedSettings = {
+      modelProviders: clearedSelectionProviderConfig,
+      model: { generationConfig: {} },
+    };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(cfg.stageModelProvidersReload).toHaveBeenLastCalledWith(
+      clearedSelectionProviderConfig,
+      {},
+      null,
+      undefined,
+    );
 
     reloadedSettings = {
       modelProviders: {

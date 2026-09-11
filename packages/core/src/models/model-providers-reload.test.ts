@@ -59,12 +59,14 @@ describe('model providers reload at the next user prompt', () => {
 
   it('discards an older staged snapshot after a successful immediate reload', async () => {
     const config = create();
-    config.stageModelProvidersReload(providers('medium'));
+    config.stageModelProvidersReload(providers('medium'), undefined, 'alias');
     config.reloadModelProvidersConfig(providers('high'));
     expect(await config.applyPendingModelProvidersReload(async () => {})).toBe(
       false,
     );
     expect(config.getModelProvidersConfig()).toEqual(providers('high'));
+    expect(config['pendingModelSelection']).toBeUndefined();
+    expect(config['pendingModelSelectionSource']).toBeUndefined();
   });
 
   it('applies a model selected in the same settings update against the new registry', async () => {
@@ -164,6 +166,24 @@ describe('model providers reload at the next user prompt', () => {
     });
 
     expect(config.getModel()).toBe('alias');
+  });
+
+  it('drops an unresolvable staged selection without blocking provider reload', async () => {
+    const config = create();
+    const next = providers('medium');
+    config.stageModelProvidersReload(next, undefined, 'missing-model');
+
+    expect(
+      await config.applyPendingModelProvidersReload(async (selection) => {
+        if (selection)
+          await config.switchModel(AuthType.USE_OPENAI, selection.modelId);
+      }),
+    ).toBe(true);
+    expect(config.getModelProvidersConfig()).toEqual(next);
+    expect(config.getModel()).toBe('alias');
+    expect(await config.applyPendingModelProvidersReload(async () => {})).toBe(
+      false,
+    );
   });
 
   it('rolls back registry and selection when refresh fails, retaining the pending update', async () => {

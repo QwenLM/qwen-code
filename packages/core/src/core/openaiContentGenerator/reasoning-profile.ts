@@ -17,7 +17,11 @@ import {
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
-import { REASONING_EFFORT_TIERS } from '../reasoning-effort.js';
+import {
+  isReasoningEffortPlaceholder,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../reasoning-effort.js';
 
 const THINKING_FIELDS = [
   'reasoning',
@@ -27,17 +31,32 @@ const THINKING_FIELDS = [
   'thinking',
 ] as const;
 
-function withNestedReasoningEffort(
+function withResolvedReasoningEffort(
   layer: Record<string, unknown> | undefined,
+  fallback: ReasoningEffort | undefined,
 ): Record<string, unknown> | undefined {
+  if (!layer) return layer;
+  if (Object.hasOwn(layer, 'reasoning_effort')) {
+    if (!isReasoningEffortPlaceholder(layer['reasoning_effort'])) return layer;
+    const normalized = { ...layer };
+    if (fallback) normalized['reasoning_effort'] = fallback;
+    else delete normalized['reasoning_effort'];
+    return normalized;
+  }
   const reasoning = layer?.['reasoning'];
   const effort =
     reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)
       ? (reasoning as Record<string, unknown>)['effort']
       : undefined;
-  if (!layer || layer['reasoning_effort'] != null || effort == null)
-    return layer;
-  return { ...layer, reasoning_effort: effort };
+  if (effort === undefined) return layer;
+  return {
+    ...layer,
+    ...(isReasoningEffortPlaceholder(effort)
+      ? fallback
+        ? { reasoning_effort: fallback }
+        : {}
+      : { reasoning_effort: effort }),
+  };
 }
 
 export function applyOpenAIReasoningProfile(
@@ -100,7 +119,17 @@ export function applyOpenAIReasoningProfile(
     }
     const hasReasoning = Object.hasOwn(layer, 'reasoning');
     const rawReasoning = layer['reasoning'];
-    const hasEffort = layer['reasoning_effort'] != null;
+    const hasEffortField = Object.hasOwn(layer, 'reasoning_effort');
+    const rawEffort = layer['reasoning_effort'];
+    const hasEffort =
+      hasEffortField && !isReasoningEffortPlaceholder(rawEffort);
+    const effectiveLayerEffort = hasEffort
+      ? rawEffort
+      : hasEffortField && typeof effort === 'string'
+        ? effort
+        : undefined;
+    const useLayerEffort =
+      !resolved.toggleOnly && effectiveLayerEffort !== undefined;
     if (hasReasoning) {
       if (rawReasoning === null) {
         body['reasoning'] = null;
@@ -110,19 +139,33 @@ export function applyOpenAIReasoningProfile(
         typeof rawReasoning === 'object' &&
         !Array.isArray(rawReasoning)
       ) {
-        if (profile === 'openai-reasoning' && !hasEffort) {
-          body['reasoning'] = rawReasoning;
+        const rawReasoningRecord = rawReasoning as Record<string, unknown>;
+        const { effort: nestedEffort, ...rest } = rawReasoningRecord;
+        const hasNestedEffort = Object.hasOwn(rawReasoningRecord, 'effort');
+        const normalizedNestedEffort =
+          hasNestedEffort && isReasoningEffortPlaceholder(nestedEffort)
+            ? typeof effort === 'string'
+              ? effort
+              : undefined
+            : nestedEffort;
+        if (profile === 'openai-reasoning' && !useLayerEffort) {
+          body['reasoning'] = {
+            ...rest,
+            ...(normalizedNestedEffort !== undefined
+              ? { effort: normalizedNestedEffort }
+              : {}),
+          };
           delete body['reasoning_effort'];
         } else {
-          const { effort: nestedEffort, ...rest } = rawReasoning as Record<
-            string,
-            unknown
-          >;
-          if (!hasEffort && nestedEffort != null)
-            body['reasoning_effort'] = nestedEffort;
           if (
-            !hasEffort &&
-            nestedEffort == null &&
+            !useLayerEffort &&
+            !resolved.toggleOnly &&
+            normalizedNestedEffort !== undefined
+          )
+            body['reasoning_effort'] = normalizedNestedEffort;
+          if (
+            !useLayerEffort &&
+            normalizedNestedEffort === undefined &&
             Object.hasOwn(rawReasoning, 'enabled')
           )
             delete body['reasoning_effort'];
@@ -136,8 +179,8 @@ export function applyOpenAIReasoningProfile(
         delete body['reasoning_effort'];
       }
     }
-    if (hasEffort) {
-      body['reasoning_effort'] = layer['reasoning_effort'];
+    if (useLayerEffort) {
+      body['reasoning_effort'] = effectiveLayerEffort;
       delete body['thinking'];
       delete body['thinking_budget'];
       delete body['enable_thinking'];
@@ -151,7 +194,7 @@ export function applyOpenAIReasoningProfile(
       } else {
         delete body['reasoning'];
       }
-    } else if (Object.hasOwn(layer, 'reasoning_effort')) {
+    } else if (hasEffortField) {
       delete body['reasoning_effort'];
     }
     if (layer['chat_template_kwargs'] !== undefined) {
@@ -189,12 +232,12 @@ export function applyOpenAIReasoningProfile(
     }
     if (
       hasTemplateDisable &&
-      (profile === 'qwen-chat-template' || !hasEffort)
+      (profile === 'qwen-chat-template' || !useLayerEffort)
     ) {
       delete body['reasoning'];
       delete body['reasoning_effort'];
       delete body['thinking'];
-    } else if (hasEffort) {
+    } else if (useLayerEffort) {
       const kwargs = body['chat_template_kwargs'];
       if (kwargs && typeof kwargs === 'object' && !Array.isArray(kwargs)) {
         const next = { ...(kwargs as Record<string, unknown>) };
@@ -208,8 +251,14 @@ export function applyOpenAIReasoningProfile(
   if (profile === 'dashscope-effort') {
     const selected = selectDashScopeThinkingKnob(
       generation.model,
-      withNestedReasoningEffort(generation.extra_body),
-      withNestedReasoningEffort(generation.samplingParams),
+      withResolvedReasoningEffort(
+        generation.extra_body,
+        typeof effort === 'string' ? effort : undefined,
+      ),
+      withResolvedReasoningEffort(
+        generation.samplingParams,
+        typeof effort === 'string' ? effort : undefined,
+      ),
       effort || undefined,
       true,
     );
@@ -273,6 +322,14 @@ export function applyOpenAIReasoningProfile(
       if (Object.keys(next).length) body['chat_template_kwargs'] = next;
       else delete body['chat_template_kwargs'];
     }
+    if (profile === 'dashscope-thinking') body['enable_thinking'] = true;
+    else if (profile === 'qwen-chat-template')
+      body['chat_template_kwargs'] = {
+        ...(body['chat_template_kwargs'] as
+          | Record<string, unknown>
+          | undefined),
+        enable_thinking: true,
+      };
     if (
       effort &&
       !dashscopeBudgetSelected &&
@@ -340,6 +397,9 @@ export function getOpenAIReasoningState(
   const value = body['reasoning_effort'] ?? (nested && nested['effort']);
   const effort = REASONING_EFFORT_TIERS.find((tier) => tier === value);
   if (effort) return { effort };
+  if (typeof value === 'string' && value) {
+    return { effort: value as ReasoningEffort };
+  }
   return resolveEffectiveReasoning(generation, resolved) === false
     ? false
     : undefined;

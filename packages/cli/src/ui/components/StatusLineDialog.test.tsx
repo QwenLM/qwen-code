@@ -54,6 +54,7 @@ const config = {
     contextWindowSize: 1000,
     reasoning: { effort: 'high' },
   }),
+  getEffectiveReasoning: () => ({ effort: 'high' }),
 } as Config;
 
 const uiState = {

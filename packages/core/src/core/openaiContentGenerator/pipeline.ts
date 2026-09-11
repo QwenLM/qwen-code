@@ -92,6 +92,25 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function shouldDropDashScopeRequiredToolChoice(
+  isDashScope: boolean,
+  model: string,
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  thinkingMandatory: boolean,
+): boolean {
+  if (!isDashScope || request.tool_choice !== 'required') return false;
+  const body = request as unknown as Record<string, unknown>;
+  const reasoningEffort = body['reasoning_effort'];
+  const thinkingBudget = body['thinking_budget'];
+  return (
+    thinkingMandatory ||
+    (isQwenFamilyWireModel(model) &&
+      (body['enable_thinking'] === true ||
+        (thinkingBudget != null && body['enable_thinking'] !== false) ||
+        (typeof reasoningEffort === 'string' && reasoningEffort !== 'none')))
+  );
+}
+
 function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   capabilities: ModelReasoningCapabilities | undefined,
@@ -989,9 +1008,12 @@ export class ContentGenerationPipeline {
         request.config?.thinkingConfig?.includeThoughts === false,
       );
       if (
-        isDashScope &&
-        resolved.canDisable === false &&
-        shaped.tool_choice === 'required'
+        shouldDropDashScopeRequiredToolChoice(
+          isDashScope,
+          model,
+          shaped,
+          resolved.canDisable === false,
+        )
       ) {
         delete shaped.tool_choice;
       }
@@ -1194,14 +1216,12 @@ export class ContentGenerationPipeline {
     // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
-      isDashScope &&
-      typed['tool_choice'] === 'required' &&
-      (explicitThinkingMandatory ||
-        (isQwenFamilyWireModel(model) &&
-          (typed['enable_thinking'] === true ||
-            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
-            (typeof reasoningEffort === 'string' &&
-              reasoningEffort !== 'none'))))
+      shouldDropDashScopeRequiredToolChoice(
+        isDashScope,
+        model,
+        providerRequest,
+        explicitThinkingMandatory,
+      )
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',

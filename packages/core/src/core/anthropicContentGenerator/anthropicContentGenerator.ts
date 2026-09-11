@@ -674,7 +674,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // downgrade once). Both the thinking budget ladder and output_config
     // consume the result so the wire shape stays internally consistent.
     const effectiveEffort = this.resolveEffectiveEffort(request);
-    const thinking = this.buildThinkingConfig(request, effectiveEffort);
+    const thinking = this.buildThinkingConfig(
+      request,
+      effectiveEffort,
+      sampling.max_tokens,
+    );
     const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig
@@ -698,7 +702,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const dropUnsignedAssistantThinking =
       !isDeepSeek &&
       !!thinking &&
-      this.modelSupportsAdaptiveThinking() &&
+      this.modelGenerationSupportsAdaptiveThinking() &&
       !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
@@ -707,7 +711,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Vertex AI, and Bedrock, so (unlike the signature workaround above)
     // this is NOT gated on baseURL.
     const stripTrailingAssistantPrefill =
-      this.modelGenerationRejectsAssistantPrefill();
+      this.modelGenerationSupportsAdaptiveThinking();
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -914,11 +918,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
     const effort = reasoning.effort;
-    if (external) return effort;
     if (effort === undefined) {
       return undefined;
     }
-    if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
+    if (!external && isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
       // DeepSeek's anthropic-compatible output_config.effort accepts only
       // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
       // lift to high and xhigh groups to max, so a low/medium request is not
@@ -937,6 +940,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       }
       return mapped;
     }
+    if (external) return effort;
     // Real Anthropic: clamp the requested tier to what this model actually
     // accepts. Opus 4.7/4.8 and the 5.x families take xhigh/max natively;
     // older models (Opus 4.6 / Sonnet 4.6 lack xhigh, Opus 4.5 lacks both)
@@ -971,15 +975,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         external.profile === 'anthropic-adaptive' ||
         external.profile === 'anthropic-adaptive-only'
       );
-    const parsed = parseClaudeModelVersion(
-      this.contentGeneratorConfig.model || '',
-    );
-    if (!parsed) return false;
-    const { major, minor } = parsed;
-    return major > 4 || (major === 4 && minor >= 6);
+    return this.modelGenerationSupportsAdaptiveThinking();
   }
 
-  private modelGenerationRejectsAssistantPrefill(): boolean {
+  private modelGenerationSupportsAdaptiveThinking(): boolean {
     const parsed = parseClaudeModelVersion(
       this.contentGeneratorConfig.model || '',
     );
@@ -1031,8 +1030,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private buildThinkingConfig(
     request: GenerateContentParameters,
     effectiveEffort: ReasoningEffort | undefined,
+    maxTokens: number,
   ): AnthropicThinkingParam | undefined {
     const external = this.configuredReasoning();
+    const forcedMandatoryThinking =
+      request.config?.thinkingConfig?.includeThoughts === false &&
+      external?.canDisable === false;
     if (
       request.config?.thinkingConfig?.includeThoughts === false &&
       external?.canDisable !== false
@@ -1049,10 +1052,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? undefined
         : effectiveReasoning;
     const requestBudgetCap = request.config?.thinkingConfig?.thinkingBudget;
-    const applyRequestBudgetCap = (budgetTokens: number): number =>
-      typeof requestBudgetCap === 'number' && requestBudgetCap > 0
-        ? Math.min(budgetTokens, requestBudgetCap)
-        : budgetTokens;
+    const applyRequestBudgetCap = (
+      budgetTokens: number,
+    ): number | undefined => {
+      const requestCap =
+        typeof requestBudgetCap === 'number' && requestBudgetCap > 0
+          ? requestBudgetCap
+          : budgetTokens;
+      const capped = Math.min(
+        budgetTokens,
+        requestCap,
+        forcedMandatoryThinking ? maxTokens - 1 : budgetTokens,
+      );
+      return capped >= 1024 ? capped : undefined;
+    };
 
     if (reasoning === false) {
       return undefined;
@@ -1078,9 +1091,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       reasoning?.budget_tokens !== undefined &&
       !this.modelRejectsManualThinking()
     ) {
+      const budgetTokens = applyRequestBudgetCap(reasoning.budget_tokens);
+      if (budgetTokens === undefined) return undefined;
       return {
         type: 'enabled',
-        budget_tokens: applyRequestBudgetCap(reasoning.budget_tokens),
+        budget_tokens: budgetTokens,
       };
     }
 
@@ -1134,9 +1149,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
               ? 64_000
               : 32_000;
 
+    const cappedBudgetTokens = applyRequestBudgetCap(budgetTokens);
+    if (cappedBudgetTokens === undefined) return undefined;
     return {
       type: 'enabled',
-      budget_tokens: applyRequestBudgetCap(budgetTokens),
+      budget_tokens: cappedBudgetTokens,
     };
   }
 

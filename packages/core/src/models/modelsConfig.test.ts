@@ -2115,6 +2115,40 @@ describe('ModelsConfig', () => {
       expect(gc.samplingParams?.max_tokens).toBe(2000);
     });
 
+    it('clears registry reasoning fields when returning to a runtime snapshot', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'declared-model',
+              baseUrl: 'https://runtime.example.com/v1',
+              generationConfig: {
+                reasoningConfig: {
+                  profile: 'openai-effort',
+                  defaultEffort: 'medium',
+                },
+              },
+            },
+          ],
+        },
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+      });
+      const runtimeId = modelsConfig.detectAndCaptureRuntimeModel()!;
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'declared-model');
+      expect(modelsConfig.getGenerationConfig().reasoningConfig).toBeDefined();
+
+      await modelsConfig.switchToRuntimeModel(runtimeId);
+      expect(
+        modelsConfig.getGenerationConfig().reasoningConfig,
+      ).toBeUndefined();
+    });
+
     it('should throw error when switching to non-existent runtime snapshot', async () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,

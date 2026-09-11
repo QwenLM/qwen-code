@@ -104,7 +104,7 @@ thinking rules inferred from an existing model name and endpoint:
   `gemini`. A profile does not change the endpoint, authentication or SDK.
 - `supportedEfforts` overrides the supported subset of
   `low/medium/high/xhigh/max`. Leaving this field out inherits known model
-  capabilities when available, then falls back to the selected protocol's safe
+  capabilities when available, then falls back to the selected profile's safe
   default ladder. Gemini uses
   `low/medium/high`. The two toggle-only profiles (`dashscope-thinking` and
   `qwen-chat-template`) do not accept effort fields.
@@ -114,12 +114,19 @@ thinking rules inferred from an existing model name and endpoint:
   ladder.
 
 Existing `capabilities.reasoning` settings continue to work; an explicit new
-declaration takes precedence.
+declaration takes precedence for fields it can express. A registry
+`canDisable: false` constraint is still inherited, and an inferred toggle-only
+capability rejects effort fields unless `profile` explicitly selects an
+effort-capable format.
 The declaration must contain at least one of the three fields;
 `"reasoningConfig": {}` is invalid.
 `reasoning: false` still disables thinking, and `thinkingMandatory: true`
 prevents disabling it. Fixed budgets continue to use `reasoning.budget_tokens`;
 there is no per-effort budget mapping setting.
+Place `reasoningConfig` inside each model provider entry's `generationConfig`.
+On a declared OpenAI-compatible route, its profile serializer keeps the
+configured reasoning state alongside unrelated `samplingParams`; explicit raw
+thinking fields still take precedence.
 
 Settings reload validates and stages the model update. The entire current
 prompt, including tools and retries, retains its configuration. The latest
@@ -818,13 +825,15 @@ On an `openrouter.ai` baseURL, the OpenAI pipeline emits OpenRouter's provider-l
 
 > [!warning]
 >
-> Except for known GPT models and models with explicit reasoning capabilities, when `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests. A `reasoning` object placed inside `samplingParams` is your own value and ships unchanged while reasoning is enabled: the effort ceiling above applies only to the tier the pipeline injects from `/effort`.
+> Except for known GPT models, models with explicit reasoning capabilities, and routes with `reasoningConfig`, when `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests. A `reasoning` object placed inside `samplingParams` is your own value and ships unchanged while reasoning is enabled: the effort ceiling above applies only to the tier the pipeline injects from `/effort`.
 >
 > Known GPT-5 models and GPT-6 Astra keep configured effort alongside unrelated sampling keys. For example, `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` sends `temperature: 0.5` and flat `reasoning_effort: 'xhigh'` on GPT-5.4, or `'max'` on GPT-5.6 / GPT-6 Astra. On an `openrouter.ai` baseURL the same clamped tier ships as nested `reasoning: { effort }` instead. On non-OpenRouter endpoints, explicit flat reasoning overrides win; nullish or empty-string flat placeholders allow the configured tier. On OpenRouter, a sampling flat override suppresses configured nested effort unless explicit model capabilities inject it; an extra-body-only flat override does not replace the configured nested effort.
 >
 > DashScope Qwen models are another exception: their provider reads `reasoning` directly and maps it to `reasoning_effort` or `enable_thinking`. On the qwen3.8-max family, provider-specific `samplingParams` fields still take precedence when the wire parameters conflict; on older qwen hybrids, a configured effort tier collapses to `enable_thinking: true`, which overrides a `samplingParams.enable_thinking` value.
 >
 > For other models, include the provider's reasoning knob directly when using `samplingParams` — for DeepSeek that is `samplingParams.reasoning_effort`. Known GPT models map configured effort automatically; only add a raw override when intentionally bypassing that mapping. Raw nested `reasoning`, including `null`, remains a whole-object override while reasoning is enabled. Disabling via `reasoning: false` or request-level `includeThoughts: false` removes the nested value, including raw overrides in either layer. Non-OpenRouter GPT requests then send `reasoning_effort: 'none'` when disabling is allowed; OpenRouter uses its nested disable field instead. Mandatory-thinking models receive neither substitute. Outside OpenRouter its meaning depends on the gateway, so model controls show the model default. Any raw override that blocks a configured tier causes an explicit tier change to fail without saving a preference. The thinking switch restores configured raw defaults after disabling only when they permit thinking. If the raw state or configured reasoning default is off, the thinking switch cannot be turned on and the saved preference is retained. This also applies when explicit capabilities omit a default tier or expose only a thinking toggle. Remove the blocking raw override to choose a different tier.
+>
+> The explicit `/effort default` command clears a saved preference without adding a model-default entry to the picker.
 >
 > Anthropic and Gemini routes also apply `reasoningConfig` defaults and supported-tier rules. Their native `samplingParams` handling remains independent of the OpenAI-compatible raw-override behavior described above.
 

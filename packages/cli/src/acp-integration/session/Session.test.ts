@@ -6988,6 +6988,43 @@ describe('Session', () => {
       });
     });
 
+    it('applies staged providers before resolving an idle model selection', async () => {
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([]);
+      vi.mocked(mockConfig.applyPendingModelProvidersReload).mockImplementation(
+        async () => {
+          vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+            {
+              id: 'new-model',
+              label: 'New model',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://new.example/v1',
+            },
+          ]);
+          return true;
+        },
+      );
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `new-model(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(
+        mockConfig.applyPendingModelProvidersReload,
+      ).toHaveBeenCalledOnce();
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'new-model',
+        undefined,
+      );
+      expect(
+        vi.mocked(mockConfig.applyPendingModelProvidersReload).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockConfig.switchModel).mock.invocationCallOrder[0]!,
+      );
+    });
+
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
       await session.setModel({

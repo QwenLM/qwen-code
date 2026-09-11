@@ -6174,6 +6174,16 @@ class QwenAgent implements Agent {
                 : choice.options.map((nested) => nested.value),
             ) ?? [];
           if (
+            !selected &&
+            typeof value === 'string' &&
+            value === option?.currentValue &&
+            choices.includes(value)
+          ) {
+            return {
+              configOptions: this.buildConfigOptions(config, defaultReasoning),
+            };
+          }
+          if (
             !option ||
             !selected ||
             (selected !== REASONING_EFFORT_DEFAULT &&

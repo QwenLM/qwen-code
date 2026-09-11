@@ -359,11 +359,7 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <EffortDialog
           currentEffort={(() => {
-            const reasoning = config.getEffectiveReasoning
-              ? config.getEffectiveReasoning()
-              : config.getReasoningEffort()
-                ? { effort: config.getReasoningEffort() }
-                : undefined;
+            const reasoning = config.getEffectiveReasoning();
             return reasoning === false ? undefined : reasoning?.effort;
           })()}
           efforts={getReasoningEffortsForConfig(config)}

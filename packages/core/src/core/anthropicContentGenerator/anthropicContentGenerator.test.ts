@@ -1487,12 +1487,12 @@ describe('AnthropicContentGenerator', () => {
           maxRetries: 2,
           samplingParams: {
             temperature: 0.7,
-            max_tokens: 1000,
+            max_tokens: 2000,
             top_p: 0.9,
             top_k: 20,
           },
           schemaCompliance: 'auto',
-          reasoning: { effort: 'high', budget_tokens: 1000 },
+          reasoning: { effort: 'high', budget_tokens: 1500 },
         },
         mockConfig,
       );
@@ -1503,8 +1503,8 @@ describe('AnthropicContentGenerator', () => {
         contents: 'Hello',
         config: {
           temperature: 0.1,
-          maxOutputTokens: 200,
-          thinkingConfig: { thinkingBudget: 199 },
+          maxOutputTokens: 1500,
+          thinkingConfig: { thinkingBudget: 1499 },
           topP: 0.5,
           topK: 5,
           abortSignal: abortController.signal,
@@ -1530,13 +1530,13 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({
           model: 'claude-test',
           // Sampling params override the request — EXCEPT max_tokens, where
-          // the smaller of config (1000) and request (200) wins so the
+          // the smaller of config (2000) and request (1500) wins so the
           // send-path window clamp can never be overridden upward.
-          max_tokens: 200,
+          max_tokens: 1500,
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
-          thinking: { type: 'enabled', budget_tokens: 199 },
+          thinking: { type: 'enabled', budget_tokens: 1499 },
           output_config: { effort: 'high' },
         }),
       );
@@ -1564,7 +1564,7 @@ describe('AnthropicContentGenerator', () => {
           baseUrl: 'https://api.anthropic.com',
           timeout: 10_000,
           maxRetries: 2,
-          samplingParams: { max_tokens: 200 },
+          samplingParams: { max_tokens: 2000 },
           schemaCompliance: 'auto',
           reasoning: { effort: 'high' },
         },
@@ -1574,18 +1574,58 @@ describe('AnthropicContentGenerator', () => {
       await generator.generateContent({
         model: 'models/ignored',
         contents: 'Hello',
-        config: { thinkingConfig: { thinkingBudget: 199 } },
+        config: { thinkingConfig: { thinkingBudget: 1024 } },
       } as unknown as GenerateContentParameters);
 
       const [anthropicRequest] =
         anthropicState.lastCreateArgs as AnthropicCreateArgs;
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
-          max_tokens: 200,
-          thinking: { type: 'enabled', budget_tokens: 199 },
+          max_tokens: 2000,
+          thinking: { type: 'enabled', budget_tokens: 1024 },
           output_config: { effort: 'high' },
         }),
       );
+    });
+
+    it('keeps mandatory thinking below a bounded side-query output limit', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-5',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+          thinkingMandatory: true,
+          reasoningConfig: { profile: 'anthropic-manual' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: {
+          maxOutputTokens: 256,
+          thinkingConfig: { includeThoughts: false },
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toMatchObject({
+        max_tokens: 256,
+        temperature: 1,
+      });
+      expect(anthropicRequest).not.toHaveProperty('thinking');
     });
 
     // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
@@ -2870,6 +2910,7 @@ describe('AnthropicContentGenerator', () => {
     async function sendWithBaseUrl(
       baseUrl: string,
       contents: GenerateContentParameters['contents'] = unsignedThinkingConversation,
+      reasoningConfig?: ContentGeneratorConfig['reasoningConfig'],
     ) {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
@@ -2886,6 +2927,7 @@ describe('AnthropicContentGenerator', () => {
           maxRetries: 2,
           samplingParams: { max_tokens: 500 },
           schemaCompliance: 'auto',
+          reasoningConfig,
         },
         mockConfig,
       );
@@ -2910,6 +2952,19 @@ describe('AnthropicContentGenerator', () => {
         type: 'adaptive',
         display: 'summarized',
       });
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Visible answer' }],
+      });
+    });
+
+    it('drops unsigned thinking for Claude 4.6 when a profile selects manual thinking', async () => {
+      const request = await sendWithBaseUrl(
+        'https://internal-proxy.example/anthropic',
+        unsignedThinkingConversation,
+        { profile: 'anthropic-manual' },
+      );
+
       expect(request.messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'text', text: 'Visible answer' }],

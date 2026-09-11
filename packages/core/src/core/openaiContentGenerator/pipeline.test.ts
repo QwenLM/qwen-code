@@ -1674,6 +1674,63 @@ describe('ContentGenerationPipeline', () => {
       ).not.toHaveProperty('tool_choice');
     });
 
+    it('removes forced tool choice for an enabled qwen effort profile on DashScope', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'qwen3-max',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoningConfig: {
+          profile: 'openai-effort',
+          defaultEffort: 'medium',
+        },
+      };
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'qwen3-max',
+          contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+          config: {
+            tools: [
+              {
+                functionDeclarations: [
+                  {
+                    name: 'respond_in_schema',
+                    parameters: { type: Type.OBJECT, properties: {} },
+                  },
+                ],
+              },
+            ],
+            toolConfig: {
+              functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+            },
+          },
+        },
+        'prompt-id',
+      );
+
+      const body = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(body.reasoning_effort).toBe('medium');
+      expect(body).not.toHaveProperty('tool_choice');
+    });
+
     it('learns required thinking from a provider error and retries once', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,

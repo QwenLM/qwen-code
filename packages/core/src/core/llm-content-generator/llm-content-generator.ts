@@ -8,6 +8,7 @@ import {
   getModelReasoningConfig,
   resolveEffectiveReasoning,
 } from '../model-reasoning-config.js';
+import { REASONING_EFFORT_TIERS } from '../reasoning-effort.js';
 import type {
   EmbedContentParameters,
   EmbedContentResponse,
@@ -243,8 +244,11 @@ export class LlmContentGenerator implements ContentGenerator {
         generation?.reasoning === false);
     const requestedEffort = reasoning === false ? undefined : reasoning?.effort;
     const fallbackEffort =
-      external && !external.toggleOnly
-        ? (external.defaultEffort ?? external.efforts[0])
+      mandatoryOverride && external && !external.toggleOnly
+        ? (external.defaultEffort ??
+          REASONING_EFFORT_TIERS.find((tier) =>
+            external.efforts.includes(tier),
+          ))
         : undefined;
     const effectiveEffort = requestedEffort ?? fallbackEffort;
 

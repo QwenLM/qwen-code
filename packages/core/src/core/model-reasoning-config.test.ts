@@ -180,6 +180,48 @@ describe('external model reasoning configuration', () => {
     expect(resolved?.canDisable).toBeUndefined();
   });
 
+  it('inherits a registry mandatory constraint through an explicit profile', () => {
+    const resolved = resolveModelReasoningConfig(
+      {
+        ...route,
+        reasoningConfig: { profile: 'openai-effort' },
+      },
+      {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'max',
+        disableField: 'reasoning_effort',
+        canDisable: false,
+      },
+    );
+    expect(resolved?.canDisable).toBe(false);
+    expect(resolveEffectiveReasoning({ reasoning: false }, resolved)).toEqual({
+      effort: 'max',
+    });
+  });
+
+  it('names a toggle-only inferred profile in effort validation errors', () => {
+    expect(() =>
+      resolveModelReasoningConfig({
+        model: 'qwen-plus',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoningConfig: { defaultEffort: 'medium' },
+      }),
+    ).toThrow('inferred profile "dashscope-thinking"');
+  });
+
+  it('recognizes provider-prefixed qwen model ids during profile inference', () => {
+    expect(() =>
+      resolveModelReasoningConfig({
+        model: 'provider:qwen3-235b-a22b',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://vllm.internal/v1',
+        reasoningConfig: { defaultEffort: 'medium' },
+      }),
+    ).toThrow('inferred profile "qwen-chat-template"');
+  });
+
   it.each([
     {},
     { profile: 'not-a-profile' },

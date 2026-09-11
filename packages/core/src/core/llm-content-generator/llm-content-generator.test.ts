@@ -684,6 +684,31 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it('keeps an optional declaration without a tier unspecified', async () => {
+    const optional = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      reasoning: {},
+      reasoningConfig: { profile: 'gemini' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await optional.generateContent(
+      { model: 'gemini-alias', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
+          },
+        }),
+      }),
+    );
+  });
+
   it('forces the lowest declared Gemini tier when mandatory thinking has no default', async () => {
     const mandatory = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-alias',
@@ -700,6 +725,32 @@ describe('LlmContentGenerator', () => {
           thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
         },
       },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: true, thinkingLevel: 'LOW' },
+        }),
+      }),
+    );
+  });
+
+  it('uses canonical tier order for a mandatory unsorted declaration', async () => {
+    const mandatory = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      thinkingMandatory: true,
+      reasoning: false,
+      reasoningConfig: {
+        profile: 'gemini',
+        supportedEfforts: ['high', 'low'],
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await mandatory.generateContent(
+      { model: 'gemini-alias', contents: [] },
       'prompt-id',
     );
 

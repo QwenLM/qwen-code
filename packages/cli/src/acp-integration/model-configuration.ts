@@ -463,20 +463,27 @@ export function buildModelReasoningConfigOption(
     (state.effort !== undefined ||
       reasoning.toggleOnly ||
       reasoning.defaultEnabled !== false);
+  const rawEffort = state.effort as string | undefined;
+  const nativeEffort =
+    rawEffort && !REASONING_EFFORT_TIERS.includes(rawEffort as ReasoningEffort)
+      ? rawEffort
+      : undefined;
   const effort =
+    !nativeEffort &&
     state.effort &&
     !reasoning.toggleOnly &&
     (reasoning.profile ||
       (getGptReasoningCapabilities(modelId) &&
         !parseModelReasoningCapabilities(configuredReasoning)))
       ? clampReasoningEffort(state.effort, reasoning.efforts)
-      : state.effort;
+      : (nativeEffort ?? state.effort);
   const currentValue =
     !enabled && canDisable
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT
-        : (reasoning.efforts.find((candidate) => candidate === effort) ??
+        : (nativeEffort ??
+          reasoning.efforts.find((candidate) => candidate === effort) ??
           reasoning.defaultEffort ??
           REASONING_EFFORT_DEFAULT);
 
@@ -520,6 +527,15 @@ export function buildModelReasoningConfigOption(
               name: REASONING_EFFORT_NAMES[effort],
               description: 'Apply this effort to the next request',
             })),
+            ...(nativeEffort
+              ? [
+                  {
+                    value: nativeEffort,
+                    name: nativeEffort,
+                    description: 'Current provider-specific effort',
+                  },
+                ]
+              : []),
           ]),
     ],
     _meta: {
@@ -547,10 +563,10 @@ export function buildModelReasoningConfigPreview(
   configuredReasoning?: ModelReasoningConfiguration,
   generation?: ContentGeneratorConfig,
 ): SessionConfigOption[] | undefined {
-  if (generation)
-    configuredReasoning =
-      resolveModelReasoningConfig(generation, configuredReasoning) ??
-      configuredReasoning;
+  const external = generation
+    ? resolveModelReasoningConfig(generation, configuredReasoning)
+    : undefined;
+  configuredReasoning = external ?? configuredReasoning;
   const reasoning = getModelConfiguration(
     modelId,
     configuredReasoning,
@@ -577,9 +593,6 @@ export function buildModelReasoningConfigPreview(
       { ...generation, reasoning: undefined },
       configuredReasoning,
     );
-  const external = generation
-    ? resolveModelReasoningConfig(generation, configuredReasoning)
-    : undefined;
   const externalState =
     generation && external
       ? generation.authType === 'openai' || generation.authType === 'qwen-oauth'

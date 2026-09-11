@@ -10861,6 +10861,15 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
+    if (
+      this.isIdle() &&
+      (await this.config.applyPendingModelProvidersReload?.())
+    ) {
+      this.reconcileReasoningSelection(this.config.getModel(), {
+        persist: false,
+      });
+    }
+
     const resolvedRoute = resolveAcpModelOption(
       rawModelId,
       this.config.getAllConfiguredModels(),

@@ -52,8 +52,9 @@ transformations, and must travel with the exact model, endpoint, credentials and
 staged generation settings. Extending the client-facing capability object would
 still require a transport profile and would couple provider serialization to
 discovery payloads. The resolver keeps the boundary one-way: an explicit
-generation declaration wins, while omitted fields may inherit existing
-capabilities.
+generation declaration wins for fields it can express, while omitted fields
+may inherit existing capabilities. Registry constraints that the generation
+shape cannot express, such as `canDisable: false`, remain authoritative.
 
 Efforts use `low/medium/high/xhigh/max`. Toggle-only profiles reject effort
 fields. Validate profile/protocol compatibility and unique supported efforts.
