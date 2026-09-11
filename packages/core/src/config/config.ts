@@ -92,6 +92,10 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  ToolMode,
+  type ToolMode as ToolModeValue,
+} from '../tools/code-mode.js';
 import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
@@ -981,6 +985,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
+  /** Replace ordinary model-facing tools with the isolated exec bridge. */
+  codeModeOnly?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -1069,6 +1075,19 @@ export interface ConfigParameters {
    * `GOAL_DEFAULT_TOKEN_BUDGET`. See `normalizeGoalTokenBudget`.
    */
   goalTokenBudget?: number;
+  /**
+   * Goal-turn window armed on each new Goal, in finished Goal turns including
+   * user-driven turns. Absent runs Goals with no turn ceiling, and `-1` says
+   * so explicitly. See `normalizeGoalMaxTurns`.
+   */
+  goalMaxTurns?: number;
+  /**
+   * Active-time window armed on each new Goal, in minutes of wall time while
+   * the Goal stays `active` in this process, including waits and idle time.
+   * Absent runs Goals with no time ceiling, and `-1` says so explicitly. See
+   * `normalizeGoalMaxActiveMinutes`.
+   */
+  goalMaxActiveMinutes?: number;
   /**
    * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
    * Absent or invalid falls back to
@@ -1536,6 +1555,78 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
     Number.isInteger(value) &&
     (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
   );
+}
+
+/**
+ * Largest accepted `model.goalMaxTurns`.
+ *
+ * A typo guard on the same reasoning as `GOAL_TOKEN_BUDGET_CAP`, sized well
+ * above any cadence a user would ask for by hand: a Goal that genuinely
+ * wants more turns than this wants no turn ceiling, which is the default.
+ */
+export const GOAL_MAX_TURNS_CAP = 10_000;
+
+/**
+ * Largest accepted `model.goalMaxActiveMinutes`: one week of active time.
+ *
+ * Active time accrues while the Goal stays active in a running process, so a
+ * week of it is already far past any single authorization a user would grant
+ * deliberately.
+ */
+export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
+
+/**
+ * True for the values `normalizeGoalMaxTurns` honours: `0` and its alias `-1`
+ * for no ceiling, or a positive integer up to `GOAL_MAX_TURNS_CAP`.
+ */
+export function isValidGoalMaxTurns(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_TURNS_CAP))
+  );
+}
+
+/**
+ * Resolves the operator's Goal turn budget to the grant the runtime arms.
+ *
+ * Unlike the token budget, the default is no ceiling: a turn budget is a
+ * cadence a user asks for, not a runaway-spend guard every Goal needs, so an
+ * absent or invalid setting arms nothing rather than falling back to a
+ * number nobody chose. Direct Config embedders may use `0` or `-1` as an
+ * opt-out; the CLI rejects `0` as a likely typo before this layer. The runtime
+ * spells "arm nothing" as a non-finite grant.
+ */
+export function normalizeGoalMaxTurns(value: unknown): number {
+  if (!isValidGoalMaxTurns(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value;
+}
+
+/**
+ * True for the values `normalizeGoalMaxActiveMinutes` honours: `0` and its
+ * alias `-1` for no ceiling, or a positive integer up to
+ * `GOAL_MAX_ACTIVE_MINUTES_CAP`.
+ */
+export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_ACTIVE_MINUTES_CAP))
+  );
+}
+
+/**
+ * Resolves the host's Goal active-time budget to the grant the runtime arms,
+ * in milliseconds. Defaults to no ceiling, exactly like
+ * `normalizeGoalMaxTurns`.
+ */
+export function normalizeGoalMaxActiveMinutes(value: unknown): number {
+  if (!isValidGoalMaxActiveMinutes(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value * 60_000;
 }
 
 /**
@@ -2272,6 +2363,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2418,6 +2510,8 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly goalTokenBudgetGrant: number;
+  private readonly goalTurnBudgetGrant: number;
+  private readonly goalActiveTimeBudgetGrantMs: number;
   private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
@@ -2756,6 +2850,26 @@ export class Config {
         `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
       );
     }
+    this.goalTurnBudgetGrant = normalizeGoalMaxTurns(params.goalMaxTurns);
+    if (
+      params.goalMaxTurns !== undefined &&
+      !isValidGoalMaxTurns(params.goalMaxTurns)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxTurns ${String(params.goalMaxTurns)}: expected an integer between 1 and ${GOAL_MAX_TURNS_CAP}, or -1 for no turn ceiling; Goals will run with no turn ceiling.`,
+      );
+    }
+    this.goalActiveTimeBudgetGrantMs = normalizeGoalMaxActiveMinutes(
+      params.goalMaxActiveMinutes,
+    );
+    if (
+      params.goalMaxActiveMinutes !== undefined &&
+      !isValidGoalMaxActiveMinutes(params.goalMaxActiveMinutes)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
+      );
+    }
     this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
       params.goalCheckpointTimeoutSeconds,
     );
@@ -2836,6 +2950,10 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
+    this.toolMode =
+      params.codeModeOnly && !this.bareMode && !this.safeMode
+        ? ToolMode.CodeModeOnly
+        : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -5739,6 +5857,24 @@ export class Config {
   }
 
   /**
+   * The Goal-turn window armed on each new Goal, as the runtime's
+   * `turnBudgetGrant`: a positive integer, or `Infinity` when no ceiling is
+   * configured (the default).
+   */
+  getGoalTurnBudgetGrant(): number {
+    return this.goalTurnBudgetGrant;
+  }
+
+  /**
+   * The active-time window armed on each new Goal, in milliseconds, as the
+   * runtime's `activeTimeBudgetGrantMs`: a positive number, or `Infinity`
+   * when no ceiling is configured (the default).
+   */
+  getGoalActiveTimeBudgetGrantMs(): number {
+    return this.goalActiveTimeBudgetGrantMs;
+  }
+
+  /**
    * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
    * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
    * default.
@@ -6442,6 +6578,14 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
+  }
+
+  getCodeModeOnly(): boolean {
+    return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getToolMode(): ToolModeValue {
+    return this.toolMode;
   }
 
   /**
@@ -7185,6 +7329,13 @@ export class Config {
 
   getApprovalMode(): ApprovalMode {
     return this.approvalMode;
+  }
+
+  getSessionApprovalMode(): ApprovalMode {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).getSessionApprovalMode();
+    }
+    return this.getApprovalMode();
   }
 
   /**
@@ -9041,6 +9192,8 @@ export class Config {
         timeoutMs: this.goalCheckpointTimeoutMs,
       }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
+      turnBudgetGrant: this.goalTurnBudgetGrant,
+      activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
@@ -9761,6 +9914,14 @@ export class Config {
       }
     };
 
+    const registerExecIfEnabled = async (): Promise<void> => {
+      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      await registerLazy(ToolNames.EXEC, async () => {
+        const { ExecTool } = await import('../tools/exec.js');
+        return new ExecTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -9780,6 +9941,7 @@ export class Config {
       });
       await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
+      await registerExecIfEnabled();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -9787,6 +9949,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');

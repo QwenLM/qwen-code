@@ -722,6 +722,21 @@ describe('suggestion shape stability', () => {
     expect(suggestions[0]?.argumentHint).toBe('<path>');
     expect(suggestions[0]?.description).toBe('cd2 description');
   });
+
+  it('carries the command source badge the dropdown column is measured against', () => {
+    const byValue = new Map(
+      slashSuggestions('/m', [
+        cmd({ name: 'mcp-list', source: 'mcp-prompt' }),
+        cmd({ name: 'model', source: 'builtin-command' }),
+        cmd({ name: 'memory' }),
+      ]).map((s) => [s.value, s.sourceBadge]),
+    );
+    expect(byValue.get('mcp-list')).toBe('[MCP]');
+    // A built-in has no badge; leave it undefined rather than an empty string,
+    // which would still widen the label column by a trailing space.
+    expect(byValue.get('model')).toBeUndefined();
+    expect(byValue.get('memory')).toBeUndefined();
+  });
 });
 
 describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
