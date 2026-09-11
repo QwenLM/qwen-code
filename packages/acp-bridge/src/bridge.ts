@@ -3804,6 +3804,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     owner.state = 'draining';
     if (channelInfo === owner) cancelIdleTimer();
+    // `retireWhenSessionsDrain` is a single sticky flag shared by every
+    // retire-after-drain condemnor on this channel. Capture whether a different
+    // path had already condemned it so the rollback below only clears the
+    // condemnation this recycle itself set, instead of erasing someone else's.
+    const wasReapPending = owner.retireWhenSessionsDrain;
     await retireChannelAfterSessionsDrain(
       owner,
       `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
@@ -3819,7 +3824,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // it keep serving as a degraded fallback until a generation drains.
         if (error instanceof BridgeRuntimeRecyclingError) {
           owner.state = 'active';
-          owner.retireWhenSessionsDrain = false;
+          if (!wasReapPending) {
+            owner.retireWhenSessionsDrain = false;
+          }
         }
         throw error;
       }
