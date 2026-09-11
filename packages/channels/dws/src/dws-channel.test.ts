@@ -700,6 +700,10 @@ class PolicyDwsChannel extends DwsChannel {
   mentionCheckpoint(): unknown {
     return this.cursor.mentionCheckpoint;
   }
+
+  mentionWatermark(): number | undefined {
+    return this.cursor.mentionWatermark;
+  }
 }
 
 let qwenHome: string;
@@ -8533,6 +8537,158 @@ describe('DwsChannel', () => {
       await third.poll();
 
       expect(thirdClient.listDirectMessages).toHaveBeenCalledWith(
+        495_000,
+        500_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('restarts direct history from an unadvanced untagged boundary when the profile changes', async () => {
+    const name = 'unadvanced-untagged-boundary-direct-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      // No configured profile: the floor this channel writes is untagged.
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        name,
+      );
+      first.disconnect();
+
+      // Re-enable direct access at t=20_000: floor 20_000 and boundary
+      // watermark 25_000 are written untagged, and the only poll paginates
+      // without completing, so the watermark never leaves the boundary.
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      secondClient.listDirectMessages.mockResolvedValueOnce({
+        messages: [],
+        nextCursor: 'cursor-100',
+      });
+      const { channel: second } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+      await second.poll();
+      expect(second.notificationWatermark()).toBe(25_000);
+      second.disconnect();
+
+      // The active login switches: the retained boundary encodes corp-one's
+      // re-enable point and must not serve corp-two's history.
+      now.mockReturnValue(500_000);
+      const thirdClient = new FakeDwsClient();
+      thirdClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      thirdClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'unadvanced-boundary-direct',
+          'belongs to the era corp-one re-enabled',
+          { eventTime: 100_000 },
+        ),
+      ];
+      const { channel: third, bridge } = await readyPolicyChannel(
+        thirdClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await third.poll();
+
+      expect(thirdClient.listDirectMessages).toHaveBeenCalledWith(
+        495_000,
+        500_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('restarts group history from an unadvanced untagged boundary when the profile changes', async () => {
+    const name = 'unadvanced-untagged-boundary-group-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      // No configured profile: the floor this channel writes is untagged.
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        name,
+      );
+      first.disconnect();
+
+      // Re-enable group access at t=20_000: floor 20_000 and boundary
+      // watermark 25_000 are written untagged, and the only poll paginates
+      // without completing, so the watermark never leaves the boundary.
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      secondClient.listMentionedMessages.mockResolvedValueOnce({
+        messages: [],
+        nextCursor: 'cursor-100',
+      });
+      const { channel: second } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ dmPolicy: 'disabled' }),
+        name,
+      );
+      await second.poll();
+      expect(second.mentionWatermark()).toBe(25_000);
+      second.disconnect();
+
+      // The active login switches: the retained boundary encodes corp-one's
+      // re-enable point and must not serve corp-two's history.
+      now.mockReturnValue(500_000);
+      const thirdClient = new FakeDwsClient();
+      thirdClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      thirdClient.mentionedMessages = [
+        message(
+          'user_im_message_receive_at',
+          'unadvanced-boundary-mention',
+          'belongs to the era corp-one re-enabled',
+          { eventTime: 100_000 },
+        ),
+      ];
+      const { channel: third, bridge } = await readyPolicyChannel(
+        thirdClient,
+        makeConfig({ dmPolicy: 'disabled' }),
+        name,
+      );
+
+      await third.poll();
+
+      expect(thirdClient.listMentionedMessages).toHaveBeenCalledWith(
         495_000,
         500_000,
         expect.any(AbortSignal),

@@ -914,6 +914,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       identity.profile,
     );
     if (this.cursor.selfProfile !== identity.profile) {
+      const previousProfile = this.cursor.selfProfile;
       this.cursor.selfSenderIds = [];
       this.cursor.selfProfile = identity.profile;
       this.cursor.todosInitialized = false;
@@ -932,14 +933,18 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       // re-enable boundary with no mismatched tag — then it encodes the
       // boundary itself, not a served position. Once a poll has advanced it,
       // the position belongs to whichever identity served it, and the window
-      // restarts from this connect.
+      // restarts from this connect. An untagged boundary vouches for no
+      // identity: it survives only when no profile has authenticated yet, and
+      // with a previous profile on record it encodes that departed account's
+      // re-enable point, so the window restarts here too.
       if (
         this.cursor.notificationHistoryFloor === undefined ||
         this.cursor.notificationWatermark !==
           this.cursor.notificationHistoryFloor +
             NOTIFICATION_HISTORY_OVERLAP_MS ||
-        (this.cursor.notificationHistoryFloorProfile !== undefined &&
-          this.cursor.notificationHistoryFloorProfile !== identity.profile)
+        (this.cursor.notificationHistoryFloorProfile !== undefined
+          ? this.cursor.notificationHistoryFloorProfile !== identity.profile
+          : previousProfile !== undefined)
       ) {
         this.cursor.notificationWatermark = undefined;
       }
@@ -947,8 +952,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         this.cursor.mentionHistoryFloor === undefined ||
         this.cursor.mentionWatermark !==
           this.cursor.mentionHistoryFloor + NOTIFICATION_HISTORY_OVERLAP_MS ||
-        (this.cursor.mentionHistoryFloorProfile !== undefined &&
-          this.cursor.mentionHistoryFloorProfile !== identity.profile)
+        (this.cursor.mentionHistoryFloorProfile !== undefined
+          ? this.cursor.mentionHistoryFloorProfile !== identity.profile
+          : previousProfile !== undefined)
       ) {
         this.cursor.mentionWatermark = undefined;
       }
