@@ -2923,6 +2923,28 @@ describe('ChatPane', () => {
     );
   });
 
+  it('suppresses stale context and its action after a pane session becomes unavailable', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = null;
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('suppresses stale context while the pane connection is in error', () => {
+    connectionState.status = 'error';
+    connectionState.sessionId = 'sess-1';
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
   it('shows context usage for this pane session', async () => {
     render();
 
@@ -3414,6 +3436,7 @@ describe('ChatPane continuation errors', () => {
       // Actual action + actual ChatPane/Banner; only SDK request and hook state
       // delivery are simulated. No SSE frames or provider replay are invented.
       const actions = createDaemonSessionActions({
+        store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
         sessionRef,
         activePromptsRef: { current: new Map() },
         settledPromptsRef: { current: new Map() },
@@ -3429,9 +3452,8 @@ describe('ChatPane continuation errors', () => {
         setPromptStatus: vi.fn(),
         addNotice,
       } as unknown as Parameters<typeof createDaemonSessionActions>[0]);
-      Object.assign(daemonActions, {
-        continueSession: actions.continueSession,
-      });
+      const continueAction = vi.fn(actions.continueSession);
+      Object.assign(daemonActions, { continueSession: continueAction });
       try {
         render({ onError });
         const button = testid('session-recovery-banner')?.querySelector(
@@ -3462,6 +3484,9 @@ describe('ChatPane continuation errors', () => {
           request.reject(requestError);
           await Promise.resolve();
         });
+        await expect(continueAction.mock.results[0]!.value).rejects.toBe(
+          requestError,
+        );
         rerender({ onError });
         const inlineErrors = Array.from(
           container!.querySelectorAll('[role="alert"]'),

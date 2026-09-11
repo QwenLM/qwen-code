@@ -1384,7 +1384,11 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (currentConversation && !hasSessionActivePrompt()) {
+        if (
+          currentConversation &&
+          !hasSessionActivePrompt() &&
+          !store.getSnapshot().activeAssistantBlockId
+        ) {
           setPromptStatus('idle');
         }
         const currentSession = sessionRef.current;

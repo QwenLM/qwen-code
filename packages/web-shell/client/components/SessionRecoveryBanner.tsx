@@ -1,3 +1,4 @@
+import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import { useEffect, useRef, useState } from 'react';
 import {
   useActions,
@@ -60,7 +61,8 @@ export function SessionRecoveryBanner({
     setFailedOwner(null);
     try {
       await actions.continueSession();
-    } catch {
+    } catch (error) {
+      if (isDaemonTurnError(error)) return;
       if (owner.isCurrent()) {
         setFailedOwner(ownerGuard.capture({ includeRecovery: true }));
       }

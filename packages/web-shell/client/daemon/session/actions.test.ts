@@ -2428,6 +2428,7 @@ describe('createDaemonSessionActions', () => {
     it('tracks the admitted turn without appending a user message', async () => {
       const session = createMockSession('session-a');
       const restartEventStream = vi.fn();
+      const onContinuationAdmitted = vi.fn();
       const {
         actions,
         activePromptsRef,
@@ -2438,6 +2439,7 @@ describe('createDaemonSessionActions', () => {
         session,
         connection: connection(),
         restartEventStream,
+        onContinuationAdmitted,
       });
       const pending = actions.continueSession();
       expect(getConnection().context?.recovery).toEqual({
@@ -2458,6 +2460,10 @@ describe('createDaemonSessionActions', () => {
         expect.any(AbortSignal),
       );
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
+      expect(onContinuationAdmitted).toHaveBeenCalledExactlyOnceWith(
+        session,
+        'continue-1',
+      );
       expect(session.submitPrompt).not.toHaveBeenCalled();
       expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
       expect(session.context).not.toHaveBeenCalled();
@@ -4959,6 +4965,7 @@ function createActionsHarness(
     hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
+    onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
     passiveAssistantDoneTimerRef?: {
       current: ReturnType<typeof setTimeout> | undefined;
@@ -5049,6 +5056,7 @@ function createActionsHarness(
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     onPromptAdmitted: opts.onPromptAdmitted,
+    onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;

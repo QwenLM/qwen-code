@@ -159,6 +159,17 @@ describe('SessionRecoveryBanner', () => {
     },
   );
 
+  it('does not report an admitted turn error as a continuation failure', async () => {
+    state.continueSession.mockRejectedValue(
+      Object.assign(new Error('Model rate limit'), { _daemonTurnError: true }),
+    );
+    render();
+    await act(async () => container.querySelector('button')!.click());
+    expect(state.continueSession).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('button')?.disabled).toBe(false);
+  });
+
   it.each([
     'owner-replaced',
     'new-activity',

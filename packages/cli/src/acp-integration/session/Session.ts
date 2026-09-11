@@ -112,6 +112,7 @@ import {
   createHookOutput,
   wrapUserPromptSubmitContext,
   generateToolUseId,
+  isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
@@ -1220,6 +1221,7 @@ interface InFlightTurnRecording {
   originatorClientId?: string;
   abortController?: AbortController;
   startedAt?: number;
+  cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
   finalAnswer: { finalText: string };
@@ -1517,12 +1519,15 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId?: string;
+  groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -4652,6 +4657,17 @@ export class Session implements SessionContext {
       );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    const recordAdmissionCancellation = () => {
+      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+    };
+    admissionCancellation?.addEventListener(
+      'abort',
+      recordAdmissionCancellation,
+      {
+        once: true,
+      },
+    );
+    if (admissionCancellation?.aborted) recordAdmissionCancellation();
     try {
       const result = await this.#promptWithTurnRecording(
         params,
@@ -4661,7 +4677,7 @@ export class Session implements SessionContext {
         scheduledGoalTurn,
         turnRecording,
       );
-      this.#settleTurnRecording(
+      await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
         result,
@@ -4686,11 +4702,16 @@ export class Session implements SessionContext {
         (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
-        this.#settleTurnRecording('cancelled', turnRecording, result);
+        await this.#settleTurnRecording('cancelled', turnRecording, result);
         return result;
       }
-      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      await this.#settleTurnRecording('error', turnRecording, undefined, error);
       throw error;
+    } finally {
+      admissionCancellation?.removeEventListener(
+        'abort',
+        recordAdmissionCancellation,
+      );
     }
   }
 
@@ -4790,6 +4811,17 @@ export class Session implements SessionContext {
     this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
     const pendingSend = goalTurn?.controller ?? new AbortController();
     if (turnRecording) turnRecording.abortController = pendingSend;
+    const recordCancellation = () => {
+      if (
+        turnRecording &&
+        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON
+      ) {
+        turnRecording.cancelledAt ??= Date.now();
+      }
+    };
+    pendingSend.signal.addEventListener('abort', recordCancellation, {
+      once: true,
+    });
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -4800,6 +4832,7 @@ export class Session implements SessionContext {
     this.pendingPrompt = pendingSend;
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
+      pendingSend.signal.removeEventListener('abort', recordCancellation);
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
       }
@@ -7868,13 +7901,27 @@ export class Session implements SessionContext {
     };
   }
 
-  #settleTurnRecording(
+  async #settleTurnRecording(
     state: 'completed' | 'cancelled' | 'error',
     recording: InFlightTurnRecording | null,
     response?: PromptResponse,
     error?: unknown,
-  ): void {
+  ): Promise<void> {
     if (recording === null) return;
+    const cancelledAt =
+      state === 'cancelled' ? recording.cancelledAt : undefined;
+    if (cancelledAt !== undefined && response) {
+      response._meta = {
+        ...response._meta,
+        'qwen.promptCancelled': {
+          cancelledAt,
+          elapsedMs: Math.max(
+            0,
+            cancelledAt - (recording.startedAt ?? cancelledAt),
+          ),
+        },
+      };
+    }
     const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
     const stopReason =
       response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
@@ -7886,6 +7933,7 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
+      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -7902,6 +7950,9 @@ export class Session implements SessionContext {
     };
     try {
       recording.recordingService?.recordTurnResult(payload);
+      if (cancelledAt !== undefined) {
+        await recording.recordingService?.flush();
+      }
     } catch (recordError) {
       debugLogger.warn(
         `Failed to record turn result: ${this.#formatError(recordError)}`,
@@ -9027,6 +9078,33 @@ export class Session implements SessionContext {
           );
         });
     };
+    const restoreOneShot = async (): Promise<void> => {
+      if (job.recurring !== false || !job.id) return;
+      try {
+        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        if (!restored) {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not restore its unexecuted one-shot: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (
+      (job.modelServiceId !== undefined &&
+        !isValidCronTaskRoutingId(job.modelServiceId)) ||
+      (job.groupId !== undefined && !isValidCronTaskRoutingId(job.groupId))
+    ) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
+      );
+      await record({ dispatchFailed: true });
+      await restoreOneShot();
+      return;
+    }
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
@@ -9054,6 +9132,8 @@ export class Session implements SessionContext {
                 sourceId: scheduledTaskRunSourceId(job.id),
               }
             : {}),
+          ...(job.modelServiceId ? { model: job.modelServiceId } : {}),
+          ...(job.groupId ? { groupId: job.groupId } : {}),
           callerSessionId: this.sessionId,
         },
       );
@@ -9066,10 +9146,30 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const requiresFreshSessionRouting =
+        job.modelServiceId !== undefined || job.groupId !== undefined;
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' &&
+              error !== null &&
+              typeof (error as Record<string, unknown>)['message'] === 'string'
+            ? (error as Record<string, unknown>)['message']
+            : String(error);
       debugLogger.warn(
-        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+        requiresFreshSessionRouting
+          ? `Scheduled task ${taskId} could not create a fresh session with its requested routing: ${errorMessage}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${errorMessage}`,
       );
-      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      await record(
+        requiresFreshSessionRouting
+          ? { dispatchFailed: true }
+          : { sessionId: this.sessionId, dispatchFailed: true },
+      );
+      if (requiresFreshSessionRouting) {
+        await restoreOneShot();
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',

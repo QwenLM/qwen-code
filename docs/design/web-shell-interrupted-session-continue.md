@@ -52,7 +52,8 @@ A shared banner appears above the composer in both the main chat and additional
 chat panes. Interrupted prompts and tool turns show a localized explanation
 and a Continue execution button. Degraded history shows an explanation only.
 Loading, disconnected, catching-up, active, permission-blocked, and read-only
-states do not offer the button. Submission disables it immediately. Recovery
+states, including an accepted new-session handoff, do not offer the button.
+Submission hides it immediately and uses the existing progress controls. Recovery
 metadata is refreshed after settling and invalidated across new work and
 session changes. Delayed responses cannot update a different conversation or
 overwrite recovery status from a newer event-stream subscription after reconnect.
@@ -66,12 +67,17 @@ replay, without adding a user turn or navigation entry. If a reload snapshot
 arrives before admission is acknowledged, its terminal events stay with that
 local continuation until the accepted prompt ID identifies the matching event;
 unrelated historical turns cannot settle it or notify. Admission during the
-reattach gap also retains notification registration.
+reattach gap also retains notification registration. A terminal already applied by the snapshot settles only its continuation
+bookkeeping and notification, whether admission arrived before or after the snapshot;
+it must not finish a newer streaming turn or release that turn’s composer lock.
+Live terminal events received before that ACK also wait for prompt-ID matching;
+a newer queued turn cannot consume the original continuation’s result.
 An automatic same-session reattach preserves continuation tracking and failure
 settlement. Explicit session loads invalidate that ownership; definite rejection
 refreshes use the current attachment, with its own recovery-read ordering.
 
-Failure feedback captures the session and recovery generation when its error
+An admitted turn’s failure is reported through the transcript, not as a failed
+continuation admission. Failure feedback captures the session and recovery generation when its error
 callback runs. Later recovery reads or activity invalidate that feedback, even
 when React batches the failure and later work into their first render.
 
