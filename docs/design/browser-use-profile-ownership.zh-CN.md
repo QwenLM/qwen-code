@@ -25,6 +25,11 @@ Browser Use session。
 Native Host 继续只转发消息。这些标识用于区分兼容的实例，不能认证以同一 OS 用户
 身份运行的其他进程。
 
+发现连接时，不兼容的 Qwen 扩展不会阻止兼容 profile 在正常连接超时窗口内接入。
+如果没有兼容连接，错误会明确指出需要更新扩展还是 Qwen Code。选定 profile 后，
+只有该 profile 断线后的握手可以提供这一诊断，其他 profile 不能覆盖它。
+兼容连接建立或停止 transport 时会清除诊断。
+
 第一个有效握手选定当前 transport 生命周期使用的 profile。首次选择取决于连接顺序，
 不会推测用户偏好的工作或个人账号。其他 profile 保持连接并待命。
 它们的消息不能完成当前请求、向 SDK 发送事件、替换选中的 socket，或重置其标签页

@@ -362,7 +362,6 @@ export async function withTimeout<T>(
   promise: Promise<T>,
   timeout: number,
 ): Promise<T> {
-  if (timeout === 0) return await promise;
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([

@@ -83,6 +83,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
   private socket: Socket | undefined;
   private hello: BridgeHello | undefined;
   private selectedExtensionInstanceId: string | undefined;
+  private incompatibleExtensionError: BrowserRuntimeError | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
@@ -266,6 +267,23 @@ export class ChromeExtensionTransport implements ChromeBridge {
           if (!validated) {
             if (!isObject(message) || message.type !== 'hello') continue;
             if (
+              message.extensionId === CHROME_EXTENSION_ID &&
+              typeof message.protocolVersion === 'number' &&
+              Number.isInteger(message.protocolVersion) &&
+              message.protocolVersion > 0 &&
+              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION &&
+              !this.isConnected() &&
+              (this.selectedExtensionInstanceId === undefined ||
+                message.extensionInstanceId ===
+                  this.selectedExtensionInstanceId)
+            ) {
+              this.incompatibleExtensionError = disconnectedError(
+                message.protocolVersion < CHROME_BRIDGE_PROTOCOL_VERSION
+                  ? 'The Qwen Code Chrome extension is out of date. Update or reload it at chrome://extensions to match this Qwen Code version, then retry Browser Use.'
+                  : 'This Qwen Code version is older than the Chrome extension. Update Qwen Code to match the installed extension, then retry Browser Use.',
+              );
+            }
+            if (
               message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
               message.extensionId !== CHROME_EXTENSION_ID ||
               typeof message.extensionInstanceId !== 'string' ||
@@ -305,6 +323,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     // or enter a disconnect/reconnect loop. Ownership survives a disconnect.
     if (hello.extensionInstanceId !== this.selectedExtensionInstanceId) return;
     this.disconnect(disconnectedError('Chrome extension reconnected'));
+    this.incompatibleExtensionError = undefined;
     this.socket = socket;
     this.hello = hello;
     this.notifyConnectionChange(true);
@@ -391,9 +410,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
         timer: setTimeout(() => {
           this.connectionWaiters.delete(waiter);
           reject(
-            disconnectedError(
-              'Chrome extension is not connected. Load the extension and verify the Native Messaging host installation.',
-            ),
+            this.incompatibleExtensionError ??
+              disconnectedError(
+                'Chrome extension is not connected. Load the extension and verify the Native Messaging host installation.',
+              ),
           );
         }, timeoutMs),
       };
@@ -443,6 +463,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
     this.socketIdentity = undefined;
     this.selectedExtensionInstanceId = undefined;
+    this.incompatibleExtensionError = undefined;
   }
 }
 

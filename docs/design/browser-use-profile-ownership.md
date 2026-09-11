@@ -29,6 +29,13 @@ handshakes cannot safely identify profiles and are rejected. Native Host remains
 an opaque relay. These identifiers distinguish compatible instances; they do
 not authenticate other processes running as the same OS user.
 
+During discovery, an incompatible Qwen extension does not prevent a compatible
+profile from connecting within the normal connection timeout. If none connects,
+the error identifies whether the extension or Qwen Code needs updating. After a
+profile is selected, only that disconnected profile can supply this diagnostic;
+unrelated profiles cannot override it. A compatible connection or stopping the
+transport clears the diagnostic.
+
 The first valid handshake selects a profile for the current transport lifetime.
 Initial selection depends on connection order, not a prediction of the user's
 preferred work or personal account. Other profiles remain connected but idle.

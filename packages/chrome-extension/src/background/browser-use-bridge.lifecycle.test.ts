@@ -7,6 +7,7 @@
 // @vitest-environment node
 
 import { readFile } from 'node:fs/promises';
+import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 import { afterEach, expect, test, vi } from 'vitest';
 
@@ -18,6 +19,7 @@ afterEach(() => vi.useRealTimers());
 
 async function fixture(
   alarms = new Map<string, chrome.alarms.AlarmCreateInfo>(),
+  localState: Record<string, unknown> = {},
 ) {
   vi.useFakeTimers();
   const listeners = new Map<string, (...args: unknown[]) => void>();
@@ -51,6 +53,12 @@ async function fixture(
       clear: vi.fn(async (name: string) => alarms.delete(name)),
     },
     storage: {
+      local: {
+        get: vi.fn(async () => ({ ...localState })),
+        set: vi.fn(async (value: Record<string, unknown>) => {
+          Object.assign(localState, structuredClone(value));
+        }),
+      },
       session: {
         get: vi.fn(async () => saved),
         set: vi.fn(async (value: Record<string, unknown>) => {
@@ -104,6 +112,7 @@ async function fixture(
   };
   const context = vm.createContext({
     chrome: chromeApi,
+    crypto: webcrypto,
     setTimeout,
     clearTimeout,
     Date,
@@ -127,7 +136,17 @@ async function fixture(
     derivedTabParents: Map<number, number>;
   };
   await vi.advanceTimersByTimeAsync(0);
-  return { ...api, chromeApi, tabs, attached, saved, alarms, emit, port };
+  return {
+    ...api,
+    chromeApi,
+    tabs,
+    attached,
+    saved,
+    localState,
+    alarms,
+    emit,
+    port,
+  };
 }
 
 test.each(['group', 'title'])(
@@ -363,7 +382,7 @@ test('worker restart preserves the scheduled retry instead of starting another h
   const first = await fixture();
   first.emit('disconnect');
   await vi.advanceTimersByTimeAsync(0);
-  const restarted = await fixture(first.alarms);
+  const restarted = await fixture(first.alarms, first.localState);
   expect(restarted.chromeApi.runtime.connectNative).not.toHaveBeenCalled();
   const name = [...restarted.alarms.keys()][0]!;
   restarted.alarms.delete(name);

@@ -5,10 +5,11 @@
  */
 
 import vm from 'node:vm';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import type { BrowserSdkContext } from './context.js';
 import { TabProxy } from './tab.js';
+import type { BrowserTab, JsonSerializable } from './types.js';
 
 function fixture() {
   const document = { title: 'Fixture', calls: 0 };
@@ -44,11 +45,36 @@ describe.each(['page', 'one', 'all'] as const)(
     const evaluate = (source: string, arg?: unknown) => {
       const f = fixture();
       return mode === 'page'
-        ? f.page.evaluate(source, arg)
+        ? f.page.evaluate(source, arg as never)
         : mode === 'one'
-          ? f.locator.evaluate(source, arg)
-          : f.locator.evaluateAll(source, arg);
+          ? f.locator.evaluate(source, arg as never)
+          : f.locator.evaluateAll(source, arg as never);
     };
+
+    it.each([
+      NaN,
+      Infinity,
+      { value: -Infinity },
+      { value: undefined },
+      new Date(0),
+      /pattern/,
+      new Map(),
+      [1, undefined],
+      { value: () => 1 },
+    ])('rejects non-JSON arguments before dispatch (%j)', (arg) => {
+      expect(() => evaluate('arg', arg)).toThrow('must be JSON-serializable');
+    });
+
+    it('preserves JSON object keys without creating an argument prototype', async () => {
+      const arg = JSON.parse('{"__proto__":{"polluted":true},"answer":42}');
+      await expect(evaluate('Object.keys(arg).sort()', arg)).resolves.toEqual([
+        '__proto__',
+        'answer',
+      ]);
+      await expect(evaluate('arg.polluted === undefined', arg)).resolves.toBe(
+        true,
+      );
+    });
 
     it.each<[string, unknown]>([
       ['document.title', 'Fixture'],
@@ -92,6 +118,34 @@ describe.each(['page', 'one', 'all'] as const)(
     });
   },
 );
+
+it('publishes JSON types and distinguishes undefined from void results', () => {
+  const check = (tab: BrowserTab) => {
+    const locator = tab.playwright.locator('button');
+    // @ts-expect-error Date is not a JSON result.
+    void tab.playwright.evaluate<Date>(() => new Date());
+    // @ts-expect-error Inferred Date results must also be rejected.
+    void locator.evaluate(() => new Date());
+    // @ts-expect-error Nested Date results are not JSON data.
+    void locator.evaluateAll(() => ({ date: new Date() }));
+    // @ts-expect-error Date arguments must be rejected.
+    void tab.playwright.evaluate(() => 1, new Date());
+    expectTypeOf(tab.playwright.evaluate(() => undefined)).toEqualTypeOf<
+      Promise<null>
+    >();
+    const discarded: () => void = () => 42;
+    expectTypeOf(tab.playwright.evaluate(discarded)).toEqualTypeOf<
+      Promise<JsonSerializable>
+    >();
+    expectTypeOf(locator.evaluate(async () => ({ value: 1 }))).toEqualTypeOf<
+      Promise<{ value: number }>
+    >();
+    expectTypeOf(locator.evaluateAll(() => [1, 'two'] as const)).toEqualTypeOf<
+      Promise<readonly [1, 'two']>
+    >();
+  };
+  expectTypeOf(check).toBeFunction();
+});
 
 it('preserves synchronous and asynchronous function arguments', async () => {
   const f = fixture();

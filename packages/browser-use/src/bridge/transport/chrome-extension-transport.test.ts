@@ -40,6 +40,79 @@ afterEach(async () => {
 });
 
 describe('ChromeExtensionTransport', () => {
+  it.each(['before', 'during'])(
+    'reports an outdated extension seen %s the connection wait',
+    async (when) => {
+      const transport = await startProfileTransport();
+      const wait = () =>
+        transport.request('ping', {}, 150).catch((error: unknown) => error);
+      const pending = when === 'during' ? wait() : undefined;
+      await rejectedHello(transport, { protocolVersion: 1 });
+      expect(await (pending ?? wait())).toMatchObject({
+        code: 'BROWSER_DISCONNECTED',
+        message: expect.stringContaining('extension is out of date'),
+      });
+      expect(transport.isConnected()).toBe(false);
+      await transport.stop();
+      await transport.start();
+      await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+        message: expect.stringContaining('extension is not connected'),
+      });
+    },
+  );
+
+  it('allows a compatible profile to connect after an incompatible hello', async () => {
+    const transport = await startProfileTransport();
+    const pending = transport.request('ping');
+    await rejectedHello(transport, { protocolVersion: 1 });
+    const owner = await connectProfile(transport, 'profile-a');
+    await expect(pending).resolves.toBe('profile-a');
+    owner.destroy();
+    await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+  });
+
+  it.each([
+    { extensionId: 'other-extension', protocolVersion: 1 },
+    { protocolVersion: '1' },
+    { protocolVersion: -1 },
+  ])('does not diagnose an upgrade from an invalid peer: %j', async (hello) => {
+    const transport = await startProfileTransport();
+    await rejectedHello(transport, hello);
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+  });
+
+  it('scopes mismatch guidance to discovery or the disconnected selected profile', async () => {
+    const transport = await startProfileTransport();
+    const owner = await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    await rejectedHello(transport, { protocolVersion: 1 });
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    owner.destroy();
+    await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
+    await rejectedHello(transport, {
+      protocolVersion: 1,
+      extensionInstanceId: 'profile-b',
+    });
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+    await rejectedHello(transport, {
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION + 1,
+      extensionInstanceId: 'profile-a',
+    });
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+      message: expect.stringContaining('Update Qwen Code'),
+    });
+    await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+  });
+
   it.each([
     ['Input.dispatchMouseEvent', undefined],
     ['Input.dispatchKeyEvent', undefined],
@@ -777,6 +850,20 @@ async function connectProfile(
     }),
   );
   return socket;
+}
+
+async function rejectedHello(
+  transport: ChromeExtensionTransport,
+  hello: Record<string, unknown>,
+): Promise<void> {
+  const socket = connect(transport.socketPath);
+  socket.on('error', () => undefined);
+  await once(socket, 'connect');
+  const closed = once(socket, 'close');
+  socket.write(
+    encodeFrame({ type: 'hello', extensionId: CHROME_EXTENSION_ID, ...hello }),
+  );
+  await closed;
 }
 
 async function connectedTransport() {

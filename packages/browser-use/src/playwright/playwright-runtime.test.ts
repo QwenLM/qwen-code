@@ -41,6 +41,106 @@ afterEach(async () => {
 });
 
 describe('PlaywrightRuntime command contracts', () => {
+  describe.each([
+    'playwright.evaluate',
+    'locator.evaluate',
+    'locator.evaluateAll',
+  ] as const)('%s JSON results', (method) => {
+    async function evaluate(script: string) {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      const evaluation =
+        method === 'playwright.evaluate'
+          ? fixture.page.evaluate
+          : method === 'locator.evaluate'
+            ? fixture.locator.evaluate
+            : fixture.locator.evaluateAll;
+      evaluation.mockImplementation(
+        async (
+          callback: (target: unknown, source?: string) => Promise<unknown>,
+          source: string,
+        ) => {
+          const result =
+            method === 'playwright.evaluate'
+              ? await callback(source)
+              : await callback(
+                  method === 'locator.evaluateAll' ? [{}, {}] : {},
+                  source,
+                );
+          // Model lossy transport conversion after the page callback returns.
+          return result === undefined
+            ? undefined
+            : JSON.parse(JSON.stringify(result));
+        },
+      );
+      return await fixture.runtime.dispatch(method, {
+        tabId: tab.id,
+        ...(method === 'playwright.evaluate'
+          ? {}
+          : { steps: [{ kind: 'locator', selector: 'button' }] }),
+        script,
+      });
+    }
+
+    it.each([
+      'NaN',
+      'Infinity',
+      'new Date(0)',
+      '/pattern/',
+      'new Map()',
+      '({ value: undefined })',
+      '({ value: () => 1 })',
+      '[undefined]',
+    ])('rejects %s before transport can alter it', async (value) => {
+      await expect(evaluate(`return ${value};`)).rejects.toMatchObject({
+        code: 'OPERATION_FAILED',
+        message: expect.stringContaining('JSON-serializable'),
+      });
+    });
+
+    it('preserves JSON results, repeated references, and top-level undefined', async () => {
+      await expect(evaluate('return undefined;')).resolves.toBeNull();
+      await expect(
+        evaluate(
+          'const value = { a: [1, true, null] }; return [value, value];',
+        ),
+      ).resolves.toEqual([{ a: [1, true, null] }, { a: [1, true, null] }]);
+      await expect(
+        evaluate('return JSON.parse(\'{"__proto__":{"value":1}}\');'),
+      ).resolves.toEqual(JSON.parse('{"__proto__":{"value":1}}'));
+    });
+
+    it('preserves access to a page global named result', async () => {
+      await expect(
+        evaluate(
+          'globalThis.result = 42; try { return result; } finally { delete globalThis.result; }',
+        ),
+      ).resolves.toBe(42);
+    });
+  });
+
+  it('rejects deep locator plans and zero operation timeouts before startup', async () => {
+    const fixture = await runtimeFixture();
+    let steps: unknown[] = [{ kind: 'locator', selector: 'button' }];
+    for (let level = 1; level < 1_000; level++) {
+      steps = [{ kind: 'and', steps }];
+    }
+    for (const args of [
+      { tabId: 'tab-1', steps },
+      {
+        tabId: 'tab-1',
+        steps: [{ kind: 'locator', selector: 'button' }],
+        timeoutMs: 0,
+      },
+    ]) {
+      await expect(
+        fixture.runtime.dispatch('locator.click', args),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+    expect(playwrightMocks.connectOverCDP).not.toHaveBeenCalled();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+
   it('reports invalid nested locator plans before starting the bridge', async () => {
     const fixture = await runtimeFixture();
     fixture.request.mockClear();

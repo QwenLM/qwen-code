@@ -9,6 +9,7 @@ import type { FrameLocator, Locator, Page } from 'playwright-core';
 import { BrowserRuntimeError } from '../core/errors.js';
 import type { DispatchResult, LocatorStep } from '../core/primitives.js';
 import type { SupportedCommand } from '../core/schemas.js';
+import { serializeJson } from '../core/serialize-json.js';
 import {
   clickOptions,
   jsonResult,
@@ -349,14 +350,20 @@ export async function evaluateScript(
   script: string,
   timeout: number,
 ): Promise<unknown> {
-  return await withTimeout(
-    page.evaluate(async (source) => {
-      const AsyncFunction = Object.getPrototypeOf(async () => undefined)
-        .constructor as new (body: string) => () => Promise<unknown>;
-      return await new AsyncFunction(source)();
-    }, script),
-    timeout,
+  return JSON.parse(
+    await withTimeout(
+      page.evaluate(async (source) => {
+        const AsyncFunction = Object.getPrototypeOf(async () => undefined)
+          .constructor as new (body: string) => () => Promise<string>;
+        return await new AsyncFunction(source)();
+      }, jsonEvaluationScript(script)),
+      timeout,
+    ),
   );
+}
+
+function jsonEvaluationScript(script: string): string {
+  return `return (${serializeJson.toString()})((await (async () => {\n${script}\n})()) ?? null);`;
 }
 
 async function evaluateLocator(
@@ -366,31 +373,35 @@ async function evaluateLocator(
   timeout: number,
 ): Promise<unknown> {
   if (all) {
-    return await withTimeout(
-      locator.evaluateAll(async (elements, source) => {
-        const AsyncFunction = Object.getPrototypeOf(async () => undefined)
-          .constructor as new (
-          argument: string,
-          body: string,
-        ) => (elements: Element[]) => Promise<unknown>;
-        return await new AsyncFunction('elements', source)(elements);
-      }, script),
-      timeout,
+    return JSON.parse(
+      await withTimeout(
+        locator.evaluateAll(async (elements, source) => {
+          const AsyncFunction = Object.getPrototypeOf(async () => undefined)
+            .constructor as new (
+            argument: string,
+            body: string,
+          ) => (elements: Element[]) => Promise<string>;
+          return await new AsyncFunction('elements', source)(elements);
+        }, jsonEvaluationScript(script)),
+        timeout,
+      ),
     );
   }
-  return await withTimeout(
-    locator.evaluate(
-      async (element, source) => {
-        const AsyncFunction = Object.getPrototypeOf(async () => undefined)
-          .constructor as new (
-          argument: string,
-          body: string,
-        ) => (element: Element) => Promise<unknown>;
-        return await new AsyncFunction('element', source)(element);
-      },
-      script,
-      { timeout },
+  return JSON.parse(
+    await withTimeout(
+      locator.evaluate(
+        async (element, source) => {
+          const AsyncFunction = Object.getPrototypeOf(async () => undefined)
+            .constructor as new (
+            argument: string,
+            body: string,
+          ) => (element: Element) => Promise<string>;
+          return await new AsyncFunction('element', source)(element);
+        },
+        jsonEvaluationScript(script),
+        { timeout },
+      ),
+      timeout,
     ),
-    timeout,
   );
 }

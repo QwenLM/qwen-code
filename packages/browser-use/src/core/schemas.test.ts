@@ -10,6 +10,33 @@ import { describe, expect, it } from 'vitest';
 import { commandSchemas, locatorStepsSchema } from './schemas.js';
 
 describe('recursive locator plans', () => {
+  it.each(['and', 'or', 'has', 'hasNot'])(
+    'bounds %s nesting while preserving 32 levels and flat breadth',
+    (kind) => {
+      const nested = (levels: number): unknown[] => {
+        let steps: unknown[] = [{ kind: 'locator', selector: 'button' }];
+        for (let level = 1; level < levels; level++) {
+          steps = [
+            { kind: 'locator', selector: 'button' },
+            kind === 'has' || kind === 'hasNot'
+              ? { kind: 'filter', [kind]: steps }
+              : { kind, steps },
+          ];
+        }
+        return steps;
+      };
+      expect(locatorStepsSchema.safeParse(nested(32)).success).toBe(true);
+      expect(locatorStepsSchema.safeParse(nested(33)).success).toBe(false);
+      expect(locatorStepsSchema.safeParse(nested(1_000)).success).toBe(false);
+      expect(
+        locatorStepsSchema.safeParse(Array(32).fill({ kind: 'first' })).success,
+      ).toBe(true);
+      expect(
+        locatorStepsSchema.safeParse(Array(33).fill({ kind: 'first' })).success,
+      ).toBe(false);
+    },
+  );
+
   it('rejects deeply nested invalid plans within a bounded process', () => {
     const probe = spawnSync(
       process.execPath,
@@ -88,6 +115,58 @@ describe('locator matcher flags', () => {
 });
 
 describe('browser command schemas', () => {
+  it.each([
+    ['locator.click', { steps: [{ kind: 'locator', selector: 'button' }] }],
+    [
+      'locator.waitFor',
+      { steps: [{ kind: 'locator', selector: 'button' }], state: 'visible' },
+    ],
+    ['playwright.evaluate', { script: 'return 1;' }],
+    ['playwright.waitForURL', { url: 'https://example.com/' }],
+    ['playwright.waitForEvent', { event: 'filechooser' }],
+  ] as const)(
+    'requires a positive operation timeout for %s',
+    (method, args) => {
+      for (const timeoutMs of [0, -1, 120_001]) {
+        expect(
+          commandSchemas[method].safeParse({
+            tabId: 'tab-1',
+            ...args,
+            timeoutMs,
+          }).success,
+        ).toBe(false);
+      }
+      for (const timeoutMs of [undefined, 1, 1_000, 120_000]) {
+        expect(
+          commandSchemas[method].safeParse({
+            tabId: 'tab-1',
+            ...args,
+            timeoutMs,
+          }).success,
+        ).toBe(true);
+      }
+    },
+  );
+
+  it('preserves a zero delay without allowing negative or excessive delays', () => {
+    for (const timeoutMs of [0, 1, 120_000]) {
+      expect(
+        commandSchemas['playwright.waitForTimeout'].safeParse({
+          tabId: 'tab-1',
+          timeoutMs,
+        }).success,
+      ).toBe(true);
+    }
+    for (const timeoutMs of [-1, 120_001]) {
+      expect(
+        commandSchemas['playwright.waitForTimeout'].safeParse({
+          tabId: 'tab-1',
+          timeoutMs,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it('accepts the five coordinate CUA mouse buttons from Codex', () => {
     const base = { tabId: 'tab-1', x: 1, y: 1 };
 
