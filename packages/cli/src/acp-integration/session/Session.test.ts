@@ -6655,13 +6655,57 @@ describe('Session', () => {
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
+      // One turn survives, so one snapshot may: every rewind surface resolves
+      // a turn through this array's positions.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
-        undefined,
+        expect.arrayContaining([expect.objectContaining({ promptId: 'p1' })]),
+      );
+    });
+
+    it('drops snapshot positions along with the turns a rewind discards', () => {
+      // A rewind resolves a turn through the snapshot array's POSITION
+      // (`getRewindSnapshots` hands out `idx`, the agent resolves a promptId
+      // with `findIndex`). Leaving an abandoned turn's snapshot behind makes
+      // the position point at a turn the history no longer has, so the next
+      // rewind cuts the wrong turn and the recorded branch disagrees with the
+      // live view.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      const snapshots = ['p1', 'p2', 'p3'].map((promptId) => ({
+        promptId,
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {},
+      }));
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(snapshots);
+
+      session.rewindToTurn(2, { rewindFiles: false });
+
+      // Two turns survive the cut to the third prompt.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        snapshots[0],
+        snapshots[1],
+      ]);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        2,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
       );
     });
 

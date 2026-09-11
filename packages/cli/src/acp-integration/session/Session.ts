@@ -4483,13 +4483,22 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
+    // Every rewind surface resolves a turn through this array's positions:
+    // `getRewindSnapshots` hands out the index, and the agent resolves a
+    // promptId with `findIndex`. Positions therefore have to keep matching the
+    // current history's turn ordinals. A conversation-only rewind abandons the
+    // later turns without going through `FileHistoryService.rewind` — which
+    // trims inclusively itself — so the trim has to happen here. Without it the
+    // next rewind resolves onto a turn the history no longer has and cuts the
+    // wrong turn, while the recorded branch and the live view disagree.
+    //
+    // The file path keeps the target snapshot: the agent restores files by
+    // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
-    if (survivingSnapshots) {
-      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    }
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     this.config
       .getChatRecordingService()
