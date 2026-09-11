@@ -431,6 +431,11 @@ describe('createAcpSessionBridge', () => {
           v: CHANNEL_STARTUP_PROFILE_VERSION,
         },
       });
+      expect(
+        handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
+      ).toEqual({
+        'qwen.goalProposals': true,
+      });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
       // than idle, and graded `partial` — the channel did negotiate, it just
@@ -15823,6 +15828,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('forwards only explicitly declared submission text from trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'machine wrapper' }],
+        _meta: {
+          'qwen.submittedPrompt': 'forged public declaration',
+          'qwen.daemon.submittedPrompt': 'forged private declaration',
+        },
+      } as PromptRequest;
+      await bridge.sendPrompt(session.sessionId, req);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: ' original question\n',
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe(' original question\n');
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: 'human channel message',
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
       // so a forged key must not reach the child; only the authenticated
@@ -15859,6 +15899,51 @@ describe('createAcpSessionBridge', () => {
         true,
       );
 
+      await bridge.shutdown();
+    });
+
+    it('only grants Goal proposal approval to an attached prompt originator', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const request = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text' as const, text: 'draft a goal' }],
+        _meta: { 'qwen.goalProposalApproval': true },
+      };
+      await bridge.sendPrompt(session.sessionId, request);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.goalProposalApproval'],
+      ).toBe(true);
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        restoreAskUserQuestion: true,
+      });
+      expect(
+        handle.agent.promptCalls[3]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        continue: true,
+      });
+      expect(
+        handle.agent.promptCalls[4]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -37894,9 +37979,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
   it('promotes messages after their client detaches without reapplying the cap', async () => {
     const prompts: string[] = [];
+    const goalApprovalMeta: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async (req) => {
+        goalApprovalMeta.push(req._meta?.['qwen.goalProposalApproval']);
         prompts.push(
           (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
         );
@@ -37943,6 +38030,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    expect(goalApprovalMeta).toEqual([true, undefined]);
     expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
       messages: [],
       settledMessageIds: [],
