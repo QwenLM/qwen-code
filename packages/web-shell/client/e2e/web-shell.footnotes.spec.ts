@@ -601,7 +601,7 @@ test('source locator demo delegates the card link to its host panel', async ({
       citationFontSize: getComputedStyle(element).fontSize,
       citationIconWidth: citationIcon.getBoundingClientRect().width,
       copyIconWidth: copyIcon.getBoundingClientRect().width,
-      iconCenterDelta: Math.abs(center(citationIcon) - center(copyIcon)),
+      iconCenterOffset: center(citationIcon) - center(copyIcon),
       textCenterDelta: Math.abs(center(element) - center(time)),
       timeFontSize: getComputedStyle(time).fontSize,
     };
@@ -612,7 +612,7 @@ test('source locator demo delegates the card link to its host panel', async ({
     copyIconWidth: 14,
     timeFontSize: '11px',
   });
-  expect(footerMetrics.iconCenterDelta).toBeLessThan(0.1);
+  expect(footerMetrics.iconCenterOffset).toBe(-1);
   expect(footerMetrics.textCenterDelta).toBeLessThan(0.1);
   const inlineMetrics = await triggers.nth(1).evaluate((element) => {
     const icon = element.querySelector<HTMLElement>('[aria-hidden="true"]')!;

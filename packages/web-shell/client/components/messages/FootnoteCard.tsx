@@ -202,7 +202,7 @@ function FootnoteCard({
           <span
             aria-hidden="true"
             className={`inline-block shrink-0 bg-current ${
-              variant === 'footer' ? 'size-3.5' : 'size-4'
+              variant === 'footer' ? 'size-3.5 -translate-y-px' : 'size-4'
             }`}
             style={{
               maskImage: cssUrlValue(knowledgeIcon),
