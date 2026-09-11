@@ -14,6 +14,7 @@ import { ToolErrorType } from '../tool-error.js';
 import { ArtifactTool, type UrlOpener } from './artifact-tool.js';
 import { LocalPublisher } from './local-publisher.js';
 import { MAX_ARTIFACT_BYTES } from './html.js';
+import { readArtifactSnapshot } from './artifact-snapshots.js';
 
 const signal = new AbortController().signal;
 
@@ -23,10 +24,15 @@ describe('ArtifactTool', () => {
   let openSpy: ReturnType<typeof vi.fn>;
   let tool: ArtifactTool;
 
-  const makeConfig = (): Config =>
+  const makeConfig = (snapshots = true): Config =>
     ({
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => workdir,
+      isArtifactSnapshotsEnabled: () => snapshots,
+      getSessionId: () => 'artifact-session',
+      storage: {
+        getRuntimeBaseDir: () => path.join(outDir, 'runtime'),
+      },
       shouldAutoOpenArtifact: () =>
         process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1',
     }) as unknown as Config;
@@ -40,6 +46,7 @@ describe('ArtifactTool', () => {
   beforeEach(async () => {
     workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-src-'));
     outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-out-'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', path.join(outDir, 'runtime'));
     openSpy = vi.fn(async () => {});
     tool = new ArtifactTool(
       makeConfig(),
@@ -53,6 +60,7 @@ describe('ArtifactTool', () => {
     await fs.rm(outDir, { recursive: true, force: true });
     delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('describes browser opening as settings-dependent', () => {
@@ -78,6 +86,12 @@ describe('ArtifactTool', () => {
         title: 'My Report',
         mimeType: 'text/html',
       },
+      {
+        kind: 'html',
+        storage: 'published',
+        title: 'My Report',
+        metadata: { artifactType: 'web_preview_snapshot' },
+      },
     ]);
     expect(res.artifacts?.[0]?.url).toMatch(/^file:\/\//);
     expect(res.artifacts?.[0]?.managedId).toBeTruthy();
@@ -85,6 +99,9 @@ describe('ArtifactTool', () => {
       /^[0-9a-f]{64}$/,
     );
 
+    expect(res.artifacts?.[1]?.metadata?.['publishedUrl']).toBe(
+      res.artifacts?.[0]?.url,
+    );
     const published = res.resultFilePaths?.[0];
     expect(published).toBeTruthy();
     const html = await fs.readFile(published!, 'utf8');
@@ -109,6 +126,106 @@ describe('ArtifactTool', () => {
     expect(second.artifacts?.[0]?.metadata?.['qwen.published.sha256']).not.toBe(
       first.artifacts?.[0]?.metadata?.['qwen.published.sha256'],
     );
+    const firstSnapshot = first.artifacts![1]!;
+    const secondSnapshot = second.artifacts![1]!;
+    expect(firstSnapshot.managedId).not.toBe(secondSnapshot.managedId);
+    await fs.unlink(file);
+    await fs.unlink(second.resultFilePaths![0]);
+    const runtime = path.join(outDir, 'runtime');
+    await expect(
+      readArtifactSnapshot(firstSnapshot, runtime),
+    ).resolves.toContain('<p>v1</p>');
+    await expect(
+      readArtifactSnapshot(secondSnapshot, runtime),
+    ).resolves.toContain('<p>v2</p>');
+  });
+
+  it('does not accumulate historical files without a managed artifact store', async () => {
+    tool = new ArtifactTool(
+      makeConfig(false),
+      new LocalPublisher(outDir),
+      openSpy,
+    );
+    const file = await writeFragment('page.html', '<h1>Report</h1>');
+    const urls = new Set<string | undefined>();
+    for (let i = 0; i < 5; i++) {
+      const result = await tool.build({ file_path: file }).execute(signal);
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(1);
+      expect(result.llmContent).not.toContain('saved');
+      urls.add(result.artifacts![0]!.url);
+    }
+    expect(urls.size).toBe(1);
+    await expect(
+      fs.stat(path.join(outDir, 'runtime', 'artifacts', 'snapshots')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['after publication', 'during snapshot write'])(
+    'reclaims only the new snapshot when cancelled %s',
+    async (abortPoint) => {
+      const earlierFile = await writeFragment('earlier.html', '<p>Earlier</p>');
+      const earlier = await tool
+        .build({ file_path: earlierFile })
+        .execute(signal);
+      const priorSnapshot = earlier.artifacts![1]!;
+      const runtime = path.join(outDir, 'runtime');
+      const root = path.join(runtime, 'artifacts', 'snapshots');
+      const beforeDirectories = await fs.readdir(root);
+      const beforeHtml = await readArtifactSnapshot(priorSnapshot, runtime);
+      const file = await writeFragment('cancel.html', '<p>Published</p>');
+      const controller = new AbortController();
+      if (abortPoint === 'after publication') {
+        openSpy.mockImplementationOnce(async () => controller.abort());
+      } else {
+        const writeFile = fs.writeFile;
+        vi.spyOn(fs, 'writeFile').mockImplementation(
+          async (file, data, options) => {
+            await writeFile(file, data, options);
+            if (
+              String(file).startsWith(root + path.sep) &&
+              path.basename(String(file)) === 'index.html'
+            ) {
+              controller.abort();
+            }
+          },
+        );
+      }
+
+      const result = await tool
+        .build({ file_path: file })
+        .execute(controller.signal);
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(result.artifacts).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Published artifact');
+      expect(result.llmContent).not.toContain(
+        'Artifact publishing was cancelled',
+      );
+      expect(await fs.readFile(result.resultFilePaths![0], 'utf8')).toContain(
+        '<p>Published</p>',
+      );
+      expect(await fs.readdir(root)).toEqual(beforeDirectories);
+      await expect(readArtifactSnapshot(priorSnapshot, runtime)).resolves.toBe(
+        beforeHtml,
+      );
+    },
+  );
+
+  it('reports a saved-version failure even when latest publication succeeded', async () => {
+    const file = await writeFragment('page.html', '<p>Published</p>');
+    await fs.writeFile(path.join(outDir, 'runtime'), 'not a directory');
+    const result = await tool.build({ file_path: file }).execute(signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'historical version could not be saved',
+    );
+    expect(result.artifacts).toHaveLength(1);
+    expect(await fs.readFile(result.resultFilePaths![0], 'utf8')).toContain(
+      '<p>Published</p>',
+    );
+    expect(result.llmContent).toContain('Published artifact');
   });
 
   it('rejects a fragment with external references and does not publish', async () => {

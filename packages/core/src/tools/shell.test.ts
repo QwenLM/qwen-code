@@ -80,6 +80,7 @@ import * as crypto from 'node:crypto';
 import path from 'node:path';
 import { ToolErrorType } from './tool-error.js';
 import { formatShellExitCode } from './shell-exit-code.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -89,6 +90,11 @@ interface ShellToolParameterJsonSchema {
   properties: {
     command: {
       description: string;
+    };
+    timeout: {
+      type: string;
+      minimum: number;
+      maximum: number;
     };
   };
 }
@@ -244,6 +250,19 @@ describe('ShellTool', () => {
 
     // Ensure attribution singleton is clean between tests
     CommitAttributionService.resetInstance();
+  });
+
+  it('exposes the accepted timeout range in its schema', () => {
+    const schema = shellTool.schema
+      .parametersJsonSchema as ShellToolParameterJsonSchema;
+
+    expect(schema.properties.timeout).toEqual(
+      expect.objectContaining({
+        type: 'integer',
+        minimum: 1,
+        maximum: 600000,
+      }),
+    );
   });
 
   describe('gh pr create binding', () => {
@@ -3553,6 +3572,34 @@ describe('ShellTool', () => {
         await promise;
       });
     });
+
+    it.each([0, 1])(
+      'omits repeated command source from nested shell results (exit %i)',
+      async (exitCode) => {
+        const command = 'echo ' + 'large-script-source'.repeat(3000);
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = runWithToolCallSource(
+          {
+            kind: 'code_mode',
+          },
+          () => invocation.execute(mockAbortSignal),
+        );
+        resolveShellExecution({
+          output: 'diagnostic output',
+          exitCode,
+          error: null,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('diagnostic output');
+        expect(result.llmContent).toContain(`Exit Code: ${exitCode}`);
+        expect(result.llmContent).not.toContain('large-script-source');
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        if (exitCode !== 0) {
+          expect(result.error?.message).toContain('diagnostic output');
+          expect(result.error?.message).not.toContain('large-script-source');
+        }
+      },
+    );
 
     it('reports a foreground non-zero exit as a tool error', async () => {
       const invocation = shellTool.build({
@@ -8361,7 +8408,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 0,
         });
-      }).toThrow('Timeout must be a positive number.');
+      }).toThrow('params/timeout must be >= 1');
 
       // Negative timeout
       expect(() => {
@@ -8370,7 +8417,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: -1000,
         });
-      }).toThrow('Timeout must be a positive number.');
+      }).toThrow('params/timeout must be >= 1');
 
       // Timeout too large
       expect(() => {
@@ -8379,7 +8426,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 700000,
         });
-      }).toThrow('Timeout cannot exceed 600000ms (10 minutes).');
+      }).toThrow('params/timeout must be <= 600000');
 
       // Non-integer timeout
       expect(() => {
@@ -8388,7 +8435,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 5000.5,
         });
-      }).toThrow('Timeout must be an integer number of milliseconds.');
+      }).toThrow('params/timeout must be integer');
 
       // Non-number timeout (schema validation catches this first)
       expect(() => {
@@ -8397,7 +8444,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 'invalid' as unknown as number,
         });
-      }).toThrow('params/timeout must be number');
+      }).toThrow('params/timeout must be integer');
     });
 
     it('should include timeout in description for foreground commands', async () => {

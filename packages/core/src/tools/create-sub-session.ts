@@ -33,6 +33,10 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
+import {
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+} from '../services/cronTasksFile.js';
 
 export { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
 
@@ -268,7 +272,9 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
             type: 'string',
             description:
               'Optional model service id for the sub-session. Omit to use the ' +
-              'default model.',
+              'default model. Must be a non-empty string of at most ' +
+              `${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control ` +
+              'characters; the daemon rejects the call otherwise.',
           },
           name: {
             type: 'string',
@@ -308,6 +314,11 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       params.completion !== 'first-turn'
     ) {
       return 'Parameter "completion" must be "sent" or "first-turn".';
+    }
+    // Mirror the daemon's boundary check so the model gets the rejection
+    // here, with the limit, instead of as an opaque spawn failure.
+    if (params.model !== undefined && !isValidCronTaskRoutingId(params.model)) {
+      return `Parameter "model" must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters.`;
     }
     return null;
   }

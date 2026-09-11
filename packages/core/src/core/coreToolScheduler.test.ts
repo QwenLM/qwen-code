@@ -3628,6 +3628,58 @@ describe('CoreToolScheduler', () => {
     expect(output).toBe(content);
   });
 
+  it.each([false, true])(
+    'does not persist self-bounded exec output (failure %s)',
+    async (failed) => {
+      const content = 'BEGIN-' + 'x'.repeat(31_000) + '-END';
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: content,
+        returnDisplay: content,
+        persistedOutputFiles: [],
+        ...(failed
+          ? {
+              error: { message: content, type: ToolErrorType.EXECUTION_FAILED },
+            }
+          : {}),
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'exec',
+          new MockTool({
+            name: 'exec',
+            execute,
+            maxOutputChars: Number.POSITIVE_INFINITY,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+      await scheduler.schedule(
+        [
+          {
+            callId: 'exec-inline',
+            name: 'exec',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'p',
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const calls = (
+        onAllToolCallsComplete.mock.calls as unknown as Array<[ToolCall[]]>
+      )[0][0];
+      const call = calls[0];
+      expect(call.status).toBe(failed ? 'error' : 'success');
+      if (!('response' in call)) throw new Error('missing completed response');
+      expect(call.response.persistedOutputFiles).toEqual([]);
+      const response =
+        call.response.responseParts[0].functionResponse?.response;
+      expect(response?.[failed ? 'error' : 'output']).toBe(content);
+    },
+  );
+
   it('exempts read_mcp_resource from the persistence spill gate', async () => {
     // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
     // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),

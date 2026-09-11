@@ -244,6 +244,11 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export {
+  deleteArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+} from './tools/artifact/artifact-snapshots.js';
+export {
   RecordArtifactTool,
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
@@ -327,6 +332,7 @@ export type {
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,
@@ -335,6 +341,8 @@ export {
   annotateCronRunSession,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  isValidCronTaskRoutingId,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
@@ -719,6 +727,7 @@ export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
 export * from './utils/secure-browser-launcher.js';
+export { initParser as initShellAstParser } from './utils/shellAstParser.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';
@@ -758,6 +767,21 @@ export { MessageBus } from './confirmation-bus/message-bus.js';
 
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
+export {
+  extractCodeModeImageContent,
+  getToolCallRuntime,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  type CodeModeImageContent,
+  type CodeModeToolResult,
+  type ToolCallRuntimeContext,
+} from './code-mode/tool-call-runtime.js';
+export {
+  getToolExposure,
+  isCodeModeToolCallAllowed,
+  ToolMode,
+  type ToolExposure,
+} from './tools/code-mode.js';
 
 // ============================================================================
 // Hooks
