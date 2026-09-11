@@ -34,6 +34,7 @@ import {
   hasDynamicPlaceholder,
   warnIfDynamicHeadersDisabled,
 } from '../outbound-dynamic-headers.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -364,6 +365,17 @@ export class LlmContentGenerator implements ContentGenerator {
       const { displayName: _, ...fileDataWithoutDisplayName } =
         result.fileData as { displayName?: string; [key: string]: unknown };
       result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+    }
+
+    // `thoughtSignature` carries no origin marker, so a Responses-API
+    // reasoning replay payload (`{"id":…,"encrypted_content":…}`) reaches the
+    // Gemini wire unchanged after a provider switch. It is not a Gemini-native
+    // signature, so drop it — wire-only, since `result` is a copy and the
+    // caller's history keeps the payload for a later switch back. `thought`
+    // and `text` are untouched, so the visible reasoning summary survives.
+    // https://github.com/QwenLM/qwen-code/issues/9453
+    if (isResponsesReasoningSignature(result.thoughtSignature)) {
+      delete result.thoughtSignature;
     }
 
     // Handle functionResponse parts (which may contain nested media parts)

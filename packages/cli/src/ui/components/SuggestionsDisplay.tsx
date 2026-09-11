@@ -14,6 +14,7 @@ import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
 import {
   MAX_SUGGESTIONS_TO_SHOW,
+  normalizeDescription,
   type Suggestion,
   type SuggestionCategory,
 } from '../utils/suggestions.js';
@@ -76,16 +77,6 @@ export { MAX_WIDTH };
  */
 const MIN_DESCRIPTION_WIDTH = 12;
 const ACTIVE_MARKER_WIDTH = 2;
-
-/**
- * Collapse all runs of whitespace (including newlines from multi-line
- * SKILL.md/command descriptions) into single spaces so a description renders
- * as a single logical line. Without this, frontmatter line breaks are
- * preserved verbatim and a single long description can fill the whole terminal.
- */
-export function normalizeDescription(description: string): string {
-  return description.replace(/\s+/g, ' ').trim();
-}
 
 export function SuggestionsDisplay({
   suggestions,
@@ -256,16 +247,25 @@ export function SuggestionsDisplay({
                 ? { width: labelColumnWidth, flexShrink: 0 as const }
                 : { flexShrink: 1 as const })}
             >
+              {/* The label keeps PrepareLabel's own wrapping: the Ctrl+R
+                  expand/collapse snapshots render the long label across
+                  lines, so the container must not truncate. Only hint and
+                  badge truncate; left wrappable, an owner badge longer than
+                  the half-width column's leftover wrapped one character per
+                  line. */}
               <Box>
                 <Box flexShrink={0}>{labelElement}</Box>
                 {suggestion.argumentHint && (
-                  <Text color={theme.text.secondary}>
+                  <Text color={theme.text.secondary} wrap="truncate-end">
                     {' '}
                     {suggestion.argumentHint}
                   </Text>
                 )}
                 {suggestion.sourceBadge && (
-                  <Text color={textColor}> {suggestion.sourceBadge}</Text>
+                  <Text color={textColor} wrap="truncate-end">
+                    {' '}
+                    {suggestion.sourceBadge}
+                  </Text>
                 )}
               </Box>
             </Box>

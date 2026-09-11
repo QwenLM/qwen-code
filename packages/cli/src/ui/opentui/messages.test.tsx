@@ -176,10 +176,12 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
     // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
+    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
     expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(20);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(51);
+    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
+    // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
   });
 
   it('falls back to the settled cap on short terminals', () => {
@@ -346,18 +348,36 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 });
 
 describe('message meta (ink glyph/color parity)', () => {
+  // ink's ICON table appends U+FE0E to force the text presentation; the
+  // selector is invisible in source, so it must not be stripped as a typo.
   it('keeps the user/assistant prefixes', () => {
     expect(userMessageMeta().glyph).toBe('>');
-    expect(assistantMessageMeta().glyph).toBe('◆');
+    expect(assistantMessageMeta().glyph).toBe('◆\uFE0E');
   });
 
   it('keeps the thinking collapse hint semantics', () => {
     const live = thinkingMeta(false, false, true);
-    expect(live.icon).toBe('∵');
+    expect(live.icon).toBe('∵\uFE0E');
     expect(live.collapsed).toBe(false);
     const collapsed = thinkingMeta(true, false, true);
-    expect(collapsed.icon).toBe('∴');
+    expect(collapsed.icon).toBe('∴\uFE0E');
     expect(collapsed.hint).toContain('ctrl+o');
+  });
+
+  it('labels a committed thought with ink’s duration wording', () => {
+    expect(thinkingMeta(true, false, false, 400).label).toBe('Thought briefly');
+    expect(thinkingMeta(true, false, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    expect(thinkingMeta(true, true, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    // No duration stamped: ink falls back to the pending wording rather than
+    // naming a time it never measured.
+    expect(thinkingMeta(true, false, false).label).toBe('Thinking');
+    // The duration is only stamped when the thought ends, so a live row never
+    // carries one.
+    expect(thinkingMeta(false, false, false, 12_000).label).toBe('Thinking…');
   });
 
   it('marks canceled tools for strikethrough', () => {
