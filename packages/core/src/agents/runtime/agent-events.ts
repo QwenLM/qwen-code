@@ -187,8 +187,8 @@ export interface AgentToolProgressEvent {
   /** Suspends the call's watchdog deadline while nested work is parked on
       Monitor-owned external input. */
   waitingForExternalInput?: true;
-  /** Replaces the call's watchdog deadline with the bounded model deadline
-      while nested work is parked on a user approval. */
+  /** Suspends the call's watchdog deadline while nested work is parked on a
+      user approval (approval waits must not cause false watchdog failures). */
   awaitingApproval?: true;
   timestamp: number;
 }

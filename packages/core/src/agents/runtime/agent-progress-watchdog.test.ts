@@ -81,17 +81,20 @@ describe('attachAgentProgressWatchdog', () => {
     expect(abortPhase()).toBe('tool');
   });
 
-  it('replaces the tool deadline with the bounded model deadline while a direct approval is pending', () => {
+  it('suspends the model deadline while a direct approval is pending', () => {
     attach();
     toolCall('t1');
     toolProgress('t1');
     emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
       callId: 't1',
     } as AgentApprovalRequestEvent);
-    vi.advanceTimersByTime(TOOL_TIMEOUT_MS + 1_000);
+    vi.advanceTimersByTime(2 * MODEL_TIMEOUT_MS);
     expect(abortPhase()).toBeUndefined();
-    vi.advanceTimersByTime(MODEL_TIMEOUT_MS - TOOL_TIMEOUT_MS);
-    expect(abortPhase()).toBe('model/control');
+
+    // Approval answered → the tool resumes executing → tool deadline re-arms.
+    toolProgress('t1');
+    vi.advanceTimersByTime(TOOL_TIMEOUT_MS);
+    expect(abortPhase()).toBe('tool');
   });
 
   it('keeps a nested external-input wait free of any deadline until progress resumes', () => {
@@ -107,15 +110,17 @@ describe('attachAgentProgressWatchdog', () => {
     expect(abortPhase()).toBe('tool');
   });
 
-  it('bounds a nested approval wait by the model deadline, not the tool deadline', () => {
+  it('suspends the model deadline during a nested approval wait', () => {
     attach();
     toolCall('t1');
     toolProgress('t1');
     toolProgress('t1', { awaitingApproval: true });
-    vi.advanceTimersByTime(TOOL_TIMEOUT_MS + 1_000);
+    vi.advanceTimersByTime(2 * MODEL_TIMEOUT_MS);
     expect(abortPhase()).toBeUndefined();
-    vi.advanceTimersByTime(MODEL_TIMEOUT_MS - TOOL_TIMEOUT_MS);
-    expect(abortPhase()).toBe('model/control');
+
+    toolProgress('t1');
+    vi.advanceTimersByTime(TOOL_TIMEOUT_MS);
+    expect(abortPhase()).toBe('tool');
   });
 
   it('keeps the model deadline suspended while a nested input wait outlives sibling tools', () => {

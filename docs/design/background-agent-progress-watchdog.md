@@ -25,11 +25,10 @@ tool's own deadline starts when the scheduler reports it executing, so a silent
 tool is not charged to the model deadline. Parallel tools retain independent
 deadlines.
 
-The relevant tool deadline is replaced by the model deadline while user
-approval is pending. The model deadline is suspended only after a no-tool round
-enters a Monitor-owned external-input wait, and resumes when input arrives. A
-timer delayed by host suspend or a local event-loop gap is rearmed rather than
-charged to the Agent.
+The relevant tool deadline is suspended while user approval is pending. The
+model deadline is suspended only after a no-tool round enters a Monitor-owned
+external-input wait, and resumes when input arrives. A timer delayed by host
+suspend or a local event-loop gap is rearmed rather than charged to the Agent.
 
 On expiry the watchdog aborts the turn with an `AgentProgressTimeoutError`.
 Cooperative model and tool paths map that reason to `TIMEOUT`; the background

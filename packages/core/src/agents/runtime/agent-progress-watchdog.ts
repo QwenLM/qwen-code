@@ -102,7 +102,10 @@ export function attachAgentProgressWatchdog(
       disposed ||
       waitingForExternalInput ||
       [...tools.values()].some(
-        (tool) => tool.state === 'executing' || tool.parkedOnInput === true,
+        (tool) =>
+          tool.state === 'executing' ||
+          tool.state === 'approval' ||
+          tool.parkedOnInput === true,
       )
     )
       return;
@@ -176,8 +179,8 @@ export function attachAgentProgressWatchdog(
       return;
     }
     if (event.awaitingApproval) {
-      // Nested run parked on a user approval: the tool deadline is replaced
-      // by the bounded model deadline, matching direct approvals.
+      // Nested run parked on a user approval: no deadline, matching direct
+      // approvals (approval waits must not cause false watchdog failures).
       tool.state = 'approval';
       delete tool.parkedOnInput;
       clearTimeout(tool.timer);
