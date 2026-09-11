@@ -162,6 +162,8 @@ describe('GetGoalTool', () => {
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
           tokenBudget: 30_000_000,
+          turnBudget: 40,
+          activeTimeBudgetMs: 1_800_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -194,6 +196,10 @@ describe('GetGoalTool', () => {
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
         tokenBudget: 30_000_000,
+        // A stopped Goal's cadence ceilings are reported beside the token
+        // one, so an inspection can see which allowance ran out.
+        turnBudget: 40,
+        activeTimeBudgetMs: 1_800_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });
