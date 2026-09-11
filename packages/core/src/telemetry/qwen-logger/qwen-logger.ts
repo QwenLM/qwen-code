@@ -110,42 +110,72 @@ const MAX_RETRY_EVENTS = 100;
 
 /**
  * Error-text keys in `properties` that can carry raw shell output or error
- * text (command lines, HTTP headers, provider error bodies).
+ * text (command lines, HTTP headers, provider error bodies, hook failures).
  */
-const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt'];
+const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt', 'error'];
 
 /**
- * `Authorization: Bearer <token>` / `authorization=token <value>` inside a
- * shell command line. The value runs to the next whitespace or quote.
+ * A secret value in free-form error text: an optional opening quote, a run of
+ * non-whitespace/non-quote characters, and an optional closing quote.
+ * Accepting the opening quote means `TOKEN="x"`, `--token 'x'` and
+ * `Authorization: Bearer "x"` all redact instead of failing on the quote. It
+ * never crosses whitespace, so a following token is left untouched.
  */
-const AUTHORIZATION_PATTERN =
-  /\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s"'`]+/gi;
+const SECRET_VALUE = String.raw`["'\`]?[^\s"'\`]+["'\`]?`;
 
 /**
- * Secret-bearing long flags: `--token x`, `--password=y`, `--_authToken w`.
+ * `Authorization: <scheme> <value>` / `authorization=<scheme> <value>` inside a
+ * shell command line. Any auth scheme (Bearer, Basic, Digest, token, …) is
+ * skipped before the value rather than only `Bearer`.
  */
-const SECRET_FLAG_PATTERN =
-  /(--(?:token|password|secret|api-key|access-token|auth-token|_authToken|_password)(?:\s*[=:]\s*|\s+))[^\s"'`]+/gi;
+const AUTHORIZATION_PATTERN = new RegExp(
+  String.raw`\b(authorization\s*[:=]\s*)(?:[A-Za-z0-9._~+/-]+\s+)?` +
+    SECRET_VALUE,
+  'gi',
+);
+
+/**
+ * Secret-bearing long flags: `--token x`, `--password=y`, `--aws-access-key
+ * w`. The secret keyword may sit anywhere inside the flag name, so long flags
+ * like `--github-api-key` or `--_authToken` are caught too, not only the exact
+ * spellings `--token` / `--password`.
+ */
+const SECRET_FLAG_PATTERN = new RegExp(
+  String.raw`(--[A-Za-z0-9_-]*?(?:token|password|secret|credential|key)[A-Za-z0-9_-]*(?:\s*[=:]\s*|\s+))` +
+    SECRET_VALUE,
+  'gi',
+);
 
 /**
  * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_xxx`,
- * `NPM_TOKEN=npm_xxx`, `DB_PASSWORD=secret`. The key must name a secret, so
+ * `OPENAI_API_KEY=sk_xxx`, `AWS_SECRET_ACCESS_KEY=…`, `DB_PASSWORD=secret`.
+ * The key must name a secret — any of the canonical secret words, including
+ * `key` for the `*_API_KEY` / `*_ACCESS_KEY*` LLM credential variables — so
  * ordinary assignments like `USER=alice` pass through untouched.
  */
-const ENV_SECRET_PATTERN =
-  /\b([A-Za-z0-9_]*(?:token|password|secret|credential)[A-Za-z0-9_]*\s*=\s*)[^\s"'`]+/gi;
+const ENV_SECRET_PATTERN = new RegExp(
+  String.raw`\b([A-Za-z0-9_]*(?:token|password|secret|credential|key)[A-Za-z0-9_]*\s*=\s*)` +
+    SECRET_VALUE,
+  'gi',
+);
 
 /**
  * Redacts error text before it enters the usage-statistics sink. Shell
  * command lines are the dominant leak vector — they can embed URL
  * credentials, Authorization headers, or secret flags — so this pass runs on
  * the single enqueue choke point rather than each call site.
+ *
+ * Redaction runs on the raw text (before `stripAnsiAndControl`) so the
+ * whitespace-delimited patterns still see their `\n` / `\t` delimiters; the
+ * control characters are stripped from the result afterwards.
  */
 function redactTelemetryError(text: string): string {
-  return redactUrlCredentials(stripAnsiAndControl(text))
-    .replace(AUTHORIZATION_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
-    .replace(SECRET_FLAG_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
-    .replace(ENV_SECRET_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`);
+  return stripAnsiAndControl(
+    redactUrlCredentials(text)
+      .replace(AUTHORIZATION_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
+      .replace(SECRET_FLAG_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`)
+      .replace(ENV_SECRET_PATTERN, `$1${REDACTED_URL_CREDENTIAL}`),
+  );
 }
 
 export interface LogResponse {

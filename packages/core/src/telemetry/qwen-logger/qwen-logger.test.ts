@@ -1217,5 +1217,84 @@ describe('QwenLogger', () => {
       expect(rumEvent.message).not.toContain('ghs_testsecret123');
       expect(rumEvent.message).toContain('***REDACTED***');
     });
+
+    it('redacts canonical LLM credential env vars (*_API_KEY, *_ACCESS_KEY*)', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'env OPENAI_API_KEY=sk_testsecret123 npm publish',
+        ),
+      ).not.toContain('sk_testsecret123');
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'env AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG npm run',
+        ),
+      ).not.toContain('wJalrXUtnFEMI/K7MDENG');
+    });
+
+    it('redacts non-Bearer Authorization schemes', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'curl -H "Authorization: Basic dXNlcjpwYXNz" https://api.example.com',
+      );
+      expect(redacted).not.toContain('dXNlcjpwYXNz');
+      expect(redacted).toContain('***REDACTED***');
+    });
+
+    it('redacts secrets delimited by tabs and newlines', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'npm publish --_authToken\tnpm_testsecret123 --registry x',
+        ),
+      ).not.toContain('npm_testsecret123');
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'npm publish --_authToken\nnpm_testsecret123 --registry x',
+        ),
+      ).not.toContain('npm_testsecret123');
+    });
+
+    it('redacts quote-opened secret values', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError('TOKEN="ghs_testsecret123"'),
+      ).not.toContain('ghs_testsecret123');
+      expect(
+        TEST_ONLY.redactTelemetryError("--token 'ghs_testsecret123'"),
+      ).not.toContain('ghs_testsecret123');
+    });
+
+    it('redacts long flags containing a secret keyword', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'aws --aws-access-key AKIA_testsecret123',
+        ),
+      ).not.toContain('AKIA_testsecret123');
+    });
+
+    it('redacts the hook error property on the enqueue boundary', () => {
+      const configWithLogPrompts = makeFakeConfig({
+        getTelemetryLogPromptsEnabled: () => true,
+      });
+      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logHookCallEvent(
+        new HookCallEvent(
+          'PostToolUse',
+          'command',
+          'cleanup.sh',
+          { tool_name: 'shell' },
+          200,
+          false,
+          undefined,
+          1,
+          '',
+          'stderr',
+          'hook failed: Authorization: Bearer ghs_testsecret123',
+        ),
+      );
+
+      const error = enqueueSpy.mock.calls[0][0].properties?.['error'] as string;
+      expect(error).not.toContain('ghs_testsecret123');
+      expect(error).toContain('***REDACTED***');
+    });
   });
 });
