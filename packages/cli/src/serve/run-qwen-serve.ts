@@ -5647,6 +5647,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6221,6 +6222,7 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -6898,6 +6900,7 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,

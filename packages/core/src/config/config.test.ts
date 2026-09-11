@@ -6238,6 +6238,27 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it.each([true, false])(
+      'registers saved-page publishing only for recorded managed sessions (%s)',
+      async (chatRecording) => {
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+          chatRecording,
+        });
+        config.setArtifactSnapshotsEnabled(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.ARTIFACT)).toBe(
+          chatRecording,
+        );
+        if (chatRecording) expect(config.shouldAutoOpenArtifact()).toBe(false);
+      },
+    );
+
     it('registers display_image only for the main interactive TUI', async () => {
       const interactive = new Config({
         ...baseParams,
@@ -6576,6 +6597,16 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.REPORT_FINDINGS);
+    });
+
+    it('enables historical artifact snapshots only when a managed caller opts in', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.isArtifactSnapshotsEnabled()).toBe(false);
+      config.setArtifactSnapshotsEnabled(true);
+      expect(config.isArtifactSnapshotsEnabled()).toBe(true);
+      const unrecorded = new Config({ ...baseParams, chatRecording: false });
+      unrecorded.setArtifactSnapshotsEnabled(true);
+      expect(unrecorded.isArtifactSnapshotsEnabled()).toBe(false);
     });
 
     describe('isArtifactEnabled', () => {
