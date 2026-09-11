@@ -40,6 +40,7 @@ import { goalTurnContext } from './goal-turn-context.js';
 import {
   type GoalBlockerKind,
   type GoalControlRequest,
+  goalCheckpointHealthVisible,
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -228,13 +229,19 @@ export class GetGoalTool extends BaseDeclarativeTool<
         ? {}
         : { activeTimeBudgetMs: goal.activeTimeBudgetMs }),
       // A Goal the stall breaker stopped names the kind of failure in
-      // `lastReason`; these two say how often and what exactly it was.
-      ...(goal.checkpointStalls
-        ? { checkpointStalls: goal.checkpointStalls }
+      // `lastReason`; these two say how often and what exactly it was. They
+      // follow the visibility rule every rendered card uses, so a Goal that
+      // completed cleanly is not reported with a stale failure.
+      ...(goalCheckpointHealthVisible(goal)
+        ? {
+            ...(goal.checkpointStalls
+              ? { checkpointStalls: goal.checkpointStalls }
+              : {}),
+            ...(goal.lastCheckpointFailure === undefined
+              ? {}
+              : { lastCheckpointFailure: goal.lastCheckpointFailure }),
+          }
         : {}),
-      ...(goal.lastCheckpointFailure === undefined
-        ? {}
-        : { lastCheckpointFailure: goal.lastCheckpointFailure }),
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
@@ -422,7 +429,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification or checkpointRequired, end the turn without additional user-facing text; after checkpointRequired, call get_goal and retry in the next Goal turn. Otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification or checkpointRequired, end the turn without additional user-facing text; after checkpointRequired, call get_goal first in the next Goal turn and retry before running any other tool, because every new tool result can push a cited entry out of the bounded catalog. Otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
       Kind.Think,
       {
         type: 'object',

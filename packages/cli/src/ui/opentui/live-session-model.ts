@@ -16,7 +16,10 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import {
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  goalCheckpointHealthVisible,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -729,21 +732,20 @@ export function describeGoalCard(
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
-  // Checkpoint health, matching the ink card: shown before the stall breaker
-  // stops the Goal, and kept on the card of a Goal it stopped.
+  // Checkpoint health, matching the ink card under the same visibility rule;
+  // transcript-view sanitizes the line when it renders it.
   const stalls = goal.checkpointStalls ?? 0;
   const checkpointFailure = goal.lastCheckpointFailure?.trim();
-  const checkpoint =
-    goal.status === 'complete' || (stalls === 0 && !checkpointFailure)
-      ? undefined
-      : `Checkpoint: ${[
-          stalls > 0
-            ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
-            : 'last check failed',
-          checkpointFailure,
-        ]
-          .filter(Boolean)
-          .join(' · ')}`;
+  const checkpoint = goalCheckpointHealthVisible(goal)
+    ? `Checkpoint: ${[
+        stalls > 0
+          ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+          : 'last check failed',
+        checkpointFailure,
+      ]
+        .filter(Boolean)
+        .join(' · ')}`
+    : undefined;
   return {
     state: 'card',
     icon: lifecycle.icon,

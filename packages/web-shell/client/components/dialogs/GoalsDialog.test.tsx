@@ -303,6 +303,12 @@ describe('GoalsDialog', () => {
     expect(checkpointLine()).toBe(
       'Checkpoint: 2/3 checks stalled · Error: provider failed',
     );
+    // The row is line-clamped, so the full line is kept as a tooltip.
+    expect(
+      document
+        .querySelector('[data-testid="goal-checkpoint"]')
+        ?.getAttribute('title'),
+    ).toBe('2/3 checks stalled · Error: provider failed');
   });
 
   it('shows a checkpoint failure that spent no stall', async () => {
@@ -310,9 +316,42 @@ describe('GoalsDialog', () => {
       withSpend({ lastCheckpointFailure: 'Error: provider failed' }),
     ]);
 
+    // Not "last check": the row above it is the judge's last check.
     expect(checkpointLine()).toBe(
-      'Checkpoint: last check failed · Error: provider failed',
+      'Checkpoint: last evidence checkpoint failed · Error: provider failed',
     );
+  });
+
+  it('keeps the checkpoint line on the card of a Goal the stall breaker stopped', async () => {
+    await mount([
+      stopped({
+        checkpointStalls: 3,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBe(
+      'Checkpoint: 3/3 checks stalled · Error: provider failed',
+    );
+  });
+
+  it('hides a stall-free failure once the Goal stopped for another reason', async () => {
+    await mount([stopped({ lastCheckpointFailure: 'Error: provider failed' })]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
+  it('renders no bidi or control characters from the diagnostic', async () => {
+    await mount([
+      withSpend({
+        checkpointStalls: 2,
+        lastCheckpointFailure: 'Error: provider\u202e failed\r',
+      }),
+    ]);
+
+    expect(checkpointLine()).toContain('2/3 checks stalled');
+    expect(checkpointLine()).not.toContain('\u202e');
+    expect(checkpointLine()).not.toContain('\r');
   });
 
   it('shows no checkpoint line for a healthy Goal', async () => {

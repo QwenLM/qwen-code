@@ -2353,7 +2353,7 @@ const EN: Messages = {
   'goal.checkpoint': 'Checkpoint',
   'goal.checkpointStalled': (v) =>
     `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
-  'goal.checkpointFailed': 'last check failed',
+  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -5854,7 +5854,7 @@ const ZH: Messages = {
   'goal.checkpoint': '检查点',
   'goal.checkpointStalled': (v) =>
     `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
-  'goal.checkpointFailed': '最近一次检查失败',
+  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',

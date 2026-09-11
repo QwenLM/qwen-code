@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  stripDisplayControlChars,
+  stripTerminalControlSequences,
+} from '../utils/terminalSafe.js';
+
 export const GOAL_STATE_VERSION = 2 as const;
 export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
 export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
@@ -30,38 +35,45 @@ export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
  */
 export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 /**
- * The stall stop for a Goal whose last stalled check folded the window into a
- * full claim list and still left evidence behind: compaction itself cannot
- * keep up, so the objective is producing more evidence than one window holds.
+ * The stall stop for a Goal whose last stalled check could not fit the window
+ * inside the checkpoint's claim bounds: a full claim list that still left
+ * evidence behind, or well-formed claims over the byte or per-claim length
+ * budget. Compaction itself cannot keep up -- the objective produces more
+ * evidence than one window holds -- so narrowing it is the remedy.
  */
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check folded it into a full claim list that still left evidence behind, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check could not fit it within the checkpoint claim bounds, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
- * The stall stop for a Goal whose last stalled check answered with something
- * that could not be folded into claims. The objective may not be too wide at
- * all -- the checkpoint model is returning output the runtime cannot accept --
- * so the full-claim-list advice to narrow it would send the user to rewrite a
- * Goal that was never the problem.
+ * The stall stop for a Goal whose last stalled check answered with output that
+ * is not usable claims at all. The objective may not be too wide -- the
+ * checkpoint model is returning output the runtime cannot accept -- so the
+ * capacity advice to narrow it would send the user to rewrite a Goal that was
+ * never the problem.
  */
 export const GOAL_CHECKPOINT_UNUSABLE_REASON =
   'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check answered with output that could not be folded into claims. Narrowing the objective does not fix this. Check that the checkpoint model returns the structured JSON it is asked for, or switch models, then resume the Goal; resuming starts a fresh evidence window.';
 
 /**
- * The stall stop for a Goal whose last stalled check failed before the
- * checkpoint verifier answered: a timeout, a provider error, a rate limit.
+ * The stall stop for a Goal whose last stalled check produced no answer to
+ * judge. The runtime cannot tell why from here: the provider may be
+ * unreachable or rate-limited, the check may have run past its own ceiling on
+ * a window too large to verify in time, or the check itself may have failed.
+ * The recorded failure says which, so this names every remedy that can apply
+ * rather than blaming the provider.
  */
 export const GOAL_CHECKPOINT_UNREACHABLE_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check failed before the checkpoint verifier answered. Narrowing the objective does not fix this. Resume the Goal once the provider is reachable; resuming starts a fresh evidence window.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check failed before the checkpoint verifier returned an answer. The recorded checkpoint failure says why: an unreachable or rate-limited provider, a check that did not finish within model.goalCheckpointTimeoutSeconds, or an error in the check itself. Fix the provider, raise that timeout, or narrow the objective so the window checkpoints in time, then resume the Goal; resuming starts a fresh evidence window.';
 
 /**
  * What the last stalled checkpoint check ran into, which decides the advice
- * the stop carries. `full_claims`: the check folded the window into a full
- * claim list and still left evidence behind. `unusable`: it answered, but not
- * with claims the runtime could accept. `unreachable`: it never answered.
+ * the stop carries. `capacity`: the check could not fit the window within the
+ * claim bounds (a full claim list that left evidence behind, or claims over
+ * the byte or length budget). `unusable`: it answered with output that is not
+ * usable claims. `unreachable`: no answer arrived to judge.
  */
 export type GoalCheckpointFailureShape =
-  | 'full_claims'
+  | 'capacity'
   | 'unusable'
   | 'unreachable';
 
@@ -70,7 +82,7 @@ export function goalCheckpointStalledReason(
   shape: GoalCheckpointFailureShape,
 ): string {
   switch (shape) {
-    case 'full_claims':
+    case 'capacity':
       return GOAL_CHECKPOINT_STALLED_REASON;
     case 'unusable':
       return GOAL_CHECKPOINT_UNUSABLE_REASON;
@@ -89,13 +101,46 @@ export function goalCheckpointStalledReason(
  */
 export const GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS = 500;
 
-/** Trims a checkpoint failure diagnostic to the record's bound, by code point. */
+/**
+ * Makes a checkpoint failure safe to keep as a one-line diagnostic: terminal
+ * control sequences and bidi overrides removed, every run of whitespace (line
+ * breaks included) collapsed to one space, and the result capped by code
+ * point. Collapsing runs before the cap, so the bound spends its code points
+ * on the message rather than on a response body's indentation. The value is
+ * journaled, handed to the model, and rendered on every Goal surface, so it is
+ * cleaned once where it is written rather than trusted to each reader.
+ */
 export function capGoalCheckpointFailure(text: string): string {
-  const trimmed = text.trim();
-  const codePoints = [...trimmed];
+  const oneLine = stripDisplayControlChars(stripTerminalControlSequences(text))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const codePoints = [...oneLine];
   return codePoints.length <= GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS
-    ? trimmed
+    ? oneLine
     : `${codePoints.slice(0, GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS - 1).join('')}…`;
+}
+
+/**
+ * Whether a Goal surface should show checkpoint health, decided once so every
+ * card and summary agrees. A completed Goal never does: its checkpoints no
+ * longer matter, and the terminal snapshot keeps whatever the record carried.
+ * A running stall streak always does, whatever the status, because it is
+ * still the truth about the evidence window a resume re-enters. A failure that
+ * spent no stall shows only while the Goal is active: once the Goal stops or
+ * pauses for another reason, that diagnostic explains nothing about the stop
+ * and would read as though it did.
+ */
+export function goalCheckpointHealthVisible(goal: {
+  status?: string;
+  checkpointStalls?: number;
+  lastCheckpointFailure?: string;
+}): boolean {
+  if (goal.status === 'complete') return false;
+  if ((goal.checkpointStalls ?? 0) > 0) return true;
+  return (
+    (goal.status ?? 'active') === 'active' &&
+    Boolean(goal.lastCheckpointFailure?.trim())
+  );
 }
 
 /**

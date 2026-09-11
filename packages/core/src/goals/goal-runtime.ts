@@ -21,7 +21,11 @@ import {
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
 } from './goal-checkpoint.js';
-import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
+import {
+  GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimLengthError,
+  GoalCheckpointVerifierInputTooLargeError,
+} from './goal-checkpoint-verifier.js';
 import {
   capGoalCheckpointFailure,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
@@ -88,15 +92,24 @@ interface CheckpointFailure {
 }
 
 /**
- * Classifies a checkpoint check that threw. An `InvalidGoalCheckpointError`
- * (its claim-budget and claim-length subclasses included) means the verifier
- * answered with something that could not become claims; anything else -- a
- * timeout, a provider error, a rate limit -- means no usable answer arrived.
+ * Classifies a checkpoint check that threw. A claim-budget or claim-length
+ * overrun is well-formed output that could not fit the window within the
+ * checkpoint's bounds -- the same capacity failure as a full claim list, with
+ * the same remedy -- so those two subclasses are tested before their base
+ * class. Any other `InvalidGoalCheckpointError` means the verifier answered
+ * with output that is not usable claims. Anything else means no answer
+ * arrived to judge: a provider error, the check's own timeout, or a failure
+ * inside the check.
  */
 function describeCheckpointFailure(error: unknown): CheckpointFailure {
   return {
     shape:
-      error instanceof InvalidGoalCheckpointError ? 'unusable' : 'unreachable',
+      error instanceof GoalCheckpointClaimBudgetError ||
+      error instanceof GoalCheckpointClaimLengthError
+        ? 'capacity'
+        : error instanceof InvalidGoalCheckpointError
+          ? 'unusable'
+          : 'unreachable',
     detail: capGoalCheckpointFailure(
       error instanceof Error
         ? `${error.name}: ${error.message}`
@@ -107,7 +120,7 @@ function describeCheckpointFailure(error: unknown): CheckpointFailure {
 
 /** The stall a checkpoint that came back at the claim ceiling spends. */
 const FULL_CLAIM_LIST_FAILURE: CheckpointFailure = {
-  shape: 'full_claims',
+  shape: 'capacity',
   detail: `checkpoint came back with a full claim list (${GOAL_CHECKPOINT_CLAIM_LIMIT} claims) while the evidence window overflowed`,
 };
 
@@ -1257,7 +1270,7 @@ export function createGoalRuntime(
   ): Promise<boolean> => {
     if (checkpointStalls < GOAL_CHECKPOINT_STALL_LIMIT) return false;
     const shape: GoalCheckpointFailureShape =
-      health !== undefined && health !== 'clear' ? health.shape : 'full_claims';
+      health !== undefined && health !== 'clear' ? health.shape : 'capacity';
     await settleCheckpointFailure(
       attempt,
       withCheckpointHealth(goal, checkpointStalls, health),
@@ -1267,14 +1280,31 @@ export function createGoalRuntime(
     return true;
   };
 
+  /**
+   * Stops the Goal at a checkpoint bound other than the stall breaker. The
+   * record's diagnostic is scoped to this stop: an arm whose cause is itself a
+   * failed check (the request that was too large) records that failure, and
+   * every other arm clears whatever an earlier, unrelated check left, since
+   * its own `lastReason` already says what happened.
+   */
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
     limitKind?: GoalLimitKind,
+    health: CheckpointHealthUpdate = 'clear',
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      await settleCheckpointFailure(attempt, snapshot.goal, reason, limitKind);
+      await settleCheckpointFailure(
+        attempt,
+        withCheckpointHealth(
+          snapshot.goal,
+          snapshot.goal.checkpointStalls ?? 0,
+          health,
+        ),
+        reason,
+        limitKind,
+      );
     });
   };
 
@@ -1410,6 +1440,7 @@ export function createGoalRuntime(
             attempt,
             GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
             'checkpoint_request',
+            describeCheckpointFailure(error),
           );
           return;
         }

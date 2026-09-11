@@ -515,6 +515,34 @@ describe('createGoalCheckpointVerifier', () => {
     expect(caller.signal.aborted).toBe(false);
   });
 
+  it('reports the timeout when the provider answers the abort with its own error', async () => {
+    // A real provider SDK rejects an aborted request with its own error and
+    // drops the reason the signal carried, so the Goal record used to say
+    // "Request was aborted." without saying the check had timed out.
+    const generateText = vi.fn().mockImplementation(
+      (request: { abortSignal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          request.abortSignal?.addEventListener('abort', () => {
+            reject(new Error('Request was aborted.'));
+          });
+        }),
+    );
+    const { config } = finishConfig(generateText);
+
+    await expect(
+      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
+    ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
+
+    // The caller's own abort is an interrupt, not a timeout: it keeps the
+    // error the provider raised.
+    const caller = new AbortController();
+    const interrupted = createGoalCheckpointVerifier(config, {
+      timeoutMs: 60_000,
+    })(input(), caller.signal);
+    caller.abort(new Error('user interrupt'));
+    await expect(interrupted).rejects.toThrow('Request was aborted.');
+  });
+
   it.each([
     ['the configured ceiling', 45_000, { timeoutMs: 45_000 }],
     ['the built-in default', GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS, {}],

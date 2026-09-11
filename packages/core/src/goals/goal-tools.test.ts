@@ -295,6 +295,75 @@ describe('GetGoalTool', () => {
     });
   });
 
+  it('leaves checkpoint health out of the summary of a completed Goal', async () => {
+    // The terminal snapshot keeps whatever the record carried; a Goal that
+    // completed cleanly must not be reported with a stale failure.
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'complete' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+          lastReason: 'Evidence satisfies the objective',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({
+      status: 'complete',
+      lastReason: 'Evidence satisfies the objective',
+    });
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
+  it('leaves a stall-free failure out of the summary of a Goal paused for another reason', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'paused' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+          lastReason: 'no progress in three turns',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({ status: 'paused' });
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
     const config = makeConfig({
       getGoalForWorker: vi.fn(),
@@ -1039,7 +1108,11 @@ describe('UpdateGoalTool', () => {
       readyForVerification: false,
       goalLifecycleChanged: false,
       checkpointRequired: true,
-      nextAction: expect.stringContaining('checkpoint the evidence catalog'),
+      // A retry that runs another tool first can push a cited entry out of
+      // the catalog, so the hint says to retry before anything else.
+      nextAction: expect.stringMatching(
+        /checkpoint the evidence catalog[\s\S]*before running any other tool/,
+      ),
     });
     expect(result.terminateTurn).toBe(true);
     expect(recordTerminalProposal).not.toHaveBeenCalled();

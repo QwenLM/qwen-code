@@ -341,6 +341,16 @@ export function createGoalCheckpointVerifier(
           retryCause = error;
         }
       }
+    } catch (error) {
+      // A provider SDK rejects its own aborted request with its own error
+      // ("Request was aborted.") and drops the reason the signal carried, so
+      // a check that ran past this ceiling would never say it timed out. The
+      // caller's abort is left alone: the runtime treats that as an
+      // interrupt, not a failed check.
+      if (timeoutController.signal.aborted && !attemptSignal?.aborted) {
+        throw timeoutController.signal.reason;
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

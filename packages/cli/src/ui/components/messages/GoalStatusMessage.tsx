@@ -8,10 +8,12 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import {
   GOAL_CHECKPOINT_STALL_LIMIT,
+  goalCheckpointHealthVisible,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
 import { formatTokenCount } from '../../statusLinePresets.js';
@@ -133,21 +135,25 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
       : undefined;
   // Checkpoint health, shown before the stall breaker has to stop the Goal:
   // a Goal paying a failed checkpoint every turn otherwise looks like one
-  // that is working. A stopped Goal keeps the line, since its stop reason
-  // names the kind of failure but not the failure itself.
+  // that is working. A Goal the breaker stopped keeps the line, since its stop
+  // reason names the kind of failure but not the failure itself; which
+  // records show it at all is decided once, in goalCheckpointHealthVisible.
+  // The diagnostic is cleaned where it is written and again here, because
+  // this renderer writes straight to the terminal.
   const stalls = goal.checkpointStalls ?? 0;
-  const checkpointFailure = goal.lastCheckpointFailure?.trim();
-  const checkpoint =
-    goal.status === 'complete' || (stalls === 0 && !checkpointFailure)
-      ? undefined
-      : [
-          stalls > 0
-            ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
-            : 'last check failed',
-          checkpointFailure,
-        ]
-          .filter(Boolean)
-          .join(' · ');
+  const checkpointFailure = sanitizeTerminalText(
+    goal.lastCheckpointFailure ?? '',
+  ).trim();
+  const checkpoint = goalCheckpointHealthVisible(goal)
+    ? [
+        stalls > 0
+          ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+          : 'last check failed',
+        checkpointFailure,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : undefined;
 
   return (
     <Box flexDirection="row">

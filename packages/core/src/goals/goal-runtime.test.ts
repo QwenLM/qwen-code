@@ -10,6 +10,7 @@ import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
   GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
@@ -35,12 +36,16 @@ import {
   type GoalTurnHost,
 } from './goal-runtime.js';
 import { GoalConflictError } from './goal-reducer.js';
-import type {
-  GoalCheckpointVerificationResult,
-  GoalCheckpointVerifier,
-  GoalCheckpointVerifierInput,
+import {
+  InvalidGoalCheckpointError,
+  type GoalCheckpointVerificationResult,
+  type GoalCheckpointVerifier,
+  type GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
-import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
+import {
+  GoalCheckpointClaimBudgetError,
+  GoalCheckpointVerifierInputTooLargeError,
+} from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
 // Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
@@ -2148,6 +2153,11 @@ describe('goal runtime', () => {
     expect(checkpointVerifier).toHaveBeenCalledTimes(2);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    // The check that found room is the one that proved the window healthy,
+    // so it also retires the diagnostic the two stalls left behind.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty(
+      'lastCheckpointFailure',
+    );
   });
 
   it('counts a verifier failure on an overflowing window as a stall', async () => {
@@ -2328,6 +2338,125 @@ describe('goal runtime', () => {
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
     // No continuation was minted for the stopped Goal.
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it('reads a claim-budget overrun as capacity, not as unusable output', async () => {
+    // A budget overrun is well-formed JSON that could not fit the window
+    // within the checkpoint's bounds -- the capacity failure a narrower
+    // objective fixes -- so its stop keeps that advice rather than telling
+    // the user to debug JSON that was valid.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValue(
+      new GoalCheckpointClaimBudgetError(20_000),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `budget-${turn}`,
+      );
+    }
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'evidence_catalog',
+      lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      lastCheckpointFailure: expect.stringMatching(
+        /^GoalCheckpointClaimBudgetError: /,
+      ),
+    });
+  });
+
+  it('reads any other subclass of the unusable-result error as unusable output', async () => {
+    // Pins `instanceof` rather than an exact-constructor check: the hierarchy
+    // is open, and a new unusable shape must keep the unusable advice.
+    class ProbeUnusableCheckpointError extends InvalidGoalCheckpointError {}
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValue(
+      new ProbeUnusableCheckpointError('probe'),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `probe-${turn}`,
+      );
+    }
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
+    });
+  });
+
+  it('records a bounded, one-line, display-safe failure', async () => {
+    // The only production call site of the record's bound: a provider error
+    // carrying a whole response body must not reach the journal, the model
+    // or a card intact.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(
+      new Error(
+        `upstream said:\n  ${'x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)}\r\u202e`,
+      ),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'body');
+
+    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
+    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+    expect(value.endsWith('…')).toBe(true);
+    expect(value.startsWith('Error: upstream said: xxx')).toBe(true);
+    expect(value).not.toMatch(/[\n\r\u202e]/);
+  });
+
+  it('records the failure that made the checkpoint request too large on the stop it caused', async () => {
+    // The stop's diagnostic belongs to this stop, not to whatever an earlier
+    // check left: the too-large request is itself the failure to report.
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      checkpointStalls: 1,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    checkpointVerifier.mockRejectedValueOnce(
+      new GoalCheckpointVerifierInputTooLargeError(300_000),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'checkpoint_request',
+      lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+      checkpointStalls: 1,
+      lastCheckpointFailure: expect.stringMatching(
+        /^GoalCheckpointVerifierInputTooLargeError: /,
+      ),
+    });
   });
 
   it('does not count an unusable result while the window has room', async () => {

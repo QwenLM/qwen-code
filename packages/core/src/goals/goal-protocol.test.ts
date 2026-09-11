@@ -11,6 +11,7 @@ import {
   GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_CHECKPOINT_UNREACHABLE_REASON,
   GOAL_CHECKPOINT_UNUSABLE_REASON,
+  goalCheckpointHealthVisible,
   goalCheckpointStalledReason,
   goalLimitKindForReason,
   GOAL_PAUSE_REASON_COMMAND,
@@ -127,7 +128,7 @@ describe('goal pause reasons', () => {
 
 describe('goal checkpoint stall reasons', () => {
   it('advises by what the check that spent the last stall ran into', () => {
-    expect(goalCheckpointStalledReason('full_claims')).toBe(
+    expect(goalCheckpointStalledReason('capacity')).toBe(
       GOAL_CHECKPOINT_STALLED_REASON,
     );
     expect(goalCheckpointStalledReason('unusable')).toBe(
@@ -136,15 +137,24 @@ describe('goal checkpoint stall reasons', () => {
     expect(goalCheckpointStalledReason('unreachable')).toBe(
       GOAL_CHECKPOINT_UNREACHABLE_REASON,
     );
-    // Only the compaction shape is fixed by a narrower objective; telling a
-    // user whose provider was down to rewrite their Goal is the bug.
+    // Capacity is fixed by a narrower objective; malformed output is not,
+    // and telling that user to rewrite their Goal is the bug.
     expect(GOAL_CHECKPOINT_STALLED_REASON).toContain('narrower objective');
-    for (const reason of [
-      GOAL_CHECKPOINT_UNUSABLE_REASON,
-      GOAL_CHECKPOINT_UNREACHABLE_REASON,
-    ]) {
-      expect(reason).toContain('Narrowing the objective does not fix this');
-    }
+    expect(GOAL_CHECKPOINT_UNUSABLE_REASON).toContain(
+      'Narrowing the objective does not fix this',
+    );
+    // A check that never answered may have run past its own ceiling on a
+    // window too large to verify in time, so its advice keeps every remedy
+    // that can apply instead of blaming the provider.
+    expect(GOAL_CHECKPOINT_UNREACHABLE_REASON).toContain(
+      'model.goalCheckpointTimeoutSeconds',
+    );
+    expect(GOAL_CHECKPOINT_UNREACHABLE_REASON).toContain(
+      'narrow the objective',
+    );
+    expect(GOAL_CHECKPOINT_UNREACHABLE_REASON).not.toContain(
+      'does not fix this',
+    );
   });
 
   it('keeps resumability on limitKind rather than on the stop prose', () => {
@@ -175,6 +185,81 @@ describe('goal checkpoint stall reasons', () => {
     expect(codePoints(capped)).toBe(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
     expect(capped.endsWith('…')).toBe(true);
     expect([...capped].slice(0, -1).every((char) => char === '😀')).toBe(true);
+  });
+
+  it('keeps a failure diagnostic on one display-safe line', () => {
+    expect(capGoalCheckpointFailure('Error: a\nb c')).toBe('Error: a b c');
+    expect(capGoalCheckpointFailure('Error: a\r\n    b\tc')).toBe(
+      'Error: a b c',
+    );
+    // Escape sequences go whole and bidi overrides go entirely, so no
+    // surface can be repainted or reordered by a provider's error text.
+    expect(
+      capGoalCheckpointFailure(
+        'Error: \u001b[31mred\u001b[0m rate\u202e limit\u0007',
+      ),
+    ).toBe('Error: red rate limit');
+
+    // Collapsing runs before the cap, so a response body's indentation
+    // cannot spend the bound.
+    const capped = capGoalCheckpointFailure(
+      `Error:${'\n    word'.repeat(200)}`,
+    );
+    expect(capped).not.toMatch(/\s{2,}|\n/);
+    expect(codePoints(capped)).toBe(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+  });
+});
+
+describe('goal checkpoint health visibility', () => {
+  const failure = 'Error: provider failed';
+
+  it.each([
+    [
+      'an active Goal whose failure spent no stall',
+      { status: 'active', lastCheckpointFailure: failure },
+      true,
+    ],
+    [
+      'an active Goal mid-streak',
+      { status: 'active', checkpointStalls: 2, lastCheckpointFailure: failure },
+      true,
+    ],
+    [
+      'a Goal the stall breaker stopped',
+      {
+        status: 'usage_limited',
+        checkpointStalls: 3,
+        lastCheckpointFailure: failure,
+      },
+      true,
+    ],
+    [
+      'a paused Goal that keeps its streak',
+      { status: 'paused', checkpointStalls: 1, lastCheckpointFailure: failure },
+      true,
+    ],
+    [
+      'a Goal paused for another reason after a stall-free failure',
+      { status: 'paused', lastCheckpointFailure: failure },
+      false,
+    ],
+    [
+      'a Goal stopped by another bound after a stall-free failure',
+      { status: 'usage_limited', lastCheckpointFailure: failure },
+      false,
+    ],
+    [
+      'a completed Goal that still carries both fields',
+      {
+        status: 'complete',
+        checkpointStalls: 1,
+        lastCheckpointFailure: failure,
+      },
+      false,
+    ],
+    ['a healthy active Goal', { status: 'active' }, false],
+  ] as const)('%s', (_label, goal, expected) => {
+    expect(goalCheckpointHealthVisible(goal)).toBe(expected);
   });
 });
 

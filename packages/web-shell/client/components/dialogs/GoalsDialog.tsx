@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/sdk/daemon';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
 import { canResumeGoal } from '../../utils/goalGate';
 import {
@@ -372,23 +373,33 @@ export function GoalsDialog({
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
           // Checkpoint health, before the stall breaker has to stop the Goal.
+          // Same visibility rule as the terminal cards (core's
+          // goalCheckpointHealthVisible, which the web shell cannot import):
+          // never on a completed Goal, always during a stall streak, and a
+          // failure that spent no stall only while the Goal is active. The
+          // text is sanitized before the gate, so a value made only of control
+          // or bidi characters cannot leave a dangling separator.
           const checkpointStalls = goal.checkpointStalls ?? 0;
-          const checkpointFailure = goal.lastCheckpointFailure?.trim();
-          const checkpointLine =
-            goal.status === 'complete' ||
-            (checkpointStalls === 0 && !checkpointFailure)
-              ? undefined
-              : [
-                  checkpointStalls > 0
-                    ? t('goal.checkpointStalled', {
-                        count: checkpointStalls,
-                        limit: GOAL_CHECKPOINT_STALL_LIMIT,
-                      })
-                    : t('goal.checkpointFailed'),
-                  checkpointFailure,
-                ]
-                  .filter(Boolean)
-                  .join(' · ');
+          const checkpointFailure = sanitizeControlChars(
+            goal.lastCheckpointFailure ?? '',
+          ).trim();
+          const checkpointVisible =
+            goal.status !== 'complete' &&
+            (checkpointStalls > 0 ||
+              (goal.status === 'active' && checkpointFailure !== ''));
+          const checkpointLine = checkpointVisible
+            ? [
+                checkpointStalls > 0
+                  ? t('goal.checkpointStalled', {
+                      count: checkpointStalls,
+                      limit: GOAL_CHECKPOINT_STALL_LIMIT,
+                    })
+                  : t('goal.checkpointFailed'),
+                checkpointFailure,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+            : undefined;
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -462,6 +473,7 @@ export function GoalsDialog({
                 <div
                   className={styles.cardReason}
                   data-testid="goal-checkpoint"
+                  title={checkpointLine}
                 >
                   <span className={styles.reasonLabel}>
                     {t('goal.checkpoint')}:

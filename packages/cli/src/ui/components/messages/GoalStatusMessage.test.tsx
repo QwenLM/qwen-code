@@ -233,6 +233,60 @@ describe('<GoalStatusMessage />', () => {
     );
   });
 
+  it('hides checkpoint health on a completed Goal that still carries it', () => {
+    // The terminal snapshot spreads the record and overrides only `status`,
+    // so a Goal that completed after a failed check journals both fields.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('complete', 'idle', 'all acceptance checks passed', {
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Goal complete');
+    expect(lastFrame()).not.toContain('Checkpoint');
+  });
+
+  it('hides a stall-free failure once the Goal stops for another reason', () => {
+    const paused = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'no progress in three turns', {
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+    expect(paused.lastFrame()).not.toContain('Checkpoint');
+
+    // A running streak is still the truth about the window a resume re-enters.
+    const streak = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'paused by the user', {
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+    expect(streak.lastFrame()).toContain('Checkpoint: 2/3 stalled');
+  });
+
+  it('never writes control or bidi characters from the diagnostic to the terminal', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'stalled\rGoal complete \u202efailed',
+        })}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Checkpoint: 1/3 stalled');
+    expect(frame).not.toContain('\r');
+    expect(frame).not.toContain('\u202e');
+  });
+
   it('says nothing about checkpoints on a healthy card', () => {
     const { lastFrame } = render(
       <GoalStatusMessage snapshot={snapshot('active', 'running')} />,

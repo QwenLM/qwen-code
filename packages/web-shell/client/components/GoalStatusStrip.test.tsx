@@ -244,4 +244,26 @@ describe('GoalStatusStrip', () => {
         ?.textContent,
     ).toBe('2.5M / 30.0M tokens');
   });
+
+  it('shows a running checkpoint stall streak, like the terminal footer pill', () => {
+    render('active', {
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    expect(
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
+        ?.textContent,
+    ).toBe('2/3 checks stalled');
+    // The failure text belongs to the Goals dialog; the strip has no room.
+    expect(container.textContent).not.toContain('provider failed');
+  });
+
+  it('shows no streak when no checkpoint has stalled', () => {
+    render('active', { lastCheckpointFailure: 'Error: provider failed' });
+
+    expect(
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
+    ).toBeNull();
+  });
 });

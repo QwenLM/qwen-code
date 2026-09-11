@@ -60,6 +60,11 @@
   color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
 }
 
+.checkpoint {
+  flex: 0 0 auto;
+  color: var(--warning-color);
+}
+
 .actions {
   display: inline-flex;
   align-items: center;
