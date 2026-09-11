@@ -108,6 +108,18 @@ vi.mock('./MessageItem', async () => {
               'data-testid': `disclosure-${message.id}`,
             })
           : null,
+        message.role === 'thinking'
+          ? React.createElement(
+              'details',
+              null,
+              React.createElement(
+                'summary',
+                { 'data-testid': `native-disclosure-${message.id}` },
+                React.createElement('span', null, 'Context details'),
+              ),
+              'Context contents',
+            )
+          : null,
         showAssistantBranch
           ? React.createElement('button', {
               'data-testid': `branch-${message.id}`,
@@ -6578,40 +6590,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 
-  it('reports scroll-to-bottom affordance when a clicked disclosure grows during streaming', async () => {
-    let scrollHeight = 600;
-    let scrollTop = 0;
-    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
-      configurable: true,
-      get: () => scrollHeight,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
-      configurable: true,
-      value: 600,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => {
-        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
-      },
-    });
-    const onCanScrollToBottomChange = vi.fn();
-    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
-      isResponding: true,
-      onCanScrollToBottomChange,
-    });
-    await nextFrame();
+  it.each(['aria', 'native'])(
+    'pauses follow when a %s disclosure grows during streaming',
+    async (kind) => {
+      let scrollHeight = 600;
+      let scrollTop = 0;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+        },
+      });
+      const onCanScrollToBottomChange = vi.fn();
+      const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+        isResponding: true,
+        onCanScrollToBottomChange,
+      });
+      await nextFrame();
 
-    click(disclosure(c, 't1'));
+      const target =
+        kind === 'native'
+          ? c.querySelector<HTMLElement>(
+              '[data-testid="native-disclosure-t1"] span',
+            )!
+          : disclosure(c, 't1');
+      click(target);
 
-    scrollHeight = 1200;
-    act(() => triggerResizeObservers());
-    await nextFrame();
-    await nextFrame();
+      scrollHeight = 1200;
+      act(() => triggerResizeObservers());
+      await nextFrame();
+      await nextFrame();
 
-    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
-  });
+      expect(scrollTop).toBe(0);
+      expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+    },
+  );
 
   it('keeps the scroll-to-bottom affordance hidden when disclosure growth stays near bottom', async () => {
     let scrollHeight = 600;
