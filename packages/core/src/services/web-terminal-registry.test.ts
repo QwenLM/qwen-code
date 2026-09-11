@@ -512,6 +512,7 @@ describe('WebTerminalRegistry', () => {
     onData('trailing');
     await new Promise<void>((resolve) => setImmediate(resolve));
 
+    expect(disposeData).toHaveBeenCalledOnce();
     expect(registry.readSnapshot('terminal:exit-trailing')).toMatchObject({
       output: 'trailing',
       exited: true,
