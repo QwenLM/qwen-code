@@ -1428,6 +1428,31 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'webPreview.title': 'Web preview',
+  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.address': 'Development URL',
+  'webPreview.open': 'Open',
+  'webPreview.refresh': 'Refresh preview',
+  'webPreview.desktop': 'Desktop width',
+  'webPreview.mobile': 'Mobile width (390 px)',
+  'webPreview.external': 'Open externally',
+  'webPreview.frame': 'Web preview frame',
+  'webPreview.saved': 'Saved version',
+  'webPreview.savedFrame': 'Saved webpage version',
+  'webPreview.savedUnavailable':
+    'This saved version is missing or has changed. It cannot be opened.',
+  'webPreview.savedLoadFailed': 'Could not load this saved version. Try again.',
+  'webPreview.page': 'Application preview',
+  'webPreview.empty':
+    'Start your development server, then enter its URL above.',
+  'webPreview.reachable':
+    'Use an address this browser can reach. For a remote server, use its accessible URL or an existing port forward.',
+  'webPreview.fallback':
+    'Blank page? Check the server or open externally. The address and refresh use the entry URL.',
+  'webPreview.live':
+    'Live page. Opening a link from an earlier message shows its current content, not a saved version.',
+  'webPreview.invalidUrl':
+    'Use a separate HTTP/HTTPS development address with a hostname or IPv4 address, without login credentials. Web Shell and daemon addresses cannot be previewed.',
   'terminal.title': 'Terminal',
   'terminal.open': 'Open a terminal',
   'terminal.notice.exited': (v) =>
@@ -2369,6 +2394,10 @@ const EN: Messages = {
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
   'goal.lastCheck': 'Last check',
+  'goal.checkpoint': 'Checkpoint',
+  'goal.checkpointStalled': (v) =>
+    `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
+  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -2922,6 +2951,18 @@ const EN: Messages = {
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
+  'userMessage.edit': 'Edit message',
+  'userMessage.editSubmit': 'Send',
+  'userMessage.editSending': 'Sending…',
+  'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
+  'userMessage.editStale':
+    'The message changed. Reopen the editor and try again.',
+  'userMessage.editAttachmentUnavailable':
+    'An attachment is unavailable. The message was not rewound.',
+  'userMessage.editSyncFailed':
+    'Could not confirm the rewind. Your edit is retained while waiting for synchronization.',
+  'userMessage.editFailed': (v) =>
+    `Could not resend the edited message: ${v?.reason ?? ''}`,
   'turn.processed': 'Processed',
   'turn.processing': 'Processing',
   'turn.collapse': 'Collapse steps',
@@ -5029,6 +5070,29 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'webPreview.title': '网页预览',
+  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.address': '开发地址',
+  'webPreview.open': '打开',
+  'webPreview.refresh': '刷新预览',
+  'webPreview.desktop': '桌面宽度',
+  'webPreview.mobile': '手机宽度（390 px）',
+  'webPreview.external': '外部打开',
+  'webPreview.frame': '网页预览容器',
+  'webPreview.saved': '当时保存的版本',
+  'webPreview.savedFrame': '历史网页版本',
+  'webPreview.savedUnavailable': '这份历史版本已丢失或被修改，无法打开。',
+  'webPreview.savedLoadFailed': '暂时无法加载这份历史版本，请重试。',
+  'webPreview.page': '应用预览',
+  'webPreview.empty': '启动开发服务器，然后在上方输入地址。',
+  'webPreview.reachable':
+    '使用当前浏览器可访问的地址。远程服务器请使用可访问的 URL 或已有的端口转发。',
+  'webPreview.fallback':
+    '页面空白？请检查服务器或外部打开。地址栏和刷新使用最初打开的地址。',
+  'webPreview.live':
+    '实时页面：从历史消息打开链接，也会显示当前内容，不是当时保存的版本。',
+  'webPreview.invalidUrl':
+    '请使用独立开发服务器的 HTTP/HTTPS 地址，主机名或 IPv4 均可，且不含登录凭据。不能预览 Web Shell 或 daemon 地址。',
   'terminal.title': '终端',
   'terminal.open': '打开终端',
   'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
@@ -5888,6 +5952,10 @@ const ZH: Messages = {
   'goal.judge': '判断',
   'goal.label': '目标',
   'goal.lastCheck': '上次检查',
+  'goal.checkpoint': '检查点',
+  'goal.checkpointStalled': (v) =>
+    `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
+  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
@@ -6410,6 +6478,15 @@ const ZH: Messages = {
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
+  'userMessage.edit': '编辑消息',
+  'userMessage.editSubmit': '发送',
+  'userMessage.editSending': '发送中…',
+  'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
+  'userMessage.editStale': '消息已发生变化，请重新打开编辑器后再试。',
+  'userMessage.editAttachmentUnavailable': '附件内容不可用，消息尚未回退。',
+  'userMessage.editSyncFailed':
+    '无法确认回退已同步。编辑内容已暂存，正在等待同步。',
+  'userMessage.editFailed': (v) => `无法重发编辑的消息：${v?.reason ?? ''}`,
   'turn.processed': '已处理',
   'turn.processing': '处理中',
   'turn.collapse': '折叠步骤',

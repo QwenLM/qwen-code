@@ -41,6 +41,11 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { ResponsesHttpError } from '../utils/responses-http-error.js';
+import {
+  getResponsesMessage,
+  sameResponsesMessage,
+} from '../utils/responses-message.js';
 import {
   classifyRetryError,
   isFallbackEligible,
@@ -455,6 +460,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
     if (
       lastPart?.text &&
       isValidNonThoughtTextPart(lastPart) &&
+      sameResponsesMessage(lastPart, part) &&
       isValidNonThoughtTextPart(part)
     ) {
       lastPart.text += part.text;
@@ -671,7 +677,7 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
-const TRANSPORT_STREAM_RETRY_CONFIG = {
+const STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
   /**
@@ -1051,6 +1057,29 @@ function mergeDeliveredPrefix(
   );
 }
 
+function mergeDeliveredParts(prefix: Part[], remainder: Part[]): Part[] {
+  if (prefix.length === 0) return remainder;
+  if ([...prefix, ...remainder].some((part) => getResponsesMessage(part))) {
+    return appendRecoveryContinuationParts(prefix, remainder);
+  }
+  const parts = [...remainder];
+  const textIndex = parts.findIndex(isPlainTextPart);
+  const text = getPlainTextFromParts(prefix);
+  if (textIndex < 0) {
+    // Keep the prefix after completed thoughts and before tool calls, without
+    // burying a dangling unsigned thought that the trailing-only check needs.
+    dropDanglingUnsignedTrailingThought(parts, true);
+    const insertAt = parts.findIndex((part) => !part.thought);
+    parts.splice(insertAt < 0 ? parts.length : insertAt, 0, { text });
+  } else {
+    parts[textIndex] = {
+      ...parts[textIndex],
+      text: mergeDeliveredPrefix(text, parts[textIndex]!.text!),
+    };
+  }
+  return parts;
+}
+
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
@@ -1187,6 +1216,11 @@ function appendRecoveryContinuationParts(
     const continuationTextPart = nextParts[continuationTextIndex] as Part & {
       text: string;
     };
+    // Distinct Responses messages carry their own meaning, even when their
+    // text overlaps (for example commentary repeated as the final answer).
+    if (!sameResponsesMessage(previousTextPart, continuationTextPart)) {
+      return [...mergedParts, ...nextParts];
+    }
     const suffix = getRecoveryContinuationSuffix(
       previousTextPart.text,
       continuationTextPart.text,
@@ -3351,7 +3385,7 @@ export class LlmChat {
     return (async function* () {
       let successfulRecoveries = 0;
       let activeRecoveryUser: Content | undefined;
-      let pendingTransportPrefix = '';
+      let pendingTransportPrefix: Part[] = [];
       const sleepInhibitorHandle = acquireSleepInhibitor(
         self.config,
         'Qwen Code is streaming a model response',
@@ -3395,7 +3429,7 @@ export class LlmChat {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
         };
-        let transportStreamRetryCount = 0;
+        let streamReplayRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -3405,18 +3439,19 @@ export class LlmChat {
         // replayed stripped, so the buffer holds no fragment twice.
         let transportContinuationCount = 0;
         let transportContinuationText = '';
+        let transportContinuationParts: Part[] = [];
         // Text delivered by the attempt currently running, before it is folded
         // into `transportContinuationText`. Kept separate so the overlap a
         // continuation attempt replays is stripped once, at the attempt
         // boundary where it occurs, rather than per chunk — the overlap scan is
         // suffix-anchored and would eat legitimately repeated text mid-stream.
-        let transportAttemptText = '';
+        let transportAttemptParts: Part[] = [];
         // Text delivered *before* the attempt currently running. Empty unless
         // a continuation is in flight. `processStreamResponse` only pushes the
         // final attempt's own output to history, so this is what has to be
         // prepended once the send succeeds, or the next turn would see the
         // model's answer starting mid-sentence.
-        let transportContinuationPrefix = '';
+        let transportContinuationPrefix: Part[] = [];
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
@@ -3481,13 +3516,13 @@ export class LlmChat {
                 ...requestContents,
                 {
                   role: 'model',
-                  parts: [{ text: transportContinuationPrefix }],
+                  parts: transportContinuationPrefix,
                 },
                 createUserContent([
                   {
                     text: buildRecoveryMessageFromText(
                       TRANSPORT_CONTINUATION_MESSAGE,
-                      transportContinuationPrefix,
+                      getPlainTextFromParts(transportContinuationPrefix),
                     ),
                   },
                 ]),
@@ -3507,9 +3542,10 @@ export class LlmChat {
         const resetTransportContinuation = () => {
           transportContinuationCount = 0;
           transportContinuationText = '';
-          transportAttemptText = '';
-          transportContinuationPrefix = '';
-          pendingTransportPrefix = '';
+          transportContinuationParts = [];
+          transportAttemptParts = [];
+          transportContinuationPrefix = [];
+          pendingTransportPrefix = [];
         };
 
         // Fold the running attempt's text into the accumulated buffer,
@@ -3522,16 +3558,20 @@ export class LlmChat {
         // (telemetry, a MAX_TOKENS-recovery guard) would be missing the final
         // attempt's text and must fold on the success path too.
         const foldTransportAttemptText = () => {
-          transportContinuationText += getRecoveryContinuationSuffix(
-            transportContinuationText,
-            transportAttemptText,
+          transportContinuationParts = mergeDeliveredParts(
+            transportContinuationParts,
+            consolidateModelResponseParts(transportAttemptParts),
           );
-          transportAttemptText = '';
+          transportContinuationText = getPlainTextFromParts(
+            transportContinuationParts,
+          );
+          transportAttemptParts = [];
         };
 
         let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
-          transportAttemptText = '';
+          transportAttemptParts = [];
+          let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -3548,7 +3588,7 @@ export class LlmChat {
             } else if (
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
-              transportStreamRetryCount > 0 ||
+              streamReplayRetryCount > 0 ||
               transportContinuationCount > 0
             ) {
               // A fresh-restart retry reaching this point means a branch that
@@ -3577,9 +3617,10 @@ export class LlmChat {
                 : undefined,
               acceptQuietToolResultCompletion,
             );
+            streamEstablished = true;
 
             // The processor now owns cancellation persistence for this prefix.
-            pendingTransportPrefix = '';
+            pendingTransportPrefix = [];
             lastFinishReason = undefined;
             self.lastObservedClosedFinishReason = undefined;
             for await (const chunk of stream) {
@@ -3597,7 +3638,13 @@ export class LlmChat {
               // the catch below history holds nothing about what the user
               // already saw.
               const chunkParts = chunk.candidates?.[0]?.content?.parts;
-              transportAttemptText += getPlainTextFromParts(chunkParts);
+              // The processor consolidates its own parts in place before
+              // throwing. Keep text independent, but share late phase updates.
+              transportAttemptParts.push(
+                ...(chunkParts ?? [])
+                  .filter(isPlainTextPart)
+                  .map((part) => ({ ...part })),
+              );
               if (chunkParts?.some((part) => part.functionCall)) {
                 streamYieldedFunctionCall = true;
               }
@@ -3613,7 +3660,7 @@ export class LlmChat {
             // again here would risk double-applying it: the dedup helper only
             // strips a replayed prefix that clears its significance floor, so
             // a short prefix would survive the second pass and be doubled.
-            transportContinuationPrefix = '';
+            transportContinuationPrefix = [];
             break;
           } catch (error) {
             lastError = error;
@@ -3655,6 +3702,12 @@ export class LlmChat {
               });
             }
 
+            if (
+              error instanceof ResponsesHttpError &&
+              error.headers.get('x-should-retry') === 'false'
+            ) {
+              throw error;
+            }
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
@@ -3730,22 +3783,39 @@ export class LlmChat {
             const contextOverflow = getContextLengthExceededInfo(error);
             const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
 
-            // Both stream-recovery mechanisms below admit a curated
-            // socket-level failure and a status-less upstream failure the
-            // provider traced with its own request id. The latter is what a
-            // gateway error frame pushed into an already-200 stream produces,
-            // and it can only be decided here: retryWithBackoff resolved when
-            // the stream was established, before a single frame was parsed.
-            // The overflow exclusion narrows only that new class, so a socket
-            // cut keeps the verdict it had before this branch existed.
-            const isRetryableStreamCut =
+            // HTTP establishment failures already exhausted retryWithBackoff;
+            // only server errors raised while reading the stream join replay.
+            const isServerStreamError =
+              streamEstablished &&
+              !isRateLimit &&
+              (classification.kind === 'http' ||
+                classification.kind === 'sse-provider') &&
+              classification.diagnosis === 'retryable' &&
+              classification.statusCode !== undefined &&
+              classification.statusCode >= 500 &&
+              classification.statusCode < 600;
+            // The classes a cut may be resumed from: a curated socket-level
+            // failure, and a status-less upstream failure the provider traced
+            // with its own request id. The latter is what a gateway error
+            // frame pushed into an already-200 stream produces, and it can
+            // only be decided here: retryWithBackoff resolved when the stream
+            // was established, before a single frame was parsed. The overflow
+            // exclusion narrows only that class, so a socket cut keeps the
+            // verdict it had before this branch existed.
+            const isContinuableStreamCut =
               isRetryableStreamTransportError(classification) ||
               (isRetryableStatuslessUpstreamError(classification) &&
                 !contextOverflow.isExceeded &&
                 !requestPayloadOverflow.isTooLarge);
+            // Replay admits one class more than continuation does: a server
+            // error raised while reading an established stream (#11634) is
+            // worth re-sending from scratch, but is not a cut this branch may
+            // ask the model to resume from.
+            const isReplayableStreamError =
+              isContinuableStreamCut || isServerStreamError;
 
-            // Replay only those failures before any
-            // content (non-thought output) has reached callers.
+            // Replay transient server errors and curated socket-level failures
+            // before any content (non-thought output) has reached callers.
             // Thinking-only output does not block the replay: such an
             // attempt persists nothing (error-path persistence
             // requires a delivered functionCall, which this gate
@@ -3755,7 +3825,7 @@ export class LlmChat {
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamCut &&
+              isReplayableStreamError &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3766,27 +3836,33 @@ export class LlmChat {
               // consulted here because this branch is checked before the
               // continuation one below.
               transportContinuationText.trim().length === 0 &&
-              transportStreamRetryCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
-              transportStreamRetryCount++;
+              streamReplayRetryCount++;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportStreamRetryCount;
-              debugLogger.warn('Transport stream retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                retryDelayMs: delayMs,
-                yieldedNonContentChunks: streamYieldedChunk,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-                classificationReason: classification.reason,
-                providerCode: classification.providerCode,
-                requestId: classification.requestId,
-              });
+                STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry scheduled'
+                  : 'Transport stream retry scheduled',
+                {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
+                  attempt: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  retryDelayMs: delayMs,
+                  yieldedNonContentChunks: streamYieldedChunk,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  classificationReason: classification.reason,
+                  providerCode: classification.providerCode,
+                  requestId: classification.requestId,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                  }),
+                },
+              );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. The gate above now admits
@@ -3832,15 +3908,15 @@ export class LlmChat {
             // processStreamResponse observed.
             const attemptFinishReason =
               lastFinishReason ?? self.lastObservedClosedFinishReason;
-            const canContinueAfterStreamCut =
-              isRetryableStreamCut &&
+            const canContinueAfterTransportCut =
+              isContinuableStreamCut &&
               (attemptFinishReason === undefined ||
                 !CLOSED_FINISH_REASONS.has(attemptFinishReason)) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
-            if (canContinueAfterStreamCut) {
+                STREAM_RETRY_CONFIG.maxContinuationRetries;
+            if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
               // Everything delivered so far — across earlier continuation
@@ -3848,17 +3924,15 @@ export class LlmChat {
               // and is never reset while continuing. Each attempt's own text
               // was folded in at the catch above with its replayed overlap
               // stripped, so this carries no fragment twice.
-              transportContinuationPrefix = transportContinuationText;
+              transportContinuationPrefix = transportContinuationParts;
               pendingTransportPrefix = transportContinuationPrefix;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportContinuationCount;
+                STREAM_RETRY_CONFIG.initialDelayMs * transportContinuationCount;
               debugLogger.warn('Transport stream continuation scheduled', {
                 retryPath: 'stream',
                 retryDecision: 'continue',
                 attempt: transportContinuationCount,
-                maxRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
+                maxRetries: STREAM_RETRY_CONFIG.maxContinuationRetries,
                 retryDelayMs: delayMs,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
@@ -3877,33 +3951,42 @@ export class LlmChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamCut) {
+            if (isReplayableStreamError) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, the
               // replay budget is exhausted, or continuation is unavailable
               // (function-call cut, no text to anchor on, its own budget
               // exhausted, or a closed finish reason — the attempt's answer
               // already completed, so there was nothing to resume).
-              debugLogger.warn('Transport stream retry not taken', {
-                retryPath: 'stream',
-                retryDecision:
-                  attemptFinishReason !== undefined &&
-                  CLOSED_FINISH_REASONS.has(attemptFinishReason)
-                    ? 'skipped_terminal_finish_reason'
-                    : streamYieldedContentChunk
-                      ? 'skipped_after_content'
-                      : 'exhausted',
-                attempts: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                continuationAttempts: transportContinuationCount,
-                maxContinuationRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-                classificationReason: classification.reason,
-                providerCode: classification.providerCode,
-                requestId: classification.requestId,
-              });
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry not taken'
+                  : 'Transport stream retry not taken',
+                {
+                  retryPath: 'stream',
+                  retryDecision:
+                    attemptFinishReason !== undefined &&
+                    CLOSED_FINISH_REASONS.has(attemptFinishReason)
+                      ? 'skipped_terminal_finish_reason'
+                      : streamYieldedContentChunk ||
+                          transportContinuationText.trim().length > 0
+                        ? 'skipped_after_content'
+                        : 'exhausted',
+                  attempts: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  continuationAttempts: transportContinuationCount,
+                  maxContinuationRetries:
+                    STREAM_RETRY_CONFIG.maxContinuationRetries,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  classificationReason: classification.reason,
+                  providerCode: classification.providerCode,
+                  requestId: classification.requestId,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                  }),
+                },
+              );
             }
 
             // Both detectors were computed above the recovery gates, so that a
@@ -3961,7 +4044,7 @@ export class LlmChat {
                 );
                 // The failed text stream no longer owns cancellation recording.
                 if (!streamYieldedFunctionCall) {
-                  pendingTransportPrefix = transportContinuationText;
+                  pendingTransportPrefix = transportContinuationParts;
                 }
                 try {
                   const reactiveInfo = await self.tryCompress(
@@ -4838,8 +4921,11 @@ export class LlmChat {
         }
       } finally {
         // Between attempts there is no response processor to save visible text.
-        if (params.config?.abortSignal?.aborted && pendingTransportPrefix) {
-          const parts = [{ text: pendingTransportPrefix }];
+        if (
+          params.config?.abortSignal?.aborted &&
+          pendingTransportPrefix.length > 0
+        ) {
+          const parts = pendingTransportPrefix;
           self.history.push({ role: 'model', parts });
           self.pendingPartialAssistantTurnIndex = self.history.length - 1;
           self.pendingPartialAssistantRecord = {
@@ -4916,7 +5002,7 @@ export class LlmChat {
     },
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
-    transportContinuationPrefix?: string,
+    transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
@@ -4944,6 +5030,10 @@ export class LlmChat {
     const persistentMode = overrides ? false : isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
+        if (error instanceof ResponsesHttpError) {
+          return error.shouldRetry(extraRetryErrorCodes);
+        }
+
         if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
           if (isInvalidArgumentError(error.message)) return false;
@@ -5530,7 +5620,7 @@ export class LlmChat {
   }
 
   /**
-   * @param transportContinuationPrefix - Text a previous attempt already
+   * @param transportContinuationPrefix - Text parts a previous attempt already
    *   delivered before a socket cut, which this attempt was asked to resume
    *   from (issue #7832). On success it is folded into the response parts
    *   before either durable write, so the JSONL transcript and in-memory
@@ -5548,7 +5638,7 @@ export class LlmChat {
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     routeKey: string,
     goalContext?: GoalTurnPermit,
-    transportContinuationPrefix?: string,
+    transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
     abortSignal?: AbortSignal,
     retryClassificationContext?: RetryErrorClassificationContext,
@@ -5586,6 +5676,7 @@ export class LlmChat {
         if (
           previous &&
           isValidNonThoughtTextPart(previous) &&
+          sameResponsesMessage(previous, part) &&
           isValidNonThoughtTextPart(part)
         ) {
           previous.text! += part.text!;
@@ -5837,17 +5928,23 @@ export class LlmChat {
       // Cancellation can close the generator at a yield, skipping everything
       // after this finally. Keep the delivered partial in both history and JSONL.
       if (abortSignal?.aborted) {
-        const parts = consolidateModelResponseParts(allModelParts);
+        let parts = consolidateModelResponseParts(allModelParts);
         dropDanglingUnsignedTrailingThought(parts, hasToolCall);
         if (transportContinuationPrefix) {
-          const textPart = parts.find(isPlainTextPart);
-          if (textPart) {
-            textPart.text = mergeDeliveredPrefix(
-              transportContinuationPrefix,
-              textPart.text,
-            );
+          if (
+            [...transportContinuationPrefix, ...parts].some(getResponsesMessage)
+          ) {
+            parts = mergeDeliveredParts(transportContinuationPrefix, parts);
           } else {
-            parts.push({ text: transportContinuationPrefix });
+            // Cancellation keeps even unfinished reasoning. The success-only
+            // merge may drop it to avoid burying a dangling thought before tools.
+            const text = getPlainTextFromParts(transportContinuationPrefix);
+            const textPart = parts.find(isPlainTextPart);
+            if (textPart) {
+              textPart.text = mergeDeliveredPrefix(text, textPart.text);
+            } else {
+              parts.push({ text });
+            }
           }
         }
         if (parts.length > 0) {
@@ -5961,10 +6058,14 @@ export class LlmChat {
     // Guarded on `streamError` because only the gate below reads this, and the
     // merge it mirrors is a dedup pass over the delivered prefix: without the
     // guard every successful continuation turn would pay it twice, once here
-    // and once in the merge block.
+    // and once in the merge block. The prefix travels as parts, so it is
+    // reduced to text the same way the cancellation merge above reduces it.
     const completedText =
       streamError !== null && transportContinuationPrefix
-        ? mergeDeliveredPrefix(transportContinuationPrefix, contentText)
+        ? mergeDeliveredPrefix(
+            getPlainTextFromParts(transportContinuationPrefix),
+            contentText,
+          )
         : contentText;
     // Shared with the stream-validation block below, and hoisted rather than
     // duplicated: this gate nulls `streamError`, which is what lets that block
@@ -5996,13 +6097,19 @@ export class LlmChat {
       hasAnyContent &&
       !lacksVisibleToolResultProgress
     ) {
-      // Only the failure classes the transport recovery gates admit can be
-      // swallowed here. Anything else reached this point precisely because
+      // Two failure classes can be swallowed here: a curated socket-level cut,
+      // and a status-less upstream frame the provider traced with its own
+      // request id. Both are transport or gateway artefacts that say nothing
+      // about the answer, which is why a closed answer can survive them. The
+      // server-error class the replay gate also admits (#11634) is deliberately
+      // not one of them: that status is the server's own verdict on the
+      // response, and the arm owning it answers with a retry rather than by
+      // accepting the turn. Anything else reached this point precisely because
       // no recovery arm owns it, so nulling it would certify an outcome the
-      // turn did not have: a user cancel would be converted into a
-      // completion, a throttling StreamContentError would never reach the
-      // rate-limit retry, and the pipeline's own InvalidStreamError would
-      // bypass the invalid-stream retry budget.
+      // turn did not have: a user cancel would be converted into a completion,
+      // a throttling StreamContentError would never reach the rate-limit
+      // retry, and the pipeline's own InvalidStreamError would bypass the
+      // invalid-stream retry budget.
       //
       // Classified with the send loop's own context. A throttle that only the
       // configured `retryErrorCodes` recognise carries a request id and no
@@ -6269,41 +6376,15 @@ export class LlmChat {
     // attempt that did not survive, and a fresh-restart retry discards it via
     // `resetTransportContinuation`.
     if (streamError === null && transportContinuationPrefix) {
-      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
-      if (textIndex < 0) {
-        // Fourth call site for the dangling-episode drop. When only thought
-        // parts remain, `findIndex((part) => !part.thought)` below is -1 and
-        // the prefix would land at the very end -- burying a trailing
-        // dangling episode mid-array before the coalescing-site trailing-only
-        // check ever runs. Once text follows the episode, that later check
-        // can never protect it again, so it must be dropped HERE, before the
-        // splice, accepting the same documented false-positive trade-off
-        // (see this function's doc comment) the other call sites accept.
-        dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, true);
-        // Continuation returned no visible text of its own (e.g. only a
-        // functionCall). Thought episodes are consolidated inline above, so
-        // insert the prefix after any leading thought parts to keep the
-        // `[thought..., text, ...]` stream order.
-        const insertAt = consolidatedHistoryParts.findIndex(
-          (part) => !part.thought,
-        );
-        consolidatedHistoryParts.splice(
-          insertAt < 0 ? consolidatedHistoryParts.length : insertAt,
-          0,
-          { text: transportContinuationPrefix },
-        );
-      } else {
-        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
-          text: string;
-        };
-        consolidatedHistoryParts[textIndex] = {
-          ...remainderPart,
-          text: mergeDeliveredPrefix(
-            transportContinuationPrefix,
-            remainderPart.text,
-          ),
-        };
-      }
+      const mergedParts = mergeDeliveredParts(
+        transportContinuationPrefix,
+        consolidatedHistoryParts,
+      );
+      consolidatedHistoryParts.splice(
+        0,
+        consolidatedHistoryParts.length,
+        ...mergedParts,
+      );
       contentText = consolidatedHistoryParts
         .filter(isVisibleTextPart)
         .map((part) => part.text)

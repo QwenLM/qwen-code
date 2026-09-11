@@ -8,6 +8,7 @@ import { AuthType } from './auth-type.js';
 import { isAbortError } from './errors.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { getRateLimitErrorDetails, isRateLimitError } from './rateLimit.js';
+import { ResponsesHttpError } from './responses-http-error.js';
 
 export type RetryErrorKind =
   | 'http'
@@ -94,6 +95,22 @@ export function classifyRetryError(
       kind: 'provider-business',
       diagnosis: 'fail-fast',
       reason: 'allocated-quota-exceeded',
+      ...common,
+    };
+  }
+
+  if (
+    error instanceof ResponsesHttpError &&
+    (error.headers.has('x-should-retry') ||
+      statusCode === 408 ||
+      statusCode === 409)
+  ) {
+    return {
+      kind: 'http',
+      diagnosis: error.shouldRetry(context.extraRetryErrorCodes)
+        ? 'retryable'
+        : 'fail-fast',
+      reason: 'responses-http-retry-policy',
       ...common,
     };
   }
