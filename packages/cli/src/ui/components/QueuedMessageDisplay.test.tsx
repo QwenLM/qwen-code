@@ -24,18 +24,21 @@ describe('QueuedMessageDisplay', () => {
     expect(output).toContain('First message');
   });
 
-  it('previews a queued message without its injected reminder envelope', () => {
+  it('previews a user-authored leading envelope verbatim from the projection', () => {
+    // `messageQueue` entries are producer-resolved display text: a leading
+    // envelope the user typed themselves is content and must stay visible
+    // (the injected-envelope strip lives in useMessageQueue's fallback).
     const { lastFrame } = render(
       <QueuedMessageDisplay
         messageQueue={[
-          '<system-reminder>\n1 background agent was restored.\n</system-reminder>\n\nreview this',
+          '<system-reminder>\nuser note\n</system-reminder>\n\nreview this',
         ]}
       />,
     );
 
     const output = lastFrame();
+    expect(output).toContain('<system-reminder>');
     expect(output).toContain('review this');
-    expect(output).not.toContain('<system-reminder>');
   });
 
   it('displays multiple queued messages', () => {

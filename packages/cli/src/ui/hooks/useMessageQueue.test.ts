@@ -670,7 +670,9 @@ describe('useMessageQueue', () => {
       });
 
       expect(popped).toBeNull();
-      expect(result.current.messageQueue).toEqual(['<envelope>']);
+      // The preview row shows the peer's display-text projection, not the
+      // model-bound envelope.
+      expect(result.current.messageQueue).toEqual(['A: one']);
     });
 
     it('counts only peer entries still waiting in the queue', () => {
@@ -1231,7 +1233,57 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
       expect(drained).toEqual([]);
-      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+      expect(result.current.messageQueue).toEqual(['Session A: one']);
+    });
+  });
+
+  describe('preview projections (messageQueue)', () => {
+    it('returns the entry submittedPrompt verbatim when it has one', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const typed =
+        '<system-reminder>\nuser note\n</system-reminder>\n\nreview this';
+      act(() => {
+        result.current.addMessage(
+          `<system-reminder>\ninjected notice\n</system-reminder>\n\n${typed}`,
+          false,
+          typed,
+        );
+      });
+      // A user-authored leading envelope survives as content: the preview
+      // shows the producer projection, not a shape-stripped text.
+      expect(result.current.messageQueue).toEqual([typed]);
+    });
+
+    it('strips an injected envelope from the preview of a projection-less entry', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage(
+          '<system-reminder>\n1 background agent was restored.\n</system-reminder>\n\nreview this',
+        );
+      });
+      expect(result.current.messageQueue).toEqual(['review this']);
+    });
+
+    it('synthesizes the aggregate projection from stripped text for projection-less members', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage(
+          '<system-reminder>\nnotice\n</system-reminder>\n\nfirst',
+        );
+        result.current.addMessage('second', false, 'second');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText:
+          '<system-reminder>\nnotice\n</system-reminder>\n\nfirst\n\nsecond',
+        submittedPrompt: 'first\n\nsecond',
+      });
     });
   });
 });

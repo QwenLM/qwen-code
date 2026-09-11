@@ -10,8 +10,10 @@ import { ToolCallStatus } from '../types.js';
 import {
   buildThoughtHeadIdMap,
   findLastUserItemIndex,
+  isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  prependMissingSystemReminders,
   realUserPromptTexts,
   splitLeadingSystemReminders,
   stripLeadingSystemReminders,
@@ -340,5 +342,70 @@ describe('stripLeadingSystemReminders', () => {
       reminders: '',
       rest: only,
     });
+  });
+});
+
+describe('isOnlyLeadingSystemReminders', () => {
+  it('accepts a single envelope prefix with trailing separator', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\n',
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts stacked envelopes', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\n',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a prefix that mixes envelopes with display content', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\n@src/foo.ts\n\n',
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects plain text, empty input, and unterminated envelopes', () => {
+    expect(isOnlyLeadingSystemReminders('review this')).toBe(false);
+    expect(isOnlyLeadingSystemReminders('')).toBe(false);
+    expect(
+      isOnlyLeadingSystemReminders('<system-reminder>never closed\n'),
+    ).toBe(false);
+  });
+});
+
+describe('prependMissingSystemReminders', () => {
+  it('prepends an armed envelope that is not already present', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      prependMissingSystemReminders(`${envelope}\n\n`, 'review this'),
+    ).toBe(`${envelope}\n\nreview this`);
+  });
+
+  it('drops an armed copy the injector already re-fired', () => {
+    const envelope = '<system-reminder>\nsteering\n</system-reminder>';
+    const text = `${envelope}\n\nrun the workflow`;
+    expect(prependMissingSystemReminders(`${envelope}\n\n`, text)).toBe(text);
+  });
+
+  it('re-arms only the blocks that did not re-fire', () => {
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const text = `${second}\n\nrun the workflow`;
+    expect(
+      prependMissingSystemReminders(`${first}\n\n${second}\n\n`, text),
+    ).toBe(`${first}\n\n${text}`);
+  });
+
+  it('returns the text unchanged for an empty envelope run', () => {
+    expect(prependMissingSystemReminders('', 'review this')).toBe(
+      'review this',
+    );
   });
 });

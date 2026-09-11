@@ -419,13 +419,23 @@ function convertToHistoryItems(
           // Strip the resolved value: `userText`/`displayText` win the
           // chain and both can carry the envelope, so wrapping only the
           // parts branch would leave the normal path unfiltered.
-          const text = stripLeadingSystemReminders(
+          const raw =
             payload.userText ||
-              (projection.displayText ??
-                extractTextFromParts(projection.parts)),
-          );
+            (projection.displayText ?? extractTextFromParts(projection.parts));
+          const text = stripLeadingSystemReminders(raw);
           if (text) {
-            items.push({ type: 'user', text });
+            // A recorded user message is a turn that reached the model:
+            // stamp it so isRealUserTurn does not fall back to the lexical
+            // check, which misreads a '?'-leading prompt once the envelope
+            // strip removed its '<system-reminder>' first char. Keep the
+            // unstripped text as modelText so a rewind restore can re-arm
+            // the consumed one-shot envelope.
+            items.push({
+              type: 'user',
+              text,
+              sentToModel: true,
+              ...(text === raw ? {} : { modelText: raw }),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -453,14 +463,20 @@ function convertToHistoryItems(
         const hasAttachmentReferences =
           Array.isArray(payload?.attachmentReferences) &&
           payload.attachmentReferences.length > 0;
-        const text = stripLeadingSystemReminders(
+        const raw =
           projection.displayText ||
-            (hasAttachmentReferences
-              ? '[User message with attachments]'
-              : extractTextFromParts(projection.parts)),
-        );
+          (hasAttachmentReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
+        const text = stripLeadingSystemReminders(raw);
         if (text) {
-          items.push({ type: 'user', text });
+          // Same stamp + carry-through as the at-command branch above.
+          items.push({
+            type: 'user',
+            text,
+            sentToModel: true,
+            ...(text === raw ? {} : { modelText: raw }),
+          });
         }
         break;
       }
@@ -621,11 +637,17 @@ function convertToHistoryItems(
         currentToolGroup = [];
       }
 
-      const text = payload.userText
-        ? stripLeadingSystemReminders(payload.userText)
-        : payload.userText;
+      const raw = payload.userText;
+      const text = raw ? stripLeadingSystemReminders(raw) : raw;
       if (text) {
-        items.push({ type: 'user', text });
+        // Lone at-command payloads have no user record to prove the turn
+        // reached the model, so they keep the lexical classification and
+        // get no sentToModel stamp — only the modelText carry-through.
+        items.push({
+          type: 'user',
+          text,
+          ...(text === raw ? {} : { modelText: raw }),
+        });
       }
       const toolDisplays = buildAtCommandDisplays(payload);
       if (toolDisplays.length > 0) {

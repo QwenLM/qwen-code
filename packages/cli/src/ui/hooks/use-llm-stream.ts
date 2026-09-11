@@ -101,6 +101,7 @@ import {
 } from '../utils/commandUtils.js';
 import {
   findLastUserItemIndex,
+  isOnlyLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
@@ -522,11 +523,13 @@ export interface CancelSubmitInfo {
     id: number;
     text: string;
     /**
-     * The exact model-bound text of the turn (`text` may have an injected
-     * one-shot reminder envelope stripped for display). The cancel handler
-     * replays this when the restored prompt is resubmitted unedited: the
-     * envelope's latch was consumed by the cancelled attempt, so without
-     * the replay the model would never see the notice at all.
+     * The submit-time model-bound text of the turn — injected one-shot
+     * envelopes plus the typed prompt — while `text` is the display form
+     * with the envelopes stripped. The cancel handler re-arms the envelope
+     * from this for the restored prompt's next submit when the cancelled
+     * turn's API-side copy was dropped — edited or not; delivery is not
+     * tied to buffer identity (see pendingRestoredRemindersRef in
+     * AppContainer).
      */
     modelText: string;
     submittedPrompt?: string;
@@ -1622,14 +1625,29 @@ export const useLlmStream = (
         // `trimmedQuery` is the model text and may carry an injected
         // one-shot reminder envelope; everything the user reads back
         // (transcript, ↑-recall, cancel-restore) must use the typed text
-        // instead. Prefer the producer-carried provenance — it is the user's
-        // text verbatim, so a user-authored leading envelope survives as
-        // content. The shape strip stays the fallback for provenance-less
-        // submits (vim, …) and never returns empty for non-empty input, so
-        // an envelope-only prompt stays visible as-is.
-        const trimmedSubmittedPrompt = submittedPrompt?.trim();
+        // instead. Adopt the producer-carried provenance only when it is a
+        // display form of the model text: identical to it (nothing was
+        // injected, so a user-authored leading envelope survives as
+        // content) or differing from it by a pure leading-envelope prefix.
+        // A collapsed large-paste placeholder or an attachment `@ref`
+        // prefix is neither and would displace the real prompt on every
+        // read-back surface, so those fall back to the shape strip — which
+        // never returns empty for non-empty input, so an envelope-only
+        // prompt stays visible as-is.
+        const trimmedSubmittedPrompt = submittedPrompt?.trim() || undefined;
+        const strippedQuery = stripLeadingSystemReminders(trimmedQuery);
         const userVisibleQuery =
-          trimmedSubmittedPrompt || stripLeadingSystemReminders(trimmedQuery);
+          trimmedSubmittedPrompt !== undefined &&
+          (trimmedSubmittedPrompt === trimmedQuery ||
+            (trimmedQuery.endsWith(trimmedSubmittedPrompt) &&
+              isOnlyLeadingSystemReminders(
+                trimmedQuery.slice(
+                  0,
+                  trimmedQuery.length - trimmedSubmittedPrompt.length,
+                ),
+              )))
+            ? trimmedSubmittedPrompt
+            : strippedQuery;
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1764,6 +1782,12 @@ export const useLlmStream = (
             {
               type: MessageType.USER,
               text: userVisibleQuery,
+              // Every prompt reaching this point is sent to the model — the
+              // slash/shell/cron paths returned above — so stamp the
+              // provenance instead of leaving isRealUserTurn to the lexical
+              // fallback, which misclassifies a '?'-leading prompt once the
+              // envelope strip removed its '<system-reminder>' first char.
+              sentToModel: true,
               // Keep the model-bound text on the item when it differs: the
               // rewind restore re-arms the consumed one-shot envelope from
               // it (the composer refill only has `text`).

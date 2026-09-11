@@ -12,6 +12,7 @@ import type {
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import { stripLeadingSystemReminders } from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -123,7 +124,10 @@ function aggregateUserMessages(
   // a peer message's one-liner and surface the raw envelope as the
   // user's prompt instead.
   const submittedPrompt = messages
-    .map((message) => message.submittedPrompt ?? message.text)
+    .map(
+      (message) =>
+        message.submittedPrompt ?? stripLeadingSystemReminders(message.text),
+    )
     .join('\n\n');
   return {
     kind: 'user',
@@ -404,7 +408,15 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    // Preview rows are display forms, not model text: prefer the entry's
+    // producer projection verbatim (it is where a user-authored leading
+    // envelope survives as content); only a genuinely projection-less entry
+    // falls back to the shape strip. Peer entries always carry their
+    // displayText as the projection.
+    messageQueue: queuedMessages.map(
+      ({ text, submittedPrompt }) =>
+        submittedPrompt ?? stripLeadingSystemReminders(text),
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     addPeerMessage,

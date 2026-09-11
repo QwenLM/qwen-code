@@ -52,6 +52,7 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { isRealUserTurn } from '../utils/historyMapping.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -978,6 +979,141 @@ describe('useLlmStream', () => {
     expect(mockLogMessage).toHaveBeenCalledWith(
       MessageSenderType.USER,
       typedText,
+    );
+  });
+
+  it('shows the expanded paste text, not the collapsed placeholder, as the visible prompt', async () => {
+    // InputPrompt hands the raw buffer capture as submittedPrompt: for a
+    // large paste that is the collapsed placeholder, which is no suffix of
+    // the expanded model text. Adopting it verbatim would bury the real
+    // prompt on every read-back surface.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const expanded = 'line1\nline2\nline3';
+    const placeholder = '[Pasted Content 3 lines]';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        expanded,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: placeholder },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(expanded);
+    expect(userItems[0][0].modelText).toBeUndefined();
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      expanded,
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(expanded);
+  });
+
+  it('keeps an attachment @ref prefix visible when provenance holds only the typed text', async () => {
+    // '@src/a.ts\n\nexplain this file' is the model text; submittedPrompt
+    // is 'explain this file'. Their difference is an attachment reference,
+    // not an injected envelope, so the display text keeps the reference.
+    const mockLogMessage = vi.fn();
+    const { result } = renderTestHook([], undefined, undefined, () => {}, {
+      logMessage: mockLogMessage,
+    } as any);
+    const modelText = '@src/a.ts\n\nexplain this file';
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: [{ text: modelText }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'explain this file' },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      modelText,
+    );
+  });
+
+  it('adopts queue-drain provenance that differs only by an injected envelope prefix', async () => {
+    // The queue drain submits the enveloped model text with the stripped
+    // aggregate projection as submittedPrompt: the row shows the projection
+    // and the item keeps the model text for the rewind re-arm.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'review this' },
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('review this');
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      'review this',
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+  });
+
+  it('stamps a "?"-leading prompt as a real user turn once its envelope is stripped', async () => {
+    // The strip removes the '<system-reminder>' first char, so the lexical
+    // fallback in isRealUserTurn would misread a '?'-leading prompt as
+    // non-model text; the write site stamps the provenance instead.
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '<system-reminder>\nnotice\n</system-reminder>\n\n?what does this do',
+        SendMessageType.UserQuery,
+      );
+    });
+
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('?what does this do');
+    expect(userItems[0][0].sentToModel).toBe(true);
+    expect(isRealUserTurn(userItems[0][0] as unknown as HistoryItem)).toBe(
+      true,
     );
   });
 
@@ -16712,6 +16848,7 @@ describe('useLlmStream', () => {
       {
         type: MessageType.USER,
         text: rawQuery,
+        sentToModel: true,
         promptId: expect.any(String),
       },
       userMessageTimestamp,

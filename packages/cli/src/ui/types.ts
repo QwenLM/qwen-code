@@ -167,11 +167,13 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   promptId?: string;
   /**
-   * The exact model-bound text of the turn when it differs from `text` —
-   * `text` may have an injected one-shot reminder envelope stripped for
-   * display. Set only on items produced live this session; the rewind
-   * restore re-arms the consumed envelope from it so a resubmit re-delivers
-   * the notice.
+   * The submit-time text of the turn — injected one-shot envelopes plus the
+   * typed prompt — captured before @-expansion and the vision bridge rewrite
+   * the request, kept when it differs from `text` (which has the envelopes
+   * stripped for display). Read only to recover the envelope prefix for a
+   * re-arm on cancel/rewind restore; it is not the request payload. Set on
+   * items produced live this session and on rebuilt items on resume when
+   * the strip changed the text.
    */
   modelText?: string;
   /**
@@ -179,9 +181,10 @@ export type HistoryItemUser = HistoryItemBase & {
    *
    * NOTE: This is set explicitly by slash command processing because visible
    * slash-command invocations may be handled locally without entering API
-   * history. Regular user messages leave this undefined and are classified by
-   * the legacy lexical fallback in isRealUserTurn. New user-item paths with
-   * ambiguous model-history behavior must set this explicitly.
+   * history. Regular user prompts are stamped `true` at the write site and
+   * on the resume rebuild; only legacy resumed items rely on the legacy
+   * lexical fallback in isRealUserTurn. New user-item paths with ambiguous
+   * model-history behavior must set this explicitly.
    */
   sentToModel?: boolean;
 };

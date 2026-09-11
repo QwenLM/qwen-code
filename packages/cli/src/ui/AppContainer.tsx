@@ -276,8 +276,10 @@ import {
 } from '../commands/extensions/consent.js';
 import {
   findLastUserItemIndex,
+  isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  prependMissingSystemReminders,
   realUserPromptTexts,
   splitLeadingSystemReminders,
   stripLeadingSystemReminders,
@@ -1493,9 +1495,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const preferredEditor = usePreferredEditor();
   const restoredSubmissionRef = useRef<{
     // Exactly what the composer holds; the identity token
-    // handleBufferChange/handleFinalSubmit compare the buffer against.
+    // handleBufferChange/handleFinalSubmit compare the buffer against, and
+    // the projection an unedited resubmit hands back to the queue.
     displayText: string;
-    submittedPrompt?: string;
   } | null>(null);
   // The one-shot reminder envelopes a restored prompt carried, re-applied to
   // its resubmit. Their latches (recovered agents, worktree restore) were
@@ -1505,12 +1507,22 @@ export const AppContainer = (props: AppContainerProps) => {
   // invalidation clears that ref but must not clear this one.
   const pendingRestoredRemindersRef = useRef<string | null>(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
+  // Set only when the provenance-unavailable latch above was tripped by an
+  // EDIT to a restored submission (the handleBufferChange divergence
+  // branch). An edited restore's caller-supplied submittedPrompt is the
+  // fresh buffer text and stays trustworthy as the queue projection; the
+  // other invalidation sources (vim, Ctrl+R, programmatic fills) must keep
+  // voiding it.
+  const restoredPromptEditedRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
   >(null);
   const invalidateSubmittedPromptProvenance = useCallback(() => {
     restoredSubmissionRef.current = null;
     submittedPromptProvenanceUnavailableRef.current = true;
+    // A non-edit invalidation replaces any earlier edit marker: the
+    // invalidator (vim, Ctrl+R, programmatic fill) decides provenance now.
+    restoredPromptEditedRef.current = false;
   }, []);
   const handleBufferChange = useCallback((text: string) => {
     if (text.length === 0) {
@@ -1522,6 +1534,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = false;
+      restoredPromptEditedRef.current = false;
       return;
     }
     if (
@@ -1530,6 +1543,7 @@ export const AppContainer = (props: AppContainerProps) => {
     ) {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
+      restoredPromptEditedRef.current = true;
     }
   }, []);
 
@@ -1567,9 +1581,14 @@ export const AppContainer = (props: AppContainerProps) => {
       const pastMessagesRaw = (
         (await logger?.getPreviousUserMessages()) || []
       ).map(stripLeadingSystemReminders);
+      // Normalize the current-session side identically to the log side
+      // above: a user-authored leading envelope the write side kept would
+      // otherwise produce two recall entries for one prompt.
       const currentSessionUserMessages = realUserPromptTexts(
         historyManager.history,
-      ).reverse();
+      )
+        .map(stripLeadingSystemReminders)
+        .reverse();
       // Current-session messages are already newest-first; combining with past
       // messages gives a newest-first list. dedupeNewestFirst keeps the first
       // (newest) occurrence so resubmitting an old prompt promotes it to
@@ -2648,36 +2667,53 @@ export const AppContainer = (props: AppContainerProps) => {
       displayText?: string;
       submittedPrompt?: string;
     }): string => {
-      // Prefer the producer-carried display text (the typed text) over
-      // shape-stripping the model text: a user-authored leading envelope is
-      // content and must stay visible. `endsWith` then recovers exactly the
-      // injected prefix the display text leaves behind; with no producer
-      // value both sides come from the same split, keeping the pair
-      // consistent.
+      // Prefer the producer-carried display text over shape-stripping the
+      // model text, but only when it is a display form of it: an explicit
+      // `displayText` equal to the model text means nothing was injected
+      // (a user-authored leading envelope stays visible and arms nothing);
+      // otherwise the difference must be a pure leading-envelope prefix,
+      // and exactly that prefix is armed. A prefix mixing envelopes with
+      // display content (an attachment `@ref`) keeps the content in the
+      // composer and arms only the envelopes; a producer value that is no
+      // suffix of the model text at all (a collapsed large-paste
+      // placeholder) is kept because the expanded model text has no usable
+      // display form. A producer value reached via `submittedPrompt` can
+      // also BE the raw model text (a projection-less queue member
+      // aggregates that way), which still takes the split.
       const split = splitLeadingSystemReminders(submission.modelText);
-      let displayText =
-        submission.displayText ?? submission.submittedPrompt ?? split.rest;
+      const producerDisplay =
+        submission.displayText ?? submission.submittedPrompt;
+      let displayText: string;
       let reminders: string;
-      if (
-        displayText !== submission.modelText &&
-        submission.modelText.endsWith(displayText)
-      ) {
-        reminders = submission.modelText.slice(
-          0,
-          submission.modelText.length - displayText.length,
-        );
-      } else {
+      if (!producerDisplay) {
         displayText = split.rest;
         reminders = split.reminders;
+      } else if (
+        submission.displayText !== undefined &&
+        submission.displayText === submission.modelText
+      ) {
+        displayText = submission.displayText;
+        reminders = '';
+      } else if (submission.modelText.endsWith(producerDisplay)) {
+        const prefix = submission.modelText.slice(
+          0,
+          submission.modelText.length - producerDisplay.length,
+        );
+        if (isOnlyLeadingSystemReminders(prefix)) {
+          displayText = producerDisplay;
+          reminders = prefix;
+        } else {
+          displayText = split.rest;
+          reminders = split.reminders;
+        }
+      } else {
+        displayText = producerDisplay;
+        reminders = split.reminders;
       }
-      restoredSubmissionRef.current = {
-        displayText,
-        ...(submission.submittedPrompt === undefined
-          ? {}
-          : { submittedPrompt: submission.submittedPrompt }),
-      };
+      restoredSubmissionRef.current = { displayText };
       pendingRestoredRemindersRef.current = reminders === '' ? null : reminders;
       submittedPromptProvenanceUnavailableRef.current = false;
+      restoredPromptEditedRef.current = false;
       return displayText;
     },
     [],
@@ -3119,22 +3155,35 @@ export const AppContainer = (props: AppContainerProps) => {
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
+      const restoredPromptEdited =
+        consumesComposerState && restoredPromptEditedRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
+        restoredPromptEditedRef.current = false;
       }
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt =
-        submittedPromptProvenanceUnavailable || !provenanceEnabled
-          ? undefined
-          : restoredSubmission === null
-            ? trimmedSubmittedPrompt || undefined
-            : restoredSubmission.displayText === submittedValue
-              ? restoredSubmission.submittedPrompt
-              : undefined;
+      // An EDITED restored prompt voids the stash but not the caller's
+      // fresh `submittedPrompt` — it is the current buffer text verbatim,
+      // so it stays the queue projection. The other invalidation sources
+      // (vim register contents, Ctrl+R recall, programmatic fills) must
+      // keep voiding it.
+      const submittedPrompt = !provenanceEnabled
+        ? undefined
+        : restoredSubmission !== null
+          ? restoredSubmission.displayText === submittedValue
+            ? restoredSubmission.displayText
+            : // The composer diverged without an observed edit (a
+              // programmatic submit while a stash is armed): the caller's
+              // own fresh text is still the right projection — the stash
+              // no longer carries one it could leak.
+              trimmedSubmittedPrompt || undefined
+          : submittedPromptProvenanceUnavailable && !restoredPromptEdited
+            ? undefined
+            : trimmedSubmittedPrompt || undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }
@@ -3252,18 +3301,24 @@ export const AppContainer = (props: AppContainerProps) => {
       // carried: their latches were consumed by the cancelled/rewound
       // attempt, so without this the model would never see the notice
       // again. Applied after the injectors and independent of edits or the
-      // submit call shape (vim submits no options); a freshly re-fired
-      // injector envelope (only the un-latched steering notice can re-fire)
-      // is kept alongside — a duplicated steering hint is harmless next to
-      // a silently dropped notice.
+      // submit call shape (vim submits no options). Submit kinds that route
+      // on text but never reach the model — slash commands, ?btw, and shell
+      // mode, whose `!` payload bash would receive verbatim — defer the
+      // latch instead of consuming it. A freshly re-fired injector envelope
+      // (only the un-latched steering notice can re-fire) already leads
+      // `submittedValue`, so the armed copy is dropped rather than stacked.
       const restoredReminders = pendingRestoredRemindersRef.current;
       if (
         restoredReminders !== null &&
+        !shellModeActive &&
         !isSlashCommand(userPromptText) &&
         !isBtwCommand(userPromptText)
       ) {
         pendingRestoredRemindersRef.current = null;
-        submittedValue = restoredReminders + submittedValue;
+        submittedValue = prependMissingSystemReminders(
+          restoredReminders,
+          submittedValue,
+        );
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
@@ -3558,18 +3613,21 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      const restoreCancelledPrompt = () => {
+      const restoreCancelledPrompt = (rearmReminders: boolean) => {
         // `text` is the producer display text and stays the identity token;
         // the envelopes `modelText` carried are armed for the resubmit.
         buffer.setText(
           stashRestoredSubmission({
             modelText: cancelledTurnUserItem.modelText,
             displayText: cancelledTurnUserItem.text,
-            ...(cancelledTurnUserItem.submittedPrompt === undefined
-              ? {}
-              : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
           }),
         );
+        if (!rearmReminders) {
+          // The preserve-output branches keep the cancelled turn's API-side
+          // copy, so the envelope was already delivered once — re-arming
+          // would deliver the one-shot notice twice.
+          pendingRestoredRemindersRef.current = null;
+        }
       };
 
       if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
@@ -3590,7 +3648,7 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving streamed output and restoring prompt text',
         );
-        restoreCancelledPrompt();
+        restoreCancelledPrompt(false);
         return;
       }
       if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
@@ -3610,7 +3668,7 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving committed output and restoring prompt text',
         );
-        restoreCancelledPrompt();
+        restoreCancelledPrompt(false);
         return;
       }
 
@@ -3651,7 +3709,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // cancelled prompt twice — once in scrollback and once pre-filled
       // in the input buffer.
       refreshStatic();
-      restoreCancelledPrompt();
+      restoreCancelledPrompt(true);
       // Third cleanup leg: the in-memory chat history. `LlmChat`
       // appends the user content before the stream generator runs, and
       // the abort path doesn't pop it. Without this strip, the NEXT

@@ -196,6 +196,59 @@ export function splitLeadingSystemReminders(text: string): {
 }
 
 /**
+ * Prepends the armed reminder `envelopes` to `text`, skipping each block
+ * that already leads `text`. The re-arm runs after the submit path's
+ * injectors, and the one injector that can re-fire (the un-latched
+ * workflow-steering notice) would otherwise stack a duplicate copy on every
+ * cancel/resubmit cycle. Comparison is per envelope block, so a partially
+ * re-fired prefix still re-arms the blocks that did not re-fire.
+ */
+export function prependMissingSystemReminders(
+  envelopes: string,
+  text: string,
+): string {
+  let missing = '';
+  let rest = envelopes;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) break;
+    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+    const block = rest.slice(0, blockEnd);
+    rest = rest.slice(blockEnd).replace(/^\s+/, '');
+    if (!text.startsWith(block)) {
+      missing += `${block}\n\n`;
+    }
+  }
+  return missing + text;
+}
+
+/**
+ * Whether `text` consists solely of whole leading `<system-reminder>`
+ * envelopes (plus separating whitespace) — the shape of a prefix the submit
+ * path's injectors prepend. Gates producer-provenance adoption: a recovered
+ * prefix that is not pure envelopes (an attachment `@ref`, a queue
+ * aggregate's leading member) is display content, not a re-armable
+ * reminder. False for '' (an empty difference is not an injected prefix) and
+ * for unterminated envelopes (a truncated envelope is never armed).
+ */
+export function isOnlyLeadingSystemReminders(text: string): boolean {
+  if (text === '') return false;
+  let rest = text;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) return false;
+    rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
+  }
+  return rest === '';
+}
+
+/**
  * Map every thought item to the id of its group's `gemini_thought` head.
  *
  * A "thought" is one `gemini_thought` head followed by zero or more
