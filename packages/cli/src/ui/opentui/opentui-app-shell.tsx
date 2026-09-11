@@ -94,9 +94,11 @@ import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import {
   OpenTuiActionConfirmation,
+  OpenTuiMcpApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 
 export interface OpenTuiAppProps {
@@ -484,6 +486,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
+
+  // ink drives the gated-server approval queue from a renderer-agnostic hook at
+  // app level; without it a `.mcp.json` checked into the project is never
+  // offered here and its servers stay silently disconnected.
+  const mcpApproval = useMcpApproval(config);
 
   // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
   // announced once per session, on the first submission that reaches a model.
@@ -916,11 +923,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <OpenTuiBanner config={config} settings={settings} />
         {renderMain ? renderMain() : null}
-        {!dialog && !activeModal && !activeToolCall && updateNotice ? (
+        {!dialog &&
+        !activeModal &&
+        !activeToolCall &&
+        !mcpApproval.isMcpApprovalDialogOpen &&
+        updateNotice ? (
           <text>{updateNotice}</text>
         ) : null}
         {noticeText ? <text>{noticeText}</text> : null}
-        {activeToolCall ? (
+        {mcpApproval.isMcpApprovalDialogOpen &&
+        mcpApproval.currentMcpApproval ? (
+          // ink ranks the gated-server approval above both the shell and the
+          // tool confirmation, so it takes the slot outright.
+          <OpenTuiMcpApprovalDialog
+            key={`mcp-${mcpApproval.currentMcpApproval.name}`}
+            server={mcpApproval.currentMcpApproval}
+            pendingServers={mcpApproval.pendingMcpApprovals}
+            remaining={mcpApproval.mcpApprovalRemaining}
+            onSelect={mcpApproval.handleMcpApprovalSelect}
+          />
+        ) : activeToolCall ? (
           <OpenTuiToolConfirmation
             key={activeToolCall.callId}
             call={activeToolCall}

@@ -472,6 +472,42 @@ text. Those two share only the structured half and keep their own fallback. What
 changes for them is the payload, not the event type — a todo list mid-execution
 and a shell result's ANSI grid on resume now render instead of dumping.
 
+## Decision 20 — the gated-server approval reuses the policy and ports only the view
+
+A server list checked into a project was never offered for approval here. ink
+opens that dialog whenever its approval queue is non-empty, and this renderer had
+no counterpart at all, so a gated server stayed silently disconnected and nothing
+told the user why or what to do about it.
+
+The queue, the decision that persists against a hash of the configuration, the
+un-gating for the session and the reconnect all live in one hook that takes only
+the config and returns plain data beside a handler. It is renderer-agnostic in
+the same way the provider setup flow is, which this renderer already reuses
+verbatim, so the port is a view and a mount point rather than a second copy of
+the policy. Nothing here decides who needs asking or what an answer means.
+
+The mount point is the part that could have been wrong. ink ranks this approval
+above both the shell confirmation and the tool confirmation, so it takes the slot
+outright here too, and the update notice stays suppressed while it owns the
+screen exactly as the other popups keep it suppressed.
+
+The geometry was measured against ink rather than assumed, and the first attempt
+was wrong in two ways: it drew the box at the terminal's left edge spanning the
+full width, and it printed no row numbers. ink insets this box one column further
+than the popups the dialog area already positions, because it adds a margin of
+its own inside that area, which leaves it one narrower than the shared popup
+width; and its radio rows are numbered. Both now measure the same at a
+hundred-column terminal, and declining lands on the same composer and the same
+footer row in both legs.
+
+Two residuals are recorded rather than chased. ink's box has no right border —
+its own margin pushes a full-width box one column past what its parent can print
+and the right edge is clipped, which is an overflow artifact rather than a
+choice, and every popup here draws a closed box. And one wrapped continuation
+line in the body carries an extra leading space here, which is the break-rule
+difference already recorded for the context-file list; matching it would mean
+reimplementing the wrap the renderer already provides.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -572,6 +608,15 @@ What was verified, and how far the verification reaches:
   chunks included, so a shell result that reports an ANSI grid while it runs now
   renders in colour; whether any tool does so before it completes is a question
   about the tools, not about this renderer, and was not answered here.
+- **The gated-server approval is frame-verified in one direction only.** A
+  scenario drops a project server list into the work directory; both legs draw
+  the same dialog at the same inset and the same width, and declining it lands on
+  the same composer and footer row in both. Approving was not exercised, because
+  it un-gates the server and reconnects, which would spawn the declared command.
+  The approve and approve-all branches are therefore not covered by frames, and
+  neither is the list of servers that approve-all prints — the scenario declares
+  one server, so the branch that renders that list is never taken. What the
+  branches do is the shared hook's own behaviour, unchanged here.
 
 ## Follow-ups
 
@@ -610,16 +655,13 @@ What was verified, and how far the verification reaches:
 - Two dialog list widgets remain where one would do; consolidating them touches
   numbering, colour and scroll arrows at once.
 - A line-by-line comparison against ink's component and rendering source turned
-  up gaps well past this change's scope. The one that blocks a workflow outright
-  is the startup approval of a project's MCP servers: ink opens that dialog
-  whenever its approval queue is non-empty, and this renderer has no counterpart
-  at all, so a server list checked into a repository is silently never offered.
-  Dialogs that open read-only where ink's are actionable: trust, rewind, diff,
-  subagent creation and listing, skills, hooks, the status line, memory, two of
-  the stats tabs, and the extension manager's discover and source tabs. And the
-  whole subagent and background-task surface — no live agent panel, no
-  background-task dialog or footer pill, and no inline attribution of an
-  approval a subagent asked for, so one arrives with nothing to say whose it is.
+  up gaps well past this change's scope. Dialogs that open read-only where ink's
+  are actionable: trust, rewind, diff, subagent creation and listing, skills,
+  hooks, the status line, memory, two of the stats tabs, and the extension
+  manager's discover and source tabs. And the whole subagent and background-task
+  surface — no live agent panel, no background-task dialog or footer pill, and no
+  inline attribution of an approval a subagent asked for, so one arrives with
+  nothing to say whose it is.
 - Two of ink's authentication progress screens were reported as missing here on
   the grounds that a login could not be completed without them. That does not
   survive a reachability check, and they are not gaps. No provider in the

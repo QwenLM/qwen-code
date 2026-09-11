@@ -74,6 +74,10 @@ const mocks = vi.hoisted(() => {
     toolConfirmProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
+    mcpApprovalProps: null as Record<string, unknown> | null,
+    /** The gated-server queue the shell's approval hook reports. */
+    mcpQueue: [] as Array<Record<string, unknown>>,
+    handleMcpApprovalSelect: vi.fn(),
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     loadingProps: null as Record<string, unknown> | null,
@@ -234,6 +238,19 @@ vi.mock('./dialogs-confirm.js', () => ({
     mocks.state.actionConfirmProps = props;
     return 'action-confirm';
   },
+  OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.mcpApprovalProps = props;
+    return 'mcp-approval';
+  },
+}));
+vi.mock('../hooks/useMcpApproval.js', () => ({
+  useMcpApproval: () => ({
+    isMcpApprovalDialogOpen: mocks.state.mcpQueue.length > 0,
+    currentMcpApproval: mocks.state.mcpQueue[0],
+    pendingMcpApprovals: mocks.state.mcpQueue,
+    mcpApprovalRemaining: Math.max(0, mocks.state.mcpQueue.length - 1),
+    handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
+  }),
 }));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
@@ -295,6 +312,9 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.toolConfirmProps = null;
     mocks.state.shellConfirmProps = null;
     mocks.state.actionConfirmProps = null;
+    mocks.state.mcpApprovalProps = null;
+    mocks.state.mcpQueue.length = 0;
+    mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -799,6 +819,38 @@ describe('OpenTuiApp shell wiring', () => {
       (mocks.state.toolConfirmProps?.['onSettled'] as () => void)();
     });
     expect(onToolCallSettled).toHaveBeenCalledWith('call-1');
+  });
+
+  it('outranks a parked tool call and routes the choice to the approval hook', async () => {
+    // ink's dialog order ranks the gated-server approval above both the shell
+    // and the tool confirmation, so a startup queue takes the slot outright.
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(mocks.state.mcpApprovalProps?.['server']).toEqual({
+      name: 'acceptance-server',
+    });
+    expect(mocks.state.mcpApprovalProps?.['remaining']).toBe(0);
+
+    const onSelect = mocks.state.mcpApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
   });
 
   it('passes streaming state and interrupt through to the composer', async () => {
@@ -1602,6 +1654,9 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.footerProps = null;
     mocks.state.exitInProgress = false;
     mocks.state.emitAutoModeEntryNotices.mockClear();
+    mocks.state.mcpApprovalProps = null;
+    mocks.state.mcpQueue.length = 0;
+    mocks.state.handleMcpApprovalSelect.mockClear();
   });
 
   function fakeConfig(

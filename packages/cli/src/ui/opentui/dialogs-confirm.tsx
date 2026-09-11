@@ -56,6 +56,7 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogAreaWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
@@ -69,6 +70,8 @@ import {
 } from './messages.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
+import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
 
 /** Structural mirror of live-session's `WaitingCallInfo` (no import cycle). */
@@ -833,5 +836,111 @@ export function OpenTuiActionConfirmation(
         />
       </box>
     </DialogFrame>
+  );
+}
+
+interface OpenTuiMcpApprovalProps {
+  /** The gated server currently being decided. */
+  server: PendingMcpServer;
+  /** Everything "approve all" would trust, this server included. */
+  pendingServers: readonly PendingMcpServer[];
+  /** How many more pending gated servers follow this one. */
+  remaining: number;
+  onSelect: (choice: McpApprovalChoice) => void;
+}
+
+const MCP_APPROVAL_OPTIONS: Array<DialogListItem<McpApprovalChoice>> = [
+  { key: 'approve', value: McpApprovalChoice.APPROVE },
+  { key: 'approve_all', value: McpApprovalChoice.APPROVE_ALL },
+  { key: 'reject', value: McpApprovalChoice.REJECT },
+];
+
+function mcpApprovalLabel(choice: McpApprovalChoice): string {
+  switch (choice) {
+    case McpApprovalChoice.APPROVE:
+      return t('Approve this server');
+    case McpApprovalChoice.APPROVE_ALL:
+      return t('Approve all pending servers in this workspace');
+    default:
+      return t('Reject (esc)');
+  }
+}
+
+/**
+ * Startup approval for a gated MCP server — a project's `.mcp.json` or the
+ * workspace's own settings. The queue, the persisted hash-bound decision and
+ * the reconnect all live in the renderer-agnostic hook; this is only the view.
+ * Esc declines the current server, which is ink's escape-to-deny convention
+ * here. Its radio select prints no navigation hint, so neither does this.
+ */
+export function OpenTuiMcpApprovalDialog(props: OpenTuiMcpApprovalProps) {
+  const { server, pendingServers, remaining, onSelect } = props;
+  const { width } = useTerminalDimensions();
+  const select = useDialogSelect<DialogListItem<McpApprovalChoice>>({
+    items: MCP_APPROVAL_OPTIONS,
+    onSelect: (value) => onSelect(value),
+  });
+
+  useKeyboard((key) => {
+    if (toOriginalKey(key).name === 'escape') {
+      onSelect(McpApprovalChoice.REJECT);
+    }
+  });
+
+  return (
+    // ink adds a margin of its own inside the dialog area, which pushes this
+    // box's left edge one column further in without moving its right edge — so
+    // it measures one narrower than the shared popup width.
+    <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
+      <DialogFrame borderColor={C.yellow}>
+        <box flexDirection="column">
+          <box flexDirection="column" marginBottom={1}>
+            <text fg={C.text} attributes={1}>
+              {t('Untrusted MCP server in {{source}}', {
+                source: server.source,
+              })}
+            </text>
+            <text fg={C.text}>
+              {t(
+                'This workspace declares an MCP server. Approving lets Qwen Code start it and run its tools. Approval is bound to this exact configuration — if {{source}} changes, you will be asked again.',
+                { source: server.source },
+              )}
+            </text>
+          </box>
+          <box flexDirection="column" marginBottom={1}>
+            <box flexDirection="row">
+              <text fg={C.text} attributes={1}>
+                {server.name}
+              </text>
+              <text fg={C.text}>{`  ${server.summary}`}</text>
+            </box>
+            {remaining > 0 ? (
+              <box flexDirection="column" marginTop={1}>
+                <text fg={C.dim}>
+                  {t('Approve all will trust these servers:')}
+                </text>
+                {pendingServers.map((pending) => (
+                  <text key={pending.name} fg={C.dim}>
+                    {`  ${pending.name}  ${pending.summary}`}
+                  </text>
+                ))}
+              </box>
+            ) : null}
+          </box>
+          <DialogSelect
+            items={MCP_APPROVAL_OPTIONS}
+            activeIndex={select.activeIndex}
+            scrollOffset={select.scrollOffset}
+            onHover={select.highlightIndex}
+            onSelectIndex={select.selectIndex}
+            renderLabel={(item, { isSelected }) => (
+              <text fg={isSelected ? C.accent : C.text}>
+                {mcpApprovalLabel(item.value)}
+              </text>
+            )}
+          />
+        </box>
+      </DialogFrame>
+    </box>
   );
 }
