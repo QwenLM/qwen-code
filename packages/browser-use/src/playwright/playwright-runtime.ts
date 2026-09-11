@@ -214,10 +214,16 @@ export class PlaywrightRuntime {
       case 'tab.title':
         return await this.tab(args).page.title();
       case 'tab.back':
-        await this.tab(args).page.goBack();
+        await this.tab(args).page.goBack({
+          waitUntil: 'commit',
+          timeout: 30_000,
+        });
         return null;
       case 'tab.forward':
-        await this.tab(args).page.goForward();
+        await this.tab(args).page.goForward({
+          waitUntil: 'commit',
+          timeout: 30_000,
+        });
         return null;
       case 'tab.reload':
         await this.tab(args).page.reload();
@@ -351,18 +357,9 @@ export class PlaywrightRuntime {
           timer = setTimeout(resolve, INPUT_DRAIN_TIMEOUT_MS);
         }),
       ]);
-    } catch (error) {
-      // Navigation can invalidate this drain after the input already succeeded.
-      const contextDestroyed =
-        typeof error === 'object' &&
-        error !== null &&
-        'message' in error &&
-        typeof error.message === 'string' &&
-        error.message.includes(
-          'Execution context was destroyed, most likely because of a navigation',
-        );
-      if (!contextDestroyed && tab.dialog === undefined && !tab.page.isClosed())
-        throw error;
+    } catch {
+      // Input already succeeded. Page-owned timers or a lost context can break
+      // this auxiliary drain without making the input safe to retry.
     } finally {
       clearTimeout(timer);
     }

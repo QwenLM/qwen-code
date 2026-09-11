@@ -20,6 +20,7 @@ import {
   CHROME_EXTENSION_ID,
   MAX_BRIDGE_FRAME_BYTES,
   defaultChromeBridgeSocketPath,
+  type BridgeRequest,
 } from '../protocol.js';
 import {
   ChromeExtensionTransport,
@@ -39,6 +40,109 @@ afterEach(async () => {
 });
 
 describe('ChromeExtensionTransport', () => {
+  it.each([
+    ['Input.dispatchMouseEvent', undefined],
+    ['Input.dispatchKeyEvent', undefined],
+    ['Input.insertText', undefined],
+    ['Input.dispatchMouseEvent', 'frame-1'],
+    ['Input.dispatchKeyEvent', 'frame-1'],
+    ['Input.insertText', 'frame-1'],
+  ] as const)(
+    'acknowledges pending %s on a dialog in its session %s',
+    async (method, sessionId) => {
+      const { transport, socket, requests } = await connectedTransport();
+      const order: string[] = [];
+      transport.onEvent(() => order.push('dialog'));
+      const result = transport
+        .request('cdp.send', { tabId: 7, sessionId, method }, 300)
+        .then(
+          (value) => {
+            order.push('result');
+            return value;
+          },
+          (error: unknown) => error,
+        );
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.write(
+        encodeFrame({
+          type: 'event',
+          tabId: 7,
+          sessionId,
+          method: 'Page.javascriptDialogOpening',
+          params: { type: 'alert', message: 'Clicked' },
+        }),
+      );
+      expect(await result).toStrictEqual({});
+      expect(order).toEqual(['dialog', 'result']);
+
+      socket.write(
+        encodeFrame({
+          type: 'response',
+          id: requests[0].id,
+          ok: false,
+          error: { message: 'late input response' },
+        }),
+      );
+      const next = transport.request('ping');
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      socket.write(
+        encodeFrame({
+          type: 'response',
+          id: requests[1].id,
+          ok: true,
+          result: 'pong',
+        }),
+      );
+      await expect(next).resolves.toBe('pong');
+      expect(order).toEqual(['dialog', 'result']);
+      socket.destroy();
+    },
+  );
+
+  it.each([
+    ['Input.dispatchMouseEvent', 8, 'frame-1'],
+    ['Input.dispatchKeyEvent', 7, 'frame-2'],
+    ['Input.insertText', 7, undefined],
+    ['Runtime.evaluate', 7, 'frame-1'],
+    ['DOM.getDocument', 7, 'frame-1'],
+  ] as const)(
+    'preserves the native response for %s on tab %s session %s',
+    async (method, tabId, sessionId) => {
+      const { transport, socket, requests } = await connectedTransport();
+      const eventSeen = vi.fn();
+      transport.onEvent(eventSeen);
+      const settled = vi.fn();
+      const operation = transport
+        .request('cdp.send', { tabId, sessionId, method })
+        .then(settled, settled);
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.write(
+        encodeFrame({
+          type: 'event',
+          tabId: 7,
+          sessionId: 'frame-1',
+          method: 'Page.javascriptDialogOpening',
+          params: { type: 'alert', message: 'Unrelated' },
+        }),
+      );
+      await vi.waitFor(() => expect(eventSeen).toHaveBeenCalledOnce());
+      expect(settled).not.toHaveBeenCalled();
+      socket.write(
+        encodeFrame({
+          type: 'response',
+          id: requests[0].id,
+          ok: false,
+          error: { message: 'native command failed' },
+        }),
+      );
+      await operation;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: 'native command failed' }),
+      );
+      socket.destroy();
+    },
+  );
+
   it('parks other profiles without interrupting requests or accepting their events', async () => {
     const transport = await startProfileTransport();
     const changes: boolean[] = [];
@@ -49,7 +153,10 @@ describe('ChromeExtensionTransport', () => {
     const a = await connectProfile(transport, 'profile-a', (request) => {
       requestId = request.id;
     });
-    const pending = transport.request('cdp.send', { tabId: 7 });
+    const pending = transport.request('cdp.send', {
+      tabId: 7,
+      method: 'Input.dispatchMouseEvent',
+    });
     await vi.waitFor(() => expect(requestId).toBeDefined());
     const b = await connectProfile(transport, 'profile-b');
     b.write(
@@ -60,7 +167,14 @@ describe('ChromeExtensionTransport', () => {
         result: 'wrong profile',
       }),
     );
-    b.write(encodeFrame({ type: 'event', tabId: 7, method: 'Page.fromB' }));
+    b.write(
+      encodeFrame({
+        type: 'event',
+        tabId: 7,
+        method: 'Page.javascriptDialogOpening',
+        params: { type: 'alert', message: 'other profile' },
+      }),
+    );
     a.write(encodeFrame({ type: 'event', tabId: 7, method: 'Page.fromA' }));
     await vi.waitFor(() => expect(events).toHaveLength(1));
     a.write(
@@ -663,4 +777,31 @@ async function connectProfile(
     }),
   );
   return socket;
+}
+
+async function connectedTransport() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+  roots.push(root);
+  const transport = new ChromeExtensionTransport({
+    socketPath: path.join(root, 'bridge.sock'),
+  });
+  transports.push(transport);
+  await transport.start();
+  const socket = connect(transport.socketPath);
+  await new Promise<void>((resolve) => socket.once('connect', resolve));
+  const requests: BridgeRequest[] = [];
+  const decoder = new FrameDecoder();
+  socket.on('data', (chunk: Buffer) => {
+    requests.push(...(decoder.push(chunk) as BridgeRequest[]));
+  });
+  socket.write(
+    encodeFrame({
+      type: 'hello',
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+      extensionId: CHROME_EXTENSION_ID,
+      extensionInstanceId: 'profile-a',
+    }),
+  );
+  await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
+  return { transport, socket, requests };
 }

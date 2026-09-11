@@ -153,12 +153,20 @@ describe('PlaywrightRuntime command contracts', () => {
       url: 'https://example.com/next',
     });
     await fixture.runtime.dispatch('tab.back', { tabId: tab.id });
+    await fixture.runtime.dispatch('tab.forward', { tabId: tab.id });
     await fixture.runtime.dispatch('tab.reload', {
       tabId: tab.id,
     });
 
     expect(fixture.page.goto).toHaveBeenCalledWith('https://example.com/next');
-    expect(fixture.page.goBack).toHaveBeenCalledWith();
+    expect(fixture.page.goBack).toHaveBeenCalledExactlyOnceWith({
+      waitUntil: 'commit',
+      timeout: 30_000,
+    });
+    expect(fixture.page.goForward).toHaveBeenCalledExactlyOnceWith({
+      waitUntil: 'commit',
+      timeout: 30_000,
+    });
     expect(fixture.page.reload).toHaveBeenCalledWith();
   });
 
@@ -211,6 +219,43 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(
       fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
     ).resolves.toEqual([]);
+  });
+
+  it('cleans up a tab closed during focus setup and allows registration again', async () => {
+    const fixture = await runtimeFixture();
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        const result = await request(method, params);
+        if (params.method === 'Emulation.setFocusEmulationEnabled')
+          fixture.page.isClosed.mockReturnValue(true);
+        return result;
+      },
+    );
+
+    await expect(createTab(fixture.runtime)).rejects.toMatchObject({
+      code: 'STALE_TAB',
+    });
+    expect(fixture.request).toHaveBeenCalledWith(
+      'tabs.detach',
+      { tabId: 17 },
+      2_000,
+    );
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([]);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toBeNull();
+
+    fixture.page.isClosed.mockReturnValue(false);
+    fixture.request.mockImplementation(request);
+    await expect(createTab(fixture.runtime)).resolves.toMatchObject({
+      title: 'Fixture',
+    });
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
+    ).toHaveLength(2);
   });
 
   it('builds locator plans and delegates read and input operations', async () => {
@@ -357,8 +402,11 @@ describe('PlaywrightRuntime command contracts', () => {
       message:
         'page.evaluate: Execution context was destroyed, most likely because of a navigation.',
     },
+    new TypeError('globalThis.setTimeout is not a function'),
+    new Error('page timer shim rejected the drain'),
+    new Error('renderer failed'),
   ])(
-    'preserves successful input when the drain loses its context (%j)',
+    'preserves successful input when the auxiliary drain fails (%j)',
     async (error) => {
       const fixture = await runtimeFixture();
       const tab = await createTab(fixture.runtime);
@@ -441,25 +489,6 @@ describe('PlaywrightRuntime command contracts', () => {
       expect(fixture.page.evaluate).not.toHaveBeenCalled();
     },
   );
-
-  it('preserves unrelated errors from the input drain', async () => {
-    const fixture = await runtimeFixture();
-    const tab = await createTab(fixture.runtime);
-    fixture.page.evaluate.mockRejectedValueOnce(new Error('renderer failed'));
-
-    await expect(
-      fixture.runtime.dispatch('locator.selectOption', {
-        tabId: tab.id,
-        steps: [{ kind: 'locator', selector: '#sort' }],
-        value: 'price',
-      }),
-    ).rejects.toMatchObject({
-      message: 'locator.selectOption failed: renderer failed',
-    });
-
-    expect(fixture.locator.selectOption).toHaveBeenCalledOnce();
-    expect(fixture.page.evaluate).toHaveBeenCalledOnce();
-  });
 
   it('delegates coordinate input and snapshot capture', async () => {
     const fixture = await runtimeFixture();
@@ -2366,8 +2395,10 @@ function fakePage(
     bringToFront: ReturnType<typeof vi.fn>;
     evaluate: ReturnType<typeof vi.fn>;
     title: ReturnType<typeof vi.fn>;
+    isClosed: ReturnType<typeof vi.fn>;
     goto: ReturnType<typeof vi.fn>;
     goBack: ReturnType<typeof vi.fn>;
+    goForward: ReturnType<typeof vi.fn>;
     reload: ReturnType<typeof vi.fn>;
     context: ReturnType<typeof vi.fn>;
     locator: ReturnType<typeof vi.fn>;
