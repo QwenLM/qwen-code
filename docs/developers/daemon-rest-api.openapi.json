@@ -104,7 +104,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/HealthResponse"
                 }
               }
             }
@@ -331,6 +331,16 @@
         "responses": {
           "204": {
             "description": "Session closed."
+          },
+          "400": {
+            "description": "The `X-Qwen-Client-Id` header is invalid (`code: invalid_client_id`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
             "description": "The live session does not exist.",
@@ -798,6 +808,16 @@
               }
             }
           },
+          "401": {
+            "description": "Caller lacks operator authority for this strict-gated mutation (`code: token_required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "The session does not exist.",
             "content": {
@@ -1131,7 +1151,7 @@
             }
           },
           "504": {
-            "description": "The prompt deadline expired. Only possible when /capabilities advertises prompt_absolute_deadline.",
+            "description": "The owning runtime could not initialize its ACP channel in time (`code: init_timeout`). Prompt-deadline expiry is not an HTTP failure: expiry is reported in-band as a `turn_error` with `code: prompt_deadline_exceeded` on the session event stream.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1337,6 +1357,16 @@
               "format": "uuid"
             },
             "description": "Best-effort physical stream lineage."
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            },
+            "description": "Set to 1 to inject a synthetic session_snapshot frame at stream start (or right after replay_complete) so a fresh or reconnecting client can seed its reducer without an extra round trip."
           }
         ],
         "responses": {
@@ -1516,7 +1546,7 @@
             }
           },
           "400": {
-            "description": "The cursor, anchor, direction, limit, or id is invalid.",
+            "description": "The cursor, anchor, direction, limit, id, or snapshot is invalid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2309,8 +2339,28 @@
               }
             }
           },
+          "422": {
+            "description": "The target exists but is a binary file that cannot be decoded as UTF-8 text (`errorKind: binary_file`). Read it with GET /file/bytes instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2443,6 +2493,16 @@
               }
             }
           },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Unexpected daemon error.",
             "content": {
@@ -2538,6 +2598,16 @@
           },
           "500": {
             "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2658,6 +2728,16 @@
           },
           "500": {
             "description": "The workspace file boundary failed unexpectedly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2806,6 +2886,16 @@
               }
             }
           },
+          "503": {
+            "description": "The workspace filesystem reported an I/O failure (`errorKind: io_error`). The same request may succeed on retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Unexpected daemon error.",
             "content": {
@@ -2945,6 +3035,14 @@
           },
           "removable": {
             "type": "boolean"
+          },
+          "workflowsEnabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["live"],
+            "description": "Present only when the workspace is backed by a live-conversation runtime."
           }
         },
         "additionalProperties": true
@@ -3012,6 +3110,18 @@
           "policy": {
             "type": "object",
             "additionalProperties": true
+          },
+          "sessionLiveStatePollIntervalMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "description": "Live-session state poll interval in milliseconds. Defaults to 5000; override with QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS."
+          },
+          "supportedLanguages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Prompt and UI language codes the daemon accepts, plus auto."
           }
         },
         "additionalProperties": true
@@ -3033,7 +3143,9 @@
           },
           "sessionId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "description": "Caller-supplied session id. Only RFC 4122 UUID versions 1-5 are admitted; RFC 9562 v7/v8 ids are rejected with 400 invalid_session_id."
           },
           "modelServiceId": {
             "type": "string"
@@ -3092,9 +3204,6 @@
           },
           "hasActivePrompt": {
             "type": "boolean"
-          },
-          "eventEpoch": {
-            "type": "string"
           },
           "sourceType": {
             "type": "string"
@@ -3642,7 +3751,36 @@
           },
           "delivery": {
             "type": "object",
-            "additionalProperties": true
+            "required": ["kind", "target"],
+            "additionalProperties": false,
+            "description": "Channel delivery target. Only this shape is accepted; any other object, unknown key, or non-blank-string violation is rejected with 400 channel_delivery_invalid.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "channel"
+              },
+              "target": {
+                "type": "object",
+                "required": ["channelName", "type", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "channelName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["user", "chat"]
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                }
+              }
+            }
           },
           "_meta": {
             "type": ["object", "null"],
@@ -3830,7 +3968,8 @@
                     "const": "selected"
                   },
                   "optionId": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   }
                 },
                 "additionalProperties": false
