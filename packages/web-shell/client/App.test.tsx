@@ -18,6 +18,7 @@ import {
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
+  type DaemonSessionContextStatus,
   type DaemonSessionContextUsageStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
@@ -54,7 +55,7 @@ type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
   sessionContext?: { kind: 'standalone' };
-  context?: { sessionId: string };
+  context?: DaemonSessionContextStatus;
   clientId: string;
   displayName: string | undefined;
   titleSource?: 'manual' | 'auto';
@@ -22923,7 +22924,12 @@ describe('App session callbacks', () => {
       mockConnection.sessionContext = standalone
         ? { kind: 'standalone' }
         : undefined;
-      mockConnection.context = { sessionId: 'session-1' };
+      mockConnection.context = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        state: {},
+      };
       renderApp();
       await flush();
       await act(async () => {
