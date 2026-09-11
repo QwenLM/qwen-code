@@ -84,9 +84,32 @@ export type WebShellFootnoteIconResolver = (
   footnotes: readonly WebShellFootnote[],
 ) => WebShellIconSource | null | undefined;
 
+export interface WebShellFootnotePreviewInfo {
+  readonly footnotes: readonly WebShellFootnote[];
+  readonly footnote: WebShellFootnote;
+  readonly index: number;
+  readonly location: 'inline' | 'assistant';
+  readonly title: string;
+  readonly sourceLabel: string;
+  /** Place this Qwen-managed element in the layout without replacing its children. */
+  readonly sourceLink: HTMLElement;
+}
+
+export interface WebShellFootnotePreviewHandle {
+  update(info: WebShellFootnotePreviewInfo): void;
+  dispose(): void;
+}
+
+/** Mounts current-page content only. Keep this synchronous function stable. */
+export type WebShellFootnotePreviewMount = (
+  container: HTMLElement,
+  info: WebShellFootnotePreviewInfo,
+) => WebShellFootnotePreviewHandle | null | undefined;
+
 export interface WebShellMarkdownCustomization {
   getInlineFootnoteIcon?: WebShellFootnoteIconResolver;
   getAssistantFootnoteIcon?: WebShellFootnoteIconResolver;
+  mountFootnotePreview?: WebShellFootnotePreviewMount;
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,

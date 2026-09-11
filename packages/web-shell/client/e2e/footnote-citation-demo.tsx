@@ -7,6 +7,7 @@ import type { WebShellFootnoteIconResolver } from '../customization';
 import knowledgeIconUrl from '../assets/icons/knowledge.svg?url&no-inline';
 import fileIconUrl from '../assets/icons/at-file.svg?url&no-inline';
 import referencesIconUrl from './assets/citation-references.svg?url&no-inline';
+import { mountDemoFootnotePreview } from './footnote-preview-host';
 
 const getInlineFootnoteIcon: WebShellFootnoteIconResolver = (footnotes) =>
   footnotes.every((note) => note.href?.startsWith(sentinelPrefix))
@@ -62,10 +63,16 @@ interface ResolvedLocator {
 
 function App() {
   const [resolved, setResolved] = useState<ResolvedLocator>();
+  const [customPreview, setCustomPreview] = useState(
+    () => new URLSearchParams(location.search).get('preview') === 'custom',
+  );
   const markdown = useMemo(
     () => ({
       getInlineFootnoteIcon,
       getAssistantFootnoteIcon,
+      mountFootnotePreview: customPreview
+        ? mountDemoFootnotePreview
+        : undefined,
       components: {
         a({ href, children, className }: ComponentProps<'a'> & ExtraProps) {
           if (href?.startsWith(sentinelPrefix)) {
@@ -108,7 +115,7 @@ function App() {
         },
       },
     }),
-    [],
+    [customPreview],
   );
 
   return (
@@ -121,6 +128,26 @@ function App() {
         color: '#f6f6f6',
       }}
     >
+      <label
+        style={{
+          position: 'fixed',
+          top: 12,
+          left: 20,
+          zIndex: 10,
+          display: 'flex',
+          gap: 6,
+          alignItems: 'center',
+          fontSize: 12,
+          color: '#aeb0bb',
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={customPreview}
+          onChange={(event) => setCustomPreview(event.target.checked)}
+        />
+        使用宿主卡片
+      </label>
       <WebShellTranscript
         blocks={blocks}
         theme="dark"

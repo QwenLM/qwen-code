@@ -786,3 +786,87 @@ test('source locator demo delegates the card link to its host panel', async ({
     animations: 'disabled',
   });
 });
+
+test('source locator demo custom page slot keeps grouping, pagination and host links', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    process.env['FOOTNOTE_BUILT'] === '1',
+    'Production app does not include the host demo; use the built-library demo fixture.',
+  );
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await page.goto('/e2e/footnote-citation-demo.html?preview=custom');
+  const triggers = page.locator(triggerSelector);
+  await expect(triggers).toHaveText(['2', '']);
+  await expect(page.locator('[data-demo-preview-content]')).toHaveCount(0);
+  await triggers.first().hover();
+  const card = page.locator(cardSelector);
+  const content = card.locator('[data-demo-preview-content]');
+  await expect(content).toBeVisible();
+  expect(
+    Number(await content.getAttribute('data-mount-width')),
+  ).toBeGreaterThan(0);
+  await expect(content).toHaveAttribute('data-ids', 'a,b');
+  await expect(content).toHaveAttribute('data-location', 'inline');
+  await expect(content).toHaveAttribute('data-index', '0');
+  const mountId = await content.getAttribute('data-mount-id');
+  await content.getByRole('button', { name: '查看脚注原文' }).click();
+  await expect(content.locator('pre')).toContainText('[^a]:');
+  await card.getByRole('button', { name: '下一条引用' }).click();
+  await expect(content).toHaveAttribute('data-mount-id', mountId!);
+  await expect(content).toHaveAttribute('data-index', '1');
+  await expect(content.locator('pre')).toContainText('[^b]:');
+  await expect(card).toContainText('2 / 2');
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(300);
+  await expect(card).toBeVisible();
+  const source = content.getByRole('button', { name: '订单规范原文' });
+  await expect(source).toHaveAttribute('href', '#');
+  await source.click();
+  await expect(page.locator('[data-demo-source-panel]')).toContainText(
+    'file-order',
+  );
+  await expect(page.locator('[data-demo-source-panel]')).toContainText(
+    'markdown:block:7',
+  );
+  await page.keyboard.press('Escape');
+  await expect(content).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭面板' }).click();
+  await triggers.nth(1).click();
+  await expect(content).toHaveAttribute('data-ids', 'c');
+  await expect(
+    content.getByRole('link', { name: '资源组规格说明' }),
+  ).toHaveAttribute('href', 'https://example.com/resource-groups');
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+  await page.locator('[data-web-shell-footnote-sources-trigger]').hover();
+  await expect(content).toHaveAttribute('data-location', 'assistant');
+  await expect(content).toHaveAttribute('data-ids', 'a,b,c');
+  await expect(card).toContainText('1 / 3');
+  await page.screenshot({
+    path: testInfo.outputPath('host-footnote-preview-content.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.keyboard.press('Escape');
+  await page.mouse.move(0, 0);
+  await page.locator('body').click({ position: { x: 1, y: 1 } });
+  await expect(card).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await triggers.first().focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    content.getByRole('button', { name: '订单业务定义' }),
+  ).toBeFocused();
+  await expectInsideViewport(page, card);
+  await expect(content.locator('..')).toHaveCSS('overflow-y', 'auto');
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+  await page.getByRole('checkbox', { name: '使用宿主卡片' }).uncheck();
+  await triggers.first().click();
+  await expect(card.locator('[data-demo-preview-content]')).toHaveCount(0);
+  await expect(card.locator('[data-web-shell-footnote-summary]')).toBeVisible();
+  expect(errors).toEqual([]);
+});

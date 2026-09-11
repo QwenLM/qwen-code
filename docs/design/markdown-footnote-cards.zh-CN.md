@@ -61,6 +61,39 @@ const markdown = {
 - 在现有 AST 管线中提取原文，不二次解析 Markdown。保持现有稳定的引用上报和组件身份，流式更新不重挂已打开的卡片；消息之间的 DOM 锚点互相隔离。
 - 复制 Markdown 和静态文档导出保留标准脚注。宿主自定义 `components.sup` 时继续退出聚合，表格复制保留原脚注编号。
 
+## 当前页内容插槽
+
+可选的 `mountFootnotePreview(container, info)` 只替换当前页的来源标签、标题、说明和缩略图。聚合、入口图标/数量、浮层定位、Hover/保持打开/Escape、键盘导航和分页器继续由 Qwen 管理。正文与 Assistant 操作栏共用此插槽。不配置、返回 null/undefined 或同步执行失败时使用默认内容。
+
+框架无关的挂载函数接收已连接且可布局的独立 HTML 容器和 `WebShellFootnotePreviewInfo`：完整只读 `footnotes` 列表、当前 `footnote`、从零开始的 `index`、入口 `location`（`inline` 或 `assistant`）、本地化 `title`、已解析的 `sourceLabel`，以及 Qwen 管理的 HTMLElement `sourceLink`。元数据仍不含 AST/React 对象；DOM 元素属于展示句柄，宿主可将其放入布局，但不要替换其子节点。Qwen 通过原有 `components.a` 在该元素内渲染当前来源链接，保留宿主接管和普通安全链接行为。纯文本脚注提供不可跳转的标题。
+
+挂载成功后返回 `WebShellFootnotePreviewHandle`，包含同步的 `update(info)` 与 `dispose()`。浮层打开时挂载，翻页/流式数据变化时更新而不重建宿主视图，关闭/卸载、替换挂载函数或回退时清理。React StrictMode 可能多次挂载/清理，每次成功挂载对应一次清理。宿主应保持挂载函数引用稳定，自行处理异步错误，并在挂载尚未返回句柄就抛错时清理已申请的资源。同步 mount/update/cleanup 错误不会破坏报告；切换页面/数据或更换挂载函数后可以重试。
+
+自定义内容保留在 Web Shell Portal 及有高度边界的滚动区域内。原生 DOM/SolidJS 接入不需要创建 React 元素；Solid 宿主按自身需要保留响应式 owner，返回更新和清理方法。此插槽不改变 `components.sup` 退出聚合的优先级，也不用于静态文档脚注。
+
+Demo 提供默认/自定义内容两种模式：自定义内容用原生 DOM 挂载，将 Qwen 管理的来源链接放进布局，使用内建分页器更新。单测与浏览器验收覆盖数据隔离、当前页/完整列表、挂载/更新/清理、回退/恢复、来源接管、焦点/翻页、流式更新与静态导出。
+
+最小原生 DOM 接入示例：
+
+```js
+const markdown = {
+  mountFootnotePreview(container, initial) {
+    const summary = container.ownerDocument.createElement('p');
+    const update = (info) => {
+      summary.textContent = info.footnote.summary;
+      container.replaceChildren(info.sourceLink, summary);
+    };
+    update(initial);
+    return {
+      update,
+      dispose() {
+        container.replaceChildren();
+      },
+    };
+  },
+};
+```
+
 ## 宿主链接与范围
 
 卡片标题继续通过宿主现有 `components.a` 渲染。内部脚注和返回正文链接沿用内建导航。普通 HTTP(S) 链接正常打开；宿主也可使用 `https://citation.invalid/dataworks-knowledge#...` 等 sentinel 携带私有定位字段，点击后校验、解析并打开自己的面板。Web Shell 不解析业务字段，也不拼接 OpenCode 业务 URL。没有宿主解析器时 sentinel 不可导航。Demo 使用固定数据、普通脚注 ID、两种正文资源图标、独立操作栏资源图标和示意右侧面板。

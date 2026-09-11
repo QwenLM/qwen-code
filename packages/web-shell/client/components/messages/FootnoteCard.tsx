@@ -9,13 +9,16 @@ import {
 import type { Components, ExtraProps } from 'react-markdown';
 import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { cssUrlValue } from '../../utils/cssUrlVar';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
 import type { FootnoteElement, FootnotePreview } from './rehype-footnote-cards';
-import type { WebShellFootnoteIconResolver } from '../../customization';
+import type {
+  WebShellFootnoteIconResolver,
+  WebShellFootnotePreviewMount,
+} from '../../customization';
+import { FootnotePreviewContent } from './FootnotePreviewContent';
 import { isSafeImageSrc } from './Markdown';
 
 export type FootnoteSourcesChangeHandler = (notes: FootnotePreview[]) => void;
@@ -25,11 +28,13 @@ export function FootnoteSup({
   children,
   linkComponent,
   iconResolver,
+  mountPreview,
   ...props
 }: ComponentProps<'sup'> &
   ExtraProps & {
     linkComponent?: Components['a'];
     iconResolver?: WebShellFootnoteIconResolver;
+    mountPreview?: WebShellFootnotePreviewMount;
   }) {
   const notes = (node as FootnoteElement | undefined)?.data?.footnoteCards;
   return notes ? (
@@ -38,6 +43,7 @@ export function FootnoteSup({
       notes={notes}
       linkComponent={linkComponent}
       iconResolver={iconResolver}
+      mountPreview={mountPreview}
     />
   ) : (
     <sup {...props}>{children}</sup>
@@ -51,6 +57,7 @@ export function FootnoteSection({
   onSourcesChange,
   sectionComponent,
   iconResolver,
+  mountPreview,
   ...props
 }: ComponentProps<'section'> &
   ExtraProps & {
@@ -58,6 +65,7 @@ export function FootnoteSection({
     onSourcesChange?: FootnoteSourcesChangeHandler;
     sectionComponent?: Components['section'];
     iconResolver?: WebShellFootnoteIconResolver;
+    mountPreview?: WebShellFootnotePreviewMount;
   }) {
   const data = (node as FootnoteElement | undefined)?.data;
   const notes = data?.footnoteSourcesFooter ? data.footnoteCards : undefined;
@@ -87,6 +95,7 @@ export function FootnoteSection({
           variant="footer"
           linkComponent={linkComponent}
           iconResolver={iconResolver}
+          mountPreview={mountPreview}
         />
       </div>
     </>
@@ -97,10 +106,12 @@ export function FootnoteSources({
   notes,
   linkComponent,
   iconResolver,
+  mountPreview,
 }: {
   notes: FootnotePreview[];
   linkComponent?: Components['a'];
   iconResolver?: WebShellFootnoteIconResolver;
+  mountPreview?: WebShellFootnotePreviewMount;
 }) {
   if (!notes.length) return null;
   return (
@@ -109,6 +120,7 @@ export function FootnoteSources({
       variant="footer"
       linkComponent={linkComponent}
       iconResolver={iconResolver}
+      mountPreview={mountPreview}
     />
   );
 }
@@ -119,18 +131,18 @@ function FootnoteCard({
   variant = 'inline',
   linkComponent,
   iconResolver,
+  mountPreview,
 }: {
   id?: string;
   notes: FootnotePreview[];
   variant?: 'inline' | 'footer';
   linkComponent?: Components['a'];
   iconResolver?: WebShellFootnoteIconResolver;
+  mountPreview?: WebShellFootnotePreviewMount;
 }) {
   const { t } = useI18n();
-  const openExternalLink = useExternalLinkOpener();
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string>();
-  const [failedImage, setFailedImage] = useState<string>();
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -151,15 +163,6 @@ function FootnoteCard({
     0,
     notes.findIndex((note) => note.id === selectedId),
   );
-  const note = notes[index];
-  const title = note.title || t('footnotes.note', { number: note.number });
-  let hostname: string | undefined;
-  try {
-    hostname = note.href ? new URL(note.href).hostname : undefined;
-  } catch {
-    // Relative links and anchors have no source hostname.
-  }
-  const defaultLink = note.href && hostname !== 'citation.invalid';
 
   function cancelTimer() {
     clearTimeout(timer.current);
@@ -269,80 +272,13 @@ function FootnoteCard({
         onFocusCapture={cancelTimer}
         onBlurCapture={leave}
       >
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span
-            aria-hidden="true"
-            className="size-4 shrink-0 bg-current"
-            style={{
-              maskImage: cssUrlValue(knowledgeIcon),
-              maskSize: 'contain',
-              maskRepeat: 'no-repeat',
-            }}
-          />
-          <span className="truncate">
-            {note.source ||
-              hostname ||
-              t('footnotes.note', { number: note.number })}
-          </span>
-        </div>
-        <div
-          className="flex items-start gap-3"
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          <div className="min-w-0 flex-1">
-            {note.href && linkComponent ? (
-              createElement(
-                linkComponent,
-                {
-                  className:
-                    'line-clamp-2 font-semibold break-words text-popover-foreground hover:underline',
-                  href: note.href,
-                  title: note.source,
-                  target: '_blank',
-                  rel: 'noopener noreferrer',
-                  ...(typeof linkComponent === 'string'
-                    ? {}
-                    : { node: note.linkNode }),
-                },
-                title,
-              )
-            ) : defaultLink ? (
-              <a
-                className="line-clamp-2 font-semibold break-words text-popover-foreground hover:underline"
-                href={note.href}
-                title={note.source}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(event) => openExternalLink(event, note.href)}
-              >
-                {title}
-              </a>
-            ) : (
-              <div className="line-clamp-2 font-semibold break-words">
-                {title}
-              </div>
-            )}
-            {note.summary && (
-              <p
-                data-web-shell-footnote-summary=""
-                tabIndex={0}
-                className="mt-1 max-h-48 overflow-y-auto overscroll-contain text-sm break-words text-muted-foreground"
-              >
-                {note.summary}
-              </p>
-            )}
-          </div>
-          {note.image && note.image !== failedImage && (
-            <img
-              key={note.image}
-              src={note.image}
-              alt=""
-              className="size-16 shrink-0 rounded-lg object-cover"
-              onError={() => setFailedImage(note.image)}
-            />
-          )}
-        </div>
+        <FootnotePreviewContent
+          notes={notes}
+          index={index}
+          location={variant === 'inline' ? 'inline' : 'assistant'}
+          mount={mountPreview}
+          linkComponent={linkComponent}
+        />
         {notes.length > 1 && (
           <div className="flex items-center justify-end gap-2 border-t border-border pt-2">
             <Button

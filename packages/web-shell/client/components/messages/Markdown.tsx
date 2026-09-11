@@ -1034,12 +1034,14 @@ export const Markdown = memo(function Markdown({
   const sourceComponents = sourceMarkdown?.components;
   const inlineFootnoteIcon = sourceMarkdown?.getInlineFootnoteIcon;
   const assistantFootnoteIcon = sourceMarkdown?.getAssistantFootnoteIcon;
+  const mountFootnotePreview = sourceMarkdown?.mountFootnotePreview;
   const renderedComponents = useMemo(() => {
     if (
       !sourceComponents &&
       !onFootnoteSourcesChange &&
       !inlineFootnoteIcon &&
-      !assistantFootnoteIcon
+      !assistantFootnoteIcon &&
+      !mountFootnotePreview
     )
       return components;
     const rendered = {
@@ -1066,6 +1068,7 @@ export const Markdown = memo(function Markdown({
           {...props}
           linkComponent={SourceLink}
           iconResolver={inlineFootnoteIcon}
+          mountPreview={mountFootnotePreview}
         />
       );
       rendered.section = (props) => (
@@ -1075,6 +1078,7 @@ export const Markdown = memo(function Markdown({
           onSourcesChange={onFootnoteSourcesChange}
           sectionComponent={sourceComponents?.section}
           iconResolver={assistantFootnoteIcon}
+          mountPreview={mountFootnotePreview}
         />
       );
     }
@@ -1086,6 +1090,7 @@ export const Markdown = memo(function Markdown({
     sourceComponents,
     inlineFootnoteIcon,
     assistantFootnoteIcon,
+    mountFootnotePreview,
   ]);
   const chart =
     !documentMode &&

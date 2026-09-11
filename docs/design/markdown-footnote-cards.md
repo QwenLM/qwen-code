@@ -61,6 +61,39 @@ The callbacks are independent. Missing callbacks, empty/null results, invalid UR
 - Definition extraction shares the existing AST pipeline; it does not reparse Markdown. Existing stable source reporting and component identities preserve open cards through streaming updates. Message instances keep isolated DOM anchor namespaces.
 - Markdown copy and static document export preserve standard footnotes. Custom `components.sup` continues to opt out of aggregation. Advanced-table copy keeps original reference text.
 
+## Current-page content slot
+
+`mountFootnotePreview(container, info)` optionally replaces only the current page's source label, title, description and thumbnail. Qwen retains grouping, trigger icons/counts, popup placement, hover/pin/Escape behavior, keyboard navigation and the pager. The same slot serves inline and Assistant-footer previews. Omitting it, declining with null/undefined, or synchronously failing restores the default page.
+
+The framework-neutral mount function receives a connected, visible HTML container and `WebShellFootnotePreviewInfo`: the complete readonly `footnotes` list, current `footnote`, zero-based `index`, `location` (`inline` or `assistant`), localized `title`, resolved `sourceLabel`, and `sourceLink` (a Qwen-owned HTMLElement). Metadata remains plain data without AST/React objects. The DOM element is a presentation handle: place it in the custom layout without replacing its children. Qwen renders the current source link into it through the existing `components.a` path, including host interception and ordinary safe-link behavior. Unlinked notes expose a non-navigable title.
+
+Return a `WebShellFootnotePreviewHandle` with synchronous `update(info)` and `dispose()` methods. Mount runs when the popup opens. Paging and streamed data invoke update without recreating the host view. Closing/unmounting, replacing the mount function or falling back disposes the view. React StrictMode may mount/dispose more than once; each successful mount has one matching cleanup. Hosts should keep the mount function stable, handle their own asynchronous errors, and clean up resources if mounting throws before a handle is returned. Synchronous mount/update/cleanup errors are isolated from the report; changing page/data or the mount function can retry a failed page.
+
+Custom content stays in the shell portal and a bounded scroll region. DOM/SolidJS implementations need no React element factory. A host that mounts Solid must retain its reactive owner as required by Solid and return its update/dispose operations. This slot neither changes `components.sup` opt-out priority nor runs for static document footnotes.
+
+The demo offers default and custom content modes; custom content uses a plain DOM mount, places the Qwen-managed source link in its layout and updates on the built-in pager. Unit and browser checks cover payload isolation, current-page/list consistency, mount/update/dispose, fallback/recovery, preserved link interception, focus/paging, streaming and static export.
+
+A minimal DOM host can use the slot as follows:
+
+```js
+const markdown = {
+  mountFootnotePreview(container, initial) {
+    const summary = container.ownerDocument.createElement('p');
+    const update = (info) => {
+      summary.textContent = info.footnote.summary;
+      container.replaceChildren(info.sourceLink, summary);
+    };
+    update(initial);
+    return {
+      update,
+      dispose() {
+        container.replaceChildren();
+      },
+    };
+  },
+};
+```
+
 ## Host links and scope
 
 Card titles use the existing host `components.a` renderer. Internal reference/backreference navigation stays built in. A normal HTTP(S) link opens normally. A host may encode private locator fields in a sentinel such as `https://citation.invalid/dataworks-knowledge#...`, validate and resolve it on click, and open its own panel. Web Shell neither interprets these fields nor builds OpenCode business URLs. Without a host resolver, the sentinel remains non-navigable. The demo uses fixed fixtures, ordinary IDs, two different inline asset icons, an independent footer asset and an illustrative host panel.
