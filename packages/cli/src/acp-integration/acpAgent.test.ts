@@ -2285,6 +2285,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     mockConfig = {
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       initialize: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
@@ -6141,6 +6144,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  // Gate-off Configs hold `.mcp.json` unexpanded: their digest cannot match the store.
+  it.each([
+    ['yolo', undefined, 0],
+    ['default', 'pending', 1],
+  ])(
+    'workspace status reads approval state only from a gate-armed Config (approval mode %s)',
+    async (approvalMode, expectedApprovalState, expectedReads) => {
+      const manager = {
+        getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+        getMcpClientAccounting: vi.fn().mockReturnValue({
+          total: 0,
+          reservedSlots: [],
+          refusedServerNames: [],
+        }),
+        getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+        getMcpBudgetMode: vi.fn().mockReturnValue('off'),
+        getServerStatus: vi.fn().mockReturnValue(MCPServerStatus.DISCONNECTED),
+      };
+      mockMcpApprovals.getState.mockReturnValue('pending');
+      mockConfig = {
+        ...mockConfig,
+        getMcpServers: vi.fn().mockReturnValue({
+          proj: { httpUrl: 'https://h.example/mcp', scope: 'project' },
+        }),
+        getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+        getTargetDir: vi.fn().mockReturnValue('/tmp'),
+        getApprovalMode: vi.fn().mockReturnValue(approvalMode),
+        isMcpServerDisabled: vi.fn().mockReturnValue(false),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getMcpClientManager: vi.fn().mockReturnValue(manager),
+        }),
+      } as unknown as Config;
+      const { agent, agentPromise } = await bootAcpAgent();
+      const status = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        {},
+      )) as { servers: Array<{ name: string; approvalState?: string }> };
+      expect(status.servers.map((s) => s.name)).toEqual(['proj']);
+      expect(status.servers[0].approvalState).toBe(expectedApprovalState);
+      expect(mockMcpApprovals.getState).toHaveBeenCalledTimes(expectedReads);
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('uses the pool status for the top-level MCP server status', async () => {
     const manager = {
@@ -28538,6 +28586,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getTargetDir: vi.fn().mockReturnValue('/work/project'),
       getWorkingDir: vi.fn().mockReturnValue('/work/project'),
       getExcludedMcpServers: vi.fn(() => excluded),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       setExcludedMcpServers: vi.fn((next: string[]) => {
         excluded = next;
       }),
@@ -28688,6 +28739,40 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     );
     expect(approveMcpServerForSession).toHaveBeenCalledWith('docs');
     expect(discoverToolsForServer).toHaveBeenCalledWith('docs');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  // Gate-off Configs hold `.mcp.json` unexpanded: approving would persist a literal digest.
+  it('refuses to approve from a gate-off (YOLO) session', async () => {
+    const server = {
+      httpUrl: 'https://h.example/mcp',
+      headers: { Authorization: 'Bearer ${WSAPPROBE_TOK}' },
+      scope: 'project' as const,
+    };
+    const approveMcpServerForSession = vi.fn();
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi.fn().mockReturnValue({ proj: server }),
+      getWorkingDir: vi.fn().mockReturnValue('/work/project'),
+      getApprovalMode: vi.fn().mockReturnValue('yolo'),
+      approveMcpServerForSession,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(mockManager),
+        discoverToolsForServer: vi.fn(),
+      }),
+    } as unknown as Config;
+
+    const { agent, agentPromise } = await getAgent();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpManage, {
+        serverName: 'proj',
+        action: 'approve',
+      }),
+    ).rejects.toThrow(/MCP approval is off for this session/);
+    expect(mockMcpApprovals.setState).not.toHaveBeenCalled();
+    expect(approveMcpServerForSession).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

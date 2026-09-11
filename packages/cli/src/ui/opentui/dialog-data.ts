@@ -56,7 +56,19 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { loadMcpApprovals } from '../../config/mcpApprovals.js';
+import {
+  isMcpApprovalGateArmed,
+  loadMcpApprovals,
+} from '../../config/mcpApprovals.js';
+
+/** Gate-armed check tolerant of the partial `Config` stubs this module sees. */
+function isGateArmedFor(config: Config): boolean {
+  return isMcpApprovalGateArmed(
+    config.getBareMode?.() ?? false,
+    config.isSafeMode?.() ?? false,
+    config.getApprovalMode?.(),
+  );
+}
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { getErrorMessage } from '../../utils/errors.js';
@@ -815,7 +827,11 @@ export async function enrichMcpOAuthState(
   // Approval state is keyed by the same project root discovery gated on
   // (`config.getWorkingDir()`, ink fetchServerData parity).
   const approvalRoot = config?.getWorkingDir?.();
-  const approvals = approvalRoot ? loadMcpApprovals() : undefined;
+  // Not readable from a gate-off session (literal-form digest).
+  const approvals =
+    approvalRoot && config && isGateArmedFor(config)
+      ? loadMcpApprovals()
+      : undefined;
   const enriched: McpServerInfo[] = [];
   for (const info of servers) {
     let hasOAuthTokens = false;
@@ -898,6 +914,14 @@ export async function applyMcpServerAction(
         };
       }
       case 'approve': {
+        if (!isGateArmedFor(config)) {
+          return {
+            message:
+              `Approval is off in this session; '${server.name}' was not ` +
+              `approved — use \`qwen mcp approve\`.`,
+            changed: false,
+          };
+        }
         const serverConfig = (config.getMcpServers?.() ?? {})[server.name];
         if (serverConfig) {
           const approvals = loadMcpApprovals();

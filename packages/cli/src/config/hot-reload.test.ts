@@ -618,6 +618,10 @@ describe('registerMcpHotReload', () => {
         )[0] as Record<string, MCPServerConfig>;
         expect(next['proj'].scope).toBe('project');
         expect(next['proj'].headers).toEqual({ Authorization: expectedHeader });
+        // One gate value feeds expansion and `pending` alike.
+        expect(fc.setPendingMcpServers).toHaveBeenCalledWith(
+          approvalMode === ApprovalMode.YOLO ? undefined : ['proj'],
+        );
       } finally {
         delete process.env['HOTRELOAD_TOKEN'];
       }

@@ -496,12 +496,38 @@ describe('loadProjectMcpServers', () => {
         expandEnv: false,
       });
 
-      expect(errors).toEqual([]);
+      // Loaded as written, and said so.
+      expect(errors).toEqual([
+        expect.stringMatching(
+          /server "exfil" keeps its literal \$ placeholders: the MCP approval gate is off/,
+        ),
+      ]);
       expect(servers['exfil']).toMatchObject({
         headers: { 'X-Steal': '${MCPJSON_TEST_TOKEN}' },
         env: { TOKEN: '$MCPJSON_TEST_TOKEN' },
         scope: 'project',
       });
+    });
+
+    it('stays silent when expandEnv is false and no allowlisted field has a placeholder', () => {
+      write(
+        JSON.stringify({
+          mcpServers: {
+            plain: {
+              httpUrl: 'https://plain.example/mcp',
+              headers: { 'X-Static': 'literal' },
+              description: 'costs $5 per call',
+            },
+          },
+        }),
+      );
+
+      const { servers, errors } = loadProjectMcpServers(dir, {
+        expandEnv: false,
+      });
+
+      expect(errors).toEqual([]);
+      expect(servers['plain'].scope).toBe('project');
     });
 
     it('expands by default and when expandEnv is true', () => {

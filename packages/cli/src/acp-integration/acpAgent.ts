@@ -4038,33 +4038,22 @@ class QwenAgent implements Agent {
       for (const config of liveConfigs) {
         try {
           const cwd = config.getTargetDir();
-          // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
-          // — each live Config in this Set may independently be bare/safe or
-          // not, so the check is per-config, not hoisted outside the loop.
-          // Without it, this control-endpoint reload path (workspaceMcpReload)
-          // would fold settings.merged.mcpServers/mcp.allowed/excluded — LOCAL
-          // state safe/bare mode is supposed to distrust — back into an
-          // already-running safe/bare session, silently stranding or
-          // filtering out the caller's own top-tier server. Same bug class as
-          // the loadCliConfig (boot) and registerMcpHotReload (settings-file
-          // watcher) fixes earlier in this PR, found here in the third
-          // reload path.
+          // Per-Config, as in registerMcpHotReload: a bare/safe Config in this
+          // set must not receive settings.mcpServers / mcp.allowed / excluded.
           const isBareOrSafe = config.getBareMode() || config.isSafeMode();
-          const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
+          // One value for both expansion and `pending`.
+          const gateArmed = isMcpApprovalGateArmed(
+            config.getBareMode(),
+            config.isSafeMode(),
+            config.getApprovalMode(),
+          );
           const mcpServers = isBareOrSafe
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
                 cwd,
                 config.getTopTierMcpServers(),
-                // No expansion when the approval gate is off for this config.
-                {
-                  expandEnv: isMcpApprovalGateArmed(
-                    config.getBareMode(),
-                    config.isSafeMode(),
-                    config.getApprovalMode(),
-                  ),
-                },
+                { expandEnv: gateArmed },
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
           const gating = isBareOrSafe
@@ -4074,7 +4063,7 @@ class QwenAgent implements Agent {
                 mcpServers,
                 cwd,
                 bootAllowed,
-                isYolo,
+                !gateArmed,
               );
           config.setExcludedMcpServers(gating.excluded ?? []);
           config.setAllowedMcpServers(gating.allowed);
@@ -6746,7 +6735,14 @@ class QwenAgent implements Agent {
       const systemDefaultServers =
         settings.systemDefaults?.settings.mcpServers ?? {};
       const servers = config.getMcpServers() ?? {};
-      const approvals = loadMcpApprovals();
+      // Gate-off Configs hold `.mcp.json` unexpanded: their digest cannot match the store.
+      const approvals = isMcpApprovalGateArmed(
+        config.getBareMode(),
+        config.isSafeMode(),
+        config.getApprovalMode(),
+      )
+        ? loadMcpApprovals()
+        : undefined;
 
       // Pool snapshot for per-server `entryCount` + `entrySummary`.
       // Captured once outside the per-server loop. Absent when the
@@ -6873,7 +6869,7 @@ class QwenAgent implements Agent {
               ...(hasOAuthTokens !== undefined ? { hasOAuthTokens } : {}),
               ...(requiresAuth ? { requiresAuth: true } : {}),
             };
-            if (isGatedMcpScope(server.scope)) {
+            if (approvals && isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
                 config.getWorkingDir(),
                 name,
@@ -10228,6 +10224,20 @@ class QwenAgent implements Agent {
             throw RequestError.invalidParams(
               undefined,
               `MCP server is not approval-gated: ${serverName}`,
+            );
+          }
+          if (
+            !isMcpApprovalGateArmed(
+              config.getBareMode(),
+              config.isSafeMode(),
+              config.getApprovalMode(),
+            )
+          ) {
+            // Gate-off: the digest would be of the literal form.
+            throw RequestError.invalidParams(
+              undefined,
+              `MCP approval is off for this session; ${serverName} was not approved — ` +
+                `use \`qwen mcp approve\``,
             );
           }
           const approvals = loadMcpApprovals();

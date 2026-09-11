@@ -35,7 +35,19 @@ const ENV_EXPANDED_TRANSPORT_FIELDS = [
   'oauth',
   'targetAudience',
   'targetServiceAccount',
-] as const;
+] as const satisfies ReadonlyArray<keyof MCPServerConfig>;
+
+const ENV_PLACEHOLDER = /\$(?:\w+|\{[^}]+\})/;
+
+/** Whether any allowlisted field of `config` still carries `$VAR` / `${VAR}`. */
+function hasEnvPlaceholder(config: MCPServerConfig): boolean {
+  const source = config as unknown as Record<string, unknown>;
+  return ENV_EXPANDED_TRANSPORT_FIELDS.some(
+    (field) =>
+      Object.prototype.hasOwnProperty.call(source, field) &&
+      ENV_PLACEHOLDER.test(JSON.stringify(source[field])),
+  );
+}
 
 /**
  * Nesting cap for one server entry. `resolveEnvVarsInObject` and the
@@ -195,6 +207,14 @@ export function loadProjectMcpServers(
       continue;
     }
     try {
+      if (!expandEnv && hasEnvPlaceholder(value as MCPServerConfig)) {
+        // Loaded as written; say so, or the only symptom is the 401 (#11499).
+        errors.push(
+          `${filePath}: server "${name}" keeps its literal $ placeholders: ` +
+            `the MCP approval gate is off (--yolo), ` +
+            `so environment variables were not expanded`,
+        );
+      }
       // `.mcp.json` is the Claude Code convention, so entries may use Claude's
       // `type`-based transport shape; normalize them to Qwen's field-based shape.
       servers[name] = {

@@ -1132,9 +1132,33 @@ describe('MCP OAuth enrichment (real token state)', () => {
     expect(enriched[0].approvalState).toBe('pending');
     expect(enriched[1].approvalState).toBeUndefined();
   });
+
+  // Gate-off sessions must not read the store (ink dialog parity).
+  it('leaves approvalState unset from a gate-off (YOLO) session', async () => {
+    const { MCPOAuthTokenStorage } = await import('@qwen-code/qwen-code-core');
+    vi.spyOn(
+      MCPOAuthTokenStorage.prototype,
+      'getCredentials',
+    ).mockResolvedValue(null);
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        'gated-srv': { scope: 'project' },
+      })) as unknown as Config['getMcpServers'],
+      getWorkingDir: (() => '/proj') as Config['getWorkingDir'],
+      getApprovalMode: (() => 'yolo') as unknown as Config['getApprovalMode'],
+    } as Partial<Config>);
+    const enriched = await enrichMcpOAuthState(config, [
+      serverInfo('gated-srv'),
+    ]);
+    expect(enriched[0].approvalState).toBeUndefined();
+  });
 });
 
-vi.mock('../../config/mcpApprovals.js', () => ({
+vi.mock('../../config/mcpApprovals.js', async (importOriginal) => ({
+  // The gate predicate is pure; keep the real one.
+  isMcpApprovalGateArmed: (
+    await importOriginal<typeof import('../../config/mcpApprovals.js')>()
+  ).isMcpApprovalGateArmed,
   loadMcpApprovals: () => ({
     setState: vi.fn(),
     getState: vi.fn(() => 'pending'),
@@ -1178,6 +1202,34 @@ describe('applyMcpServerAction (real server actions)', () => {
     );
     expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
     expect(result.changed).toBe(true);
+  });
+
+  it('approve is refused from a gate-off (YOLO) session', async () => {
+    const approveMcpServerForSession = vi.fn();
+    const discoverToolsForServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: { scope: 'project' },
+      })) as unknown as Config['getMcpServers'],
+      getWorkingDir: (() => '/proj') as Config['getWorkingDir'],
+      getApprovalMode: (() => 'yolo') as unknown as Config['getApprovalMode'],
+      approveMcpServerForSession:
+        approveMcpServerForSession as unknown as Config['approveMcpServerForSession'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ source: 'project' }),
+      'approve',
+    );
+    expect(result.changed).toBe(false);
+    expect(result.message).toMatch(/Approval is off in this session/);
+    expect(approveMcpServerForSession).not.toHaveBeenCalled();
+    expect(discoverToolsForServer).not.toHaveBeenCalled();
   });
 
   it('disable writes mcp.excluded to the user scope and disables the server', async () => {

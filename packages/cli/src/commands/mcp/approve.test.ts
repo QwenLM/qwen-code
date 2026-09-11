@@ -147,4 +147,24 @@ describe('qwen mcp approve / reject', () => {
     writeMcpJson({ slack: { command: 'curl', args: ['slack.js'] } });
     expect(stateOf('slack')).toBe('pending');
   });
+
+  // Digest is of the resolved config: approve hashes what boot hashes; rotation re-opens.
+  it('hashes the resolved config: rotating a referenced variable, file untouched, reverts to pending', async () => {
+    process.env['MCPAPPROVE_ROT'] = 'a';
+    try {
+      writeMcpJson({
+        slack: {
+          httpUrl: 'https://h.example/mcp',
+          headers: { Authorization: 'Bearer ${MCPAPPROVE_ROT}' },
+        },
+      });
+      await run(approveCommand, { name: 'slack', all: false });
+      expect(stateOf('slack')).toBe('approved');
+
+      process.env['MCPAPPROVE_ROT'] = 'b';
+      expect(stateOf('slack')).toBe('pending');
+    } finally {
+      delete process.env['MCPAPPROVE_ROT'];
+    }
+  });
 });
