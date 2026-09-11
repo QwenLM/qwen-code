@@ -1608,8 +1608,15 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch {
+                throw new Error(t('composer.editFailed'));
+              }
               const snapshot =
                 editingMessage.turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
@@ -1625,10 +1632,14 @@ export function EmbeddedApp() {
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
+              try {
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  clientId: runtime.clientId,
+                  rewindFiles: false,
+                });
+              } catch {
+                throw new Error(t('composer.editFailed'));
+              }
               setEditingMessage(undefined);
               clearInsight();
             }
