@@ -822,9 +822,10 @@ describe('EmbeddedApp host wiring', () => {
     // sessions, and pre-attribution conversations all persist under the same
     // workspace. Scoping the history query to the vscode source hid
     // everything else, including the entire pre-upgrade history (#11574).
-    // Machine-owned rows — channel conversations, scheduled-task keepalives,
-    // and sub-agent children — must be dropped from the rendered list so they
-    // are never offered the panel's rename/permanent-delete actions.
+    // Rows another surface owns — channel conversations, Live voice threads,
+    // scheduled-task keepalives, side-task branches, and sub-agent children —
+    // must be dropped from the rendered list so they are never offered the
+    // panel's rename/permanent-delete actions.
     sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [
         {
@@ -868,6 +869,20 @@ describe('EmbeddedApp host wiring', () => {
           updatedAt: '2026-09-07T12:00:00.000Z',
         },
         {
+          sessionId: 'sidetask-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Side task branch',
+          sourceType: 'side_task',
+          updatedAt: '2026-09-06T18:00:00.000Z',
+        },
+        {
+          sessionId: 'live-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Live voice thread',
+          sourceType: 'qwen-live',
+          updatedAt: '2026-09-06T15:00:00.000Z',
+        },
+        {
           sessionId: 'subagent-1',
           workspaceCwd: '/workspace',
           displayName: 'Sub-agent child',
@@ -901,11 +916,13 @@ describe('EmbeddedApp host wiring', () => {
     expect(document.querySelector('[data-session-id="cli-1"]')).not.toBeNull();
     expect(document.querySelector('[data-session-id="web-1"]')).not.toBeNull();
 
-    // Machine-owned rows must never render as ordinary chats.
+    // Rows another surface owns must never render as ordinary chats.
     expect(document.querySelector('[data-session-id="channel-1"]')).toBeNull();
     expect(
       document.querySelector('[data-session-id="scheduled-1"]'),
     ).toBeNull();
+    expect(document.querySelector('[data-session-id="sidetask-1"]')).toBeNull();
+    expect(document.querySelector('[data-session-id="live-1"]')).toBeNull();
     expect(document.querySelector('[data-session-id="subagent-1"]')).toBeNull();
 
     // The request itself must not scope by source — that filter is what hid

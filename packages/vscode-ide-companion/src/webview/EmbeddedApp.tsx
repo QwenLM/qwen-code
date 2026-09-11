@@ -52,18 +52,20 @@ const isVsCodeModelVisible = (model: { id: string }) =>
 
 /**
  * Whether a catalog row may render as an ordinary chat in the history list.
- * The unfiltered workspace catalog also returns machine-owned rows — channel
- * conversations, scheduled-task keepalives, side-task branches, and
- * sub-agent children — that must never surface here: the panel's
- * rename/permanent-delete would otherwise reach rows another surface owns,
- * with no source-ownership check on the daemon side.
+ * The unfiltered workspace catalog also returns rows another surface owns —
+ * channel conversations, Live voice threads, scheduled-task keepalives,
+ * side-task branches, and sub-agent children — that must never surface here:
+ * the panel's rename/permanent-delete would otherwise reach them, with no
+ * source-ownership check on the daemon side. `sourceType` is an open
+ * vocabulary, so this list has to grow as new surfaces appear.
  */
 function isPresentableHistorySession(session: DaemonSessionSummary): boolean {
   return (
     session.parentSessionId === undefined &&
     session.sourceType !== 'scheduled_task' &&
     session.sourceType !== 'side_task' &&
-    session.sourceType !== 'channel'
+    session.sourceType !== 'channel' &&
+    session.sourceType !== 'qwen-live'
   );
 }
 
@@ -443,18 +445,21 @@ export function EmbeddedApp() {
         // metadata list path and onto `SessionService.listSessions`, whose
         // cursor is a strict `mtime <` keyset that can silently skip rows
         // sharing an mtime with a page boundary (e.g. a bulk-copied chats
-        // directory). The tie-safe alternative is the `organized` view, which
-        // full-scans the catalog on every open — a worse tradeoff for a
-        // history dropdown than that narrow edge case, so the weaker cursor is
-        // accepted here deliberately.
+        // directory). Where mtimes do collide the loss is not marginal — a
+        // measured tie group dropped about a third of the catalog. The
+        // tie-safe alternative is the `organized` view, which full-scans the
+        // catalog on every open; the weaker cursor is accepted here because
+        // losing a tied row is recoverable (the row is still reachable from
+        // the CLI and the browser Web Shell) while a full scan is not
+        // affordable for a dropdown that reopens constantly.
         //
-        // The unfiltered catalog also returns machine-owned rows (channel
-        // conversations, scheduled-task keepalives, side-task branches, and
-        // sub-agent children). Those must not render as ordinary chats, so
-        // they are dropped before they reach the dropdown; client-side
-        // filtering shortens each page while the raw cursor still advances,
-        // so fetch until a full page of presentable rows is collected or the
-        // cursor is exhausted.
+        // The unfiltered catalog also returns rows another surface owns
+        // (channel conversations, Live voice threads, scheduled-task
+        // keepalives, side-task branches, and sub-agent children). Those must
+        // not render as ordinary chats, so they are dropped before they reach
+        // the dropdown; client-side filtering shortens each page while the raw
+        // cursor still advances, so fetch until a full page of presentable
+        // rows is collected or the cursor is exhausted.
         const HISTORY_PAGE_SIZE = 20;
         const MAX_HISTORY_SCAN_PAGES = 10;
         let pages = 0;
