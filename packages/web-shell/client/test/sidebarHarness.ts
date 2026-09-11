@@ -35,11 +35,11 @@ export function resolveWebShellSessions<
 }
 
 export function installSidebarDomShims(): void {
-  (
-    globalThis as typeof globalThis & {
-      IS_REACT_ACT_ENVIRONMENT?: boolean;
-    }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
+  // IS_REACT_ACT_ENVIRONMENT and Element.prototype.scrollIntoView are owned
+  // by test/setup.ts, a vitest setupFile that runs before any test module
+  // body — re-installing them here would be unreachable no-ops. This file
+  // only adds the pointer-event API jsdom lacks, which the sidebar suites
+  // dispatch directly.
   if (!globalThis.PointerEvent) {
     globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
   }
@@ -51,9 +51,6 @@ export function installSidebarDomShims(): void {
   }
   if (!Element.prototype.releasePointerCapture) {
     Element.prototype.releasePointerCapture = () => {};
-  }
-  if (!Element.prototype.scrollIntoView) {
-    Element.prototype.scrollIntoView = () => {};
   }
 }
 
