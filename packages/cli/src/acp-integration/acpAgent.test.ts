@@ -1125,6 +1125,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
@@ -4219,6 +4220,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([false, true])(
+    'enables snapshot storage only for a trusted managed parent (%s)',
+    async (managed) => {
+      const innerConfig = await setupSessionMocks('snapshot-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        managed ? 'snapshot-parent' : undefined,
+      );
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        expect(innerConfig.setArtifactSnapshotsEnabled).toHaveBeenCalledWith(
+          managed,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('generates and binds a sessionId before loading a new Config', async () => {
     const innerConfig = await setupSessionMocks('generated-session');
     let configLoadSessionContext: string | undefined;
@@ -4567,6 +4588,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
@@ -22494,6 +22516,34 @@ describe('QwenAgent sessionIdContext binding', () => {
     await agentPromise;
   });
 
+  it('does not persist a scheduled-task run model as the workspace default', async () => {
+    const setModel = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({ setModel }),
+    );
+
+    await agent.unstable_setSessionModel({
+      sessionId,
+      modelId: 'qwen-max(openai)',
+      _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+    });
+
+    expect(setModel).toHaveBeenCalledWith(
+      {
+        sessionId,
+        modelId: 'qwen-max(openai)',
+        _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+      },
+      { persistDefault: false },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('binds sessionIdContext for direct cancel', async () => {
     const cancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
     const { agent, agentPromise } = await bootAgent();
@@ -22608,6 +22658,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     recording: ReturnType<typeof makeRecordingService> | null,
   ) {
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -24484,6 +24535,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
@@ -28807,6 +28859,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
   function makeConfig(overrides: Record<string, unknown> = {}) {
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),

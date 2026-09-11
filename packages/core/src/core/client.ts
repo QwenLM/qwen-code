@@ -92,6 +92,7 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
 import {
@@ -181,7 +182,8 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
@@ -374,6 +376,7 @@ type MainSessionPromptConfig = Pick<
   | 'getSystemPrompt'
   | 'getModel'
   | 'getOutputStyle'
+  | 'getCodeModeOnly'
   | 'getExperimentalZedIntegration'
   | 'getInputFormat'
   | 'isInteractive'
@@ -403,6 +406,7 @@ export function getMainSessionBaseSystemPrompt(
         resolveMainSessionOutputStyle(config),
         config,
         config.isTodoWriteEnabled(),
+        config.getCodeModeOnly(),
       );
 }
 
@@ -1148,12 +1152,13 @@ export class LlmClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
+    const codeModeOnly = this.config.getToolMode?.() === ToolMode.CodeModeOnly;
     const deferredSummary = toolRegistry.getDeferredToolSummary();
     // Progressive MCP discovery registers tools after a resumed chat has
     // already been constructed. Re-scan the live history here so historical
     // MCP calls reveal their newly registered schemas before declarations are
     // refreshed. setTools() is shared by interactive and headless refreshes.
-    if (!options.skipHistoryReveal) {
+    if (!codeModeOnly && !options.skipHistoryReveal) {
       this.revealDeferredToolsReferencedInHistory(deferredSummary, () =>
         this.getHistoryShallow(),
       );
@@ -1711,6 +1716,7 @@ export class LlmClient {
    * later stay deferred until the next session start.
    */
   private preloadDeferredToolsWithinBudget(): void {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) return;
     const toolRegistry = this.config.getToolRegistry();
     // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
     // reveals everything — there is no budget decision to make.
@@ -2156,23 +2162,6 @@ export class LlmClient {
     }
   }
 
-  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
-    switch (approvalMode) {
-      case ApprovalMode.DEFAULT:
-        return PermissionMode.Default;
-      case ApprovalMode.PLAN:
-        return PermissionMode.Plan;
-      case ApprovalMode.AUTO_EDIT:
-        return PermissionMode.AutoEdit;
-      case ApprovalMode.AUTO:
-        return PermissionMode.Auto;
-      case ApprovalMode.YOLO:
-        return PermissionMode.Yolo;
-      default:
-        return PermissionMode.Default;
-    }
-  }
-
   private async fireSessionStartHook(
     source: SessionStartSource,
     signal?: AbortSignal,
@@ -2191,14 +2180,14 @@ export class LlmClient {
         ? await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
             undefined,
             signal,
           )
         : await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
           );
       signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
@@ -2247,6 +2236,8 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      const codeModeOnly =
+        this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
@@ -2255,12 +2246,14 @@ export class LlmClient {
       // call to foo_tool because the schema is absent. This must happen
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
-      profiler.timeSync('resume_deferred_tool_reveal', () => {
-        this.revealDeferredToolsReferencedInHistory(
-          deferredSummary,
-          () => extraHistory,
-        );
-      });
+      if (!codeModeOnly) {
+        profiler.timeSync('resume_deferred_tool_reveal', () => {
+          this.revealDeferredToolsReferencedInHistory(
+            deferredSummary,
+            () => extraHistory,
+          );
+        });
+      }
       // Budget-based deferred-tool preload runs BEFORE the deferred
       // reminder is resolved so preloaded tools are filtered out of the
       // startup reminder and never enter the announced set.

@@ -390,6 +390,24 @@ Notes:
 - You run non-interactively: never ask a question, and never wait for input.
 - Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
+    {
+      name: 'claude-code',
+      description:
+        'Delegate to Claude Code through the installed claude-agent-acp adapter, using its own authentication and model settings. Foreground by default.',
+      systemPrompt:
+        'Complete the delegated task and report the verified result.',
+      background: false,
+      executor: { kind: 'acp', command: 'claude-agent-acp' },
+    },
+    {
+      name: 'codex',
+      description:
+        'Delegate one self-contained task to the installed Codex CLI using its own authentication and model settings. Foreground by default; optional background execution, no messages or resume.',
+      systemPrompt:
+        'Complete the delegated task and report the verified result.',
+      background: false,
+      executor: { kind: 'codex', command: 'codex' },
+    },
   ];
 }
 

@@ -31,6 +31,7 @@ import {
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from './truncation.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -2834,7 +2835,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : '(none)';
 
       llmContent = [
-        `Command: ${this.params.command}`,
+        ...(getCurrentToolCallSource()?.kind === 'code_mode'
+          ? []
+          : [`Command: ${this.params.command}`]),
         `Directory: ${this.params.directory || '(root)'}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
@@ -5216,7 +5219,7 @@ ${
 
 **Usage notes**:
 - The command argument is required.
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
+- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
 - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 ${fileOperationGuidance}
@@ -5301,7 +5304,9 @@ export class ShellTool extends BaseDeclarativeTool<
               'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
           },
           timeout: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
+            maximum: 600000,
             description: 'Optional timeout in milliseconds (max 600000)',
           },
           description: {

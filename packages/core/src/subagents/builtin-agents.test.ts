@@ -135,6 +135,19 @@ describe('BuiltinAgentRegistry', () => {
   });
 
   describe('getBuiltinAgent', () => {
+    it.each([
+      ['claude-code', 'acp', 'claude-agent-acp'],
+      ['codex', 'codex', 'codex'],
+    ])(
+      'runs %s through its native executor in the foreground by default',
+      (name, kind, command) => {
+        expect(BuiltinAgentRegistry.getBuiltinAgent(name)).toMatchObject({
+          executor: { kind, command },
+          background: false,
+        });
+      },
+    );
+
     it('should return correct agent for valid name', () => {
       const agent = BuiltinAgentRegistry.getBuiltinAgent('general-purpose');
 
@@ -303,6 +316,7 @@ describe('BuiltinAgentRegistry', () => {
       // `hasWildcard || (no strings && no inline decls)`, so a declared
       // `['*']` is the same surface as declaring nothing — both are caught.
       const inheriting = BuiltinAgentRegistry.getBuiltinAgents()
+        .filter((agent) => agent.executor === undefined)
         .filter(
           (agent) =>
             !agent.tools ||

@@ -86,6 +86,13 @@ export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
  * thrown error, and those 429s should honor the provider-specified wait.
  */
 export function getRetryAfterDelayMs(error: unknown): number | null {
+  const millis =
+    getHeaderValue(error, 'retry-after-ms') ??
+    getResponseHeaderValue(error, 'retry-after-ms');
+  if (millis !== null && /^\d+(\.\d+)?$/.test(millis.trim())) {
+    const value = Number(millis);
+    if (Number.isFinite(value)) return Math.min(value, MAX_TIMEOUT_MS);
+  }
   const value =
     getHeaderValue(error, 'retry-after') ??
     getResponseHeaderValue(error, 'retry-after');
