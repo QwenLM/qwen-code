@@ -77,12 +77,15 @@ async function writePortAndWorkspace({
     IDE_SERVER_PORT_ENV_VAR,
     port.toString(),
   );
-  // On Remote-SSH the extension host can activate before workspaceFolders
-  // resolves to the remote workspace. Writing an empty string here would
-  // clear the variable, causing the daemon to skip its IDE branch and the
-  // webview↔IDE bridge to never form. Skip the write when there is nothing
-  // to set; syncEnvVars will pick up the folders once they appear.
-  if (workspacePath) {
+  // The collection persists across activations, so on Remote-SSH it can
+  // already hold a path before workspaceFolders resolves. Don't overwrite that
+  // with an empty string; syncEnvVars rewrites it once the folders appear. A
+  // window that never had folders has nothing to preserve, so the empty
+  // sentinel is still written there.
+  if (
+    workspacePath ||
+    !context.environmentVariableCollection.get(IDE_WORKSPACE_PATH_ENV_VAR)
+  ) {
     context.environmentVariableCollection.replace(
       IDE_WORKSPACE_PATH_ENV_VAR,
       workspacePath,

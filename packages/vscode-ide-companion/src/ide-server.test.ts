@@ -108,6 +108,7 @@ describe('IDEServer', () => {
       environmentVariableCollection: {
         replace: vi.fn(),
         clear: vi.fn(),
+        get: vi.fn(),
       },
     } as unknown as vscode.ExtensionContext;
   });
@@ -197,21 +198,60 @@ describe('IDEServer', () => {
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
-  it('should not clear the workspace path env var when no folders are open', async () => {
+  it('should still record an empty workspace path when nothing was persisted', async () => {
     vscodeMock.workspace.workspaceFolders = [];
 
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;
 
-    // Port must still be written
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_SERVER_PORT',
+      expect.any(String),
+    );
+    // The empty value is a real signal: it tells the CLI a window is open with
+    // no folder, which is a different diagnosis from an absent variable.
+    expect(replaceMock).toHaveBeenCalledWith(
+      'QWEN_CODE_IDE_WORKSPACE_PATH',
+      '',
+    );
+
+    const port = getPortFromMock(replaceMock);
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
+    );
+    const expectedContent = JSON.stringify({
+      port: parseInt(port, 10),
+      workspacePath: '',
+      ppid: process.ppid,
+      authToken: 'test-auth-token',
+      ideName: 'VS Code',
+    });
+    expect(fs.writeFile).toHaveBeenCalledWith(
+      expectedLockFile,
+      expectedContent,
+    );
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
+  });
+
+  it('should keep a persisted workspace path when no folders are open', async () => {
+    vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockReturnValue({
+      value: '/remote/workspace',
+      type: 1,
+      options: {},
+    } as unknown as vscode.EnvironmentVariableMutator);
+
+    await ideServer.start(mockContext);
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+
     expect(replaceMock).toHaveBeenCalledWith(
       'QWEN_CODE_IDE_SERVER_PORT',
       expect.any(String),
     );
 
-    // Workspace path env var must NOT be replaced with an empty string —
-    // clearing it would wipe the variable on Remote-SSH before workspace
-    // folders resolve, causing the daemon to skip its IDE branch.
     const wsCall = vi
       .mocked(replaceMock)
       .mock.calls.find((call) => call[0] === 'QWEN_CODE_IDE_WORKSPACE_PATH');
