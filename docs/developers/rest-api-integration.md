@@ -64,11 +64,18 @@ authentication; it is inert until a channel webhook source is configured.
 
 ```bash
 export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"
+export DAEMON_URL=http://127.0.0.1:4170
 
 qwen serve --no-web --require-auth \
   --hostname 0.0.0.0 --port 4170 \
   --workspace /srv/project
 ```
+
+`DAEMON_URL` is the loopback base URL every client command below uses, and
+matches `servers[0].url` in the
+[OpenAPI artifact](./daemon-rest-api-reference.md). The daemon still binds
+`0.0.0.0` so a remote host can reach it; point `DAEMON_URL` at that host in that
+case.
 
 `--no-web` preserves the routes listed below, but disables Web Shell assets and
 dependent surfaces: on macOS the `/live/*` routes and `/live/host` socket, and on
@@ -115,8 +122,12 @@ These are the ones a REST integration needs. Treat the rest as internal.
 | [`POST /session/:id/cancel`](./qwen-serve-protocol.md#post-sessionidcancel)                                                                                             | Cancel the active prompt only                          |
 | [`GET /session/:id/events`](./qwen-serve-protocol.md#get-sessionidevents-sse)                                                                                           | SSE stream. Subscribe **before** prompting             |
 | [`GET /session/:id/transcript`](./qwen-serve-protocol.md#get-sessionidtranscript)                                                                                       | Conversation history                                   |
-| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                                                                                             | Context window usage                                   |
-| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export or inspect the current prompt queue             |
+| [`GET /session/:id/context`](./qwen-serve-protocol.md#get-sessionidcontext)                                                                                             | Model, mode, and config-option state                   |
+| [`GET /session/:id/export`](./qwen-serve-protocol.md#get-sessionidexport) · [`GET /session/:id/pending-prompts`](./qwen-serve-protocol.md#get-sessionidpending-prompts) | Export the persisted transcript · list queued prompts  |
+
+Token usage is not part of this surface: `GET /session/:id/context` returns the
+live model, mode, and configuration-option state, while the usage counters live
+on `GET /session/:id/context-usage`, outside the curated contract.
 
 ### Permissions
 
@@ -139,7 +150,7 @@ These are the ones a REST integration needs. Treat the rest as internal.
 `policy.permission` (so you know who may answer permission requests).
 
 ```bash
-curl -sH @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") http://daemon:4170/capabilities
+curl -sH @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") "$DAEMON_URL/capabilities"
 ```
 
 **2. Create a session.** Use `sessionScope: "thread"` unless callers are meant
@@ -148,16 +159,21 @@ same-workspace create _reuse_ the existing session, serialising unrelated
 callers through one queue.
 
 ```bash
-SESSION_JSON="$(curl -sX POST http://daemon:4170/session \
+SESSION_JSON="$(curl -sX POST "$DAEMON_URL/session" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
-  -d '{"sessionScope":"thread"}')"
+  -d '{"sessionScope":"thread"}')" || echo "create failed (curl exit $?)" >&2
 printf '%s\n' "$SESSION_JSON"
-export SID="$(printf '%s' "$SESSION_JSON" | jq -er '.sessionId')"
+SID="$(printf '%s' "$SESSION_JSON" | jq -er '.sessionId // empty')" || echo "create returned no sessionId" >&2
+export SID
+[ -n "$SID" ] || echo "SID is empty: fix step 2 before running steps 3-6" >&2
 # → {"sessionId":"…","workspaceCwd":"/srv/project","attached":false}
 ```
 
 **3. Subscribe before prompting.** Run this in a second terminal with the same
-`QWEN_SERVER_TOKEN` and `SID`. `Last-Event-ID: 0` replays from the oldest
+`QWEN_SERVER_TOKEN` and `DAEMON_URL`, and with `SID` set to the `sessionId` step
+2 printed: exports do not cross terminals, so paste or re-export it there. The
+block keeps `SID` as a placeholder, so pasting it back into terminal 1 cannot
+clobber the value steps 4-6 use. `Last-Event-ID: 0` replays from the oldest
 retained event, which is how you catch events fired between create and
 subscribe — notably `model_switch_failed`. On an **attach** (the default
 `sessionScope: "single"` reusing an existing session) that event is the only
@@ -169,7 +185,9 @@ deterministic one to act on rather than an event on a bounded ring. A create
 without `modelServiceId` has no `modelApplied` key at all.
 
 ```bash
-curl -N http://daemon:4170/session/$SID/events \
+# terminal 2 — set this to the sessionId step 2 printed
+SID='<sessionId from step 2>'
+curl -N "$DAEMON_URL/session/$SID/events" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") \
   -H 'Accept: text/event-stream' -H 'Last-Event-ID: 0'
 ```
@@ -188,7 +206,7 @@ on `turn_error`, read `message` and any optional `code` / `errorKind` — see
 [`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt).
 
 ```bash
-curl -sX POST http://daemon:4170/session/$SID/prompt \
+curl -sX POST "$DAEMON_URL/session/$SID/prompt" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
   -d '{"prompt":[{"type":"text","text":"What does src/main.ts do?"}]}'
 # → 202 {"promptId":"…","lastEventId":42}
@@ -219,7 +237,7 @@ from the `permission_request` event and set it before voting:
 
 ```bash
 export REQUEST_ID='<data.requestId>'
-curl -sX POST http://daemon:4170/session/$SID/permission/$REQUEST_ID \
+curl -sX POST "$DAEMON_URL/session/$SID/permission/$REQUEST_ID" \
   -H @<(printf 'Authorization: Bearer %s\n' "$QWEN_SERVER_TOKEN") -H 'Content-Type: application/json' \
   -d '{"outcome":{"outcome":"selected","optionId":"proceed_once"}}'
 ```

@@ -46,15 +46,14 @@
         "operationId": "getHealth",
         "tags": ["Discovery"],
         "summary": "Probe daemon health",
-        "description": "Returns a cheap listener probe by default. Set deep to aggregate informational daemon-wide runtime counters.",
+        "description": "Returns a cheap listener probe by default. Set deep to aggregate informational daemon-wide runtime counters. Anonymous probes are accepted only on a loopback bind without --require-auth; every other bind requires bearer auth.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-health"
         },
         "security": [
           {
             "bearerAuth": []
-          },
-          {}
+          }
         ],
         "x-qwen-capability": "health",
         "x-qwen-scope": "process-global",
@@ -545,7 +544,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestoreSessionRequest"
+                "$ref": "#/components/schemas/ResumeSessionRequest"
               }
             }
           }
@@ -1132,7 +1131,7 @@
             }
           },
           "504": {
-            "description": "The prompt deadline expired.",
+            "description": "The prompt deadline expired. Only possible when /capabilities advertises prompt_absolute_deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1288,7 +1287,7 @@
               "type": "integer",
               "minimum": 0
             },
-            "description": "Replay events with an id greater than this cursor."
+            "description": "Replay events with an id greater than this cursor. A malformed value is ignored: the stream opens live-only with no replay."
           },
           {
             "name": "X-Qwen-Event-Epoch",
@@ -1298,7 +1297,7 @@
               "type": "string",
               "minLength": 1
             },
-            "description": "Epoch paired with Last-Event-ID to detect daemon restarts."
+            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. A stale token is answered with 200 plus an id-less state_resync_required frame before replay."
           },
           {
             "name": "maxQueued",
@@ -1342,7 +1341,7 @@
         ],
         "responses": {
           "200": {
-            "description": "SSE stream. Each data line is an EventEnvelope.",
+            "description": "SSE stream. Each data line is an EventEnvelope. A stale X-Qwen-Event-Epoch token, or a Last-Event-ID the replay ring no longer holds, is reported in band: the stream stays open and emits an id-less state_resync_required frame before replay. Treat that frame as state is stale and rebuild via POST /session/{id}/load, not as a transport error.",
             "headers": {
               "X-Qwen-SSE-Stream-Id": {
                 "schema": {
@@ -1370,7 +1369,7 @@
             }
           },
           "400": {
-            "description": "The cursor, queue bound, or client id is invalid.",
+            "description": "The maxQueued queue bound is invalid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1381,16 +1380,6 @@
           },
           "404": {
             "description": "The live session does not exist.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The supplied event epoch is stale.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1486,8 +1475,9 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["forward", "backward"]
-            }
+              "enum": ["backward"]
+            },
+            "description": "Paging direction. Only backward is accepted; omitting direction pages forward from the cursor."
           },
           {
             "name": "beforeRecordId",
@@ -1717,7 +1707,7 @@
               "application/json": {
                 "schema": {}
               },
-              "application/x-ndjson": {
+              "application/jsonl": {
                 "schema": {
                   "type": "string"
                 }
@@ -3163,11 +3153,31 @@
           },
           "historyPageSize": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 500
           },
           "liveReplayMode": {
             "type": "string",
             "enum": ["full", "summary"]
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ResumeSessionRequest": {
+        "type": "object",
+        "description": "Resume request. historyPageSize is not parsed on this route, and liveReplayMode is not passed to the bridge resume call (only the legacy-standalone compatibility restore sees it), so neither field is published here.",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "approvalMode": {
+            "type": "string"
           },
           "sourceType": {
             "type": "string"
@@ -3271,7 +3281,7 @@
         "properties": {
           "displayName": {
             "type": "string",
-            "description": "Empty clears the name; values longer than 256 characters are truncated."
+            "description": "Values longer than 256 characters are truncated. An empty or whitespace-only value is rejected with 400 invalid_metadata; omit the field to leave the name unchanged."
           },
           "pr": {
             "$ref": "#/components/schemas/SessionPrInput"
@@ -3378,13 +3388,13 @@
       },
       "SessionModelResult": {
         "type": "object",
-        "required": ["modelId"],
         "properties": {
-          "modelId": {
-            "type": "string"
+          "_meta": {
+            "type": ["object", "null"],
+            "additionalProperties": true
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "PendingInteraction": {
         "type": "object",
@@ -3404,13 +3414,42 @@
           "title": {
             "type": "string"
           },
-          "toolCall": {
+          "action": {
             "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {},
+              "locations": {},
+              "input": {}
+            },
             "additionalProperties": true
           },
           "questions": {
             "type": "array",
-            "items": {}
+            "items": {
+              "type": "object",
+              "required": ["answerKey"],
+              "properties": {
+                "answerKey": {
+                  "type": "string"
+                },
+                "header": {
+                  "type": "string"
+                },
+                "question": {
+                  "type": "string"
+                },
+                "multiSelect": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": true
+            }
           },
           "options": {
             "type": "array",
@@ -3597,7 +3636,9 @@
           },
           "deadlineMs": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "x-qwen-capability": "prompt_absolute_deadline",
+            "description": "Ignored unless /capabilities advertises prompt_absolute_deadline (daemon booted with --prompt-deadline-ms). The effective deadline is min(server flag, this value); a request can shorten it, never extend it."
           },
           "delivery": {
             "type": "object",

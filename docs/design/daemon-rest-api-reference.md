@@ -62,8 +62,9 @@ operation contains:
 - request and response schemas with their relevant wire constraints;
 - `x-qwen-capability`, `x-qwen-scope`, `x-qwen-stability`, and
   `x-qwen-sdk-method` metadata;
-- bearer authentication, with the documented loopback exception on the health
-  probe;
+- bearer authentication on every operation; the loopback-only `/health`
+  exemption is recorded in that operation's description, not as an anonymous
+  `security` alternative;
 - `text/event-stream` plus the shared event envelope on the SSE operation.
 
 The specification describes the current wire contract; the TypeScript SDK
@@ -125,7 +126,8 @@ repository owns presentation, translation, and deployment.
 - Bearer values stay in an environment variable and curl header file
   descriptor, not process arguments.
 - The reference explicitly preserves ownership distinctions such as
-  process-global, primary-workspace, and live-session-owner routes.
+  process-global, selected-runtime, persisted-workspace, live-session-owner,
+  and legacy-primary routes.
 
 ## Validation
 

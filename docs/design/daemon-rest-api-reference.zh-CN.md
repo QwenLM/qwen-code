@@ -50,7 +50,8 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 - 请求与响应 schema 及相关 wire 约束；
 - `x-qwen-capability`、`x-qwen-scope`、`x-qwen-stability` 和
   `x-qwen-sdk-method` 元数据；
-- bearer 认证，并在 health probe 上注明已记录的 loopback 例外；
+- 每个操作都要求 bearer 认证；`/health` 仅在 loopback 上的例外写在该操作的
+  description 中，而不是一个匿名的 `security` 备选项；
 - SSE 操作的 `text/event-stream` 和共享事件 envelope。
 
 该规范描述当前 wire contract；TypeScript SDK 仍是强类型客户端实现，本次变更
@@ -102,8 +103,8 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 - 非 loopback 地址绑定示例旁明确说明必须在 daemon 或经过验证的 TLS 终止层启用
   TLS。
 - bearer 值继续通过环境变量和 curl header 文件描述符传递，不进入进程参数。
-- Reference 明确保留 process-global、primary-workspace 和 live-session-owner 等
-  所有权差异。
+- Reference 明确保留 process-global、selected-runtime、persisted-workspace、
+  live-session-owner 和 legacy-primary 等所有权差异。
 
 ## 验证
 

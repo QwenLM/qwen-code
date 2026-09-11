@@ -8,15 +8,21 @@ detailed lifecycle semantics.
 
 ## OpenAPI
 
-The complete 25-operation contract is available as
+The curated core integration contract is available as
 [OpenAPI 3.1 JSON](https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/developers/daemon-rest-api.openapi.json).
 Import that URL into an OpenAPI-compatible renderer, client generator, or
-validation tool. The checked-in JSON is the portable interface contract and is
-validated against the guide, protocol headings, and registered routes in CI.
+validation tool. The checked-in JSON is the portable interface contract for the
+operations indexed below and is validated against the guide, protocol headings,
+and registered routes in CI.
 
-The specification deliberately excludes the daemon's first-party Web Shell
-routes and conditional internal surfaces. Their presence in the server is not
-a public compatibility promise.
+This index covers a curated core subset of the daemon's REST surface, not all
+of it.
+Outside it are the first-party Web Shell routes, conditional internal surfaces,
+and other public but non-core routes: file mutation, workspace registration,
+session organization and generation, and workspace MCP, skills, and providers
+among them. Those surfaces are documented in the
+[HTTP protocol reference](./qwen-serve-protocol.md) and advertised by their own
+capability tags; they are outside this contract, not deprecated.
 
 ## Reading the index
 
@@ -25,9 +31,11 @@ a public compatibility promise.
   to support older daemon builds should handle `404`.
 - **Scope** says which runtime owns the operation. `process-global` reads
   daemon-wide state, `selected-runtime` uses the request's workspace selection,
-  `persisted-workspace` resolves persisted session storage,
-  `live-session-owner` routes by the live session, and `legacy-primary` always
-  targets the daemon's primary workspace.
+  `persisted-workspace` resolves persisted session storage, `live-session-owner`
+  routes by the live session, and `legacy-primary` always targets the daemon's
+  primary workspace. One `persisted-workspace` route is the exception:
+  `GET /session/:id/export` is primary-pinned, resolving only managed internal
+  runtimes before falling back to the primary workspace.
 - All operations in this index are **stable** in the v1 REST contract. The
   deprecated `unstable_session_resume` capability name is only an alias; use
   `session_resume` for the stable resume route.

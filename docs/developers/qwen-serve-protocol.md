@@ -2432,7 +2432,9 @@ The response is the `DaemonSessionSummary` wire shape. Optional fields include
 display and source metadata, `activeWorkState`, `updatedAt`, `turnError`,
 organization state, worktree or branch metadata, and PR bindings. `404` means
 no live owner exists; a bootstrapping, draining, or unavailable owner returns
-`503` instead of falling back. The TypeScript SDK method is `sessionStatus()`.
+`503` instead of falling back. An untrusted non-primary owner returns
+`403 untrusted_workspace`, and an id live in more than one workspace returns
+`500 ambiguous_session_owner`. The TypeScript SDK method is `sessionStatus()`.
 
 ### ACP `session/new` caller-supplied ID
 
@@ -2522,8 +2524,8 @@ Query parameters:
 | ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cursor`         | no       | Opaque base64url cursor returned by the previous page. Omit for the first page. The cursor is daemon-issued and tamper-checked; modifying it returns `400 invalid_transcript_cursor`. It binds to the transcript file identity and frozen first-page byte size; deleting, truncating, replacing, or archiving the file invalidates it and returns `409`. |
 | `limit`          | no       | Target number of active `ChatRecord`s in a page. Defaults to `100`, maximum `500`. A backward page may expand to at most `3 * limit` records to preserve turn and tool-call/result boundaries. One record can produce multiple replay frames, so `events.length` may be larger still. Invalid values return `400 invalid_transcript_limit`.              |
-| `direction`      | no       | `forward` (default) or `backward`. A backward first page starts at the newest records.                                                                                                                                                                                                                                                                   |
-| `beforeRecordId` | no       | Start before this record id. It cannot be combined with `cursor`, and requires `direction=backward`.                                                                                                                                                                                                                                                     |
+| `direction`      | no       | `backward` only; forward paging is what omitting the parameter gives you. A backward first page starts at the newest records, and `backward` cannot be combined with `cursor` or any record anchor.                                                                                                                                                      |
+| `beforeRecordId` | no       | Start before this record id, which implies backward. It cannot be combined with `cursor`, `atRecordId`, `snapshot`, or the `direction` parameter.                                                                                                                                                                                                        |
 
 Response:
 
@@ -2558,7 +2560,7 @@ To protect daemon memory and latency, snapshots above the transcript indexing ca
 
 **Errors:**
 
-- `400` — invalid `limit`, `cursor`, `direction`, `beforeRecordId`, or session id shape; `cursor` and `beforeRecordId` are mutually exclusive.
+- `400` — invalid `limit`, `cursor`, `direction`, `beforeRecordId`, or session id shape. The paging parameters are mutually exclusive: `cursor` cannot be combined with `beforeRecordId`, `atRecordId`, or `snapshot`; `snapshot` requires `atRecordId` or `beforeRecordId`; `atRecordId` requires `snapshot`; and `backward` cannot be combined with a cursor or any record anchor.
 - `404` — active persisted session id does not exist on the first page request.
 - `409` — `session_archived`, `session_archiving`, or `session_conflict` from the same loadability checks as `/load`.
 - `409` — transcript snapshot is unavailable because the file was deleted, truncated, replaced, or archived after the cursor was issued; this also applies when preflight can no longer find the active file for a cursor request.
@@ -2574,7 +2576,7 @@ Pre-flight `caps.features.session_export`.
 Successful responses are attachments with a sanitized filename,
 `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. The content
 type is `text/html`, `text/markdown`, `application/json`, or
-`application/x-ndjson` according to the selected format. The route reads
+`application/jsonl` according to the selected format. The route reads
 persisted storage only: it does not resolve a live owner, start ACP, or attach
 a client. Use the workspace-qualified route below when the target may be in a
 non-primary workspace. Invalid formats return `400 invalid_export_format`;
@@ -2947,7 +2949,9 @@ identify an attached client.
 `state` is `running` for the prompt being dispatched and `queued` for waiting
 prompts. `content` appears when the prompt includes structured content such as
 images. This is a live-session-owner route: `404` means no live owner and
-`503` means the owner is temporarily unavailable. There is no dedicated
+`503` means the owner is temporarily unavailable. An untrusted non-primary
+owner returns `403 untrusted_workspace`, and an id live in more than one
+workspace returns `500 ambiguous_session_owner`. There is no dedicated
 capability tag; older daemons return `404`. The TypeScript SDK method is
 `getPendingPrompts()`.
 
@@ -3082,7 +3086,7 @@ Request:
 
 | Field         | Required | Notes                                                                                                                                                                                      |
 | ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `displayName` | no       | String. Values longer than 256 characters are truncated. Empty string clears the name; omit to leave it unchanged.                                                                         |
+| `displayName` | no       | String. Values longer than 256 characters are truncated. An empty or whitespace-only value is rejected with `400 invalid_metadata`; omit the field to leave the name unchanged.            |
 | `pr`          | no       | Bind one pull request. Requires a positive integer `number`, an HTTP(S) `url` of at most 2,048 characters without control characters, and optional `state`: `open`, `merged`, or `closed`. |
 
 Response:
@@ -3179,11 +3183,9 @@ Request:
 { "modelId": "qwen-staging" }
 ```
 
-Response:
-
-```json
-{ "modelId": "qwen-staging" }
-```
+Response: the ACP agent's model-switch result, forwarded verbatim — the
+daemon does not reshape it, so the top level carries no `modelId`. Read the
+switch details from `_meta.qwenModelSwitch`.
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
 
@@ -3647,9 +3649,11 @@ The request body, mediation policies, outcomes, and success response are
 identical to `POST /permission/:requestId`. The optional
 `X-Qwen-Client-Id` header participates in designated and consensus policy.
 Errors are `400` for invalid input or client identity, `403` when policy rejects
-the voter, `404` for an unknown live session or pending request, `500` for a
-permission contract violation, `501` for an unimplemented policy, and `503`
-when the owning runtime is unavailable. It never retries against the primary
+the voter (`permission_forbidden`) or the owning workspace is not trusted
+(`untrusted_workspace`), `404` for an unknown live session or pending request,
+`500` for a permission contract violation (`cancel_sentinel_collision`) or an
+ambiguous session owner (`ambiguous_session_owner`), `501` for an unimplemented
+policy, and `503` when the owning runtime is unavailable. It never retries against the primary
 bridge. The TypeScript SDK method is `respondToSessionPermission()`.
 
 ### `POST /permission/:requestId`
