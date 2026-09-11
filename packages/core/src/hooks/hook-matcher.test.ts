@@ -4,10 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn,
+    error: vi.fn(),
+  }),
+}));
+
 import { matchesHookPattern } from './hook-matcher.js';
 
 describe('matchesHookPattern', () => {
+  beforeEach(() => {
+    warn.mockClear();
+  });
+
   it.each(['', '  ', '*', '.*'])('matches everything with %j', (matcher) => {
     expect(matchesHookPattern(matcher, 'anything')).toBe(true);
   });
@@ -53,6 +68,27 @@ describe('matchesHookPattern', () => {
 
   it('still reads a group that spans the pipe as one regex', () => {
     expect(matchesHookPattern('a(b|c)', 'ab')).toBe(true);
+  });
+
+  it('drops a stray pipe before reading a group that spans the pipe', () => {
+    expect(matchesHookPattern('read_(file|edit)|', 'read_file')).toBe(true);
+    expect(matchesHookPattern('read_(file|edit)|', 'write_file')).toBe(false);
+  });
+
+  it('never matches a list entry on its own as a regex', () => {
+    expect(matchesHookPattern('notes\\|todo\\.md', 'docs/todo.md')).toBe(false);
+    expect(matchesHookPattern('notes\\|todo\\.md', 'docs/notes|todo.md')).toBe(
+      true,
+    );
+  });
+
+  it('warns only about a matcher that does not compile as a whole', () => {
+    expect(matchesHookPattern('a(b|c)', 'ab')).toBe(true);
+    expect(matchesHookPattern('read_(file|edit)', 'read_file')).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(matchesHookPattern('[invalid(regex', 'bash')).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('matches aliases exactly but never through a regex', () => {
