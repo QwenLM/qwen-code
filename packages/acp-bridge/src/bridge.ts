@@ -1869,6 +1869,23 @@ function broadcastTurnComplete(
             checkpointUuid: rawBranchPoint['checkpointUuid'],
           }
         : undefined;
+    const rawPromptCancelled =
+      meta?.['qwen.promptCancelled'] &&
+      typeof meta['qwen.promptCancelled'] === 'object'
+        ? (meta['qwen.promptCancelled'] as Record<string, unknown>)
+        : undefined;
+    const promptCancelled =
+      promptResult.stopReason === 'cancelled' &&
+      typeof rawPromptCancelled?.['cancelledAt'] === 'number' &&
+      Number.isFinite(rawPromptCancelled['cancelledAt']) &&
+      typeof rawPromptCancelled['elapsedMs'] === 'number' &&
+      Number.isFinite(rawPromptCancelled['elapsedMs']) &&
+      rawPromptCancelled['elapsedMs'] >= 0
+        ? {
+            cancelledAt: rawPromptCancelled['cancelledAt'],
+            elapsedMs: rawPromptCancelled['elapsedMs'],
+          }
+        : undefined;
     const published = entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
@@ -1877,6 +1894,7 @@ function broadcastTurnComplete(
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
         ...(branchPoint ? { branchPoint } : {}),
+        ...(promptCancelled ? { promptCancelled } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
