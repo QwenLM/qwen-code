@@ -1695,6 +1695,7 @@ export function registerWorkspaceExtensionRoutes(
               if (!extension) {
                 throw new Error(`Extension "${name}" not found`);
               }
+              ctrl.updateOperation(operationId!, { name: extension.name });
               let preparedResult: Awaited<
                 ReturnType<ExtensionManager['prepareExtensionUpdate']>
               >;

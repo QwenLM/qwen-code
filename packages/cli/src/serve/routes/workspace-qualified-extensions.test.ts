@@ -3177,6 +3177,7 @@ describe('extension management v2 REST', () => {
   it.each([
     `/extensions/${extensionId}/update`,
     '/workspace/extensions/demo/update',
+    `/workspace/extensions/${encodeURIComponent('https://example.com/demo.zip')}/update`,
   ])(
     'supersedes a pending interactive update and completes the next archive URL update at %s',
     async (updateRoute) => {
