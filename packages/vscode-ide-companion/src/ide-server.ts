@@ -77,10 +77,17 @@ async function writePortAndWorkspace({
     IDE_SERVER_PORT_ENV_VAR,
     port.toString(),
   );
-  context.environmentVariableCollection.replace(
-    IDE_WORKSPACE_PATH_ENV_VAR,
-    workspacePath,
-  );
+  // On Remote-SSH the extension host can activate before workspaceFolders
+  // resolves to the remote workspace. Writing an empty string here would
+  // clear the variable, causing the daemon to skip its IDE branch and the
+  // webview↔IDE bridge to never form. Skip the write when there is nothing
+  // to set; syncEnvVars will pick up the folders once they appear.
+  if (workspacePath) {
+    context.environmentVariableCollection.replace(
+      IDE_WORKSPACE_PATH_ENV_VAR,
+      workspacePath,
+    );
+  }
 
   const ideInfo = detectIdeFromEnv();
   const content = JSON.stringify({
@@ -136,6 +143,7 @@ export class IDEServer {
   private transports: { [sessionId: string]: StreamableHTTPServerTransport } =
     {};
   private openFilesManager: OpenFilesManager | undefined;
+  private syncPending = false;
   diffManager: DiffManager;
 
   constructor(log: (message: string) => void, diffManager: DiffManager) {
@@ -359,6 +367,14 @@ export class IDEServer {
               log: this.log,
             });
           }
+          // If onDidChangeWorkspaceFolders fired while start() was still
+          // in progress, syncEnvVars() could not run — the guard would fail
+          // because the server fields were not yet set. Replay the deferred
+          // sync now that the server is fully ready.
+          if (this.syncPending) {
+            this.syncPending = false;
+            await this.syncEnvVars();
+          }
         }
         resolve();
       });
@@ -394,6 +410,11 @@ export class IDEServer {
         log: this.log,
       });
       this.broadcastIdeContextUpdate();
+      this.syncPending = false;
+    } else {
+      // Server isn't ready yet (e.g. start() still in progress when
+      // onDidChangeWorkspaceFolders fired). Defer until start() completes.
+      this.syncPending = true;
     }
   }
 
