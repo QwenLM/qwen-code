@@ -99,6 +99,27 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         } else if (
           calls.some(
             (c) =>
+              (c.args as { __infoPrompt?: string } | undefined)?.__infoPrompt,
+          )
+        ) {
+          // PreToolUse 'ask' hook bounce on a non-edit call: the core
+          // scheduler's details are { type: 'info', prompt: hookReason }.
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((c) => ({
+              status: 'awaiting_approval',
+              request: c,
+              confirmationDetails: {
+                type: 'info',
+                title: `Hook requested confirmation to run ${c.name}`,
+                prompt: (c.args as { __infoPrompt?: string }).__infoPrompt,
+                renderPromptAsPlainText: true,
+                onConfirm: async () => {},
+              },
+            })),
+          );
+        } else if (
+          calls.some(
+            (c) =>
               (c.args as { __cancelApproval?: boolean } | undefined)
                 ?.__cancelApproval,
           )
@@ -1859,6 +1880,47 @@ describe('livePromptEvents', () => {
         tool: 'run_shell_command',
         title: 'Hook requested confirmation to run',
         confirmType: 'ask_user_question',
+      },
+    ]);
+  });
+
+  it("carries an info confirmation's prompt as the confirm event's body (hook bounce)", async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'i1',
+            name: 'mcp__fs__write_file',
+            args: { __infoPrompt: 'hook said no\nsecond line' },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // The pending card prices itself against the dialog's expandable body —
+    // for an info confirmation that is the prompt, so the confirm event must
+    // carry it or the card cannot yield the rows the dialog needs.
+    expect(events.filter((e) => e.type === 'confirm')).toEqual([
+      {
+        type: 'confirm',
+        id: 'i1',
+        tool: 'mcp__fs__write_file',
+        title: 'Hook requested confirmation to run mcp__fs__write_file',
+        confirmType: 'info',
+        confirmBody: 'hook said no\nsecond line',
       },
     ]);
   });

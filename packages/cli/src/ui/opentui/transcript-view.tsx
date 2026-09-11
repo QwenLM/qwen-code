@@ -16,7 +16,7 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
@@ -107,6 +107,12 @@ export function OpenTuiTranscriptView({
   thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  // Pending tool cards share the transcript region with the confirmation
+  // dialog: each budgets its description against the sibling count so N
+  // parked calls cannot each claim the whole viewport.
+  const pendingCount = items.filter(
+    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  ).length;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -120,6 +126,7 @@ export function OpenTuiTranscriptView({
             maxRows={maxRows}
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
+            pendingCount={pendingCount}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -133,12 +140,14 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -155,6 +164,7 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          pendingCount={pendingCount}
         />
       );
     case 'task':
@@ -296,11 +306,13 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -320,17 +332,37 @@ function ToolCard({
   // own body can expand past its collapsed footprint (a hook-forced info
   // confirmation duplicates this payload; a plan body is much taller than
   // its folded card row) the card yields rows for it — and when it cannot
-  // (mcp, edit) the card keeps them.
-  const cap = capToolCardDescription(
-    text,
-    name,
-    width,
-    item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width, {
-          type: item.confirmType,
-          body: item.confirmBody,
-        })
-      : TOOL_CARD_DESCRIPTION_ROWS,
+  // (mcp, whose card is the only surface with the arguments; edit, whose
+  // card description is a single path row; ask_user_question) the card
+  // keeps them. Memoized: a sibling call's stream events re-render this
+  // card, and the pending measure scans the whole confirmation body.
+  const cap = useMemo(
+    () =>
+      capToolCardDescription(
+        text,
+        name,
+        width,
+        item.confirm === 'pending' && !item.done
+          ? pendingCardMaxRows(
+              terminalHeight,
+              getCachedStringWidth(text),
+              width,
+              { type: item.confirmType, body: item.confirmBody },
+              pendingCount,
+            )
+          : TOOL_CARD_DESCRIPTION_ROWS,
+      ),
+    [
+      text,
+      name,
+      width,
+      terminalHeight,
+      pendingCount,
+      item.confirm,
+      item.done,
+      item.confirmType,
+      item.confirmBody,
+    ],
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (

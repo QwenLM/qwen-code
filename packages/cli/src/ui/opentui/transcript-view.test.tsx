@@ -51,11 +51,22 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { buildJsxRuntime };
+  return {
+    buildJsxRuntime,
+    pendingSpy: undefined as unknown as import('vitest').Mock,
+  };
 });
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+
+// Spy on the pending-card budget so the memoization test can count the
+// dialog-body measure across re-renders; every other export passes through.
+vi.mock('./messages.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./messages.js')>();
+  mocks.pendingSpy = vi.fn(actual.pendingCardMaxRows);
+  return { ...actual, pendingCardMaxRows: mocks.pendingSpy };
+});
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
@@ -158,13 +169,49 @@ describe('OpenTuiTranscriptView', () => {
   });
 
   it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
-    // The mem0 confirmation duplicates the card's description inside its
-    // dialog body: once ctrl-s expands it, the whole payload plus dialog
-    // chrome must fit the viewport, so a ~4k-char payload must shrink the
-    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
-    // at 110 columns). A marker placed past the yielded budget pins the
-    // shrink — that bound alone would still show it and the e2e expansion
-    // stage would stay red.
+    // The production mem0 shape: a PreToolUse 'ask' bounce builds an info
+    // confirmation whose prompt is the hook reason, and the card carries
+    // the call's args JSON alongside it. A 30-row body engages the
+    // expanded-dialog bound ((80-26-30)*0.7 = 16 rows ≈ 1600 visible
+    // columns at 110), so a marker past that cut must leave the screen —
+    // while the description stays short enough (19 folded rows) that the
+    // payload proxy stays off: only the wired-through confirmBody can make
+    // this pass.
+    const confirmBody = Array.from({ length: 30 }, () => 'reason line').join(
+      '\n',
+    );
+    const description =
+      '{"content":"' + 'a'.repeat(1800) + 'MID_MARKER' + 'b'.repeat(200) + '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+            confirmType: 'info',
+            confirmBody,
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('... last');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('yields pending rows via the payload proxy for an untyped confirm event (wire fallback)', () => {
+    // A confirm event from a server that predates confirmType/confirmBody
+    // carries neither: the card falls back to pricing its own folded
+    // payload as the dialog body. The ~4k-char payload wraps to ~37 folded
+    // rows — past the collapsed window — so the expanded-payload bound
+    // shrinks the card below the collapsed-dialog bound (23 rows ≈ 2356
+    // visible chars at 110 columns). A marker placed past the yielded
+    // budget pins the shrink — that bound alone would still show it and
+    // the e2e expansion stage would stay red.
     const description =
       '{"content":"' +
       'a'.repeat(2500) +
@@ -218,6 +265,66 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('awaiting approval');
     expect(text).toContain('MID_MARKER');
+  });
+
+  it('splits the pending budget between sibling cards awaiting approval', () => {
+    // Two parked mcp calls: without the sibling count each card budgets
+    // against the whole viewport (34 rows ≈ 3544 visible columns), and two
+    // ~45-row cards push the first call's confirmation dialog — the only
+    // actionable surface — off an 80-row alt screen. Sharing the transcript
+    // region halves each budget (17 rows ≈ 1708 columns), so the marker
+    // past that cut leaves the screen.
+    const description =
+      '{"content":"' +
+      'a'.repeat(2500) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__fs__write_file',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[parked('t1'), parked('t2')]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('memoizes the pending-card measure across sibling re-renders', () => {
+    // A sibling call's stream events re-render the whole transcript, and the
+    // pending card's dialog-body measure scans the whole confirmation body —
+    // it must re-run only when its own inputs change.
+    const pending = toolItem({
+      id: 't1',
+      tool: 'exit_plan_mode',
+      description: 'plan ready',
+      confirm: 'pending',
+      confirmType: 'plan',
+      confirmBody: Array.from({ length: 30 }, () => 'step').join('\n'),
+    });
+    const sibling = toolItem({ id: 't2', output: 'chunk one' });
+    const view = (items: LiveToolItem[]) => (
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={items}
+      />
+    );
+    const { rerender } = render(view([pending, sibling]));
+    const callsAfterFirstRender = mocks.pendingSpy.mock.calls.length;
+    expect(callsAfterFirstRender).toBeGreaterThan(0);
+    rerender(view([pending, { ...sibling, output: 'chunk two' }]));
+    expect(mocks.pendingSpy.mock.calls.length).toBe(callsAfterFirstRender);
   });
 
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {

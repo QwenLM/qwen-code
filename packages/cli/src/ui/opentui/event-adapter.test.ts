@@ -116,6 +116,32 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         confirmBody: undefined,
       },
     ]);
+    // A hook-forced info confirmation carries its prompt as the body: the
+    // core scheduler's PreToolUse 'ask' bounce builds { type: 'info',
+    // prompt: hookReason }, and the pending card prices the dialog's
+    // expandable body against it.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c3', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Hook requested confirmation to run mcp__fs__write_file',
+            type: 'info',
+            prompt: 'line one\nline two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c3',
+        tool: 'mcp__fs__write_file',
+        title: 'Hook requested confirmation to run mcp__fs__write_file',
+        confirmType: 'info',
+        confirmBody: 'line one\nline two',
+      },
+    ]);
   });
 
   it('carries FileDiff resultDisplay as a structured diff payload', () => {

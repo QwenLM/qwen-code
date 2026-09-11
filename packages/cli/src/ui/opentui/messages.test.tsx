@@ -174,52 +174,95 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // the payload the dialog renders expanded: a hook-forced confirmation
     // duplicates the card's description in its body, so a wide payload
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
-    // (mem0 e2e regression).
+    // (mem0 e2e regression). The collapsed bound prices the region above
+    // the card plus the dialog chrome (46 - 20 = 26 physical rows) plus the
+    // collapsed body, converted to budget rows by the 0.7 wrap ratio — a
+    // budget row renders ~1/0.7 physical rows, so spending physical rows
+    // directly as budget rows over-budgets the card by ~1.37x.
     expect(maxHistoryItemRows(80)).toBe(320);
-    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
-    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    // The gate keeps a payload that fits the collapsed dialog body on the
-    // collapsed-dialog bound (100 - 46), where the unconditional bound would
-    // shrink it to (100 - 26 - 0) * 0.7 = 51.
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
+    // No payload, unknown dialog: the collapsed-dialog bound charges the
+    // full collapsed body window — (80 - 26 - 20) * 0.7 = 23.
+    expect(pendingCardMaxRows(80, 0, 110)).toBe(23);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(37);
     // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
     // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
     expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
     // Gate boundary: at exactly 20 folded payload rows the dialog body still
-    // fits collapsed (hiddenRows 0, no ctrl-s), so the expanded bound must
-    // not engage; at 21 rows it overflows, so it must ((80-26-21)*0.7 = 23).
-    // (2160/2268 are exact multiples of the 110-2=108-column divisor.)
-    expect(pendingCardMaxRows(80, 2160, 110)).toBe(34);
+    // fits collapsed (hiddenRows 0, no ctrl-s), so the collapsed bound
+    // prices it; at 21 rows the payload overflows and the expanded bound
+    // engages ((80-26-21)*0.7 = 23 — at 80 rows it meets the collapsed
+    // price). (2160/2268 are exact multiples of the 110-2=108-column
+    // divisor.)
+    expect(pendingCardMaxRows(80, 2160, 110)).toBe(23);
     expect(pendingCardMaxRows(80, 2268, 110)).toBe(23);
     // A mid-range payload under the gate keeps the collapsed-dialog budget
     // even on tall terminals (the PR's small-payload claim).
-    expect(pendingCardMaxRows(100, 1080, 110)).toBe(54);
+    expect(pendingCardMaxRows(100, 1080, 110)).toBe(37);
     // An mcp dialog shows two fixed lines and cannot expand: the card is the
     // only surface carrying the arguments (R5-9), so it keeps the
-    // collapsed-footprint budget no matter how wide the args payload is.
+    // collapsed-footprint budget — (80 - 26 - 5) * 0.7 = 34 — no matter how
+    // wide the args payload is.
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' })).toBe(34);
+    // ...but N pending siblings share the transcript region: two parked mcp
+    // calls halve the collapsed bound (34.3 / 2 = 17), so two 45-row cards
+    // cannot push the first call's dialog off an 80-row alt screen.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2)).toBe(17);
+    // A hook-bounced info confirmation whose reason exactly fills the
+    // collapsed window prices the collapsed dialog's real 20-row body
+    // ((80 - 26 - 20) * 0.7 = 23); an unconverted physical-row term would
+    // hand back 34 budget rows, which paint ~45 physical rows and push the
+    // dialog's question row and outcome list off the viewport.
+    const hookReason = Array.from({ length: 20 }, () => 'x'.repeat(10)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'info', body: hookReason }),
+    ).toBe(23);
     // A many-short-line body folds to ~3 card rows but fills 25 dialog rows:
     // the expandable TextBody charges each logical row, so the card yields
-    // ((80-26-25)*0.7 = 20) even though the folded width sits under the gate.
+    // ((80-26-25)*0.7 = 20) even though the folded width sits under the
+    // gate. An info body measures identically.
     const planBody = Array.from({ length: 25 }, () => 'x'.repeat(10)).join(
       '\n',
     );
     expect(
       pendingCardMaxRows(80, 259, 110, { type: 'plan', body: planBody }),
     ).toBe(20);
-    // The body measure keeps the same collapsed-cap boundary: a 20-row body
-    // fits collapsed (gate off), a 21-row body overflows (gate on).
-    const fits = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
-    expect(pendingCardMaxRows(80, 0, 110, { type: 'plan', body: fits })).toBe(
-      34,
+    expect(
+      pendingCardMaxRows(80, 259, 110, { type: 'info', body: planBody }),
+    ).toBe(20);
+    // The body measure is taken on the dialog's own column basis — the
+    // terminal width, which start-opentui-ui's availableWidth = width - 4
+    // makes width + 4 here: 12 lines of 106 columns are 12 collapsed rows
+    // there (no ctrl-s offered), so only the collapsed bound applies
+    // ((80 - 26 - 12) * 0.7 = 29). On the card's narrower 104-column basis
+    // the same body would miscount 24 rows and wrongly engage the gate.
+    const dialogFits = Array.from({ length: 12 }, () => 'x'.repeat(106)).join(
+      '\n',
     );
     expect(
-      pendingCardMaxRows(80, 0, 110, { type: 'plan', body: fits + '\nx' }),
+      pendingCardMaxRows(80, 0, 106, { type: 'plan', body: dialogFits }),
+    ).toBe(29);
+    // The body measure keeps the same collapsed-cap boundary: a 20-row body
+    // fits collapsed (gate off — the collapsed bound (81-26-20)*0.7 = 24),
+    // a 21-row body overflows (gate on — the expanded bound
+    // (81-26-21)*0.7 = 23).
+    const fits = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
+    expect(pendingCardMaxRows(81, 0, 110, { type: 'plan', body: fits })).toBe(
+      24,
+    );
+    expect(
+      pendingCardMaxRows(81, 0, 110, { type: 'plan', body: fits + '\nx' }),
     ).toBe(23);
     // exec keeps the folded-payload proxy: its dialog body renders the
     // command uncapped, and the yield is what brings the outcome list back
-    // on screen.
+    // on screen. So does any type this module does not know — a future
+    // ToolCallConfirmationDetails variant or a version-skewed wire event
+    // fails safe toward yielding, not toward keeping the full budget.
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'exec' })).toBe(11);
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'some_future_type' }),
+    ).toBe(11);
   });
 
   it('falls back to the settled cap on short terminals', () => {

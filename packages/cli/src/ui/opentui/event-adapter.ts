@@ -37,11 +37,12 @@ import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 /**
  * The text a confirmation dialog's expandable body renders — an info
  * confirmation's prompt, a plan confirmation's plan. Every other type's body
- * never grows past its collapsed footprint (mcp shows two fixed lines, edit a
- * bounded DiffBody, exec an uncapped command), so it has no expandable body.
- * This mirrors dialogs-confirm's ConfirmationBody render switch and feeds the
- * pending card's expanded-dialog bound (pendingCardMaxRows); it lives here,
- * not in dialogs-confirm, so this module stays free of UI-runtime imports.
+ * has no ctrl-s expansion (mcp shows two fixed lines, edit a tail-windowed
+ * diff below an unbounded warnings list, exec an uncapped command), so it
+ * has no expandable body. This mirrors dialogs-confirm's ConfirmationBody
+ * render switch and feeds the pending card's expanded-dialog bound
+ * (pendingCardMaxRows); it lives here, not in dialogs-confirm, so this
+ * module stays free of UI-runtime imports.
  */
 export function expandableConfirmationBody(details: {
   type?: string;
