@@ -81,6 +81,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
   private server: Server | undefined;
   private socket: Socket | undefined;
   private hello: BridgeHello | undefined;
+  private selectedExtensionInstanceId: string | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
@@ -245,7 +246,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
             if (!isObject(message) || message.type !== 'hello') continue;
             if (
               message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
-              message.extensionId !== CHROME_EXTENSION_ID
+              message.extensionId !== CHROME_EXTENSION_ID ||
+              typeof message.extensionInstanceId !== 'string' ||
+              message.extensionInstanceId.trim() === '' ||
+              message.extensionInstanceId.length > 128
             ) {
               socket.destroy(
                 new Error(
@@ -275,6 +279,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
   }
 
   private promote(socket: Socket, hello: BridgeHello): void {
+    this.selectedExtensionInstanceId ??= hello.extensionInstanceId;
+    // Keep other profiles connected but idle so they cannot evict this session
+    // or enter a disconnect/reconnect loop. Ownership survives a disconnect.
+    if (hello.extensionInstanceId !== this.selectedExtensionInstanceId) return;
     this.disconnect(disconnectedError('Chrome extension reconnected'));
     this.socket = socket;
     this.hello = hello;
@@ -398,6 +406,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     if (server !== undefined) await closeServer(server);
     await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
     this.socketIdentity = undefined;
+    this.selectedExtensionInstanceId = undefined;
   }
 }
 

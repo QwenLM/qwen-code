@@ -5,16 +5,105 @@
  */
 
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import vm from 'node:vm';
 
 const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
 
 const extensionRoot = process.cwd();
+
+test('profile identity persists before hello and survives reconnects and worker restarts', async () => {
+  const source = await readFile(
+    join(extensionRoot, 'src/background/browser-use-bridge.js'),
+    'utf8',
+  );
+  const startWorker = async (
+    localState: Record<string, unknown>,
+    failSave = false,
+  ) => {
+    const hellos: Array<{
+      extensionInstanceId: string;
+      protocolVersion: number;
+    }> = [];
+    const listeners: Record<string, (...args: unknown[]) => void> = {};
+    const event = (name: string) => ({
+      addListener: (callback: (...args: unknown[]) => void) => {
+        listeners[name] = callback;
+      },
+    });
+    const port = {
+      onMessage: event('message'),
+      onDisconnect: event('disconnect'),
+      postMessage: (hello: {
+        extensionInstanceId: string;
+        protocolVersion: number;
+      }) => {
+        assert.equal(
+          hello.extensionInstanceId,
+          localState.browserUseInstanceId,
+          'persist before connecting',
+        );
+        hellos.push(hello);
+      },
+    };
+    const context = vm.createContext({
+      crypto: webcrypto,
+      setTimeout,
+      clearTimeout,
+      chrome: {
+        runtime: { id: CHROME_EXTENSION_ID, connectNative: () => port },
+        alarms: {
+          get: async () => undefined,
+          create: async () => undefined,
+          onAlarm: event('alarm'),
+        },
+        storage: {
+          local: {
+            get: async () => ({ ...localState }),
+            set: async (value: Record<string, unknown>) => {
+              if (failSave) {
+                failSave = false;
+                throw new Error('storage write failed');
+              }
+              Object.assign(localState, value);
+            },
+          },
+          session: { get: async () => ({}), set: async () => undefined },
+        },
+        tabs: {
+          query: async () => [],
+          onCreated: event('created'),
+          onRemoved: event('removed'),
+        },
+        debugger: { onDetach: event('detached'), onEvent: event('cdp') },
+      },
+    });
+    vm.runInContext(source, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { hellos, listeners };
+  };
+  const state: Record<string, unknown> = {};
+  const first = await startWorker(state, true);
+  assert.equal(first.hellos.length, 0, 'no unpersisted identity may connect');
+  first.listeners.alarm({ name: 'browser-use-reconnect' });
+  first.listeners.alarm({ name: 'browser-use-reconnect' });
+  await vi.waitFor(() => assert.equal(first.hellos.length, 1));
+  const identity = first.hellos[0].extensionInstanceId;
+  assert.match(identity, /^[0-9a-f-]{36}$/);
+  assert.equal(first.hellos[0].protocolVersion, 2);
+  first.listeners.disconnect();
+  first.listeners.alarm({ name: 'browser-use-reconnect' });
+  await vi.waitFor(() => assert.equal(first.hellos.length, 2));
+  assert.equal(first.hellos[1].extensionInstanceId, identity);
+  const restarted = await startWorker(state);
+  assert.equal(restarted.hellos[0].extensionInstanceId, identity);
+  const other = await startWorker({});
+  assert.notEqual(other.hellos[0].extensionInstanceId, identity);
+});
 
 test('unpacked extension has a stable id and the expected least-privilege bridge permissions', async () => {
   const manifest = JSON.parse(
@@ -160,6 +249,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   };
   const context = vm.createContext({
     atob,
+    crypto: webcrypto,
     console,
     setTimeout,
     clearTimeout,
@@ -173,6 +263,9 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
         onAlarm: noOpEvent('alarm'),
       },
       storage: {
+        local: {
+          get: async () => ({ browserUseInstanceId: 'test-profile' }),
+        },
         session: {
           async get(keys: string | string[]) {
             const wanted = Array.isArray(keys) ? keys : [keys];

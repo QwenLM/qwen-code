@@ -5,10 +5,10 @@
  */
 
 // @ts-check
-/* global atob, chrome, clearTimeout, setTimeout, TextDecoder */
+/* global atob, chrome, clearTimeout, crypto, setTimeout, TextDecoder */
 
 const NATIVE_HOST = 'com.qwen.browser';
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 /** @type {Set<number>} */
 const attachedTabs = new Set();
 /** @type {Map<number, Promise<void>>} */
@@ -94,6 +94,7 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
 
 /** @type {chrome.runtime.Port | undefined} */
 let nativePort;
+let connecting = false;
 let sessionName = DEFAULT_SESSION_NAME;
 let groupOperation = Promise.resolve();
 let connectionGeneration = 0;
@@ -169,8 +170,9 @@ function stateSnapshot() {
   };
 }
 
-function connectNative() {
-  if (nativePort) return;
+async function connectNative() {
+  if (nativePort || connecting) return;
+  connecting = true;
   let backendConnected = false;
   const disconnected = () => {
     nativePort = undefined;
@@ -186,6 +188,18 @@ function connectNative() {
   // Unlike the /cdp path, a live Native Messaging port keeps the MV3 worker
   // alive on every supported Chrome version.
   try {
+    const stored = await chrome.storage.local.get('browserUseInstanceId');
+    const extensionInstanceId =
+      typeof stored.browserUseInstanceId === 'string' &&
+      stored.browserUseInstanceId.trim() !== '' &&
+      stored.browserUseInstanceId.length <= 128
+        ? stored.browserUseInstanceId
+        : crypto.randomUUID();
+    if (extensionInstanceId !== stored.browserUseInstanceId) {
+      await chrome.storage.local.set({
+        browserUseInstanceId: extensionInstanceId,
+      });
+    }
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
     const generation = ++connectionGeneration;
@@ -208,12 +222,15 @@ function connectNative() {
       type: 'hello',
       protocolVersion: PROTOCOL_VERSION,
       extensionId: chrome.runtime.id,
+      extensionInstanceId,
     });
   } catch {
     const port = nativePort;
     nativePort = undefined;
     port?.disconnect();
     disconnected();
+  } finally {
+    connecting = false;
   }
 }
 

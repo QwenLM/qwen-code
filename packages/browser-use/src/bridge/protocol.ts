@@ -6,7 +6,7 @@
 
 import { join } from 'node:path';
 
-export const CHROME_BRIDGE_PROTOCOL_VERSION = 1;
+export const CHROME_BRIDGE_PROTOCOL_VERSION = 2;
 export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
@@ -30,6 +30,7 @@ export interface BridgeHello {
   type: 'hello';
   protocolVersion: number;
   extensionId: string;
+  extensionInstanceId: string;
 }
 
 export interface BridgeRequest {
