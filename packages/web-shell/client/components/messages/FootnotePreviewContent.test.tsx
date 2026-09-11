@@ -15,7 +15,6 @@ import { FootnotePreviewContent } from './FootnotePreviewContent';
 const report =
   'First[^a][^b].\n\nSecond[^c].\n\n[^a]: [Alpha](https://citation.invalid/record#id=a "Knowledge") First summary.\n[^b]: Plain beta.\n[^c]: [Gamma](https://example.com/gamma) Third summary.';
 const trigger = '[data-web-shell-footnote-trigger]';
-const footer = '[data-web-shell-footnote-sources-trigger]';
 const cardSelector = '[data-web-shell-footnote-card]';
 let container: HTMLDivElement;
 let root: Root;
@@ -93,7 +92,6 @@ it('mounts only an open page, supplies isolated data and updates without replaci
   expect(first.footnote).toBe(first.footnotes[0]);
   expect(first).toMatchObject({
     index: 0,
-    location: 'inline',
     title: 'Alpha',
     sourceLabel: 'Knowledge',
   });
@@ -121,16 +119,6 @@ it('mounts only an open page, supplies isolated data and updates without replaci
     'c',
   ]);
   close();
-  click(container.querySelector(footer));
-  expect(mount.mock.calls.at(-1)![1]).toMatchObject({
-    location: 'assistant',
-    index: 0,
-  });
-  expect(mount.mock.calls.at(-1)![1].footnotes.map((note) => note.id)).toEqual([
-    'a',
-    'b',
-    'c',
-  ]);
 });
 
 it('preserves components.a interception inside the DOM content slot', () => {
@@ -252,12 +240,7 @@ it('cleans up on renderer replacement and balances StrictMode mounts', () => {
   ];
   const node = (mount: WebShellFootnotePreviewMount) => (
     <StrictMode>
-      <FootnotePreviewContent
-        notes={notes}
-        index={0}
-        location="inline"
-        mount={mount}
-      />
+      <FootnotePreviewContent notes={notes} index={0} mount={mount} />
     </StrictMode>
   );
   render(node(first.mount));
@@ -287,7 +270,9 @@ it('contains disposal errors when the popup closes', () => {
   close();
   expect(dispose).toHaveBeenCalledTimes(1);
   expect(log).toHaveBeenCalled();
-  expect(container.textContent).toContain('3 citations');
+  expect(
+    container.querySelector('[data-web-shell-turn-sources-trigger]'),
+  ).toBeNull();
 });
 
 it('does not mount for static export or custom superscript rendering', () => {
@@ -366,12 +351,7 @@ it('retries a previously declined renderer after another renderer succeeds', () 
     },
   ];
   const node = (renderer: WebShellFootnotePreviewMount) => (
-    <FootnotePreviewContent
-      notes={notes}
-      index={0}
-      location="inline"
-      mount={renderer}
-    />
+    <FootnotePreviewContent notes={notes} index={0} mount={renderer} />
   );
   render(node(mount));
   render(node(second.mount));
@@ -397,12 +377,7 @@ it('keeps every StrictMode mount measurable even when the host declines', () => 
   ];
   render(
     <StrictMode>
-      <FootnotePreviewContent
-        notes={notes}
-        index={0}
-        location="inline"
-        mount={mount}
-      />
+      <FootnotePreviewContent notes={notes} index={0} mount={mount} />
     </StrictMode>,
   );
   expect(hidden.length).toBeGreaterThan(0);

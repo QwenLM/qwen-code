@@ -2877,6 +2877,9 @@ const EN: Messages = {
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
   'sources.title': 'Sources',
+  'sources.count': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'source' : 'sources'}`,
+  'sources.currentTurn': 'Sources for this turn',
   'sources.add': 'Add source',
   'sources.empty': 'Add files or links for reference.',
   'sources.explanation':
@@ -6354,6 +6357,8 @@ const ZH: Messages = {
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
   'sources.title': '来源',
+  'sources.count': (v) => `${v?.count ?? 0} 个来源`,
+  'sources.currentTurn': '本轮来源',
   'sources.add': '添加来源',
   'sources.empty': '添加文件或链接作为参考。',
   'sources.explanation': '添加引用不会将内容发送给助手。',

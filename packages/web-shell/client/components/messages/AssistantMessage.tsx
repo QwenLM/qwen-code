@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LightbulbIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
-import { FootnoteSources } from './FootnoteCard';
-import type { FootnotePreview } from './rehype-footnote-cards';
+import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import {
@@ -33,6 +33,8 @@ interface AssistantMessageProps {
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -44,31 +46,18 @@ export const AssistantMessage = memo(function AssistantMessage({
   showBranchAction = false,
   isLocateFlashing = false,
   customFooterInfo,
+  turnSources,
+  onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
-  const { markdown, renderAssistantTurnFooter } = useWebShellCustomization();
+  const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
-  const [reportedFootnoteSources, setReportedFootnoteSources] = useState<{
-    content: string;
-    items: FootnotePreview[];
-  }>();
-  const contentRef = useRef(content);
-  contentRef.current = content;
-  const handleFootnoteSourcesChange = useCallback(
-    (items: FootnotePreview[]) =>
-      setReportedFootnoteSources({ content: contentRef.current, items }),
-    [],
-  );
-  const footnoteSources =
-    reportedFootnoteSources?.content === content
-      ? reportedFootnoteSources.items
-      : [];
   const showFooter =
     !!content &&
     !isStreaming &&
-    (showFooterActions || footnoteSources.length > 0) &&
+    (showFooterActions || (turnSources?.length ?? 0) > 0) &&
     !documentMode;
   const customFooter = useMemo(
     () =>
@@ -108,7 +97,6 @@ export const AssistantMessage = memo(function AssistantMessage({
               content={content}
               source="assistant"
               isStreaming={isStreaming}
-              onFootnoteSourcesChange={handleFootnoteSourcesChange}
             />
           </div>
         </div>
@@ -141,12 +129,9 @@ export const AssistantMessage = memo(function AssistantMessage({
               <BranchIcon />
             </button>
           )}
-          <FootnoteSources
-            notes={footnoteSources}
-            linkComponent={markdown?.components?.a}
-            iconResolver={markdown?.getAssistantFootnoteIcon}
-            mountPreview={markdown?.mountFootnotePreview}
-          />
+          {turnSources?.length ? (
+            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+          ) : null}
           {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">
               {formatTimestamp(timestamp)}

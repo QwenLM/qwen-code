@@ -41,11 +41,7 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
-import {
-  FootnoteSection,
-  FootnoteSup,
-  type FootnoteSourcesChangeHandler,
-} from './FootnoteCard';
+import { FootnoteSection, FootnoteSup } from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
@@ -64,7 +60,6 @@ interface MarkdownProps {
    */
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
-  onFootnoteSourcesChange?: FootnoteSourcesChangeHandler;
 }
 
 // Keep the cost of repeatedly parsing a growing stream bounded. Short streams
@@ -999,7 +994,6 @@ export const Markdown = memo(function Markdown({
   source,
   isStreaming,
   tableMode,
-  onFootnoteSourcesChange,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
@@ -1033,16 +1027,9 @@ export const Markdown = memo(function Markdown({
 
   const sourceComponents = sourceMarkdown?.components;
   const inlineFootnoteIcon = sourceMarkdown?.getInlineFootnoteIcon;
-  const assistantFootnoteIcon = sourceMarkdown?.getAssistantFootnoteIcon;
   const mountFootnotePreview = sourceMarkdown?.mountFootnotePreview;
   const renderedComponents = useMemo(() => {
-    if (
-      !sourceComponents &&
-      !onFootnoteSourcesChange &&
-      !inlineFootnoteIcon &&
-      !assistantFootnoteIcon &&
-      !mountFootnotePreview
-    )
+    if (!sourceComponents && !inlineFootnoteIcon && !mountFootnotePreview)
       return components;
     const rendered = {
       ...components,
@@ -1074,11 +1061,7 @@ export const Markdown = memo(function Markdown({
       rendered.section = (props) => (
         <FootnoteSection
           {...props}
-          linkComponent={SourceLink}
-          onSourcesChange={onFootnoteSourcesChange}
           sectionComponent={sourceComponents?.section}
-          iconResolver={assistantFootnoteIcon}
-          mountPreview={mountFootnotePreview}
         />
       );
     }
@@ -1086,10 +1069,8 @@ export const Markdown = memo(function Markdown({
   }, [
     components,
     effectiveTableMode,
-    onFootnoteSourcesChange,
     sourceComponents,
     inlineFootnoteIcon,
-    assistantFootnoteIcon,
     mountFootnotePreview,
   ]);
   const chart =

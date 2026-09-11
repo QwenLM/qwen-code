@@ -21,8 +21,6 @@ import type {
 import { FootnotePreviewContent } from './FootnotePreviewContent';
 import { isSafeImageSrc } from './Markdown';
 
-export type FootnoteSourcesChangeHandler = (notes: FootnotePreview[]) => void;
-
 export function FootnoteSup({
   node,
   children,
@@ -53,28 +51,15 @@ export function FootnoteSup({
 export function FootnoteSection({
   node,
   children,
-  linkComponent,
-  onSourcesChange,
   sectionComponent,
-  iconResolver,
-  mountPreview,
   ...props
 }: ComponentProps<'section'> &
-  ExtraProps & {
-    linkComponent?: Components['a'];
-    onSourcesChange?: FootnoteSourcesChangeHandler;
-    sectionComponent?: Components['section'];
-    iconResolver?: WebShellFootnoteIconResolver;
-    mountPreview?: WebShellFootnotePreviewMount;
-  }) {
-  const data = (node as FootnoteElement | undefined)?.data;
-  const notes = data?.footnoteSourcesFooter ? data.footnoteCards : undefined;
-  useEffect(() => {
-    if (!onSourcesChange) return;
-    onSourcesChange(notes ?? []);
-    return () => onSourcesChange([]);
-  }, [notes, onSourcesChange]);
-  const section = sectionComponent ? (
+  ExtraProps & { sectionComponent?: Components['section'] }) {
+  if (
+    (node as FootnoteElement | undefined)?.data?.hasVisibleFootnotes === false
+  )
+    return null;
+  return sectionComponent ? (
     createElement(
       sectionComponent,
       typeof sectionComponent === 'string' ? props : { ...props, node },
@@ -83,59 +68,17 @@ export function FootnoteSection({
   ) : (
     <section {...props}>{children}</section>
   );
-  if (!notes?.length) return section;
-  const visibleFootnotes = data?.hasVisibleFootnotes ? section : null;
-  if (onSourcesChange) return visibleFootnotes;
-  return (
-    <>
-      {visibleFootnotes}
-      <div data-web-shell-footnote-sources="" className="mt-4 flex">
-        <FootnoteCard
-          notes={notes}
-          variant="footer"
-          linkComponent={linkComponent}
-          iconResolver={iconResolver}
-          mountPreview={mountPreview}
-        />
-      </div>
-    </>
-  );
-}
-
-export function FootnoteSources({
-  notes,
-  linkComponent,
-  iconResolver,
-  mountPreview,
-}: {
-  notes: FootnotePreview[];
-  linkComponent?: Components['a'];
-  iconResolver?: WebShellFootnoteIconResolver;
-  mountPreview?: WebShellFootnotePreviewMount;
-}) {
-  if (!notes.length) return null;
-  return (
-    <FootnoteCard
-      notes={notes}
-      variant="footer"
-      linkComponent={linkComponent}
-      iconResolver={iconResolver}
-      mountPreview={mountPreview}
-    />
-  );
 }
 
 function FootnoteCard({
   id,
   notes,
-  variant = 'inline',
   linkComponent,
   iconResolver,
   mountPreview,
 }: {
   id?: string;
   notes: FootnotePreview[];
-  variant?: 'inline' | 'footer';
   linkComponent?: Components['a'];
   iconResolver?: WebShellFootnoteIconResolver;
   mountPreview?: WebShellFootnotePreviewMount;
@@ -198,17 +141,8 @@ function FootnoteCard({
           ref={trigger}
           id={id}
           type="button"
-          data-web-shell-footnote-trigger={
-            variant === 'inline' ? '' : undefined
-          }
-          data-web-shell-footnote-sources-trigger={
-            variant === 'footer' ? '' : undefined
-          }
-          className={
-            variant === 'footer'
-              ? 'inline-flex h-5 items-center gap-1 rounded-[5px] px-1 text-[11px] leading-[1.4] text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
-              : 'mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-middle text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
-          }
+          data-web-shell-footnote-trigger=""
+          className="mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-middle text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring"
           aria-label={t('footnotes.references', { count: notes.length })}
           onPointerEnter={(event) => {
             if (event.pointerType === 'touch') return;
@@ -237,9 +171,7 @@ function FootnoteCard({
         >
           <span
             aria-hidden="true"
-            className={`inline-block shrink-0 bg-current ${
-              variant === 'footer' ? 'size-3.5' : 'size-4'
-            } ${variant === 'footer' && !customIcon ? '-translate-y-px' : ''}`}
+            className="inline-block size-4 shrink-0 bg-current"
             style={{
               maskImage: cssUrlValue(customIcon ?? knowledgeIcon),
               maskSize: 'contain',
@@ -247,11 +179,7 @@ function FootnoteCard({
               maskPosition: 'center',
             }}
           />
-          {variant === 'footer'
-            ? t('footnotes.citations', { count: notes.length })
-            : notes.length > 1
-              ? notes.length
-              : null}
+          {notes.length > 1 ? notes.length : null}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -275,7 +203,6 @@ function FootnoteCard({
         <FootnotePreviewContent
           notes={notes}
           index={index}
-          location={variant === 'inline' ? 'inline' : 'assistant'}
           mount={mountPreview}
           linkComponent={linkComponent}
         />

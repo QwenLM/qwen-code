@@ -48,7 +48,6 @@ export const mountDemoFootnotePreview: WebShellFootnotePreviewMount = (
   const update = (info: WebShellFootnotePreviewInfo) => {
     content.dataset['index'] = String(info.index);
     content.dataset['ids'] = info.footnotes.map((note) => note.id).join(',');
-    content.dataset['location'] = info.location;
     source.textContent = info.sourceLabel;
     title.replaceChildren(info.sourceLink);
     summary.textContent = info.footnote.summary;

@@ -26,13 +26,11 @@ type PreviewData = Omit<WebShellFootnotePreviewInfo, 'sourceLink'>;
 export function FootnotePreviewContent({
   notes,
   index,
-  location,
   mount,
   linkComponent,
 }: {
   notes: FootnotePreview[];
   index: number;
-  location: WebShellFootnotePreviewInfo['location'];
   mount?: WebShellFootnotePreviewMount;
   linkComponent?: Components['a'];
 }) {
@@ -56,11 +54,10 @@ export function FootnotePreviewContent({
       footnotes,
       footnote: footnotes[index],
       index,
-      location,
       title,
       sourceLabel,
     }),
-    [footnotes, index, location, title, sourceLabel],
+    [footnotes, index, title, sourceLabel],
   );
   const sourceLink = (
     <FootnoteSourceLink

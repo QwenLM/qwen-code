@@ -162,8 +162,8 @@ test.describe('footnote source previews', () => {
     await expect(triggers).toHaveText(['3', '', '', '3', '', '']);
     await expect(page.locator('[data-footnotes] li')).toHaveCount(0);
     await expect(
-      page.locator('[data-web-shell-footnote-sources-trigger]'),
-    ).toHaveText('4 citations');
+      page.locator('[data-web-shell-turn-sources-trigger]'),
+    ).toHaveCount(0);
     await triggers.first().hover();
     const card = page.locator(cardSelector);
     await expect(card).toBeVisible();
@@ -251,44 +251,8 @@ test.describe('footnote source previews', () => {
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
     await page.locator('body').click({ position: { x: 1, y: 1 } });
+    await expect(card).toHaveCount(0);
 
-    const sourceFooters = page.locator(
-      '[data-web-shell-footnote-sources-trigger]',
-    );
-    await expect(sourceFooters).toHaveText(['4 citations', '1 citation']);
-    const assistantFooter = sourceFooters.first().locator('..');
-    await expect(assistantFooter).toHaveCSS('opacity', '0');
-    await sourceFooters.first().hover();
-    await expect(assistantFooter).toHaveCSS('opacity', '1');
-    await expect(card).toBeVisible();
-    await card.evaluate((element) =>
-      element.dispatchEvent(
-        new PointerEvent('pointerout', {
-          bubbles: true,
-          relatedTarget: document.body,
-        }),
-      ),
-    );
-    await card.getByRole('button', { name: /Next/i }).dispatchEvent('click');
-    await card.evaluate((element) =>
-      element.dispatchEvent(
-        new PointerEvent('pointerout', {
-          bubbles: true,
-          relatedTarget: document.body,
-        }),
-      ),
-    );
-    await page.waitForTimeout(350);
-    await expect(card).toBeVisible();
-    await expect(card).toContainText('Official ticket website');
-    await page.keyboard.press('Escape');
-    await expect(card).toHaveCount(0);
-    await page.locator('body').click({ position: { x: 1, y: 1 } });
-    await sourceFooters.first().hover();
-    await expect(card).toBeVisible();
-    await page.mouse.move(0, 0);
-    await page.waitForTimeout(250);
-    await expect(card).toHaveCount(0);
     const ids = await triggers.evaluateAll((elements) =>
       elements.map((element) => element.id),
     );
@@ -600,9 +564,9 @@ test('source locator demo delegates the card link to its host panel', async ({
   await expect(triggers).toHaveCount(2);
   await expect(triggers.first()).toHaveText('2');
   await expect(triggers.nth(1)).toHaveText('');
-  const footerSelectorForDemo = '[data-web-shell-footnote-sources-trigger]';
+  const footerSelectorForDemo = '[data-web-shell-turn-sources-trigger]';
   const footerTrigger = page.locator(footerSelectorForDemo);
-  await expect(footerTrigger).toHaveText('3 个引用');
+  await expect(footerTrigger).toHaveText('4 个来源');
   const assistantFooter = footerTrigger.locator('..');
   await expect(assistantFooter).toHaveCSS('opacity', '0');
   await expect(page.locator('[data-footnotes]')).toHaveCount(0);
@@ -643,7 +607,7 @@ test('source locator demo delegates the card link to its host panel', async ({
       'button[aria-label="复制"] svg',
     )!;
     const citation = footer.querySelector<HTMLElement>(
-      '[data-web-shell-footnote-sources-trigger] > span',
+      '[data-web-shell-turn-sources-trigger] > span',
     )!;
     const mask = getComputedStyle(citation).maskImage;
     const maskUrl = mask.slice(4, -1).replace(/^"|"$/g, '');
@@ -777,8 +741,11 @@ test('source locator demo delegates the card link to its host panel', async ({
   await expect(card).toHaveCount(0);
   await footerTrigger.hover();
   await expect(assistantFooter).toHaveCSS('opacity', '1');
-  await expect(card).toBeVisible();
-  await expect(card).toContainText('1 / 3');
+  const sources = page.locator('[data-web-shell-turn-sources]');
+  await expect(sources).toBeVisible();
+  await expect(sources).toContainText('订单样例.csv');
+  await expect(sources).not.toContainText('上一轮背景资料.pdf');
+  await expect(sources.locator('li')).toHaveCount(4);
 
   await page.screenshot({
     path: testInfo.outputPath('source-footnote-host-demo.png'),
@@ -809,7 +776,6 @@ test('source locator demo custom page slot keeps grouping, pagination and host l
     Number(await content.getAttribute('data-mount-width')),
   ).toBeGreaterThan(0);
   await expect(content).toHaveAttribute('data-ids', 'a,b');
-  await expect(content).toHaveAttribute('data-location', 'inline');
   await expect(content).toHaveAttribute('data-index', '0');
   const mountId = await content.getAttribute('data-mount-id');
   await content.getByRole('button', { name: '查看脚注原文' }).click();
@@ -841,10 +807,11 @@ test('source locator demo custom page slot keeps grouping, pagination and host l
   ).toHaveAttribute('href', 'https://example.com/resource-groups');
   await page.keyboard.press('Escape');
   await expect(card).toHaveCount(0);
-  await page.locator('[data-web-shell-footnote-sources-trigger]').hover();
-  await expect(content).toHaveAttribute('data-location', 'assistant');
-  await expect(content).toHaveAttribute('data-ids', 'a,b,c');
-  await expect(card).toContainText('1 / 3');
+  await page.locator('[data-web-shell-turn-sources-trigger]').hover();
+  const sourceList = page.locator('[data-web-shell-turn-sources]');
+  await expect(sourceList).toBeVisible();
+  await expect(sourceList.locator('li')).toHaveCount(4);
+  await expect(page.locator('[data-demo-preview-content]')).toHaveCount(0);
   await page.screenshot({
     path: testInfo.outputPath('host-footnote-preview-content.png'),
     fullPage: true,
@@ -853,7 +820,7 @@ test('source locator demo custom page slot keeps grouping, pagination and host l
   await page.keyboard.press('Escape');
   await page.mouse.move(0, 0);
   await page.locator('body').click({ position: { x: 1, y: 1 } });
-  await expect(card).toHaveCount(0);
+  await expect(sourceList).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await triggers.first().focus();
   await page.keyboard.press('Enter');

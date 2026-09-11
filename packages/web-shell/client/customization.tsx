@@ -14,6 +14,8 @@ import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart
 import type {
   DaemonInputAnnotation,
   DaemonSessionArtifact,
+  DaemonSessionAttachmentReference,
+  SessionSource,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -84,11 +86,27 @@ export type WebShellFootnoteIconResolver = (
   footnotes: readonly WebShellFootnote[],
 ) => WebShellIconSource | null | undefined;
 
+export type WebShellSource =
+  | { readonly type: 'source'; readonly source: SessionSource }
+  | {
+      readonly type: 'attachment';
+      readonly attachment: DaemonSessionAttachmentReference;
+    };
+
+export interface WebShellSourceReference {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly sourceId: string;
+}
+
+export type WebShellSourceIconResolver = (
+  sources: readonly WebShellSource[],
+) => WebShellIconSource | null | undefined;
+
 export interface WebShellFootnotePreviewInfo {
   readonly footnotes: readonly WebShellFootnote[];
   readonly footnote: WebShellFootnote;
   readonly index: number;
-  readonly location: 'inline' | 'assistant';
   readonly title: string;
   readonly sourceLabel: string;
   /** Place this Qwen-managed element in the layout without replacing its children. */
@@ -108,7 +126,6 @@ export type WebShellFootnotePreviewMount = (
 
 export interface WebShellMarkdownCustomization {
   getInlineFootnoteIcon?: WebShellFootnoteIconResolver;
-  getAssistantFootnoteIcon?: WebShellFootnoteIconResolver;
   mountFootnotePreview?: WebShellFootnotePreviewMount;
   transformMarkdown?: (
     markdown: string,
@@ -615,6 +632,8 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;

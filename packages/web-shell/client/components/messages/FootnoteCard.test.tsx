@@ -64,9 +64,8 @@ describe('Markdown footnote cards', () => {
     ]);
     expect(container.querySelector('[data-footnotes]')).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-footnote-sources-trigger]')
-        ?.textContent,
-    ).toBe('3 citations');
+      container.querySelector('[data-web-shell-turn-sources-trigger]'),
+    ).toBeNull();
     click(triggers[0]);
     expect(card().textContent).toContain('tourism.example');
     expect(card().textContent).toContain('Tourism office');
@@ -118,37 +117,6 @@ describe('Markdown footnote cards', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('reports citations into the assistant action footer and clears stale totals', () => {
-    render(
-      <AssistantMessage
-        showFooterActions
-        timestamp={Date.now()}
-        content={`Sources[^source-a][^source-b].${definitions}`}
-      />,
-    );
-
-    const citation = container.querySelector(
-      '[data-web-shell-footnote-sources-trigger]',
-    );
-    const copy = container.querySelector('[aria-label="Copy"]');
-    expect(citation?.textContent).toBe('2 citations');
-    expect(citation?.parentElement).toBe(copy?.parentElement);
-    expect(
-      container.querySelector('[data-web-shell-footnote-sources]'),
-    ).toBeNull();
-
-    render(
-      <AssistantMessage
-        showFooterActions
-        timestamp={Date.now()}
-        content="Plain response."
-      />,
-    );
-    expect(
-      container.querySelector('[data-web-shell-footnote-sources-trigger]'),
-    ).toBeNull();
   });
 
   it('does not merge across paragraphs, cells, or inline code', () => {
@@ -317,9 +285,8 @@ describe('Markdown footnote cards', () => {
       container.querySelector(triggerSelector)?.getAttribute('aria-label'),
     ).toBe('查看 2 条引用');
     expect(
-      container.querySelector('[data-web-shell-footnote-sources-trigger]')
-        ?.textContent,
-    ).toBe('2 个引用');
+      container.querySelector('[data-web-shell-turn-sources-trigger]'),
+    ).toBeNull();
     click(container.querySelector(triggerSelector));
     click(card().querySelector('[aria-label="下一条引用"]'));
     expect(card().textContent).toContain('脚注 2');
@@ -343,9 +310,8 @@ describe('Markdown footnote cards', () => {
     expect(container.querySelector('[data-footnotes]')).toBeNull();
     expect(container.textContent).toContain('[^missing]');
     expect(
-      container.querySelector('[data-web-shell-footnote-sources-trigger]')
-        ?.textContent,
-    ).toBe('3 citations');
+      container.querySelector('[data-web-shell-turn-sources-trigger]'),
+    ).toBeNull();
     click(triggers[2]);
     expect(card().textContent).toContain('Footnote 3');
     expect(card().textContent).toContain(
@@ -382,27 +348,8 @@ describe('Markdown footnote cards', () => {
     );
     expect(target?.textContent).toContain('Concert details.');
     expect(
-      container.querySelector('[data-web-shell-footnote-sources-trigger]')
-        ?.textContent,
-    ).toBe('1 citation');
-  });
-
-  it('opens all unique message sources from the footer', () => {
-    render(
-      <AssistantMessage
-        showFooterActions
-        content={`First[^source-b]. Repeat[^source-b]. Then[^source-a].${definitions}`}
-      />,
-    );
-    const footer = container.querySelector(
-      '[data-web-shell-footnote-sources-trigger]',
-    );
-    expect(footer?.textContent).toBe('2 citations');
-    click(footer);
-    expect(card().textContent).toContain('Ticket website');
-    expect(card().textContent).toContain('1 / 2');
-    click(card().querySelector('[aria-label="Next reference"]'));
-    expect(card().textContent).toContain('Tourism office');
+      container.querySelector('[data-web-shell-turn-sources-trigger]'),
+    ).toBeNull();
   });
 
   it('routes source links through the host component with the locator intact', () => {
@@ -473,7 +420,6 @@ const resourceDefinitions = [
   '[^c]: [Specification](https://example.com/shared) — Details.',
 ];
 const resourceReport = `First[^a] [^b][^a].\n\nSecond[^c].${'\n\n'}${resourceDefinitions.join('\n')}`;
-const footerSelector = '[data-web-shell-footnote-sources-trigger]';
 
 function iconMask(selector: string) {
   return container
@@ -481,13 +427,10 @@ function iconMask(selector: string) {
     ?.querySelector<HTMLElement>('[aria-hidden="true"]')?.style.maskImage;
 }
 
-describe('Host footnote icon selection', () => {
-  it('passes complete separate lists and transformed original definitions without render nodes', () => {
+describe('Host inline footnote icon selection', () => {
+  it('receives complete independent groups and transformed definitions without rendering nodes', () => {
     const inline = vi.fn<WebShellFootnoteIconResolver>((notes) =>
       notes.length === 2 ? '/icons/pair.svg' : '/icons/single.svg',
-    );
-    const assistant = vi.fn<WebShellFootnoteIconResolver>(
-      () => '/icons/all.svg',
     );
     render(
       <WebShellCustomizationProvider
@@ -495,38 +438,34 @@ describe('Host footnote icon selection', () => {
           markdown: {
             transformMarkdown: () => resourceReport,
             getInlineFootnoteIcon: inline,
-            getAssistantFootnoteIcon: assistant,
           },
         }}
       >
-        <AssistantMessage
-          content="Text before transformation."
-          showFooterActions
-        />
+        <AssistantMessage content="Before transformation" showFooterActions />
       </WebShellCustomizationProvider>,
     );
-    const groups = inline.mock.calls.map(([notes]) =>
-      notes.map((note) => note.id),
-    );
-    expect(groups).toContainEqual(['a', 'b']);
-    expect(groups).toContainEqual(['c']);
-    expect(
-      groups.every((ids) => ids.join(',') === 'a,b' || ids.join(',') === 'c'),
-    ).toBe(true);
-    const all = assistant.mock.calls.at(-1)![0];
-    expect(all.map((note) => note.id)).toEqual(['a', 'b', 'c']);
-    expect(all.map((note) => note.number)).toEqual([1, 2, 3]);
+    const groups = inline.mock.calls.map(([notes]) => notes);
+    expect(groups.map((notes) => notes.map((note) => note.id))).toContainEqual([
+      'a',
+      'b',
+    ]);
+    expect(groups.map((notes) => notes.map((note) => note.id))).toContainEqual([
+      'c',
+    ]);
+    const all = [
+      ...groups.find((notes) => notes.length === 2)!,
+      ...groups.find((notes) => notes.length === 1)!,
+    ];
     expect(all.map((note) => note.definitionMarkdown)).toEqual(
       resourceDefinitions,
     );
-    expect(all[0]).toEqual({
+    expect(all.map((note) => note.number)).toEqual([1, 2, 3]);
+    expect(all[0]).toMatchObject({
       id: 'a',
-      number: 1,
-      definitionMarkdown: resourceDefinitions[0],
       title: 'Order',
-      href: 'https://example.com/shared',
       source: 'Knowledge',
       summary: '— Definition. A second paragraph.',
+      href: 'https://example.com/shared',
       image: 'https://example.com/preview.png',
     });
     expect(all[1]).toMatchObject({
@@ -535,26 +474,15 @@ describe('Host footnote icon selection', () => {
       summary: 'Plain explanation without a link.',
     });
     expect(all[2].href).toBe(all[0].href);
-    for (const [notes] of [...inline.mock.calls, ...assistant.mock.calls]) {
-      for (const note of notes) {
-        expect(Object.keys(note).sort()).toEqual([
-          'definitionMarkdown',
-          'href',
-          'id',
-          'image',
-          'number',
-          'source',
-          'summary',
-          'title',
-        ]);
-      }
-    }
+    expect(all.every((note) => !('linkNode' in note))).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-turn-sources-trigger]'),
+    ).toBeNull();
     const triggers = container.querySelectorAll(triggerSelector);
     expect(iconMask(triggerSelector)).toContain('/icons/pair.svg');
     expect(
       (triggers[1].firstElementChild as HTMLElement).style.maskImage,
     ).toContain('/icons/single.svg');
-    expect(iconMask(footerSelector)).toContain('/icons/all.svg');
     click(triggers[0]);
     click(card().querySelector('[aria-label="Next reference"]'));
     expect(card().textContent).toContain('Plain explanation without a link.');
@@ -564,43 +492,7 @@ describe('Host footnote icon selection', () => {
         ([notes]) => notes.map((note) => note.id).join(',') !== 'b',
       ),
     ).toBe(true);
-    expect(
-      container
-        .querySelector(`${footerSelector} span`)
-        ?.classList.contains('-translate-y-px'),
-    ).toBe(false);
   });
-
-  it.each(['inline', 'assistant'] as const)(
-    'keeps the other icon at default when only %s is configured',
-    (location) => {
-      const resolver = () => '/icons/custom.svg';
-      render(
-        <WebShellCustomizationProvider
-          value={{
-            markdown: {
-              ...(location === 'inline'
-                ? { getInlineFootnoteIcon: resolver }
-                : { getAssistantFootnoteIcon: resolver }),
-            },
-          }}
-        >
-          <AssistantMessage content={resourceReport} showFooterActions />
-        </WebShellCustomizationProvider>,
-      );
-      expect(
-        iconMask(location === 'inline' ? triggerSelector : footerSelector),
-      ).toContain('/icons/custom.svg');
-      expect(
-        iconMask(location === 'inline' ? footerSelector : triggerSelector),
-      ).not.toContain('/icons/custom.svg');
-      expect(
-        container
-          .querySelector(`${footerSelector} span`)
-          ?.classList.contains('-translate-y-px'),
-      ).toBe(location === 'inline');
-    },
-  );
 
   it.each([
     undefined,
@@ -610,161 +502,102 @@ describe('Host footnote icon selection', () => {
     'javascript:alert(1)',
     'data:image/svg+xml;base64,PHN2Zz4=',
     '//external.example/icon.svg',
-  ])('falls back for an empty or unsafe icon result %s', (result) => {
-    render(<AssistantMessage content={resourceReport} showFooterActions />);
-    const defaultInline = iconMask(triggerSelector);
-    const defaultFooter = iconMask(footerSelector);
-    const resolver = () => result;
+  ])('falls back for an empty or unsafe inline icon %s', (result) => {
+    render(<AssistantMessage content={resourceReport} />);
+    const fallback = iconMask(triggerSelector);
     render(
       <WebShellCustomizationProvider
-        value={{
-          markdown: {
-            getInlineFootnoteIcon: resolver,
-            getAssistantFootnoteIcon: resolver,
-          },
-        }}
+        value={{ markdown: { getInlineFootnoteIcon: () => result } }}
       >
-        <AssistantMessage content={resourceReport} showFooterActions />
+        <AssistantMessage content={resourceReport} />
       </WebShellCustomizationProvider>,
     );
-    expect(iconMask(triggerSelector)).toBe(defaultInline);
-    expect(iconMask(footerSelector)).toBe(defaultFooter);
+    expect(iconMask(triggerSelector)).toBe(fallback);
     click(container.querySelector(triggerSelector));
     expect(card().textContent).toContain('Order');
   });
 
-  it('isolates resolver exceptions, preserving the other callback and report', () => {
+  it('isolates icon exceptions from the report', () => {
     render(
       <WebShellCustomizationProvider
         value={{
           markdown: {
             getInlineFootnoteIcon: () => {
-              throw new Error('Host icon error');
+              throw new Error('Icon failed');
             },
-            getAssistantFootnoteIcon: () => '/icons/all.svg',
           },
         }}
       >
-        <AssistantMessage content={resourceReport} showFooterActions />
+        <AssistantMessage content={resourceReport} />
       </WebShellCustomizationProvider>,
     );
-    expect(iconMask(footerSelector)).toContain('/icons/all.svg');
     click(container.querySelector(triggerSelector));
     expect(card().textContent).toContain('Order');
   });
 
-  it('preserves logical Chinese IDs, CRLF definitions and message isolation', () => {
-    const assistant = vi.fn<WebShellFootnoteIconResolver>();
+  it('preserves Chinese IDs, CRLF definitions and message isolation', () => {
+    const inline = vi.fn<WebShellFootnoteIconResolver>();
     const original = '[^说明]: First line.\r\n\r\n    Second line.';
     render(
       <WebShellCustomizationProvider
-        value={{ markdown: { getAssistantFootnoteIcon: assistant } }}
+        value={{ markdown: { getInlineFootnoteIcon: inline } }}
       >
-        <AssistantMessage
-          content={`Note[^说明].\r\n\r\n${original}`}
-          showFooterActions
-        />
+        <AssistantMessage content={`Note[^说明].\r\n\r\n${original}`} />
         <AssistantMessage
           content={'Other[^说明].\n\n[^说明]: Different explanation.'}
-          showFooterActions
         />
       </WebShellCustomizationProvider>,
     );
-    const notes = assistant.mock.calls.map(([list]) => list);
     expect(
-      notes.every((list) => list.length === 1 && list[0].id === '说明'),
+      inline.mock.calls.every(
+        ([notes]) => notes.length === 1 && notes[0].id === '说明',
+      ),
     ).toBe(true);
-    expect(notes.map((list) => list[0].definitionMarkdown)).toContain(original);
-    expect(notes.map((list) => list[0].summary)).toContain(
+    expect(
+      inline.mock.calls.map(([notes]) => notes[0].definitionMarkdown),
+    ).toContain(original);
+    expect(inline.mock.calls.map(([notes]) => notes[0].summary)).toContain(
       'Different explanation.',
     );
   });
 
-  it('keeps literal percent IDs distinct and reuses a definition for case-insensitive references', () => {
-    const assistant = vi.fn<WebShellFootnoteIconResolver>();
+  it('keeps percent IDs distinct and case-insensitive references deduplicated', () => {
+    const inline = vi.fn<WebShellFootnoteIconResolver>();
     render(
       <WebShellCustomizationProvider
-        value={{ markdown: { getAssistantFootnoteIcon: assistant } }}
+        value={{ markdown: { getInlineFootnoteIcon: inline } }}
       >
         <AssistantMessage
           content={
             'Notes[^a][^%61][^ORDER][^order].\n\n[^a]: Letter.\n[^%61]: Percent.\n[^Order]: Order.'
           }
-          showFooterActions
         />
       </WebShellCustomizationProvider>,
     );
-    expect(container.querySelector(triggerSelector)?.textContent).toBe('3');
-    expect(assistant.mock.calls.at(-1)![0].map((note) => note.id)).toEqual([
+    expect(inline.mock.calls.at(-1)![0].map((note) => note.id)).toEqual([
       'a',
       '%61',
       'Order',
     ]);
   });
 
-  it('includes unconverted references in message totals and retains all their navigation targets', () => {
-    const assistant = vi.fn<WebShellFootnoteIconResolver>();
-    render(
-      <WebShellCustomizationProvider
-        value={{
-          markdown: {
-            getAssistantFootnoteIcon: assistant,
-            components: { a: ({ children }) => <span>{children}</span> },
-          },
-        }}
-      >
-        <AssistantMessage
-          content={
-            '[Note[^b]](https://outer.example). Converted[^a].\n\n[^a]: Converted.\n[^b]: Kept definition.'
-          }
-          showFooterActions
-        />
-      </WebShellCustomizationProvider>,
-    );
-    expect(assistant.mock.calls.at(-1)![0].map((note) => note.id)).toEqual([
-      'b',
-      'a',
-    ]);
-    expect(container.querySelectorAll('[data-footnotes] li')).toHaveLength(1);
-    const reference = container.querySelector<HTMLAnchorElement>(
-      '[data-footnote-ref]',
-    )!;
-    expect(
-      document.getElementById(reference.getAttribute('href')!.slice(1))
-        ?.textContent,
-    ).toContain('Kept definition.');
-  });
-
-  it('keeps open cards, current pages and full lists across assistant updates', () => {
-    const inline = vi.fn<WebShellFootnoteIconResolver>(() => '/icons/pair.svg');
-    const assistant = vi.fn<WebShellFootnoteIconResolver>(
-      () => '/icons/all.svg',
-    );
-    const markdown = {
-      getInlineFootnoteIcon: inline,
-      getAssistantFootnoteIcon: assistant,
-    };
-    const tree = (text: string) => (
+  it('keeps the current page open across assistant updates', () => {
+    const markdown = { getInlineFootnoteIcon: () => '/icons/pair.svg' };
+    const tree = (content: string) => (
       <WebShellCustomizationProvider value={{ markdown }}>
-        <AssistantMessage content={text} showFooterActions />
+        <AssistantMessage content={content} />
       </WebShellCustomizationProvider>
     );
     render(tree(resourceReport));
     click(container.querySelector(triggerSelector));
     click(card().querySelector('[aria-label="Next reference"]'));
-    const openCard = card();
-    render(tree(`${resourceReport}\n\nAppended paragraph.`));
-    expect(card()).toBe(openCard);
-    expect(card().textContent).toContain('Plain explanation without a link.');
+    const before = card();
+    render(tree(`${resourceReport}\n\nMore text.`));
+    expect(card()).toBe(before);
     expect(card().textContent).toContain('2 / 2');
-    expect(assistant.mock.calls.at(-1)![0].map((note) => note.id)).toEqual([
-      'a',
-      'b',
-      'c',
-    ]);
   });
 
-  it('keeps original Markdown on copy and disables icon callbacks in static export', async () => {
+  it('copies original Markdown and keeps static export as standard footnotes', async () => {
     const writeText = vi
       .spyOn(navigator.clipboard, 'writeText')
       .mockResolvedValue();
@@ -775,15 +608,10 @@ describe('Host footnote icon selection', () => {
     const resolver = vi.fn<WebShellFootnoteIconResolver>();
     render(
       <WebShellCustomizationProvider
-        value={{
-          markdown: {
-            getInlineFootnoteIcon: resolver,
-            getAssistantFootnoteIcon: resolver,
-          },
-        }}
+        value={{ markdown: { getInlineFootnoteIcon: resolver } }}
       >
         <TranscriptRenderModeProvider value="document">
-          <AssistantMessage content={resourceReport} showFooterActions />
+          <AssistantMessage content={resourceReport} />
         </TranscriptRenderModeProvider>
       </WebShellCustomizationProvider>,
     );

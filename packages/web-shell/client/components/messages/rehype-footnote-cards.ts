@@ -8,7 +8,6 @@ export interface FootnotePreview extends WebShellFootnote {
 export interface FootnoteElement extends Element {
   data?: Element['data'] & {
     footnoteCards?: FootnotePreview[];
-    footnoteSourcesFooter?: boolean;
     hasVisibleFootnotes?: boolean;
   };
 }
@@ -235,8 +234,6 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
         const element = footer as FootnoteElement;
         element.data = {
           ...element.data,
-          footnoteCards: [...referencedSources.values()],
-          footnoteSourcesFooter: true,
           hasVisibleFootnotes,
         };
       }
