@@ -52,8 +52,12 @@ interface RewindSnapshotStub {
 
 const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
-  getRewindSnapshots: vi.fn(),
-  rewindSession: vi.fn(),
+  getRewindSnapshots: vi.fn<
+    (sessionId: string) => Promise<{
+      snapshots: Array<{ turnIndex: number; promptId: string }>;
+    }>
+  >(async () => ({ snapshots: [] })),
+  rewindSession: vi.fn(async () => ({})),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -1556,5 +1560,62 @@ describe('EmbeddedApp message edit rewind', () => {
       'prompt-3',
       expect.objectContaining({ rewindFiles: false }),
     );
+  });
+});
+
+describe('EmbeddedApp rewind preflight localization', () => {
+  it('rethrows a localized error when getRewindSnapshots rejects', async () => {
+    await renderApp();
+    const props = mocks.embeddedProps.current as CapturedProps;
+
+    const onUserMessageEditRequest = callback<
+      (turnIndex: number, content: string) => boolean
+    >(props, 'onUserMessageEditRequest');
+    await act(async () => {
+      onUserMessageEditRequest(0, 'original text');
+      await Promise.resolve();
+    });
+
+    sdkMocks.getRewindSnapshots.mockRejectedValueOnce(new Error('HTTP 503'));
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    await expect(
+      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+    ).rejects.toThrow('Failed to edit the message. Please try again.');
+  });
+
+  it('rethrows a localized error when rewindSession rejects', async () => {
+    await renderApp();
+    const props = mocks.embeddedProps.current as CapturedProps;
+
+    const onUserMessageEditRequest = callback<
+      (turnIndex: number, content: string) => boolean
+    >(props, 'onUserMessageEditRequest');
+    await act(async () => {
+      onUserMessageEditRequest(0, 'original text');
+      await Promise.resolve();
+    });
+
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+    });
+    sdkMocks.rewindSession.mockRejectedValueOnce(new Error('HTTP 503'));
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    await expect(
+      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+    ).rejects.toThrow('Failed to edit the message. Please try again.');
   });
 });
