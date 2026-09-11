@@ -2244,6 +2244,8 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
+    codeModeOnly:
+      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2525,12 +2527,16 @@ export async function loadCliConfig(
 
   const config = new Config(configParams);
 
-  // Load the ACP transport only when an external subagent is requested.
+  // Load the selected transport only when an external subagent is requested.
   config.setExternalAgentExecutor({
     create: (params) =>
-      import('../external-agents/acp-subagent-executor.js').then((module) =>
-        module.acpExternalAgentExecutor.create(params),
-      ),
+      params.spec.kind === 'codex'
+        ? import('../external-agents/codex-subagent-executor.js').then(
+            (module) => module.codexExternalAgentExecutor.create(params),
+          )
+        : import('../external-agents/acp-subagent-executor.js').then((module) =>
+            module.acpExternalAgentExecutor.create(params),
+          ),
   });
 
   if (lspEnabled) {

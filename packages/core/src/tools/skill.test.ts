@@ -1410,6 +1410,121 @@ describe('SkillTool', () => {
       );
       vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue(mockSkills);
     });
+    it.each([
+      [undefined, ''],
+      ['Script failed after loading the skill', ''],
+      [undefined, '\n<system-reminder>PostToolUse context</system-reminder>'],
+    ])(
+      'restores preserved nested Skill bodies even when exec fails: %s',
+      (error, suffix) => {
+        const output = buildSkillLlmContent(
+          '/project/.qwen/skills/code-review',
+          mockSkills[0].body,
+        );
+        skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: { code: 'await tools.skill({ skill: "code-review" })' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: {
+                    output:
+                      JSON.stringify({
+                        error,
+                        toolResults: [
+                          {
+                            name: ToolNames.SKILL,
+                            args: { skill: 'code-review' },
+                            output,
+                          },
+                        ],
+                      }) + suffix,
+                  },
+                },
+              },
+            ],
+          },
+        ]);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['code-review']),
+        );
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
+      },
+    );
+
+    it.each([
+      'not JSON',
+      JSON.stringify({ toolResults: null }),
+      JSON.stringify({ toolResults: [null, {}, { name: ToolNames.SKILL }] }),
+      JSON.stringify({
+        toolResults: [
+          {
+            name: ToolNames.SKILL,
+            args: { skill: 'code-review' },
+            output: 'Skill "code-review" is already loaded in context.',
+          },
+        ],
+      }),
+      JSON.stringify({
+        toolResults: [
+          {
+            name: ToolNames.SKILL,
+            args: { skill: 'other-command' },
+            output: buildSkillLlmContent(
+              '/project/.qwen/skills/code-review',
+              'Review code for quality and best practices.',
+            ),
+          },
+        ],
+      }),
+    ])(
+      'ignores exec results without a matching complete Skill body: %s',
+      (output) => {
+        skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: { output },
+                },
+              },
+            ],
+          },
+        ]);
+        expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
+      },
+    );
 
     it('does not restore command output that matches an unrelated cached Skill', () => {
       const output = buildSkillLlmContent(
