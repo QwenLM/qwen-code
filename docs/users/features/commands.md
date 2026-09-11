@@ -1066,3 +1066,8 @@ writing one: the record schema and how liveness is judged, the socket
 paths and framing, the auth line, every frame field, the receipt states
 and their transitions, and what a receiver does with a message before its
 model sees it.
+
+A Node program does not have to write any of that by hand:
+`@qwen-code/sdk/peer` implements the contract. `PeerEndpoint.start({ name })`
+publishes the record and binds the inbox, `list()` and `send()` address
+sessions by name, and `onMessage` receives what they send.

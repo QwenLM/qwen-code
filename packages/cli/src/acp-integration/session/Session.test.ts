@@ -25175,7 +25175,7 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'The autonomous token budget for this Goal window is spent.',
+                  'An autonomous budget for this Goal window is spent',
                 ),
               }),
               expect.objectContaining({
@@ -25307,7 +25307,7 @@ describe('Session', () => {
             (part) =>
               typeof part['text'] === 'string' &&
               (part['text'] as string).includes(
-                'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+                'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
               ),
           ),
         ).toBe(true);
