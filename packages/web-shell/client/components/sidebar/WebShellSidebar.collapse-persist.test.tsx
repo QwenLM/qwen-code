@@ -449,6 +449,53 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('prioritizes the prompt spinner over the background icon and clears it on completion', async () => {
+    const taskSession = makeSession('background-session', {
+      hasActivePrompt: true,
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'active',
+    });
+    const update = async (
+      hasActivePrompt: boolean,
+      hasRunningBackgroundTasks?: boolean,
+    ) => {
+      active.sessions = [
+        { ...taskSession, hasActivePrompt, hasRunningBackgroundTasks },
+      ];
+      active.data = active.sessions;
+      renderSidebar(false);
+      await flushSidebar();
+    };
+    await update(true, true);
+    expect(
+      container.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await update(false, true);
+    expect(
+      container.querySelector('[data-web-shell-session-running]'),
+    ).toBeNull();
+    const icon = container.querySelector(
+      '[data-web-shell-session-background-running]',
+    );
+    expect(icon?.getAttribute('aria-label')).toBe('Background tasks running');
+    expect(icon?.querySelector('svg')).toBeNull();
+    expect(container.querySelector('[aria-label="Active work"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+    await update(false, false);
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await update(false);
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+  });
+
   it('shows completion from a secondary workspace on the collapsed icon', async () => {
     const multiWorkspaceCapabilities = {
       ...organizationCapabilities,

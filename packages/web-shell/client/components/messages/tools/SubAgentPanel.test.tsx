@@ -36,6 +36,7 @@ function renderPanel(
   tool: ACPToolCall,
   options: {
     compactThinking?: boolean;
+    hideHeader?: boolean;
     renderMode?: 'interactive' | 'document';
   } = {},
 ): HTMLElement {
@@ -51,7 +52,12 @@ function renderPanel(
           <WebShellCustomizationProvider
             value={{ compactThinking: options.compactThinking }}
           >
-            <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
+            <SubAgentPanel
+              tool={tool}
+              defaultExpanded
+              inline
+              hideHeader={options.hideHeader ?? true}
+            />
           </WebShellCustomizationProvider>
         </TranscriptRenderModeProvider>
       </I18nProvider>,
@@ -72,6 +78,18 @@ function makeAgentWithSubTool(subTool: ACPToolCall): ACPToolCall {
 }
 
 describe('SubAgentPanel sub-tool timestamps', () => {
+  it('shows pending result processing on the original agent header', () => {
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        backgroundResultPending: true,
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).toContain('Awaiting processing');
+  });
   it('marks a failed sub-tool with an error icon instead of text', () => {
     const container = renderPanel(
       makeAgentWithSubTool({

@@ -1367,6 +1367,12 @@ describe('DaemonSessionClient', () => {
           clientId: 'client-1',
           state: {},
           hasActivePrompt: true,
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: 'agent',
+            startedAt: 100,
+          },
           compactedReplay: [],
           liveJournal: [],
         });
@@ -1380,8 +1386,69 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.hasActivePrompt).toBe(true);
+    expect(session.backgroundTurn).toEqual({
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent',
+      startedAt: 100,
+    });
     // Absent on the response → defaults to a trustworthy snapshot.
     expect(session.replayDegraded).toBe(false);
+  });
+
+  it.each([true, false, undefined])(
+    'preserves background task activity %s independently of prompt activity',
+    async (hasRunningBackgroundTasks) => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          hasActivePrompt: false,
+          ...(hasRunningBackgroundTasks === undefined
+            ? {}
+            : { hasRunningBackgroundTasks }),
+          compactedReplay: [],
+          liveJournal: [],
+        }),
+      );
+      const session = await DaemonSessionClient.load(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        's-1',
+        { workspaceCwd: '/work/a' },
+      );
+      expect(session.hasRunningBackgroundTasks).toBe(hasRunningBackgroundTasks);
+      expect(session.hasActivePrompt).toBe(false);
+    },
+  );
+
+  it('ignores malformed background metadata in a load snapshot', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+        state: {},
+        hasActivePrompt: false,
+        backgroundTurn: {
+          turnId: 'auto',
+          taskId: 'task',
+          kind: 'agent',
+          startedAt: 'invalid',
+        },
+        compactedReplay: [],
+        liveJournal: [],
+      }),
+    );
+    const session = await DaemonSessionClient.load(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      's-1',
+      { workspaceCwd: '/work/a' },
+    );
+    expect(session.backgroundTurn).toBeUndefined();
   });
 
   it('surfaces replayDegraded from the load response', async () => {

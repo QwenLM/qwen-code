@@ -24,7 +24,11 @@
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -278,6 +282,7 @@ export interface BackgroundActivity {
  * sidecar metadata path, message queue, and resume hooks.
  */
 export interface AgentTask extends TaskBase {
+  sourceTurnId?: string;
   kind: 'agent';
   /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
@@ -392,6 +397,7 @@ export interface BackgroundTaskRegisterOptions {
 }
 
 export interface NotificationMeta {
+  sourceTurnId?: string;
   agentId: string;
   status: TaskStatus;
   stats?: AgentCompletionStats;
@@ -704,6 +710,10 @@ export class BackgroundTaskRegistry {
       ? ((registration as AgentTask).notified ?? false)
       : false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    if (!options.preserveNotificationState) {
+      entry.sourceTurnId =
+        getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    }
     entry.pendingMessages = registration.pendingMessages ?? [];
     // Resolve the parent's display name at registration time — before the
     // parent can evict — so the UI's orphan annotation survives it. Owned
@@ -1769,6 +1779,7 @@ export class BackgroundTaskRegistry {
 
     const meta: NotificationMeta = {
       agentId: entry.agentId,
+      sourceTurnId: entry.sourceTurnId,
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,

@@ -4401,6 +4401,8 @@ export function WebShellSidebar({
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const backgroundRunning =
+        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4448,7 +4450,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            running && styles.runningSession,
+            running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4476,13 +4478,25 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread ? (
+            {completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
+            {backgroundRunning && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundRunning,
+                )}
+                data-web-shell-session-background-running
+                role="img"
+                aria-label={t('background.running')}
+                title={t('background.running')}
+              />
+            )}
             {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
@@ -4492,7 +4506,7 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
@@ -4560,7 +4574,7 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt || sessionWorkActive ? (
+                {running && !backgroundRunning ? (
                   <span
                     className={styles.sessionLoading}
                     aria-label={

@@ -60,8 +60,7 @@ import type {
   WorkflowTask,
   BranchPoint,
   AdmissibleNotification,
-} from '@qwen-code/qwen-code-core';
-import {
+
   AuthType,
   getGptReasoningCapabilities,
   parseModelReasoningCapabilities,
@@ -198,6 +197,8 @@ import {
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
   todoWorkChainContext,
   dedupeToolCallsById,
   getFunctionCallFingerprint,
@@ -239,8 +240,7 @@ import {
   buildGoalContinuationParts,
   decideNotificationAdmission,
   DroppedNotificationTally,
-  MAX_BACKGROUND_NOTIFICATION_QUEUE,
-} from '@qwen-code/qwen-code-core';
+  MAX_BACKGROUND_NOTIFICATION_QUEUE} from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
@@ -1467,6 +1467,7 @@ class TodoStopGuardClaimTimeoutError extends Error {
 }
 
 export interface BackgroundNotificationQueueItem {
+  sourceTurnId?: string;
   displayText: string;
   modelText: string;
   taskId: string;
@@ -1487,6 +1488,8 @@ export interface BackgroundNotificationQueueItem {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+  turn?: BackgroundNotificationTurn;
+  admissionRetries?: number;
 }
 
 /**
@@ -2096,6 +2099,12 @@ export class Session implements SessionContext {
    */
   private readonly droppedNotifications = new DroppedNotificationTally();
   private notificationProcessing = false;
+  private backgroundTurn: BackgroundNotificationTurn | undefined;
+  private lastCompletedRpcPromptId: string | undefined;
+  private notificationsPaused = false;
+  private notificationAdmissionDeferred = false;
+  private notificationAdmissionRetry: ReturnType<typeof setTimeout> | undefined;
+  private finishedBackgroundTurnId: string | undefined;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
@@ -2166,6 +2175,7 @@ export class Session implements SessionContext {
   private workflowDeletionSeq = 0;
   private readonly workflowDeletionSeqByRunId = new Map<string, number>();
   #shellStatusChangeCallback: (() => void) | undefined;
+  #monitorStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -4036,6 +4046,27 @@ export class Session implements SessionContext {
     }
   }
 
+  hasRunningBackgroundTasks(): boolean {
+    return (
+      !this.disposed &&
+      (this.config.getBackgroundTaskRegistry().hasRunningTasks() ||
+        this.config.getBackgroundShellRegistry().hasRunningEntries() ||
+        this.config.getWorkflowRunRegistry().hasRunningEntries() ||
+        this.config
+          .getMonitorRegistry()
+          .getAll()
+          .some((task) => task.status === 'running'))
+    );
+  }
+
+  getBackgroundTurn(): BackgroundNotificationTurn | undefined {
+    return this.disposed ? undefined : this.backgroundTurn;
+  }
+
+  getFinishedBackgroundTurnId(): string | undefined {
+    return this.finishedBackgroundTurnId;
+  }
+
   isTurnIdle(): boolean {
     return !this.closing && !this.#hasActiveTurn();
   }
@@ -4282,6 +4313,9 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    clearTimeout(this.notificationAdmissionRetry);
+    this.notificationAdmissionRetry = undefined;
+    this.backgroundTurn = undefined;
     this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -4329,6 +4363,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
+    if (this.#monitorStatusChangeCallback) {
+      this.config
+        .getMonitorRegistry()
+        .clearStatusChangeCallback?.(this.#monitorStatusChangeCallback);
+      this.#monitorStatusChangeCallback = undefined;
+    }
     const shellRegistry = this.config.getBackgroundShellRegistry();
     shellRegistry.setNotificationCallback(undefined);
     if (this.#shellStatusChangeCallback) {
@@ -4546,7 +4586,9 @@ export class Session implements SessionContext {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
-      !!this.notificationAbortController || this.notificationProcessing;
+      !!this.notificationAbortController ||
+      this.notificationProcessing ||
+      !!this.notificationAdmissionRetry;
     const queuedGoalTurns = this.goalQueue.splice(0);
     const hadQueuedGoalTurn = queuedGoalTurns.length > 0;
 
@@ -4585,8 +4627,9 @@ export class Session implements SessionContext {
       this.notificationAbortController.abort();
       this.notificationAbortController = null;
     }
-    this.notificationQueue = [];
-    this.droppedNotifications.clear();
+    this.notificationsPaused = true;
+    clearTimeout(this.notificationAdmissionRetry);
+    this.notificationAdmissionRetry = undefined;
     this.notificationProcessing = false;
 
     const queuedGoalTurn = queuedGoalTurns[0];
@@ -4828,6 +4871,15 @@ export class Session implements SessionContext {
       pendingSend.signal.removeEventListener('abort', recordCancellation);
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
+        if (!scheduledGoalTurn)
+          this.lastCompletedRpcPromptId = invocationContext?.promptId;
+        clearTimeout(this.notificationAdmissionRetry);
+        this.notificationAdmissionRetry = undefined;
+        this.notificationAdmissionDeferred = false;
+        for (const item of this.notificationQueue) {
+          item.admissionRetries = 0;
+          delete item.turn;
+        }
       }
     };
 
@@ -4870,8 +4922,6 @@ export class Session implements SessionContext {
     if (this.notificationAbortController) {
       this.notificationAbortController.abort();
       this.notificationAbortController = null;
-      this.notificationQueue = [];
-      this.droppedNotifications.clear();
       this.notificationProcessing = false;
     }
     if (this.notificationCompletion) {
@@ -5446,6 +5496,7 @@ export class Session implements SessionContext {
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
         }
+        if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
         // Increment turn counter for each user prompt
         this.turn += 1;
 
@@ -6628,6 +6679,40 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
+      const backgroundParts = await this.#takeCurrentTurnBackgroundParts(
+        promptId,
+        pendingSend.signal,
+      );
+      if (backgroundParts.length > 0) {
+        if (
+          pendingSend.signal.aborted ||
+          (this.pendingPrompt && this.pendingPrompt !== pendingSend)
+        ) {
+          this.#preserveUnsentMessageHistory(
+            { role: 'user', parts: backgroundParts },
+            true,
+          );
+          return { stopReason: 'cancelled' };
+        }
+        const continuation = await this.#runStopContinuation(
+          pendingSend,
+          promptId + '_background_result_' + ++midTurnContinuationCount,
+          promptId,
+          backgroundParts,
+          false,
+          {
+            onFullTurnModel,
+            getModelOverride: () => modelOverride,
+            responseCapture,
+            rejectOnLoopDetected,
+            ...(goalTurn ? { goalTurn } : {}),
+            ...(channelTurn ? { channelTurn: true } : {}),
+          },
+        );
+        if (continuation.kind === 'terminal') return continuation;
+        continue;
+      }
+
       if (this.todoStopGuard.needsStopInspection) {
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
           watchQueuedPrompt: true,
@@ -7693,6 +7778,17 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
+    const execution = backgroundTurnContext.getStore();
+    if (
+      execution?.active &&
+      execution.sessionId === this.sessionId &&
+      update._meta?.['source'] !== 'background_task_completed'
+    ) {
+      update = {
+        ...update,
+        _meta: { ...update._meta, backgroundTurn: { ...execution.turn } },
+      };
+    }
     const projectedUpdate = projectAcpToolResultUpdate(update);
     observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
     const params: SessionNotification = {
@@ -7702,9 +7798,10 @@ export class Session implements SessionContext {
     const canUpdateTodoPlanRevision =
       update.sessionUpdate === 'plan' &&
       this.config.getApprovalMode() === ApprovalMode.PLAN;
-    const todoPlanRevision = canUpdateTodoPlanRevision
-      ? this.#readTodoPlanRevision(update)
-      : undefined;
+    const todoPlanRevision =
+      canUpdateTodoPlanRevision && update.sessionUpdate === 'plan'
+        ? this.#readTodoPlanRevision(update)
+        : undefined;
     const preservesPendingRevision =
       todoPlanRevision !== undefined &&
       todoPlanRevision.structure === this.activeTodoPlanStructure;
@@ -8382,6 +8479,10 @@ export class Session implements SessionContext {
       watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
     });
+    const backgroundParts = await this.#takeCurrentTurnBackgroundParts(
+      promptId,
+      abortSignal,
+    );
     const hadMidTurnUserInput = drained.parts.length > 0;
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
@@ -8395,6 +8496,7 @@ export class Session implements SessionContext {
             ...toolRun.parts,
             ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
             ...drained.parts,
+            ...backgroundParts,
           ],
         },
         hadMidTurnUserInput,
@@ -8437,6 +8539,7 @@ export class Session implements SessionContext {
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),
       ...drained.parts,
+      ...backgroundParts,
     ];
     if (repeatedToolFailureDecision.kind === 'stop') {
       this.todoStopGuard.suspend();
@@ -8723,8 +8826,14 @@ export class Session implements SessionContext {
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
+      const background = backgroundTurnContext.getStore();
+      const promptId =
+        background?.active && background.sessionId === this.sessionId
+          ? background.turn.turnId
+          : getInvocationContext()?.promptId;
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
+        ...(promptId ? { promptId } : {}),
         // Keep the legacy wire name for ACP host compatibility.
         ...(options.watchQueuedPrompt
           ? { todoStopGuardWatchQueuedPrompt: true }
@@ -9859,6 +9968,7 @@ export class Session implements SessionContext {
           displayText,
           modelText,
           taskId: meta.agentId,
+          sourceTurnId: meta.sourceTurnId,
           status: meta.status,
           kind: 'agent',
           continuesTodoStopGuardWorkChain:
@@ -9878,6 +9988,10 @@ export class Session implements SessionContext {
     );
 
     const monitorRegistry = this.config.getMonitorRegistry();
+    this.#monitorStatusChangeCallback = () => this.#activeWorkChanged();
+    monitorRegistry.setStatusChangeCallback?.(
+      this.#monitorStatusChangeCallback,
+    );
     monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
       if (meta.status === 'running') {
         return;
@@ -10071,6 +10185,23 @@ export class Session implements SessionContext {
       }
     }
     this.notificationQueue.push(item);
+    this.config.getChatRecordingService()?.recordBackgroundTaskCompleted?.({
+      displayText: item.displayText,
+      backgroundTask: {
+        taskId: item.taskId,
+        sourceTurnId: item.sourceTurnId,
+        status: item.status,
+        kind: item.kind,
+        toolUseId: item.toolUseId,
+        ...item.structured,
+      },
+    });
+    void this.#emitBackgroundNotificationDisplay(
+      item,
+      'background_task_completed',
+    ).catch((error) => {
+      debugLogger.warn('Failed to publish background task completion:', error);
+    });
     this.#activeWorkChanged();
     void this.#drainNotificationQueue();
   }
@@ -10117,6 +10248,7 @@ export class Session implements SessionContext {
         item.displayText,
         {
           taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
@@ -10142,11 +10274,101 @@ export class Session implements SessionContext {
     return true;
   }
 
+  async #takeCurrentTurnBackgroundParts(
+    promptId: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (signal.aborted || this.notificationsPaused) return [];
+    const turnId =
+      this.backgroundTurn?.turnId ??
+      getInvocationContext()?.promptId ??
+      promptId;
+    const parts: Part[] = [];
+    for (let index = 0; index < this.notificationQueue.length; ) {
+      const item = this.notificationQueue[index];
+      if (item.sourceTurnId !== turnId) {
+        index++;
+        continue;
+      }
+      this.notificationQueue.splice(index, 1);
+      const droppedSummary = this.droppedNotifications.take();
+      if (droppedSummary) {
+        parts.push({ text: droppedSummary.modelText });
+        this.config
+          .getChatRecordingService()
+          ?.recordNotification(
+            [{ text: droppedSummary.modelText }],
+            droppedSummary.displayText,
+          );
+        try {
+          await this.#emitDroppedNotificationSummary(droppedSummary);
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to display dropped notification summary:',
+            error,
+          );
+        }
+      }
+      if (!item.persisted) {
+        this.config
+          .getChatRecordingService()
+          ?.recordNotification([{ text: item.modelText }], item.displayText, {
+            taskId: item.taskId,
+            status: item.status,
+            kind: item.kind,
+            toolUseId: item.toolUseId,
+            sourceTurnId: item.sourceTurnId,
+            ...item.structured,
+          });
+      }
+      parts.push({ text: item.modelText });
+      try {
+        await this.#emitBackgroundNotificationDisplay(item);
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to display consumed background result:',
+          error,
+        );
+      }
+    }
+    if (parts.length > 0) this.#activeWorkChanged();
+    return parts;
+  }
+
+  #deferBackgroundAdmission(item: QueuedBackgroundNotification): void {
+    if (this.disposed) return;
+    this.notificationQueue.unshift(item);
+    this.notificationAdmissionDeferred = true;
+    if (this.notificationsPaused) return;
+    const attempt = item.admissionRetries ?? 0;
+    item.admissionRetries = attempt + 1;
+    if (attempt >= 3) {
+      void backgroundTurnContext.exit(() =>
+        this.#emitAgentDiagnosticMessageSafely(
+          'Background result retained after repeated start failures. Send a message to retry.',
+          'Failed to display deferred background result',
+        ),
+      );
+      return;
+    }
+    this.notificationAdmissionRetry = setTimeout(
+      () => {
+        this.notificationAdmissionRetry = undefined;
+        if (this.disposed || this.notificationsPaused) return;
+        this.notificationAdmissionDeferred = false;
+        void this.#drainNotificationQueue();
+      },
+      1000 * 2 ** attempt,
+    );
+    this.notificationAdmissionRetry.unref?.();
+  }
+
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
+    if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (
       this.pendingPrompt ||
       this.goalProcessing ||
@@ -10166,6 +10388,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
@@ -10180,6 +10403,11 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Notification turn rejected [session ${this.sessionId}]: ${error instanceof Error ? error.message : String(error)}`,
       );
+      const index = this.#nextNotificationQueueIndex();
+      if (index >= 0)
+        this.#deferBackgroundAdmission(
+          this.notificationQueue.splice(index, 1)[0],
+        );
       return;
     }
     if (
@@ -10203,7 +10431,11 @@ export class Session implements SessionContext {
     });
 
     try {
-      while (this.notificationQueue.length > 0) {
+      while (
+        this.notificationQueue.length > 0 &&
+        !this.notificationsPaused &&
+        !this.notificationAdmissionDeferred
+      ) {
         if (
           this.pendingPrompt ||
           this.goalProcessing ||
@@ -10233,13 +10465,29 @@ export class Session implements SessionContext {
           // leave the store, as #executePrompt does for every non-Goal turn,
           // or the notification's tool results would be stamped as evidence
           // for a turn that never made those calls.
-          await goalTurnContext.exit(() =>
-            runWithInvocationContext(undefined, () =>
-              sessionIdContext.run(this.config.getSessionId(), () =>
-                this.#executeBackgroundNotificationPromptInner(item),
+          const turn: BackgroundNotificationTurn = (item.turn ??= {
+            turnId: `${this.sessionId}########notification${randomUUID()}`,
+            taskId: item.taskId,
+            kind: item.kind,
+            ...(item.toolUseId ? { toolUseId: item.toolUseId } : {}),
+            ...(item.sourceTurnId ? { sourceTurnId: item.sourceTurnId } : {}),
+            ...(item.label ? { label: item.label } : {}),
+            startedAt: Date.now(),
+          });
+          const context = { sessionId: this.sessionId, turn, active: true };
+          try {
+            await backgroundTurnContext.run(context, () =>
+              goalTurnContext.exit(() =>
+                runWithInvocationContext(undefined, () =>
+                  sessionIdContext.run(this.config.getSessionId(), () =>
+                    this.#executeBackgroundNotificationPromptInner(item, turn),
+                  ),
+                ),
               ),
-            ),
-          );
+            );
+          } finally {
+            context.active = false;
+          }
         } finally {
           this.currentAgentNotificationTaskId = null;
           this.currentWorkflowNotificationTaskId = null;
@@ -10258,6 +10506,8 @@ export class Session implements SessionContext {
 
       if (
         this.notificationQueue.length > 0 &&
+        !this.notificationsPaused &&
+        !this.notificationAdmissionDeferred &&
         !this.pendingPrompt &&
         !this.goalProcessing &&
         !this.cronProcessing &&
@@ -10279,16 +10529,17 @@ export class Session implements SessionContext {
 
   async #executeBackgroundNotificationPromptInner(
     item: QueuedBackgroundNotification,
+    turn: BackgroundNotificationTurn,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
         const ac = new AbortController();
-        const promptId =
-          this.config.getSessionId() + '########notification' + Date.now();
+        const promptId = turn.turnId;
         let responseSegmentEmitted = false;
         let responseTurnComplete = false;
+        let admitted = false;
         const finishBackgroundNotificationTurn = async (
           reason: PromptResponse['stopReason'],
           partial = false,
@@ -10311,7 +10562,7 @@ export class Session implements SessionContext {
               );
             }
           }
-          await this.#emitBackgroundNotificationEndTurn(reason);
+          await this.#emitBackgroundNotificationEndTurn(reason, promptId);
         };
         this.notificationAbortController = ac;
         const continuesCurrentWorkChain =
@@ -10319,7 +10570,39 @@ export class Session implements SessionContext {
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         try {
           await this.assertCanStartTurn();
-          if (ac.signal.aborted) return;
+          if (ac.signal.aborted) {
+            this.notificationQueue.unshift(item);
+            return;
+          }
+          let admission: Record<string, unknown> | undefined;
+          try {
+            admission = await this.client.extMethod('_qwencode/start_turn', {
+              sessionId: this.sessionId,
+              source: 'background_notification',
+              ...turn,
+              ...(this.lastCompletedRpcPromptId
+                ? { afterPromptId: this.lastCompletedRpcPromptId }
+                : {}),
+            });
+          } catch (error) {
+            const code =
+              error && typeof error === 'object' && 'code' in error
+                ? error.code
+                : undefined;
+            if (code !== -32601) throw error;
+          }
+          if (admission?.['accepted'] === false) {
+            this.#deferBackgroundAdmission(item);
+            return;
+          }
+          admitted = true;
+          this.backgroundTurn = turn;
+          if (ac.signal.aborted) {
+            delete item.turn;
+            this.notificationQueue.unshift(item);
+            await finishBackgroundNotificationTurn('cancelled', true);
+            return;
+          }
           this.config.startAutomaticActiveTodoWorkChain(
             promptId,
             item.todoWorkChainId,
@@ -10357,6 +10640,7 @@ export class Session implements SessionContext {
               item.displayText,
               {
                 taskId: item.taskId,
+                sourceTurnId: item.sourceTurnId,
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
@@ -10391,6 +10675,7 @@ export class Session implements SessionContext {
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
+              this.#preserveUnsentMessageHistory(nextMessage, true);
               await finishBackgroundNotificationTurn('cancelled', true);
               return;
             }
@@ -10508,20 +10793,15 @@ export class Session implements SessionContext {
               }
             }
 
-            const turnComplete = functionCalls.length === 0;
-            if (
-              responseText.length > 0 ||
-              (turnComplete && responseSegmentEmitted)
-            ) {
+            if (responseText.length > 0) {
               await this.#emitBackgroundNotificationResponse(
                 item,
                 responseText,
                 ac.signal,
                 promptId,
-                turnComplete,
+                false,
               );
-              if (responseText.length > 0) responseSegmentEmitted = true;
-              if (turnComplete) responseTurnComplete = true;
+              responseSegmentEmitted = true;
             }
 
             if (this.messageRewriter) {
@@ -10570,6 +10850,16 @@ export class Session implements SessionContext {
                 );
                 return;
               }
+            } else {
+              const input = await this.#drainMidTurnUserMessages(ac.signal);
+              const results = await this.#takeCurrentTurnBackgroundParts(
+                promptId,
+                ac.signal,
+              );
+              if (input.length > 0) this.todoStopGuard.acceptMidTurnUserInput();
+              if (input.length > 0 || results.length > 0) {
+                nextMessage = { role: 'user', parts: [...input, ...results] };
+              }
             }
           }
 
@@ -10594,6 +10884,14 @@ export class Session implements SessionContext {
             ac.signal.aborted,
           );
         } catch (error) {
+          if (!admitted) {
+            this.#deferBackgroundAdmission(item);
+            debugLogger.warn(
+              'Background turn could not start; retaining result:',
+              error,
+            );
+            return;
+          }
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
             await finishBackgroundNotificationTurn('cancelled', true);
@@ -10616,6 +10914,9 @@ export class Session implements SessionContext {
           }
         } finally {
           this.config.endAutomaticActiveTodoWorkChain(promptId);
+          if (admitted) this.finishedBackgroundTurnId = promptId;
+          if (this.backgroundTurn?.turnId === promptId)
+            this.backgroundTurn = undefined;
           if (this.notificationAbortController === ac) {
             this.notificationAbortController = null;
           }
@@ -10641,15 +10942,17 @@ export class Session implements SessionContext {
 
   async #emitBackgroundNotificationDisplay(
     item: BackgroundNotificationQueueItem,
+    source = 'background_notification',
   ): Promise<void> {
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: item.displayText },
       _meta: {
-        source: 'background_notification',
+        source,
         qwenDiscreteMessage: true,
         backgroundTask: {
           taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
@@ -10681,6 +10984,7 @@ export class Session implements SessionContext {
         qwenDiscreteMessage: true,
         backgroundTask: {
           taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
@@ -10702,11 +11006,13 @@ export class Session implements SessionContext {
 
   async #emitBackgroundNotificationEndTurn(
     reason: PromptResponse['stopReason'],
+    turnId: string,
   ): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
         reason,
+        turnId,
         source: 'background_notification',
       });
     } catch (error) {
@@ -10831,13 +11137,28 @@ export class Session implements SessionContext {
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    return this.client.requestPermission(params);
+    return this.client.requestPermission(
+      this.#withBackgroundPermission(params),
+    );
+  }
+
+  #withBackgroundPermission(
+    params: RequestPermissionRequest,
+  ): RequestPermissionRequest {
+    const execution = backgroundTurnContext.getStore();
+    return execution?.active && execution.sessionId === this.sessionId
+      ? {
+          ...params,
+          _meta: { ...params._meta, backgroundTurn: execution.turn },
+        }
+      : params;
   }
 
   #requestPermissionQueued(
     params: RequestPermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
+    params = this.#withBackgroundPermission(params);
     const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
     const transportRequest = prior.then(() =>
       signal.aborted

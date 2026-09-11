@@ -68,6 +68,7 @@ import {
 import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
+  backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
@@ -9777,6 +9778,177 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(promptStatus).not.toBe('idle');
+  });
+
+  it.each([
+    [false, false, 'turn_complete'],
+    [false, true, 'turn_complete'],
+    [true, false, 'turn_complete'],
+    [true, true, 'turn_complete'],
+    [false, true, 'turn_error'],
+  ] as const)(
+    'settles local input across a background handoff (old end: %s, early terminal: %s, %s)',
+    async (deliverOldTerminal, earlyTerminal, terminalType) => {
+      const accepted = createDeferred<NonBlockingPromptAccepted>();
+      const oldEnd = createDeferred<void>();
+      const newEnd = createDeferred<void>();
+      const oldSeen = createDeferred<void>();
+      const session = createMockSession({
+        hasActivePrompt: true,
+        backgroundTurn: {
+          turnId: 'old-auto',
+          taskId: 'old-task',
+          kind: 'agent',
+          startedAt: 1,
+        },
+        submitPrompt: vi.fn(() => accepted.promise),
+        async *events(opts = {}) {
+          await oldEnd.promise;
+          if (opts.signal?.aborted) return;
+          if (deliverOldTerminal)
+            yield {
+              v: 1,
+              id: 6,
+              type: 'turn_complete',
+              data: { promptId: 'old-auto', stopReason: 'end_turn' },
+            } as DaemonEvent;
+          oldSeen.resolve();
+          await newEnd.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            v: 1,
+            id: 7,
+            type: terminalType,
+            data: {
+              promptId: 'local-P',
+              stopReason: 'end_turn',
+              message: 'Local prompt failed',
+              code: 'internal_error',
+            },
+          } as DaemonEvent;
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) resolve();
+            else
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let status = 'idle';
+      function Harness() {
+        actions = useDaemonActions();
+        status = useDaemonPromptStatus();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      let pending!: Promise<unknown>;
+      let settled = false;
+      await act(async () => {
+        pending = requireActions(actions)
+          .sendPrompt('Local user P')
+          .then(
+            (result) => {
+              settled = true;
+              return result;
+            },
+            (error: unknown) => {
+              settled = true;
+              return error;
+            },
+          );
+        await flushPromises();
+        oldEnd.resolve();
+        await oldSeen.promise;
+        await flushPromises();
+      });
+      expect(settled).toBe(false);
+      expect(status).not.toBe('idle');
+      await act(async () => {
+        if (earlyTerminal) {
+          newEnd.resolve();
+          await flushPromises();
+        }
+        accepted.resolve({ promptId: 'local-P', lastEventId: 6 });
+        await flushPromises();
+      });
+      expect(settled).toBe(earlyTerminal);
+      await act(async () => {
+        newEnd.resolve();
+        if (terminalType === 'turn_complete') {
+          expect(await pending).toEqual({ stopReason: 'end_turn' });
+        } else {
+          expect(await pending).toMatchObject({
+            message: 'Local prompt failed',
+          });
+        }
+        await flushPromises();
+      });
+      expect(settled).toBe(true);
+      expect(status).toBe('idle');
+    },
+  );
+
+  it('restores background execution and ignores a stale terminal before its own completion', async () => {
+    const staleSeen = createDeferred<void>();
+    const finish = createDeferred<void>();
+    const finished = createDeferred<void>();
+    const backgroundTurn = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    const session = createMockSession({
+      hasActivePrompt: true,
+      backgroundTurn,
+      lastEventId: 5,
+      async *events() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'old-user', stopReason: 'end_turn' },
+        };
+        staleSeen.resolve();
+        await finish.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'auto-1', stopReason: 'end_turn' },
+        };
+        finished.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: ReturnType<typeof useDaemonConnection> | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    function Harness() {
+      connection = useDaemonConnection();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await staleSeen.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toEqual(backgroundTurn);
+    expect(promptStatus).not.toBe('idle');
+    await act(async () => {
+      finish.resolve();
+      await finished.promise;
+      await flushPromises();
+    });
+    expect(connection?.backgroundTurn).toBeUndefined();
+    expect(promptStatus).toBe('idle');
   });
 
   it('settles restored active prompts when turn_complete arrives', async () => {
@@ -20310,6 +20482,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     clientId: opts.clientId ?? 'client-1',
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
+    backgroundTurn: opts.backgroundTurn,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
     replayDegraded: opts.replayDegraded ?? false,

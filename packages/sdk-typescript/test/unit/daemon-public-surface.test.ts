@@ -563,6 +563,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
   });
 
   it('exposes the workspace session live-state surface at the public entry', () => {
+    expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
     // The prototype checks execute under vitest (type-only imports are
     // erased). The type shape assertions pin the wire contract via the
     // package typecheck, which compiles this file through
@@ -582,6 +583,8 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       clientCount: number;
       hasActivePrompt: boolean;
       activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+      backgroundTurn?: Public.DaemonBackgroundTurn;
+      hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
       updatedAt?: string;

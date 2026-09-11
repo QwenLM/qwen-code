@@ -2009,3 +2009,12 @@
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
+
+.sessionBackgroundRunning {
+  color: var(--warning-color, #d29922);
+}
+
+.sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
+  opacity: 0;
+  pointer-events: none;
+}

@@ -7087,6 +7087,55 @@ describe('workspace session live-state route', () => {
     ]);
   });
 
+  it.each([true, false, undefined])(
+    'preserves running background task state %s while the main prompt is idle',
+    async (hasRunningBackgroundTasks) => {
+      const { app } = makeHarness({
+        primarySummaries: [
+          makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD, {
+            hasActivePrompt: false,
+            hasRunningBackgroundTasks,
+          }),
+        ],
+      });
+      const res = await request(app)
+        .get(liveStatePath('primary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(res.body.sessions[0].hasActivePrompt).toBe(false);
+      expect(res.body.sessions[0].hasRunningBackgroundTasks).toBe(
+        hasRunningBackgroundTasks,
+      );
+      if (hasRunningBackgroundTasks === undefined)
+        expect(res.body.sessions[0]).not.toHaveProperty(
+          'hasRunningBackgroundTasks',
+        );
+    },
+  );
+
+  it('preserves the active automatic execution in the live-state projection', async () => {
+    const backgroundTurn = {
+      turnId: 'automatic-turn',
+      taskId: 'background-agent',
+      kind: 'agent' as const,
+      sourceTurnId: 'source-turn',
+      startedAt: 1234,
+    };
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD, {
+          hasActivePrompt: true,
+          backgroundTurn,
+        }),
+      ],
+    });
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+    expect(res.body.sessions[0].backgroundTurn).toEqual(backgroundTurn);
+  });
+
   it('omits updatedAt when the bridge summary has no activity watermark', async () => {
     // A live entry that has not settled a running turn in this bridge (fresh
     // spawn, restore) legitimately carries no watermark. The key must be

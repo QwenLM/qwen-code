@@ -198,7 +198,9 @@ import {
   type ChannelLivenessFailure,
 } from './channel-liveness.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
+import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import type {
+  BackgroundNotificationTurn,
   BridgeSession,
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
@@ -440,12 +442,16 @@ function getChannelPromptDisplayText(
 function hasInFlightPromptActivity(
   entry: Pick<
     SessionEntry,
-    'promptActive' | 'goalTurnActive' | 'deferredRestoreAskUserQuestionPrompts'
+    | 'promptActive'
+    | 'goalTurnActive'
+    | 'backgroundTurn'
+    | 'deferredRestoreAskUserQuestionPrompts'
   >,
 ): boolean {
   return (
     entry.promptActive ||
     entry.goalTurnActive === true ||
+    !!entry.backgroundTurn ||
     (entry.deferredRestoreAskUserQuestionPrompts?.size ?? 0) > 0
   );
 }
@@ -1356,6 +1362,15 @@ interface SessionEntry {
    * summaries because Goal turns never flip `promptActive`.
    */
   goalTurnActive?: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
+  backgroundAdmissionEpoch?: number;
+  backgroundStartsSuspended?: boolean;
+  activePromptTerminal?: {
+    promptId: string;
+    promise: Promise<void>;
+    resolve: () => void;
+  };
   /** Terminal error from the prior turn, cleared when the next turn starts. */
   turnError?: {
     message: string;
@@ -2434,6 +2449,9 @@ function publishPromptTerminal(
       mutateTurnState,
     );
   }
+  if (entry.activePromptTerminal?.promptId === pendingEntry.promptId) {
+    entry.activePromptTerminal.resolve();
+  }
 }
 
 /**
@@ -3133,7 +3151,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   function entryHasLocalWork(entry: SessionEntry): boolean {
     return (
-      entry.pendingPromptCount > 0 || entry.pendingAgentNotificationCount > 0
+      entry.pendingPromptCount > 0 ||
+      entry.pendingAgentNotificationCount > 0 ||
+      !!entry.backgroundTurn
     );
   }
 
@@ -3622,13 +3642,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (snapshot.seq <= info.activeWork.seq) return;
     info.activeWork.seq = snapshot.seq;
     const now = Date.now();
-    const reported = new Map<string, Map<string, ActiveWorkHoldCategory>>();
+    const reportedHolds = new Map<
+      string,
+      Map<string, ActiveWorkHoldCategory>
+    >();
     for (const session of snapshot.sessions) {
       const holds = new Map<string, ActiveWorkHoldCategory>();
       for (const hold of session.holds) holds.set(hold.id, hold.category);
-      reported.set(session.sessionId, holds);
+      reportedHolds.set(session.sessionId, holds);
     }
-    info.activeWork.snapshot = { receivedAt: now, sessions: reported };
+    info.activeWork.snapshot = { receivedAt: now, sessions: reportedHolds };
+    const reported = new Map(
+      snapshot.sessions.map((session) => [session.sessionId, session]),
+    );
     // Iterate what the channel owns rather than what the snapshot named: a
     // Session the child did not mention holds nothing on the child side.
     // Because reports are complete, silence about a Session this channel owns
@@ -3646,10 +3672,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     for (const sessionId of Array.from(info.sessionIds)) {
       const entry = byId.get(sessionId);
       if (!entry || entry.channel !== info.channel) continue;
-      const holds = reported.get(sessionId) ?? new Map();
+      const report = reported.get(sessionId);
+      if (report?.finishedBackgroundTurnId) {
+        info.client.finishBackgroundTurn(
+          sessionId,
+          report.finishedBackgroundTurnId,
+          'end_turn',
+        );
+      }
+      const holds = new Map(
+        report?.holds.map((hold) => [hold.id, hold.category]),
+      );
       const previouslyHeld = entry.childHolds
         ? entry.childHolds.size > 0
         : undefined;
+      const running = report
+        ? report.hasRunningBackgroundTasks
+        : entry.hasRunningBackgroundTasks === undefined
+          ? undefined
+          : false;
+      if (entry.hasRunningBackgroundTasks !== running) {
+        entry.hasRunningBackgroundTasks = running;
+        markSessionCatalogChanged();
+      }
       entry.childHolds = holds;
       entry.childHoldsAt = now;
       // Only a change in whether the Session holds anything counts as
@@ -4291,6 +4336,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       clientCount: entry.clientIds.size,
       hasActivePrompt: hasInFlightPromptActivity(entry),
       activeWorkState: entryActiveWorkState(entry),
+      hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
+      ...(entry.backgroundTurn ? { backgroundTurn: entry.backgroundTurn } : {}),
       isWaitingForPermission,
       isWaitingForUserQuestion,
       pendingInteractionCount: entry.pendingInteractions.size,
@@ -4779,8 +4826,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           markSessionCatalogChanged,
           // A Goal turn drains the mid-turn queue but owns no prompt slot, so
           // nothing else would settle what its last drain missed.
-          settleMidTurnQueueAfterGoalTurn,
+          settleMidTurnQueueAfterAutomaticTurn,
           opts.onCreateCurrentSessionScheduledTask,
+          async (sessionId, turn, afterPromptId) => {
+            const entry = byId.get(sessionId);
+            if (
+              !entry ||
+              entry.closing ||
+              resetPendingSessions.has(sessionId) ||
+              entry.backgroundStartsSuspended ||
+              entry.goalTurnActive
+            )
+              return false;
+            if (entry.backgroundTurn)
+              return entry.backgroundTurn.turnId === turn.turnId;
+            const epoch = entry.backgroundAdmissionEpoch;
+            const preceding = entry.activePromptTerminal;
+            if (entry.promptActive && preceding?.promptId !== afterPromptId)
+              return false;
+            if (preceding && preceding.promptId === afterPromptId)
+              await preceding.promise;
+            if (
+              byId.get(sessionId) !== entry ||
+              entry.closing ||
+              resetPendingSessions.has(sessionId) ||
+              entry.backgroundAdmissionEpoch !== epoch ||
+              entry.backgroundTurn ||
+              entry.goalTurnActive ||
+              entry.pendingPromptList.some((p) => !p.terminalPublished)
+            )
+              return false;
+            entry.backgroundTurn = turn;
+            delete entry.cancelBroadcastWithoutPrompt;
+            delete entry.turnError;
+            delete entry.turnErrorEvent;
+            clearPromptSettledClose(entry);
+            entry.sessionLastSeenAt = Date.now();
+            touchActivity();
+            return true;
+          },
         );
         const rawConnection = new ClientSideConnection(
           () =>
@@ -7788,6 +7872,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId
         ) {
@@ -7957,7 +8042,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // promptActive; Goal turns never set promptActive at all.
       entry.promptActive ||
       entry.pendingPromptCount > 0 ||
-      entry.goalTurnActive === true
+      entry.goalTurnActive === true ||
+      entry.backgroundTurn !== undefined
     ) {
       return false;
     }
@@ -8155,8 +8241,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        hasRunningBackgroundTasks: existing.hasRunningBackgroundTasks,
         hasActivePrompt:
-          existing.promptActive || existing.goalTurnActive === true,
+          existing.promptActive ||
+          existing.goalTurnActive === true ||
+          !!existing.backgroundTurn,
+        ...(existing.backgroundTurn
+          ? { backgroundTurn: existing.backgroundTurn }
+          : {}),
         ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
         ...replayFields,
         ...(historyAnchorRecordId !== undefined
@@ -8334,6 +8426,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // restore was in flight must still read as active here so the
         // waiter's caller never relocates or resets under a deferred prompt.
         hasActivePrompt: hasInFlightPromptActivity(entry),
+        hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
+        ...(entry.backgroundTurn
+          ? { backgroundTurn: entry.backgroundTurn }
+          : {}),
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
@@ -8872,10 +8968,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ? { sourceId: racedEntry.sourceId }
             : {}),
           state: racedEntry.restoreState ?? {},
+          hasRunningBackgroundTasks: racedEntry.hasRunningBackgroundTasks,
           hasActivePrompt:
             restorePromptAdmitted ||
             racedEntry.promptActive ||
-            racedEntry.goalTurnActive === true,
+            racedEntry.goalTurnActive === true ||
+            !!racedEntry.backgroundTurn,
+          ...(racedEntry.backgroundTurn
+            ? { backgroundTurn: racedEntry.backgroundTurn }
+            : {}),
           ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
           ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
@@ -8902,6 +9003,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
       const publicState = publicRestoreState(state);
       entry.restoreState = publicState;
+      entry.backgroundTurn = parseBackgroundNotificationTurn(
+        state._meta?.['backgroundTurn'],
+      );
+      if (typeof state._meta?.['hasRunningBackgroundTasks'] === 'boolean') {
+        entry.hasRunningBackgroundTasks =
+          state._meta['hasRunningBackgroundTasks'];
+      }
       if (replayPartial === true) {
         entry.restoreReplayPartial = true;
       }
@@ -9047,10 +9155,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
+        hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
         hasActivePrompt:
           restorePromptAdmitted ||
           entry.promptActive ||
-          entry.goalTurnActive === true,
+          entry.goalTurnActive === true ||
+          !!entry.backgroundTurn,
+        ...(entry.backgroundTurn
+          ? { backgroundTurn: entry.backgroundTurn }
+          : {}),
         ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
@@ -9476,13 +9589,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    * while a Goal is still active: the child's `claimGoalTurn` makes the
    * promoted prompt wait for the permit and run as the next Goal turn.
    */
-  const settleMidTurnQueueAfterGoalTurn = (sessionId: string) => {
+  const settleMidTurnQueueAfterAutomaticTurn = (sessionId: string) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
+    advanceTurnActivity(entry);
+    entry.sessionLastSeenAt = Date.now();
+    touchActivity();
     // A prompt owns the queue and settles it on its own terminal; a Goal turn
     // that started again already re-armed the child's drain.
     if (
       entry.goalTurnActive === true ||
+      entry.backgroundTurn !== undefined ||
       entry.pendingPromptCount > 0 ||
       entry.closing
     ) {
@@ -9550,6 +9667,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             pendingPromptCount: entry.pendingPromptCount,
             pendingPermissionCount: entry.pendingPermissionIds.size,
             hasActivePrompt: hasInFlightPromptActivity(entry),
+            hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
+            ...(entry.backgroundTurn
+              ? { backgroundTurn: entry.backgroundTurn }
+              : {}),
             lastEventId: entry.events.lastEventId,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
@@ -9916,8 +10037,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
               : {}),
+            hasRunningBackgroundTasks: existing.hasRunningBackgroundTasks,
             hasActivePrompt:
-              existing.promptActive || existing.goalTurnActive === true,
+              existing.promptActive ||
+              existing.goalTurnActive === true ||
+              !!existing.backgroundTurn,
+            ...(existing.backgroundTurn
+              ? { backgroundTurn: existing.backgroundTurn }
+              : {}),
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -9993,9 +10120,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...session,
             attached: true,
             clientId,
+            hasRunningBackgroundTasks: attachedEntry.hasRunningBackgroundTasks,
             hasActivePrompt:
               attachedEntry.promptActive ||
-              attachedEntry.goalTurnActive === true,
+              attachedEntry.goalTurnActive === true ||
+              !!attachedEntry.backgroundTurn,
+            ...(attachedEntry.backgroundTurn
+              ? { backgroundTurn: attachedEntry.backgroundTurn }
+              : {}),
           };
         }
       }
@@ -10635,6 +10767,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   return copy;
                 })();
+                entry.backgroundStartsSuspended = false;
+                let resolveTerminal!: () => void;
+                entry.activePromptTerminal = {
+                  promptId: pendingEntry.promptId,
+                  promise: new Promise<void>((resolve) => {
+                    resolveTerminal = resolve;
+                  }),
+                  resolve: () => resolveTerminal(),
+                };
                 entry.promptActive = true;
                 // The child serializes Goal turns against RPC prompts, so a
                 // still-set flag here means the goal end_turn signal was
@@ -10693,8 +10834,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   throw echoErr;
                 }
                 pendingEntry.dispatched = true;
+                const precedingBackgroundTurnId = entry.backgroundTurn?.turnId;
                 const promptPromise = entry.connection
                   .prompt(promptRequest)
+                  .then((response) => {
+                    // A successful RPC response proves the child drained its preceding automatic execution.
+                    if (
+                      precedingBackgroundTurnId &&
+                      byId.get(sessionId) === entry
+                    )
+                      channelInfoForEntry(entry)?.client.finishBackgroundTurn(
+                        sessionId,
+                        precedingBackgroundTurnId,
+                        'end_turn',
+                      );
+                    return response;
+                  })
                   .finally(() => {
                     // Ownership-gated: a late settle after a deadline
                     // already released the FIFO must not clear the NEXT
@@ -10900,6 +11055,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           const shouldSettleMidTurnQueue =
             entry.pendingPromptCount === 1 &&
+            !entry.backgroundTurn &&
             !entry.closing &&
             byId.get(entry.sessionId) === entry;
           const undrainedMessages = shouldSettleMidTurnQueue
@@ -10939,6 +11095,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      entry.backgroundAdmissionEpoch =
+        (entry.backgroundAdmissionEpoch ?? 0) + 1;
+      entry.backgroundStartsSuspended = true;
       const runningPrompt = entry.pendingPromptList.find(
         (pending) => pending.state === 'running' && !pending.terminalPublished,
       );
@@ -10967,7 +11126,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       broadcastPromptCancelledOnce(
         entry,
         sessionId,
-        entry.activePromptId ?? runningPrompt?.promptId,
+        entry.backgroundTurn?.turnId ??
+          entry.activePromptId ??
+          runningPrompt?.promptId,
         cancelOriginatorClientId,
       );
       // ACP spec: cancelling a prompt MUST resolve outstanding
@@ -11267,12 +11428,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // a derivative session while the checkout's ownership is in flux.
       assertSessionResetNotPending(sessionId);
 
-      const concurrentSideTask = isSideTask && entry.promptActive;
+      const concurrentSideTask =
+        isSideTask && (entry.promptActive || !!entry.backgroundTurn);
       // Admission-time check: pendingPromptCount changes synchronously when a
       // prompt is accepted, before its queue callback sets promptActive. A
       // check inside the branch callback would observe post-prompt state and
       // silently wait instead of rejecting.
-      if (!isSideTask && (entry.pendingPromptCount > 0 || entry.promptActive)) {
+      if (
+        !isSideTask &&
+        (entry.pendingPromptCount > 0 ||
+          entry.promptActive ||
+          !!entry.backgroundTurn)
+      ) {
         throw new BranchWhilePromptActiveError(sessionId);
       }
       const branchResult = (
@@ -11282,7 +11449,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (isClosingOrAuthorizingClose(entry)) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
-        if (entry.promptActive && !isSideTask) {
+        if ((entry.promptActive || entry.backgroundTurn) && !isSideTask) {
           throw new BranchWhilePromptActiveError(sessionId);
         }
 
@@ -11625,7 +11792,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const ci = assertLivePromptEntry(sessionId, entry);
         runtimeOperationReservations++;
         try {
-          if (entry.promptActive) {
+          if (entry.promptActive || entry.backgroundTurn) {
             throw new CdWhilePromptActiveError(sessionId);
           }
 
@@ -13827,7 +13994,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // queue. Without `goalTurnActive` here every mid-turn insert during a
       // Goal turn is rejected as idle even though the client enables the
       // affordance (Goal turns are non-idle in `hasActivePrompt` summaries).
-      if (entry.pendingPromptCount === 0 && entry.goalTurnActive !== true) {
+      if (
+        entry.pendingPromptCount === 0 &&
+        entry.goalTurnActive !== true &&
+        !entry.backgroundTurn
+      ) {
         // Both modes refuse new ownership once idle. `queueOnly` callers (live
         // steering) additionally drive the next turn themselves: a promoted
         // message would have no collector forwarding its response or deadline.
@@ -14052,14 +14223,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // The fork agent runs its tools in this session's cwd — the checkout the
       // transfer is moving — and it chains onto the same queue a prompt would.
       assertSessionResetNotPending(sessionId);
-      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+      if (
+        entry.pendingPromptCount > 0 ||
+        entry.promptActive ||
+        !!entry.backgroundTurn
+      ) {
         throw new SessionBusyError(
           sessionId,
           'Cannot fork while a response or tool call is in progress',
         );
       }
       return entry.promptQueue.then(async () => {
-        if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        if (
+          entry.pendingPromptCount > 0 ||
+          entry.promptActive ||
+          !!entry.backgroundTurn
+        ) {
           throw new SessionBusyError(
             sessionId,
             'Cannot fork while a response or tool call is in progress',
@@ -14325,7 +14504,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `isTurnIdle()` guard never fires because the queue guarantees the turn
       // is over before the rewind reaches the agent. Reject synchronously,
       // matching branchSession and launchSessionForkAgent.
-      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+      if (
+        entry.pendingPromptCount > 0 ||
+        entry.promptActive ||
+        !!entry.backgroundTurn
+      ) {
         throw new SessionBusyError(
           sessionId,
           'Cannot rewind while a prompt is running',

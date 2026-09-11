@@ -34,6 +34,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   DaemonHttpError,
+  parseDaemonBackgroundTurn,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
@@ -322,6 +323,9 @@ export function getConnectionAfterSessionClear(
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
+    delete next.backgroundTurn;
+    delete next.finishedBackgroundTurnId;
+    delete next.backgroundTurnObservedAt;
     delete next.standaloneSession;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
@@ -901,6 +905,9 @@ export function createDaemonSessionActions({
           clientId: undefined,
           displayName: undefined,
           titleSource: undefined,
+          backgroundTurn: undefined,
+          finishedBackgroundTurnId: undefined,
+          backgroundTurnObservedAt: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -956,10 +963,45 @@ export function createDaemonSessionActions({
         workspaceCwd: sessionRef.current?.workspaceCwd,
         sessionId: sessionRef.current?.sessionId,
       },
+      backgroundTurn,
+      requestStartedAt,
     ) {
+      backgroundTurn = parseDaemonBackgroundTurn(backgroundTurn);
+      const connection = getConnection();
+      if (
+        connection.sessionId === owner.sessionId &&
+        connection.workspaceCwd === owner.workspaceCwd &&
+        requestStartedAt !== undefined &&
+        requestStartedAt <= (connection.backgroundTurnObservedAt ?? -Infinity)
+      )
+        return;
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = { active, ...owner };
       const backstopSession = sessionRef.current;
+      if (
+        active !== undefined &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd
+      ) {
+        setConnection((current) => {
+          const nextBackgroundTurn =
+            current.finishedBackgroundTurnId === backgroundTurn?.turnId
+              ? undefined
+              : backgroundTurn;
+          return current.backgroundTurn === nextBackgroundTurn
+            ? current
+            : {
+                ...current,
+                backgroundTurn: nextBackgroundTurn,
+                backgroundTurnObservedAt:
+                  requestStartedAt ?? current.backgroundTurnObservedAt,
+                finishedBackgroundTurnId:
+                  current.backgroundTurn && !nextBackgroundTurn
+                    ? current.backgroundTurn.turnId
+                    : current.finishedBackgroundTurnId,
+              };
+        });
+      }
       // A fresh `false` is a settle signal even when this provider has not seen
       // the preceding `true`; that is how a restored prompt is released after
       // the first post-attach live-state poll. The bridge withholds cached
@@ -1001,7 +1043,12 @@ export function createDaemonSessionActions({
         return;
       }
       const settledRestoredPrompt = settleRestoredActivePrompt();
-      if (!lostAuthority && !settledRestoredPrompt) return;
+      if (
+        !lostAuthority &&
+        !settledRestoredPrompt &&
+        !connection.backgroundTurn
+      )
+        return;
       // Commit the buffered batch before reading the store. Without this the
       // read races the 16ms window: a chunk burst still buffered at flip time
       // lands *after* the `assistant.done` below, and the reducer mints a fresh
@@ -1930,6 +1977,9 @@ export function createDaemonSessionActions({
             status: 'connected',
             sessionId: nextSession.sessionId,
             sessionContext: createdSessionContext,
+            backgroundTurn: undefined,
+            finishedBackgroundTurnId: undefined,
+            backgroundTurnObservedAt: undefined,
             goalState: undefined,
             ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
             workspaceCwd:
@@ -2045,6 +2095,9 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        backgroundTurn: undefined,
+        finishedBackgroundTurnId: undefined,
+        backgroundTurnObservedAt: undefined,
         goalState: undefined,
         missingSession: false,
         error: undefined,

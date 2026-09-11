@@ -1646,7 +1646,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const maySettleToIdle = (
         target = session ?? sessionRef.current ?? connectionRef.current,
       ) => {
-        if (hasCurrentSessionActivePrompt()) return false;
+        if (
+          hasCurrentSessionActivePrompt() ||
+          connectionRef.current.backgroundTurn
+        )
+          return false;
         if (getDaemonActivePrompt(target) === true) {
           // The counterpart to the settle breadcrumb in the action layer:
           // "the pane has said working for 40 minutes" is otherwise
@@ -2389,6 +2393,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          if (runnerSession !== activeSession) {
+            setConnectionSynchronous((current) => ({
+              ...current,
+              backgroundTurn:
+                current.sessionId === activeSession.sessionId &&
+                current.finishedBackgroundTurnId ===
+                  activeSession.backgroundTurn?.turnId
+                  ? undefined
+                  : activeSession.backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+              finishedBackgroundTurnId:
+                current.sessionId === activeSession.sessionId
+                  ? current.finishedBackgroundTurnId
+                  : undefined,
+            }));
+          }
           runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
@@ -3348,6 +3368,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('waiting');
                 }
               }
+              const backgroundTerminal =
+                connectionRef.current.backgroundTurn !== undefined &&
+                eventPromptId(event) ===
+                  connectionRef.current.backgroundTurn.turnId;
+              const localPrompt = activePromptsRef.current.get(
+                activeSession.sessionId,
+              );
+              if (
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                connectionRef.current.backgroundTurn &&
+                eventPromptId(event) !==
+                  connectionRef.current.backgroundTurn.turnId &&
+                (!localPrompt ||
+                  (localPrompt.promptId !== undefined &&
+                    eventPromptId(event) !== localPrompt.promptId))
+              ) {
+                // Ignore the preceding turn's late terminal, but let a newer
+                // local prompt settle even if the background end was lost.
+                continue;
+              }
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
                 activeSession.clientId,
@@ -3404,15 +3445,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) {
                 flushTranscriptSync();
               }
-              const activePromptSettled = settleActivePromptFromTurnEvent(
-                activePromptsRef.current,
-                settledPromptsRef.current,
-                activeSession.sessionId,
-                event,
-                store,
-                setPromptStatus,
-                passiveAssistantDoneTimerRef,
-              );
+              // An old background terminal must not claim a local prompt
+              // whose HTTP admission has not returned its ID yet.
+              const activePromptSettled =
+                !backgroundTerminal &&
+                settleActivePromptFromTurnEvent(
+                  activePromptsRef.current,
+                  settledPromptsRef.current,
+                  activeSession.sessionId,
+                  event,
+                  store,
+                  setPromptStatus,
+                  passiveAssistantDoneTimerRef,
+                );
               let restoredPromptSettled = false;
               if (
                 !activePromptSettled &&
@@ -3724,6 +3769,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -3977,6 +4025,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 context: undefined,
                 reasoning: undefined,
                 models: getWorkspaceModelsAfterSessionClear(current),
+                backgroundTurn: undefined,
+                finishedBackgroundTurnId: undefined,
+                backgroundTurnObservedAt: undefined,
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -4006,6 +4057,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -4358,6 +4412,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         context: undefined,
                         reasoning: undefined,
                         models: getWorkspaceModelsAfterSessionClear(current),
+                        backgroundTurn: undefined,
+                        finishedBackgroundTurnId: undefined,
+                        backgroundTurnObservedAt: undefined,
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,

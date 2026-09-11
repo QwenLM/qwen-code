@@ -248,6 +248,8 @@ export {
   type DaemonSessionSearchResult,
   type DaemonSessionCatalogVersion,
   type DaemonSessionLiveState,
+  type DaemonBackgroundTurn,
+  parseDaemonBackgroundTurn,
   type DaemonWorkspaceSessionLiveState,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,

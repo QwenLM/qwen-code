@@ -14,6 +14,7 @@ import {
   getWorkspaceModelsAfterSessionClear,
   resolveSessionRestoreTimeouts,
 } from './actions';
+import { updateConnectionFromDaemonEvent } from './mappers';
 import type {
   ActivePrompt,
   DaemonActivePromptState,
@@ -56,6 +57,13 @@ describe('getConnectionAfterSessionClear', () => {
         titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
+        backgroundTurn: {
+          turnId: 'background-a',
+          taskId: 'task-a',
+          kind: 'agent',
+          startedAt: 100,
+        },
+        finishedBackgroundTurnId: 'background-old',
         commands: [commandInfo('old-command')],
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
@@ -84,6 +92,8 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
+    expect(next).not.toHaveProperty('backgroundTurn');
+    expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
@@ -320,6 +330,156 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  describe('background live-state request ordering', () => {
+    const owner = { workspaceCwd: '/workspace', sessionId: 'session-1' };
+    const oldTurn = {
+      turnId: 'A',
+      taskId: 'task-A',
+      kind: 'agent' as const,
+      startedAt: 1,
+    };
+    const newTurn = {
+      turnId: 'B',
+      taskId: 'task-B',
+      kind: 'agent' as const,
+      startedAt: 10,
+    };
+
+    function startBackgroundTurn(previousActive?: boolean) {
+      const daemonActivePromptRef: {
+        current: DaemonActivePromptState | undefined;
+      } = {
+        current:
+          previousActive === undefined
+            ? undefined
+            : { active: previousActive, ...owner },
+      };
+      const harness = createActionsHarness({
+        session: createMockSession(owner.sessionId),
+        daemonActivePromptRef,
+        connection: {
+          status: 'connected',
+          ...owner,
+          finishedBackgroundTurnId: oldTurn.turnId,
+        },
+      });
+      const applyEvent = (
+        event: Parameters<typeof updateConnectionFromDaemonEvent>[0],
+      ) => {
+        updateConnectionFromDaemonEvent(event, (update) => {
+          harness.replaceConnection(
+            typeof update === 'function'
+              ? update(harness.getConnection())
+              : update,
+          );
+        });
+      };
+      applyEvent({
+        v: 1,
+        id: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn: newTurn,
+            },
+          },
+        },
+      });
+      expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+      const observedAt = harness.getConnection().backgroundTurnObservedAt;
+      expect(observedAt).toEqual(expect.any(Number));
+      return {
+        ...harness,
+        applyEvent,
+        daemonActivePromptRef,
+        observedAt: observedAt!,
+      };
+    }
+
+    it.each([true, false])(
+      'ignores an older active=%s response after SSE starts B',
+      (active) => {
+        const harness = startBackgroundTurn(true);
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        harness.actions.setDaemonActivePrompt(
+          active,
+          owner,
+          active ? oldTurn : undefined,
+          harness.observedAt - 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([undefined, true])(
+      'allows a newer idle response to settle B (previous authority: %s)',
+      (previousActive) => {
+        const harness = startBackgroundTurn(previousActive);
+        harness.actions.setDaemonActivePrompt(
+          false,
+          owner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.daemonActivePromptRef.current).toMatchObject({
+          active: false,
+        });
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+      },
+    );
+
+    it('ignores an older active response after B has terminated', () => {
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+      try {
+        const harness = startBackgroundTurn(false);
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        expect(harness.observedAt).toBe(100);
+        clock.mockReturnValue(200);
+        harness.applyEvent({
+          v: 1,
+          id: 2,
+          type: 'turn_complete',
+          data: { promptId: newTurn.turnId },
+        });
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.getConnection().finishedBackgroundTurnId).toBe(
+          newTurn.turnId,
+        );
+        expect(harness.getConnection().backgroundTurnObservedAt).toBe(200);
+        harness.actions.setDaemonActivePrompt(true, owner, newTurn, 150);
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('ignores malformed live-state execution metadata', () => {
+      const harness = createActionsHarness({
+        session: createMockSession(owner.sessionId),
+        connection: { status: 'connected', ...owner },
+      });
+      harness.actions.setDaemonActivePrompt(true, owner, {
+        ...newTurn,
+        startedAt: Number.NaN,
+      });
+      expect(harness.getConnection().backgroundTurn).toBeUndefined();
+    });
+
+    it('preserves settlement for legacy callers without request timing', () => {
+      const harness = startBackgroundTurn(true);
+      harness.actions.setDaemonActivePrompt(false, owner);
+      expect(harness.getConnection().backgroundTurn).toBeUndefined();
+      expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+  });
   describe('setDaemonActivePrompt (#9487)', () => {
     it('settles the prompt state when the daemon reports the turn finished', () => {
       const daemonActivePromptRef: {

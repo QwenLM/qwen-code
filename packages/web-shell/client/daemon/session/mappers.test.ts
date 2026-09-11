@@ -1497,3 +1497,91 @@ describe('Plan connection state', () => {
     expect(getPlanExecutionMode(context)).toBeUndefined();
   });
 });
+
+describe('background execution state', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 10,
+  };
+  it('starts explicitly and ignores another execution terminal', () => {
+    const started = applyEvent(
+      { status: 'connected' },
+      {
+        v: 1,
+        id: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Continue' },
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn,
+            },
+          },
+        },
+      },
+    );
+    expect(started.backgroundTurn).toEqual(backgroundTurn);
+    const stale = applyEvent(started, {
+      ...turnComplete,
+      data: { promptId: 'older-turn' },
+    });
+    expect(stale).toBe(started);
+    expect(
+      applyEvent(stale, { ...turnComplete, data: { promptId: 'auto-1' } })
+        .backgroundTurn,
+    ).toBeUndefined();
+  });
+  it('does not infer running state from arbitrary persisted reply metadata', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'background_notification_response',
+                backgroundTurn,
+              },
+            },
+          },
+        },
+      ).backgroundTurn,
+    ).toBeUndefined();
+  });
+});
+
+it('does not revive a completed background turn from its repeated start', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const finished = applyEvent(
+    { status: 'connected', backgroundTurn },
+    { ...turnComplete, data: { promptId: 'auto-1' } },
+  );
+  const replayed = applyEvent(finished, {
+    v: 1,
+    id: 100,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+        },
+      },
+    },
+  });
+  expect(replayed.backgroundTurn).toBeUndefined();
+});

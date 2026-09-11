@@ -8574,6 +8574,10 @@ export function registerSessionRoutes(
           ...(session.activeWorkState !== undefined
             ? { activeWorkState: session.activeWorkState }
             : {}),
+          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+          ...(session.backgroundTurn
+            ? { backgroundTurn: session.backgroundTurn }
+            : {}),
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
           // Bridge-local activity watermark, absent until a running prompt in
