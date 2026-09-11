@@ -191,6 +191,11 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain(
       'Do not claim that writing it configures a timer or changes the Goal token budget',
     );
+    // Naming the settings without their timing sends a reader to bound a Goal
+    // that is already running, which neither setting can do.
+    expect(body).toContain(
+      'takes effect after a restart and only for Goals created afterwards',
+    );
     expect(body).toContain('Preserve a user-specified budget');
     expect(body).toContain('mark the default `[ASSUMPTION]` in Context');
     // The self-check must enforce the marking, and the strong exemplar must
@@ -228,8 +233,28 @@ describe('bundled goal-draft skill', () => {
       expect(position).toBeGreaterThan(previous);
       previous = position;
     }
-    expect(template).toContain("<user's stopping agreement");
+    expect(template).toContain("<user's advisory stopping agreement");
     expect(template).toContain('stop as blocked after 20 turns');
+    // The ceiling settings are operator configuration, not objective text:
+    // the template and the exemplar keep them out of the Budget slot, and the
+    // rules of thumb name them instead. One placement, pinned both ways, so
+    // the two cannot drift apart again.
+    expect(template).not.toContain('model.goalMax');
+    // Every literal Budget exemplar, not just the first: a drafting model
+    // copies whichever example it imitates, so one unmarked row is enough to
+    // put an unenforced turn count into an objective.
+    const weakToStrong = body.slice(body.indexOf('### Weak'));
+    const exemplars = weakToStrong
+      .split('\n')
+      .filter((line) => line.startsWith('| ') && line.includes('Budget:'));
+    expect(exemplars.length).toBeGreaterThanOrEqual(2);
+    for (const exemplar of exemplars) {
+      expect(exemplar).toContain('as model guidance');
+      expect(exemplar).not.toContain('model.goalMax');
+    }
+    expect(body).toContain('model.goalMaxTurns');
+    expect(body).toContain('model.goalMaxActiveMinutes');
+    expect(body).toContain('never write the setting into the objective');
     expect(template).not.toContain('minutes');
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.
@@ -257,11 +282,11 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('acknowledge it in one sentence and end the turn');
     // The text hand-off survives for headless runs and disabled tools.
     expect(body).toContain(
-      '**Otherwise** (Web Shell or another ACP client, headless, the tool is disabled, or a Goal is active)',
+      '**Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active)',
     );
     expect(body).toContain('the draft has not been applied');
     expect(body).toContain(
-      'Do not promise a dialog in Web Shell or other ACP sessions',
+      'Do not promise a dialog when the tool is unavailable',
     );
   });
 

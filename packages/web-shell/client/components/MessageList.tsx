@@ -4109,7 +4109,7 @@ export const MessageList = memo(
       (event: ReactMouseEvent<HTMLDivElement>) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
-        if (!target.closest('[aria-expanded]')) return;
+        if (!target.closest('[aria-expanded], summary')) return;
         followPausedByUserRef.current = true;
         setShouldFollow(false);
         scheduleFollowRecheck();
