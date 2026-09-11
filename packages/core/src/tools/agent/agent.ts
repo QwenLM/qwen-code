@@ -1709,6 +1709,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       ? extractParentToolNames(generationConfig)
       : [];
     registerForkDisplayImageForCache(agentConfig, parentToolNames);
+    const defaultExecutionToolNames = Array.from(
+      new Set([
+        ...parentToolNames,
+        ...agentConfig.getToolRegistry().getAllToolNames(),
+      ]),
+    ).filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
     const requestedExecutionAllowedTools =
@@ -1822,16 +1828,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const declaredExecutionToolNames =
-        parentToolNames.length > 0
-          ? parentToolNames
-          : agentConfig
-              .getToolRegistry()
-              .getAllToolNames()
-              .filter(
-                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
-              );
-
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
           | string
@@ -1844,15 +1840,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentToolNames,
           buildForkExecutionAllowlist(
             requestedTools,
-            declaredExecutionToolNames,
+            defaultExecutionToolNames,
           ),
         ),
       };
     } else {
-      const registeredToolNames = agentConfig
-        .getToolRegistry()
-        .getAllToolNames()
-        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
@@ -1861,7 +1853,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
+          buildForkExecutionAllowlist(
+            requestedTools,
+            defaultExecutionToolNames,
+          ),
         ),
       };
     }
