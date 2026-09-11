@@ -17,6 +17,20 @@ import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { maskApiKey } from './useAuth.js';
 
 describe('useProviderSetupFlow API selection', () => {
+  // A preset has no `protocolOptions`, so the API step never renders for it —
+  // but the daemon/ACP contracts accept `api` for any provider id, so a preset
+  // can already hold a Responses install.
+  const preset: ProviderConfig = {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    description: 'DeepSeek',
+    protocol: AuthType.USE_OPENAI,
+    baseUrl: 'https://api.deepseek.com/v1',
+    envKey: 'DEEPSEEK_API_KEY',
+    models: [{ id: 'deepseek-v4' }],
+    modelNamePrefix: 'DeepSeek',
+  };
+
   it('previews the same Responses model configuration that it submits', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
@@ -70,20 +84,8 @@ describe('useProviderSetupFlow API selection', () => {
   });
 
   it('keeps the prefilled Responses API for a preset provider with no API step', () => {
-    // Presets have no `protocolOptions`, so the API step never renders for
-    // them — but the daemon/ACP contracts accept `api` for any provider id, so
-    // a preset can already hold a Responses install. Re-authenticating it must
-    // not silently drop the field and move the user to Chat Completions.
-    const preset: ProviderConfig = {
-      id: 'deepseek',
-      label: 'DeepSeek',
-      description: 'DeepSeek',
-      protocol: AuthType.USE_OPENAI,
-      baseUrl: 'https://api.deepseek.com/v1',
-      envKey: 'DEEPSEEK_API_KEY',
-      models: [{ id: 'deepseek-v4' }],
-      modelNamePrefix: 'DeepSeek',
-    };
+    // Re-authenticating a preset that holds a Responses install must not
+    // silently drop the field and move the user to Chat Completions.
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
     act(() => result.current.start(preset, AuthType.USE_OPENAI_RESPONSES));
@@ -93,19 +95,31 @@ describe('useProviderSetupFlow API selection', () => {
     expect(submit.mock.calls[0]![1]).toMatchObject({ api: 'responses' });
   });
 
+  it('omits api when re-authenticating a preset with no Responses install', () => {
+    // A preset re-authentication that carries no Responses install must submit
+    // without `api`: stamping the default route would make the recorded
+    // model-list version irreproducible by buildProviderTemplate and prompt a
+    // spurious update on every launch.
+    const submit = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(submit));
+    act(() => result.current.start(preset));
+    act(() => result.current.submitApiKey('sk-secret-test'));
+    expect(submit).toHaveBeenCalledOnce();
+    expect(submit.mock.calls[0]![1]).not.toHaveProperty('api');
+  });
+
   it('derives the baseUrl placeholder from the effective API route', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
-    // A legacy Responses install pre-fills the Responses default endpoint, so
-    // re-authentication matches the stored identity (the envKey derivation and
-    // the legacy prune both key on the baseUrl string).
     act(() =>
       result.current.start(customProvider, AuthType.USE_OPENAI_RESPONSES),
     );
+    act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
+    // The Responses API prefilled from the legacy install keeps the protocol
+    // reselection on the Responses wire's default endpoint.
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com',
     );
-    act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
     act(() => result.current.selectApi('chat-completions'));
     expect(result.current.state.baseUrlPlaceholder).toBe(
       'https://api.openai.com/v1',
@@ -117,5 +131,18 @@ describe('useProviderSetupFlow API selection', () => {
     );
     act(() => result.current.submitBaseUrl());
     expect(result.current.state.baseUrl).toBe('https://api.openai.com');
+    // Switching routes after a blank submit must drop the endpoint auto-filled
+    // from the previous route's placeholder — otherwise the install persists
+    // the Responses default onto the Chat Completions wire, where the SDK
+    // appends no /v1 and every request 404s.
+    act(() => result.current.goBack());
+    act(() => result.current.goBack());
+    act(() => result.current.selectApi('chat-completions'));
+    expect(result.current.state.baseUrl).toBe('');
+    expect(result.current.state.baseUrlPlaceholder).toBe(
+      'https://api.openai.com/v1',
+    );
+    act(() => result.current.submitBaseUrl());
+    expect(result.current.state.baseUrl).toBe('https://api.openai.com/v1');
   });
 });

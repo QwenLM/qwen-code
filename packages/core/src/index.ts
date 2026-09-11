@@ -37,6 +37,7 @@ export {
   modelRegistryKey,
   resolveProviderProtocol,
   resolveModelProtocol,
+  tryResolveModelProtocol,
   resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,

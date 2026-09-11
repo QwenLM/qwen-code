@@ -91,6 +91,25 @@ export function resolveModelProtocol(
     : AuthType.USE_OPENAI;
 }
 
+/**
+ * {@link resolveModelProtocol} for read paths: returns `undefined` instead of
+ * throwing when an entry's `api` is invalid, so one hand-edited entry cannot
+ * take down a whole listing or an unrelated install. Write and startup paths
+ * keep using the throwing resolver — an invalid value stays a config error
+ * there.
+ */
+export function tryResolveModelProtocol(
+  providerId: string,
+  model: Pick<ModelConfig, 'api'>,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  try {
+    return resolveModelProtocol(providerId, model, providerProtocol);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve raw startup settings, never an explicit switch or saved route. */
 export function resolveModelSelectionAuthType(
   authType: AuthType,

@@ -252,6 +252,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   resolveModelProtocol: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).resolveModelProtocol,
+  tryResolveModelProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).tryResolveModelProtocol,
 
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()

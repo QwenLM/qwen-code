@@ -6,7 +6,10 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveModelProtocol } from '../models/modelRegistry.js';
+import {
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+} from '../models/modelRegistry.js';
 import type { ModelApi } from '../models/types.js';
 import type {
   ModelSpec,
@@ -281,6 +284,23 @@ function resolveProviderState(
   return undefined;
 }
 
+/**
+ * Retire a provider's recorded model-list version: an install whose models
+ * carry an explicit `api` stamp can never be reproduced by the drift check's
+ * template rebuild, so a version left behind by an earlier default-route
+ * install would outlive the route switch and prompt a spurious "update" whose
+ * accept path rebuilds the models unstamped. The `undefined` value deletes
+ * the persisted field (settings adapters treat `undefined` as unset).
+ */
+function retireProviderState(
+  config: ProviderConfig,
+): ProviderInstallState | undefined {
+  const key = resolveMetadataKey(config);
+  return key
+    ? { [`${PROVIDER_METADATA_NS}.${key}`]: { version: undefined } }
+    : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Build ProviderInstallPlan from config + inputs
 // ---------------------------------------------------------------------------
@@ -347,14 +367,14 @@ export function buildInstallPlan(
       },
     ],
     // The drift check (findAllPendingUpdates) rebuilds the reference version
-    // from the provider's own protocol template, which can never reproduce an
-    // `api`-stamped install (different generationConfig shape). Recording a
-    // version for such an install would prompt a spurious model-list update on
-    // every launch — and accepting it would duplicate every model.
+    // from the provider's own protocol template, which never stamps `api`, so
+    // any stamped install — on either wire — records nothing. Skipping alone
+    // would let a version from an earlier default-route install survive, so
+    // the retire shape deletes it instead.
     providerState:
-      protocol === config.protocol
+      api === undefined && protocol === config.protocol
         ? resolveProviderState(config, inputs.baseUrl, models)
-        : undefined,
+        : retireProviderState(config),
   };
 }
 
@@ -458,24 +478,66 @@ export function findExistingProviderModels(
     ? config.protocolOptions
     : [config.protocol];
   for (const protocol of protocols) {
-    const effectiveProtocols =
-      protocol === AuthType.USE_OPENAI
-        ? [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES]
-        : [protocol];
-    for (const effectiveProtocol of effectiveProtocols) {
-      const models = Object.entries(modelProviders).flatMap(
-        ([providerId, raw]) => {
-          if (!Array.isArray(raw)) return [];
-          return raw.filter(
-            (model): model is ProviderModelConfig =>
-              isProviderModelConfig(model) &&
-              ownsModel(model) &&
-              resolveModelProtocol(providerId, model) === effectiveProtocol,
+    if (
+      protocol === AuthType.USE_OPENAI ||
+      protocol === AuthType.USE_OPENAI_RESPONSES
+    ) {
+      // An OpenAI-family provider's models can live in the canonical `openai`
+      // bucket and the legacy `openai-responses` one at once — that is exactly
+      // the state a wire switch leaves behind. Scan the canonical bucket first
+      // (installs prepend, so its first owned entry carries the current wire),
+      // then the legacy bucket, and dedup by (id, baseUrl) identity so a stale
+      // legacy duplicate cannot drive what consumers prefill. `undefined`
+      // protocols (unknown ids, invalid `api`) skip the entry rather than
+      // throwing: this powers the repair UI, so it must stay readable.
+      const collected: Array<{
+        model: ProviderModelConfig;
+        protocol: AuthType;
+      }> = [];
+      for (const bucket of [
+        AuthType.USE_OPENAI,
+        AuthType.USE_OPENAI_RESPONSES,
+      ]) {
+        const raw = modelProviders[bucket];
+        if (!Array.isArray(raw)) continue;
+        for (const model of raw) {
+          if (!isProviderModelConfig(model) || !ownsModel(model)) continue;
+          const resolved = tryResolveModelProtocol(bucket, model);
+          if (
+            resolved !== AuthType.USE_OPENAI &&
+            resolved !== AuthType.USE_OPENAI_RESPONSES
+          ) {
+            continue;
+          }
+          const duplicate = collected.some(
+            (seen) =>
+              seen.model.id === model.id &&
+              normalizeBaseUrlForMatching(seen.model.baseUrl) ===
+                normalizeBaseUrlForMatching(model.baseUrl),
           );
-        },
-      );
-      if (models.length > 0) return { protocol: effectiveProtocol, models };
+          if (!duplicate) collected.push({ model, protocol: resolved });
+        }
+      }
+      if (collected.length > 0) {
+        return {
+          protocol: collected[0]!.protocol,
+          models: collected.map((entry) => entry.model),
+        };
+      }
+      continue;
     }
+    const models = Object.entries(modelProviders).flatMap(
+      ([providerId, raw]) => {
+        if (!Array.isArray(raw)) return [];
+        return raw.filter(
+          (model): model is ProviderModelConfig =>
+            isProviderModelConfig(model) &&
+            ownsModel(model) &&
+            tryResolveModelProtocol(providerId, model) === protocol,
+        );
+      },
+    );
+    if (models.length > 0) return { protocol, models };
   }
   return undefined;
 }

@@ -12,8 +12,8 @@ import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
   resolveModelConfig,
-  resolveModelProtocol,
   resolveModelSelectionAuthType,
+  tryResolveModelProtocol,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
   type ModelProvidersConfig,
@@ -61,8 +61,12 @@ export function collectProviderModelsForProtocol(
     }
     out.push(
       ...models.filter(
+        // tryResolveModelProtocol: one entry with an invalid `api` (a
+        // hand-edited settings file surviving a hot reload) must not take
+        // down every read that walks the providers map — skip that entry.
+        // Startup validation still classifies it as a FatalConfigError.
         (model) =>
-          resolveModelProtocol(providerId, model, providerProtocol) ===
+          tryResolveModelProtocol(providerId, model, providerProtocol) ===
           protocol,
       ),
     );
@@ -85,7 +89,7 @@ function findProviderIdForModel(
     }
     if (
       models.includes(modelProvider) &&
-      resolveModelProtocol(providerId, modelProvider, providerProtocol) ===
+      tryResolveModelProtocol(providerId, modelProvider, providerProtocol) ===
         protocol
     ) {
       return providerId;

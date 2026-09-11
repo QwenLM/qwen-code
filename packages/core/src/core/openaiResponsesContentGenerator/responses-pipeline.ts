@@ -33,6 +33,7 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import {
+  DEFAULT_OPENAI_BASE_URL,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   DISABLED_REQUEST_TIMEOUT_MS,
@@ -46,6 +47,22 @@ import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
+
+/**
+ * Normalize an OpenAI-family baseUrl to the origin this wire dials: the
+ * pipeline strips any trailing `/v1` and appends `/v1/responses` itself, so a
+ * bare origin, a `/v1`-suffixed URL, and an unset/default URL are the same
+ * endpoint. ModelsConfig's credential-reuse comparison imports this so the
+ * wire and the credential-carry decision can never drift apart on what "same
+ * origin" means.
+ */
+export function normalizeOpenAiWireBaseUrl(
+  baseUrl: string | undefined,
+): string {
+  return (baseUrl || DEFAULT_OPENAI_BASE_URL)
+    .replace(/\/v1\/?$/, '')
+    .replace(/\/$/, '');
+}
 
 /**
  * Thrown when the SSE read loop goes silent past the inactivity timeout.
@@ -559,9 +576,7 @@ export class ResponsesPipeline {
     apiRequest: ResponsesApiRequest,
     signal?: AbortSignal,
   ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-    const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
-      .replace(/\/v1\/?$/, '')
-      .replace(/\/$/, '');
+    const baseUrl = normalizeOpenAiWireBaseUrl(this.config.baseUrl);
     const url = `${baseUrl}/v1/responses`;
 
     const headers: Record<string, string> = {

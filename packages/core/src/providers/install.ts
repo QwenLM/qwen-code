@@ -6,6 +6,7 @@
 
 import { AuthType } from '../core/contentGenerator.js';
 import type {
+  ModelConfig,
   ModelProvidersConfig,
   ProviderProtocolConfig,
 } from '../models/types.js';
@@ -50,10 +51,21 @@ function isSameModelIdentity(
   return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
 }
 
+interface ModelProvidersPatchOutcome {
+  updated: ModelProvidersConfig;
+  /**
+   * Legacy `openai-responses` entries the ownership gate preserved even though
+   * they are registry-indistinguishable from a just-installed model (same id,
+   * baseUrl, and effective protocol). The registry resolves such a collision
+   * first-registration-wins, so the caller must make it loud.
+   */
+  collidingLegacy: ModelConfig[];
+}
+
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
-): ModelProvidersConfig {
+): ModelProvidersPatchOutcome {
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
@@ -86,10 +98,11 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
-  const updated = {
+  const updated: ModelProvidersConfig = {
     ...existingModelProviders,
     [patch.authType]: updatedModels,
   };
+  let collidingLegacy: ModelConfig[] = [];
   if (
     patch.authType === AuthType.USE_OPENAI &&
     patch.mergeStrategy !== 'append'
@@ -121,8 +134,32 @@ function applyModelProvidersPatch(
     if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
       updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
     }
+    const survivingLegacy = updated[AuthType.USE_OPENAI_RESPONSES] ?? [];
+    collidingLegacy = survivingLegacy.filter((legacy) =>
+      patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, legacy) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, legacy),
+      ),
+    );
+    if (collidingLegacy.length > 0) {
+      // A preserved foreign-owned entry must survive (re-pruning it is the
+      // data loss the ownership gate exists to stop), but the registry's
+      // first-registration-wins rule would otherwise hand the composite
+      // (id + baseUrl) slot to whichever bucket key sorts first in the
+      // settings JSON. Give the install the user just performed the
+      // deterministic win; the caller warns so the conflict is visible.
+      const reordered: ModelProvidersConfig = {
+        [patch.authType]: updated[patch.authType]!,
+      };
+      for (const [key, value] of Object.entries(updated)) {
+        if (key !== patch.authType) reordered[key] = value;
+      }
+      return { updated: reordered, collidingLegacy };
+    }
   }
-  return updated;
+  return { updated, collidingLegacy };
 }
 
 // ---------------------------------------------------------------------------
@@ -201,18 +238,6 @@ export async function applyProviderInstallPlan(
 
   const previousModelId = settings.getValue('model.name');
   const previousBaseUrl = settings.getValue('model.baseUrl');
-  const previousAuthType =
-    typeof selectedAuthType === 'string'
-      ? resolveModelSelectionAuthType(
-          selectedAuthType as AuthType,
-          typeof previousModelId === 'string' ? previousModelId : undefined,
-          previousRuntimeProviders,
-          settings.getValue('providerProtocol') as
-            | ProviderProtocolConfig
-            | undefined,
-          typeof previousBaseUrl === 'string' ? previousBaseUrl : undefined,
-        )
-      : undefined;
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -266,13 +291,13 @@ export async function applyProviderInstallPlan(
       ...previousRuntimeProviders,
     };
 
+    const collidingLegacyModels: ModelConfig[] = [];
     for (const patch of plan.modelProviders ?? []) {
       const previousLegacy =
         updatedModelProviders[AuthType.USE_OPENAI_RESPONSES];
-      updatedModelProviders = applyModelProvidersPatch(
-        updatedModelProviders,
-        patch,
-      );
+      const outcome = applyModelProvidersPatch(updatedModelProviders, patch);
+      updatedModelProviders = outcome.updated;
+      collidingLegacyModels.push(...outcome.collidingLegacy);
       if (
         previousLegacy !== updatedModelProviders[AuthType.USE_OPENAI_RESPONSES]
       ) {
@@ -284,6 +309,22 @@ export async function applyProviderInstallPlan(
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
+      );
+    }
+
+    if (collidingLegacyModels.length > 0) {
+      // eslint-disable-next-line no-console -- user-facing install warning
+      console.error(
+        `[auth] Warning: ${collidingLegacyModels
+          .map(
+            (model) =>
+              `"${model.id}" (envKey ${model.envKey ?? 'none'}, baseUrl ${model.baseUrl ?? 'default'})`,
+          )
+          .join(
+            ', ',
+          )} remained on the legacy "openai-responses" route under another provider's credentials, ` +
+          `indistinguishable from the model(s) just installed. The new install takes precedence in this session; ` +
+          `remove the stale entry from settings.json to avoid ambiguity.`,
       );
     }
 
@@ -336,6 +377,29 @@ export async function applyProviderInstallPlan(
         );
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
+        // Resolved lazily and only for OpenAI-family plans (the only ones a
+        // wire switch applies to): the resolver validates every modelProviders
+        // entry, so a hand-edited invalid `api` sitting in an unrelated bucket
+        // must not abort another provider's install ahead of the plan's own
+        // error contract.
+        const previousAuthType =
+          (plan.authType === AuthType.USE_OPENAI ||
+            plan.authType === AuthType.USE_OPENAI_RESPONSES) &&
+          typeof selectedAuthType === 'string'
+            ? resolveModelSelectionAuthType(
+                selectedAuthType as AuthType,
+                typeof previousModelId === 'string'
+                  ? previousModelId
+                  : undefined,
+                previousRuntimeProviders,
+                settings.getValue('providerProtocol') as
+                  | ProviderProtocolConfig
+                  | undefined,
+                typeof previousBaseUrl === 'string'
+                  ? previousBaseUrl
+                  : undefined,
+              )
+            : undefined;
         if (
           previousAuthType !== undefined &&
           previousAuthType !== plan.authType

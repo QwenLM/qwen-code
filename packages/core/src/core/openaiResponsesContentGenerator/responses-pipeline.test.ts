@@ -19,6 +19,7 @@ import { inspect } from 'node:util';
 import {
   ResponsesPipeline,
   mergeStreamResponses,
+  normalizeOpenAiWireBaseUrl,
   StreamInactivityTimeoutError,
   StreamLifetimeExceededError,
   StreamConnectTimeoutError,
@@ -145,6 +146,30 @@ function makeGeneratorConfig(
 function textRequest(text: string): GenerateContentParameters {
   return { model: 'gpt-5', contents: [{ role: 'user', parts: [{ text }] }] };
 }
+
+describe('normalizeOpenAiWireBaseUrl', () => {
+  it('maps the empty default and a /v1-suffixed URL onto the same origin', () => {
+    // The Responses wire strips a trailing /v1 before appending /v1/responses,
+    // so these spellings are one endpoint — the credential-reuse comparison in
+    // ModelsConfig depends on this exact rule.
+    expect(normalizeOpenAiWireBaseUrl('')).toBe('https://api.openai.com');
+    expect(normalizeOpenAiWireBaseUrl(undefined)).toBe(
+      'https://api.openai.com',
+    );
+    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/v1')).toBe(
+      'https://api.openai.com',
+    );
+    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/v1/')).toBe(
+      'https://api.openai.com',
+    );
+    expect(normalizeOpenAiWireBaseUrl('https://api.openai.com/')).toBe(
+      'https://api.openai.com',
+    );
+    expect(normalizeOpenAiWireBaseUrl('https://proxy.example/v1/')).toBe(
+      'https://proxy.example',
+    );
+  });
+});
 
 describe('ResponsesPipeline', () => {
   let fetchMock: ReturnType<typeof vi.fn>;

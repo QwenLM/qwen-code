@@ -55,6 +55,11 @@ function getVisibleSteps(
   });
 }
 
+// The effective wire route of an OpenAI-family selection: a `responses` API
+// rides the Responses wire even though the provider bucket stays `openai`.
+const routeProtocol = (proto: AuthType, api: ModelApi): AuthType =>
+  api === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto;
+
 // ---------------------------------------------------------------------------
 // State type
 // ---------------------------------------------------------------------------
@@ -163,13 +168,7 @@ export function useProviderSetupFlow(
       const resolved = resolveBaseUrl(config);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
-        resolved
-          ? ''
-          : getDefaultBaseUrlForProtocol(
-              initial === AuthType.USE_OPENAI_RESPONSES
-                ? AuthType.USE_OPENAI_RESPONSES
-                : proto,
-            ),
+        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
       );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
@@ -244,9 +243,7 @@ export function useProviderSetupFlow(
       // the effective route as a placeholder (used if they submit blank).
       setBaseUrl('');
       setBaseUrlPlaceholder(
-        getDefaultBaseUrlForProtocol(
-          nextApi === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto,
-        ),
+        getDefaultBaseUrlForProtocol(routeProtocol(proto, nextApi)),
       );
       setApiKey('');
       setApiKeyError(null);
@@ -258,15 +255,12 @@ export function useProviderSetupFlow(
   const selectApi = useCallback(
     (selectedApi: ModelApi) => {
       setApi(selectedApi);
-      // The placeholder follows the effective wire route, so a blank Base URL
-      // submission persists the same default a pre-split Responses protocol
-      // choice would have.
+      // The wire route changed: clear any baseUrl auto-filled from the
+      // previous route's placeholder so a blank submit falls back to the new
+      // route's default endpoint instead of persisting the old one.
+      setBaseUrl('');
       setBaseUrlPlaceholder(
-        getDefaultBaseUrlForProtocol(
-          selectedApi === 'responses'
-            ? AuthType.USE_OPENAI_RESPONSES
-            : protocol,
-        ),
+        getDefaultBaseUrlForProtocol(routeProtocol(protocol, selectedApi)),
       );
       goNext();
     },

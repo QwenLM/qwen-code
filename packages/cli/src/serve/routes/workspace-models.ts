@@ -204,32 +204,16 @@ export function registerWorkspaceModelsRoutes(
           modelId: parsed.modelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
-        // Deleting the active route must not clear the persisted selection
-        // when a surviving OpenAI sibling still carries it: with per-model
-        // `api`, the other wire of the same id+baseUrl keeps resolving the
-        // same selection, so the tombstone would destroy a selection that is
-        // not dangling.
-        const selectionSurvivesRemoval = Object.entries(next).some(
-          ([providerId, models]) =>
-            Array.isArray(models) &&
-            models.some((model) => {
-              if (model.id !== parsed.modelId) return false;
-              const protocol = resolveModelProtocol(
-                providerId,
-                model,
-                loaded.merged.providerProtocol,
-              );
-              if (
-                protocol !== AuthType.USE_OPENAI &&
-                protocol !== AuthType.USE_OPENAI_RESPONSES
-              ) {
-                return false;
-              }
-              return removedBaseUrl
-                ? (model.baseUrl ?? '') === removedBaseUrl
-                : true;
-            }),
-        );
+        // Whether the persisted selection survives the removal is decided by
+        // re-resolving it against the POST-removal config, not by comparing
+        // shapes: with per-model `api` the wire is a property of the model
+        // entry, so a survivor must carry the selection's effective protocol
+        // at the selection's own endpoint — an api-less sibling can never
+        // carry an `openai-responses` selection, and an unpinned selection
+        // must not latch onto a same-id entry at a different endpoint.
+        const isOpenAiFamily = (authType: string | undefined): boolean =>
+          authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES;
         for (const activeScope of getWritableScopes(loaded)) {
           const scopeModel = loaded.forScope(activeScope).settings.model;
           const selectedAuthType =
@@ -240,18 +224,44 @@ export function registerWorkspaceModelsRoutes(
           const activeAuthType = selectedAuthType
             ? resolveCliGenerationConfig({
                 argv: {},
-                settings: { ...loaded.merged, model: scopeModel },
+                settings: {
+                  ...loaded.merged,
+                  modelProviders: next,
+                  model: scopeModel,
+                },
                 selectedAuthType,
                 env: deps.env ?? {},
               }).authType
             : undefined;
+          const selectionSurvivesRemoval =
+            isOpenAiFamily(activeAuthType) &&
+            Object.entries(next).some(
+              ([providerId, models]) =>
+                Array.isArray(models) &&
+                models.some(
+                  (model) =>
+                    model.id === scopeModel?.name &&
+                    resolveModelProtocol(
+                      providerId,
+                      model,
+                      loaded.merged.providerProtocol,
+                    ) === activeAuthType &&
+                    (model.baseUrl ?? '') === (scopeModel?.baseUrl ?? ''),
+                ),
+            );
           if (
             !selectionSurvivesRemoval &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
               activeTarget,
-              activeAuthType,
+              // The wire veto spares a selection that belongs to a different
+              // provider family (e.g. an env-only Anthropic runtime sharing an
+              // id+baseUrl with the deleted OpenAI entry). Within the OpenAI
+              // family the wire follows the model entry, so survival above is
+              // the whole test — vetoing here would leave a genuinely dangling
+              // selection untombstoned.
+              isOpenAiFamily(activeAuthType) ? undefined : activeAuthType,
             )
           ) {
             writes.push({ scope: activeScope, key: 'model.name', value: '' });

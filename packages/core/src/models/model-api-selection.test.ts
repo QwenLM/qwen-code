@@ -268,7 +268,7 @@ describe('model API selection', () => {
     expect(config.getGenerationConfig().apiKey).toBe('injected-key');
   });
 
-  it('does not refresh a removed API into its sibling or an unrelated default', async () => {
+  it('does not refresh a removed model into an unrelated default', async () => {
     const config = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI_RESPONSES,
       generationConfig: { model: 'shared', apiKey: 'old-key', baseUrl },
@@ -277,10 +277,7 @@ describe('model API selection', () => {
     config.syncAfterAuthRefresh(AuthType.USE_OPENAI_RESPONSES, 'shared');
     const before = structuredClone(config.getGenerationConfig());
     config.reloadModelProvidersConfig({
-      openai: [
-        routes['openai'][1],
-        { id: 'different', api: 'responses', envKey: 'OTHER_KEY' },
-      ],
+      openai: [{ id: 'different', api: 'responses', envKey: 'OTHER_KEY' }],
     });
     expect(() =>
       config.syncAfterAuthRefresh(AuthType.USE_OPENAI_RESPONSES, 'shared'),
@@ -290,7 +287,51 @@ describe('model API selection', () => {
     await expect(
       config.switchModel(AuthType.USE_OPENAI_RESPONSES, 'shared', { baseUrl }),
     ).rejects.toThrow('not found');
-    await config.switchModel(AuthType.USE_OPENAI, 'shared', { baseUrl });
+    await config.switchModel(AuthType.USE_OPENAI_RESPONSES, 'different');
+    expect(config.getGenerationConfig().model).toBe('different');
+  });
+
+  it('follows the selected model when a reload moves it to the sibling wire', () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: { model: 'shared' },
+      modelProvidersConfig: {
+        openai: [{ id: 'shared', baseUrl, envKey: 'SHARED_KEY' }],
+      },
+    });
     expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+    // An install or settings edit that stamps `api` onto the same id+baseUrl
+    // moves the model to the other wire; the sync must follow it rather than
+    // throw "no longer configured" for a model that is still configured.
+    config.reloadModelProvidersConfig({
+      openai: [
+        { id: 'shared', baseUrl, envKey: 'SHARED_KEY', api: 'responses' },
+      ],
+    });
+    expect(() =>
+      config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared'),
+    ).not.toThrow();
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(config.getGenerationConfig().model).toBe('shared');
+  });
+
+  it('adopts a surviving same-endpoint sibling wire instead of failing closed', () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      generationConfig: { model: 'shared', apiKey: 'old-key', baseUrl },
+      modelProvidersConfig: routes,
+    });
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI_RESPONSES, 'shared');
+    // The Responses route is removed but the same id+baseUrl survives on the
+    // Chat wire: the selection is not dangling, so the sync adopts the sibling
+    // wire (and keeps the session's key, same endpoint and envKey) instead of
+    // throwing.
+    config.reloadModelProvidersConfig({
+      openai: [routes['openai'][1]],
+    });
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI_RESPONSES, 'shared');
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+    expect(config.getGenerationConfig().model).toBe('shared');
+    expect(config.getGenerationConfig().apiKey).toBe('old-key');
   });
 });

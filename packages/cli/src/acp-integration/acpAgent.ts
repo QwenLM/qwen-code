@@ -11,6 +11,7 @@ import {
   AuthType,
   type ModelApi,
   resolveModelProtocol,
+  tryResolveModelProtocol,
   resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
@@ -1731,8 +1732,10 @@ function resolveExistingProviderApiKey(
     for (const model of models) {
       if (model.baseUrl !== baseUrl || !model.envKey || !ownsModel?.(model))
         continue;
+      // tryResolveModelProtocol: a hand-edited invalid `api` on one entry
+      // must not reject the whole providers/connect flow — skip that entry.
       if (
-        resolveModelProtocol(
+        tryResolveModelProtocol(
           providerId,
           model,
           settings.merged.providerProtocol,
@@ -5138,18 +5141,25 @@ class QwenAgent implements Agent {
     const method = z.nativeEnum(AuthType).parse(methodId);
     const currentAuthType =
       this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
-    const authType =
-      method === AuthType.USE_OPENAI
-        ? resolveModelSelectionAuthType(
-            currentAuthType === AuthType.USE_OPENAI_RESPONSES
-              ? currentAuthType
-              : method,
-            this.config.getModel(),
-            this.settings.merged.modelProviders,
-            this.settings.merged.providerProtocol,
-            this.config.getCurrentModelRegistryBaseUrl?.(),
-          )
-        : method;
+    // The wire resolver throws on a hand-edited invalid `api` anywhere in
+    // modelProviders; re-authentication is the repair path, so fall back to
+    // the requested method instead of rejecting it outright.
+    let authType = method;
+    if (method === AuthType.USE_OPENAI) {
+      try {
+        authType = resolveModelSelectionAuthType(
+          currentAuthType === AuthType.USE_OPENAI_RESPONSES
+            ? currentAuthType
+            : method,
+          this.config.getModel(),
+          this.settings.merged.modelProviders,
+          this.settings.merged.providerProtocol,
+          this.config.getCurrentModelRegistryBaseUrl?.(),
+        );
+      } catch {
+        authType = method;
+      }
+    }
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {

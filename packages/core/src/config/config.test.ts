@@ -6760,7 +6760,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
     });
 
-    it('retains the working generator when hot reload removes its API route', async () => {
+    it('follows the model to the sibling wire when hot reload moves its API route', async () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI_RESPONSES,
@@ -6776,19 +6776,17 @@ describe('Server Config (config.ts)', () => {
         }),
       );
       await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES);
-      const previousGenerator = config.getContentGenerator();
-      const previousConfig = config.getContentGeneratorConfig();
       vi.mocked(createContentGenerator).mockClear();
       config.reloadModelProvidersConfig({ openai: [{ id: 'shared' }] });
 
-      await expect(
-        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
-      ).rejects.toThrow('is no longer configured');
+      // The model is still configured — on the sibling Chat wire — so the
+      // refresh follows it there and rebuilds the generator instead of
+      // failing closed and wedging every later hot-reload reconcile.
+      await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true);
 
-      expect(createContentGenerator).not.toHaveBeenCalled();
-      expect(config.getContentGenerator()).toBe(previousGenerator);
-      expect(config.getContentGeneratorConfig()).toBe(previousConfig);
-      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(createContentGenerator).toHaveBeenCalled();
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+      expect(config.getModel()).toBe('shared');
     });
 
     it('should refresh auth and update config', async () => {

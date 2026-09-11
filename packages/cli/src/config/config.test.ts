@@ -1296,9 +1296,9 @@ describe('loadCliConfig', () => {
     const argv = await parseArguments();
     const settings: Settings = {
       // No security.auth.selectedType and no model.name: generation-config
-      // resolution never touches the model, so the invalid `api` is first hit
-      // by the ModelRegistry constructor inside `new Config` — still a config
-      // error, not an unexpected crash with a stack trace.
+      // resolution never touches the model, so the invalid `api` is caught by
+      // the up-front validation loop in loadCliConfig — still a config error,
+      // not an unexpected crash with a stack trace.
       modelProviders: {
         openai: [
           {

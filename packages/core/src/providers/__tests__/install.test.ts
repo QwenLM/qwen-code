@@ -6,13 +6,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../../models/types.js';
+import { ModelRegistry } from '../../models/modelRegistry.js';
+import type { ModelConfig, ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
   ProviderInstallError,
+  type ProviderConfig,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
 } from '../index.js';
@@ -467,6 +469,9 @@ describe('applyProviderInstallPlan', () => {
     const baseUrl = 'https://api.openai.com/v1';
     const foreign = { id: 'gpt-5.1', baseUrl, envKey: 'WORK_KEY' };
     const adapter = createAdapter({ 'openai-responses': [foreign] });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
     const updated = {
       id: 'gpt-5.1',
       baseUrl,
@@ -495,6 +500,100 @@ describe('applyProviderInstallPlan', () => {
     expect(adapter.setValue).not.toHaveBeenCalledWith(
       'modelProviders.openai-responses',
       expect.anything(),
+    );
+    // The preserved legacy entry is registry-indistinguishable from the
+    // freshly installed one (same id+baseUrl+effective protocol), and the
+    // registry resolves such a collision first-registration-wins — the install
+    // the user just performed must win the slot deterministically rather than
+    // losing to the JSON key order of the legacy bucket.
+    const registry = new ModelRegistry(result.updatedModelProviders);
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'gpt-5.1', baseUrl)
+        ?.envKey,
+    ).toBe('DEEPSEEK_API_KEY');
+    // The collision is surfaced rather than silent: an install that reports
+    // success while another provider's entry shares the slot must say so.
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('legacy "openai-responses" route'),
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('gpt-5.1'),
+    );
+  });
+
+  it('does not let an invalid api elsewhere in settings abort a non-OpenAI install', async () => {
+    const adapter = createAdapter({
+      openai: [{ id: 'm', envKey: 'A', api: 'response' as ModelConfig['api'] }],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'm',
+          }) as Record<string, unknown>
+        )[key],
+    );
+    // The pre-install wire resolution scans every modelProviders entry, so an
+    // invalid `api` in an unrelated bucket would throw ahead of the plan's own
+    // error contract. A non-OpenAI plan never consults it.
+    const plan: ProviderInstallPlan = {
+      providerId: 'anthropic',
+      authType: AuthType.USE_ANTHROPIC,
+      modelSelection: { modelId: 'm' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_ANTHROPIC,
+          models: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        anthropic: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+      },
+    });
+  });
+
+  it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
+    const preset: ProviderConfig = {
+      id: 'test',
+      label: 'Test',
+      description: 'Test',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.test.com/v1',
+      envKey: 'TEST_API_KEY',
+      models: [{ id: 'model-a' }],
+      modelNamePrefix: 'Test',
+    };
+    const adapter = createAdapter();
+    const defaultPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(
+      defaultPlan.providerState?.['providerMetadata.test']?.['version'],
+    ).toBeDefined();
+
+    const responsesPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      api: 'responses',
+    });
+    await applyProviderInstallPlan(responsesPlan, { settings: adapter });
+
+    // The drift check's template rebuild can never reproduce an api-stamped
+    // install's version, so the reinstall must retire the version the
+    // default-route install recorded — otherwise the next template change
+    // prompts a spurious update whose accept path duplicates every model.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'providerMetadata.test.version',
+      undefined,
     );
   });
 

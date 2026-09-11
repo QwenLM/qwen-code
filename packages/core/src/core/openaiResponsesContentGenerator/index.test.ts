@@ -17,13 +17,20 @@ import {
 const mockExecute = vi.fn();
 const mockExecuteStream = vi.fn();
 const mockConnectStream = vi.fn();
-vi.mock('./responses-pipeline.js', () => ({
-  ResponsesPipeline: vi.fn().mockImplementation(() => ({
-    execute: mockExecute,
-    executeStream: mockExecuteStream,
-    connectStream: mockConnectStream,
-  })),
-}));
+vi.mock('./responses-pipeline.js', async (importOriginal) => {
+  // Keep the module's real exports (normalizeOpenAiWireBaseUrl drives the
+  // embeddings baseURL below); only the pipeline class is stubbed.
+  const actual =
+    await importOriginal<typeof import('./responses-pipeline.js')>();
+  return {
+    ...actual,
+    ResponsesPipeline: vi.fn().mockImplementation(() => ({
+      execute: mockExecute,
+      executeStream: mockExecuteStream,
+      connectStream: mockConnectStream,
+    })),
+  };
+});
 
 const mockEmbeddingsCreate = vi.fn();
 const mockOpenAIConstructor = vi.fn();

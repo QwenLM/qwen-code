@@ -1922,11 +1922,12 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Validate per-model `api` fields up front: the same validation throws from
-  // resolveCliGenerationConfig below when a model is selected, and from the
-  // ModelRegistry constructor inside `new Config` when it is not — classifying
-  // it here keeps every startup shape a FatalConfigError instead of a stack
-  // trace before the TUI starts.
+  // Validate per-model `api` fields up front: the registry resolver throws a
+  // bare Error on an invalid value, and every startup shape (with or without a
+  // selected model/auth type) passes through here — classify it as a
+  // FatalConfigError so the user gets the message and the "please fix the
+  // configuration file(s)" hint instead of a stack trace before the TUI
+  // starts.
   for (const [providerId, models] of Object.entries(
     settings.modelProviders ?? {},
   )) {
@@ -1942,31 +1943,22 @@ export async function loadCliConfig(
     }
   }
 
-  // Unified resolution of generation config with source attribution
-  let resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig>;
-  try {
-    resolvedCliConfig = resolveCliGenerationConfig({
-      argv: {
-        model: argv.model,
-        openaiApiKey: argv.openaiApiKey,
-        openaiBaseUrl: argv.openaiBaseUrl,
-        openaiLogging: argv.openaiLogging,
-        openaiLoggingDir: argv.openaiLoggingDir,
-      },
-      settings,
-      selectedAuthType,
-      env: process.env as Record<string, string | undefined>,
-    });
-  } catch (err) {
-    // Resolution reads settings, so its throws are config errors -- notably
-    // per-model `api` validation from the registry resolver. This runs before
-    // the TUI starts, so without this a one-character typo in settings.json
-    // ends as a stack trace with no in-app way to correct it.
-    if (err instanceof FatalConfigError) throw err;
-    throw new FatalConfigError(
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  // Unified resolution of generation config with source attribution. Note the
+  // up-front `api` validation loop above is what classifies invalid per-model
+  // `api` values; this call's own settings reads must not re-wrap a resolver
+  // defect as a user config error, so it stays unwrapped.
+  const resolvedCliConfig = resolveCliGenerationConfig({
+    argv: {
+      model: argv.model,
+      openaiApiKey: argv.openaiApiKey,
+      openaiBaseUrl: argv.openaiBaseUrl,
+      openaiLogging: argv.openaiLogging,
+      openaiLoggingDir: argv.openaiLoggingDir,
+    },
+    settings,
+    selectedAuthType,
+    env: process.env as Record<string, string | undefined>,
+  });
 
   const { model: resolvedModel } = resolvedCliConfig;
 

@@ -4333,9 +4333,13 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh
+    // Sync modelsConfig state for this auth refresh. The sync may have
+    // followed the selected model onto the sibling OpenAI wire (a reload that
+    // stamped `api` onto the same id+baseUrl), so build the generator for the
+    // wire it actually landed on.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
+    authMethod = this.modelsConfig.getCurrentAuthType() ?? authMethod;
 
     // Check and consume cached credentials flag
     const requireCached =
