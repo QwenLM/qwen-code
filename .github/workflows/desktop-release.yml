@@ -138,16 +138,20 @@ jobs:
           git fetch origin "$INPUT_REF"
           sha="$(git rev-parse FETCH_HEAD)"
           if [ "$IS_DRY_RUN" = 'false' ]; then
-            # A release-triggered publish runs on the released tag's ref, not on
-            # main, so the branch name cannot be the gate there. The ancestry
-            # check below still is: the bundled commit must be reachable from
-            # main either way.
             if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$GITHUB_EVENT_NAME" != 'release' ]; then
               echo '::error::Published desktop releases must run from main or follow a published release.'
               exit 1
             fi
+            # A release tag points at the version-bump commit on release/<tag>,
+            # which is squash-merged back to main as a different commit and so
+            # is never reachable from main. Its parent is the main commit the
+            # release was cut from, so check that on the release arm.
+            ancestor="$sha"
+            if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+              ancestor="$(git rev-parse "${sha}^")"
+            fi
             git fetch origin main:refs/remotes/origin/main
-            if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            if ! git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main; then
               echo '::error::Published desktop releases may only bundle commits reachable from main.'
               exit 1
             fi

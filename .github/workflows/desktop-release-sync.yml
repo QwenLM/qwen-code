@@ -30,7 +30,7 @@ permissions:
   contents: 'write'
 
 concurrency:
-  group: 'desktop-release-publish'
+  group: 'desktop-release-sync'
   cancel-in-progress: false
 
 jobs:
