@@ -230,6 +230,9 @@ describe('Desktop release sync caller', () => {
       )?.[1];
     expect(calleeFallback).toBe('publish');
     expect(syncCallerWorkflow).toContain("group: 'desktop-release-sync'");
+    expect(syncCallerWorkflow).toContain(
+      "concurrency:\n  group: 'desktop-release-sync'\n  cancel-in-progress: false",
+    );
     expect(`desktop-release-${calleeFallback}`).not.toBe(
       'desktop-release-sync',
     );
