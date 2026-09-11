@@ -9,6 +9,7 @@ import type { GenerateContentResponse, Part } from '@google/genai';
 import {
   createOpenAIReasoningThoughtPart,
   getThoughtSummary,
+  isResponsesReasoningSignature,
   parseThought,
 } from './thoughtUtils.js';
 
@@ -130,5 +131,57 @@ describe('getThoughtSummary', () => {
     const response = responseWithParts([{ thought: true, text: '' }]);
 
     expect(getThoughtSummary(response)).toBeNull();
+  });
+});
+
+describe('isResponsesReasoningSignature', () => {
+  const replayPayload = JSON.stringify({
+    id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+    encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+  });
+
+  it('recognizes a Responses reasoning replay payload', () => {
+    expect(isResponsesReasoningSignature(replayPayload)).toBe(true);
+  });
+
+  it('recognizes a payload with leading whitespace', () => {
+    // The `startsWith('{')` pre-check must tolerate leading whitespace the
+    // same way `JSON.parse` itself does, so a payload preceded by a newline
+    // or spaces is still recognized (and dropped off a foreign wire) rather
+    // than forwarded unchanged.
+    expect(isResponsesReasoningSignature(`\n  ${replayPayload}`)).toBe(true);
+  });
+
+  it('rejects a non-string id', () => {
+    const nonStringId = JSON.stringify({
+      id: 123,
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+    expect(isResponsesReasoningSignature(nonStringId)).toBe(false);
+  });
+
+  it('rejects non-string input without throwing', () => {
+    // Gemini `signature_delta` can surface a number/boolean on a history part;
+    // the recognizer must not throw `startsWith` on a non-string.
+    expect(isResponsesReasoningSignature(undefined)).toBe(false);
+    expect(isResponsesReasoningSignature(null)).toBe(false);
+    expect(isResponsesReasoningSignature(1)).toBe(false);
+    expect(isResponsesReasoningSignature(true)).toBe(false);
+    expect(isResponsesReasoningSignature({})).toBe(false);
+  });
+
+  it('rejects a non-object parsed payload', () => {
+    expect(isResponsesReasoningSignature('"just a string"')).toBe(false);
+    expect(isResponsesReasoningSignature('123')).toBe(false);
+  });
+
+  it('rejects an object missing the replay shape', () => {
+    expect(isResponsesReasoningSignature('{}')).toBe(false);
+    expect(isResponsesReasoningSignature(JSON.stringify({ id: 'rs_1' }))).toBe(
+      false,
+    );
+    expect(
+      isResponsesReasoningSignature(JSON.stringify({ encrypted_content: 'x' })),
+    ).toBe(false);
   });
 });

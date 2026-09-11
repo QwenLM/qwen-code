@@ -888,5 +888,45 @@ describe('LlmContentGenerator', () => {
       // later switch back to the Responses API can still replay it.
       expect(historyPart.thoughtSignature).toBe(responsesReplaySignature);
     });
+
+    it('forwards a non-string thoughtSignature without throwing', async () => {
+      // Gemini `signature_delta` can surface a non-string thoughtSignature on
+      // a history part (number/boolean). The recognizer must not crash on it
+      // with `startsWith is not a function` — it should treat it as a native
+      // opaque token and forward it unchanged, matching the base behavior.
+      const nonStringSignature = 1 as unknown as string;
+
+      await generator.generateContent(
+        {
+          model: 'gemini-2.5-pro',
+          contents: [
+            { role: 'user' as const, parts: [{ text: 'First' }] },
+            {
+              role: 'model' as const,
+              parts: [
+                {
+                  text: 'Reasoning summary',
+                  thought: true,
+                  thoughtSignature: nonStringSignature,
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+            { role: 'user' as const, parts: [{ text: 'Second' }] },
+          ],
+        },
+        'prompt-id',
+      );
+
+      const calledWith =
+        mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+      const thoughtPart = calledWith.contents[1].parts[0];
+
+      // The garbage is forwarded unchanged (base behavior): the recognizer
+      // only drops the Responses replay payload shape, never crashes.
+      expect(thoughtPart.thoughtSignature).toBe(nonStringSignature);
+      expect(thoughtPart.thought).toBe(true);
+      expect(thoughtPart.text).toBe('Reasoning summary');
+    });
   });
 });

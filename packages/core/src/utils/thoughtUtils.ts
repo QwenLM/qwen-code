@@ -53,10 +53,9 @@ export function isOpenAIReasoningThoughtPart(part: Part): boolean {
  * (`decodeReasoningSignature`).
  * See https://github.com/QwenLM/qwen-code/issues/9453
  */
-export function isResponsesReasoningSignature(
-  signature: string | undefined,
-): boolean {
-  if (!signature || !signature.startsWith('{')) return false;
+export function isResponsesReasoningSignature(signature: unknown): boolean {
+  if (typeof signature !== 'string') return false;
+  if (!signature.trimStart().startsWith('{')) return false;
   try {
     const payload: unknown = JSON.parse(signature);
     return (

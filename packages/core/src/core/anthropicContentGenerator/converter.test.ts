@@ -4552,17 +4552,13 @@ describe('AnthropicContentConverter', () => {
       // Must not throw "proxy omitted the thinking signature": the replay
       // payload is dropped rather than emitted as an unsigned thinking block,
       // so dropUnsignedThinkingFromAssistantMessages never sees an unsigned
-      // thinking block on this active tool-use turn.
+      // thinking block on this active tool-use turn. The demoted reasoning
+      // summary survives as plain text, and the tool_use block is untouched.
       const assistant = messages.find((m) => m.role === 'assistant');
-      const blocks = Array.isArray(assistant?.content)
-        ? assistant!.content
-        : [];
-      expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
-      // ...and the demoted reasoning summary survives as plain text.
-      expect(blocks).toContainEqual({
-        type: 'text',
-        text: 'Reasoning summary',
-      });
+      expect(assistant?.content).toEqual([
+        { type: 'text', text: 'Reasoning summary' },
+        { type: 'tool_use', id: 'call-1', name: 'tool_name', input: {} },
+      ]);
     });
 
     it('never forwards a signature-only replay payload as a native signature', () => {
@@ -4594,7 +4590,9 @@ describe('AnthropicContentConverter', () => {
       }) => result.messages.find((m) => m.role === 'assistant');
 
       // Under dropUnsignedAssistantThinking the replay payload is dropped and
-      // no thinking block is emitted.
+      // no thinking block is emitted. With empty (signature-only) text there
+      // is nothing to demote, so the exact content is just the visible answer
+      // — pinning that no empty-text block leaks through.
       const assertDropped = (result: {
         messages: Array<{ role: string; content: unknown }>;
       }) => {
@@ -4638,6 +4636,42 @@ describe('AnthropicContentConverter', () => {
           enableCacheControl: false,
         }),
       );
+    });
+
+    it('demotes a non-empty replay summary to plain text instead of dropping it', () => {
+      // The empty-text signature-only case above cannot tell "demoted to
+      // text" apart from "dropped entirely", because with no text there is
+      // nothing to preserve. A non-empty summary pins the demote path: under
+      // dropUnsignedAssistantThinking the thinking block is dropped AND the
+      // visible summary survives as a plain-text block.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user' as const, parts: [{ text: 'First' }] },
+            {
+              role: 'model' as const,
+              parts: [
+                {
+                  text: 'Reasoning summary',
+                  thought: true,
+                  thoughtSignature: responsesReplaySignature,
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Reasoning summary' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
     });
   });
 });
