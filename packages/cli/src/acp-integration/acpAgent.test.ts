@@ -4221,6 +4221,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([false, true])(
+    'enables snapshot storage only for a trusted managed parent (%s)',
+    async (managed) => {
+      const innerConfig = await setupSessionMocks('snapshot-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        managed ? 'snapshot-parent' : undefined,
+      );
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        expect(innerConfig.setArtifactSnapshotsEnabled).toHaveBeenCalledWith(
+          managed,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('generates and binds a sessionId before loading a new Config', async () => {
     const innerConfig = await setupSessionMocks('generated-session');
     let configLoadSessionContext: string | undefined;
@@ -4569,6 +4589,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
@@ -22647,6 +22668,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     recording: ReturnType<typeof makeRecordingService> | null,
   ) {
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -24523,6 +24545,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
@@ -28846,6 +28869,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
   function makeConfig(overrides: Record<string, unknown> = {}) {
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),

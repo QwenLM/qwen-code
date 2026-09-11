@@ -59,6 +59,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
   BranchPoint,
+  CodeModeToolResult,
   AdmissibleNotification,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -199,6 +200,11 @@ import {
   sessionIdContext,
   promptIdContext,
   todoWorkChainContext,
+  extractCodeModeImageContent,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  isCodeModeToolCallAllowed,
+  ToolMode,
   dedupeToolCallsById,
   getFunctionCallFingerprint,
   getProviderToolCallId,
@@ -578,6 +584,7 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
 }
 
 type RunToolResult = {
+  modelOverride?: string;
   parts: Part[];
   stopAfterPermissionCancel: boolean;
   loopDetected?: boolean;
@@ -2031,6 +2038,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private codeModeNestedSequence = 0;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -4490,13 +4498,22 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
+    // Every rewind surface resolves a turn through this array's positions:
+    // `getRewindSnapshots` hands out the index, and the agent resolves a
+    // promptId with `findIndex`. Positions therefore have to keep matching the
+    // current history's turn ordinals. A conversation-only rewind abandons the
+    // later turns without going through `FileHistoryService.rewind` — which
+    // trims inclusively itself — so the trim has to happen here. Without it the
+    // next rewind resolves onto a turn the history no longer has and cuts the
+    // wrong turn, while the recorded branch and the live view disagree.
+    //
+    // The file path keeps the target snapshot: the agent restores files by
+    // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
-    if (survivingSnapshots) {
-      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    }
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     this.config
       .getChatRecordingService()
@@ -11352,11 +11369,17 @@ export class Session implements SessionContext {
       ]),
     );
     const pendingToolResultRecords: PendingToolResultRecord[] = [];
+    const pendingNestedToolResultRecords: PendingToolResultRecord[] = [];
     let toolResultRecordSequence = 0;
     const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
-      pendingToolResultRecords.push({
+      const ordinal = dedupedFunctionCalls.indexOf(fc);
+      const target =
+        ordinal === -1
+          ? pendingNestedToolResultRecords
+          : pendingToolResultRecords;
+      target.push({
         ...record,
-        ordinal: dedupedFunctionCalls.indexOf(fc),
+        ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
       });
     };
@@ -11365,47 +11388,20 @@ export class Session implements SessionContext {
     // end the turn asked no matter which of the exits below the batch takes,
     // and the exits that run before any tool does read it as false anyway.
     let batchTerminatesTurn = false;
-    const finalizeRunToolResult = async (
-      result: RunToolResult,
-    ): Promise<RunToolResult> => {
-      const orderedRecords = [...pendingToolResultRecords].sort(
-        (left, right) =>
-          left.ordinal - right.ordinal || left.sequence - right.sequence,
-      );
-      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
-        complete:
-          orderedRecords.length === dedupedFunctionCalls.length &&
-          new Set(orderedRecords.map((record) => record.ordinal)).size ===
-            dedupedFunctionCalls.length,
-        observations: orderedRecords.map((record) => ({
-          callId: record.callId,
-          policyToolName: record.policyToolName,
-          toolType: record.toolType,
-          terminalStatus: record.metadata.status,
-          executionStatus: record.metadata.executionStatus,
-          executionErrorType: record.executionErrorType,
-          providerDuplicate: record.providerDuplicate,
-        })),
-      };
-      if (orderedRecords.length === 0) {
-        return {
-          ...result,
-          repeatedToolFailureBatch,
-          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
-        };
-      }
+    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+      if (records.length === 0) return [];
       const finalized = await finalizeToolResponses(
         this.config,
-        orderedRecords.map((record) => ({
+        records.map((record) => ({
           callId: record.callId,
           toolName: record.toolName,
           responseParts: record.responseParts,
           persistedOutputFiles: record.persistedOutputFiles,
           artifacts: record.metadata.artifacts,
         })),
-        new Map(orderedRecords.map((record) => [record.callId, promptId])),
+        new Map(records.map((record) => [record.callId, promptId])),
       );
-      orderedRecords.forEach((record, index) => {
+      records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
         // in-memory result is produced. The flag check is retroactive on
@@ -11432,6 +11428,51 @@ export class Session implements SessionContext {
           ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
         );
       });
+      return finalized;
+    };
+    const finalizeNestedToolResult = async (
+      result: RunToolResult,
+    ): Promise<Part[]> => {
+      const records = pendingNestedToolResultRecords.splice(0);
+      if (records.length === 0) return result.parts;
+      const finalized = await finalizeAndRecord(records);
+      return finalized.flatMap((entry) => entry.responseParts);
+    };
+    const finalizeRunToolResult = async (
+      result: RunToolResult,
+    ): Promise<RunToolResult> => {
+      await finalizeAndRecord(
+        [...pendingNestedToolResultRecords].sort(
+          (left, right) => left.sequence - right.sequence,
+        ),
+      );
+      const orderedRecords = [...pendingToolResultRecords].sort(
+        (left, right) =>
+          left.ordinal - right.ordinal || left.sequence - right.sequence,
+      );
+      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
+        complete:
+          orderedRecords.length === dedupedFunctionCalls.length &&
+          new Set(orderedRecords.map((record) => record.ordinal)).size ===
+            dedupedFunctionCalls.length,
+        observations: orderedRecords.map((record) => ({
+          callId: record.callId,
+          policyToolName: record.policyToolName,
+          toolType: record.toolType,
+          terminalStatus: record.metadata.status,
+          executionStatus: record.metadata.executionStatus,
+          executionErrorType: record.executionErrorType,
+          providerDuplicate: record.providerDuplicate,
+        })),
+      };
+      if (orderedRecords.length === 0) {
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
+        };
+      }
+      const finalized = await finalizeAndRecord(orderedRecords);
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
@@ -11822,6 +11863,8 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          undefined,
+          finalizeNestedToolResult,
         )
           .then((r) => {
             results[idx] = r;
@@ -11965,6 +12008,8 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              undefined,
+              finalizeNestedToolResult,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -12066,6 +12111,11 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    codeModeContext?: {
+      parentCallId: string;
+      source: 'code_mode';
+    },
+    finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -12073,6 +12123,14 @@ export class Session implements SessionContext {
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
     let executeAttempted = false;
+    // Set when the tool starts executing, so hook durations exclude
+    // validation and permission time. Read from the monotonic clock so a
+    // system clock adjustment during a long tool cannot skew the duration.
+    let executionStartedAt: number | undefined;
+    const elapsedExecutionMs = (): number | undefined =>
+      executionStartedAt === undefined
+        ? undefined
+        : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -12132,6 +12190,12 @@ export class Session implements SessionContext {
           'event.name': 'tool_call',
           'event.timestamp': new Date().toISOString(),
           call_id: callId,
+          ...(codeModeContext
+            ? {
+                parent_call_id: codeModeContext.parentCallId,
+                source: codeModeContext.source,
+              }
+            : {}),
           prompt_id: promptId,
           function_name: toolName,
           function_args: args,
@@ -12314,6 +12378,22 @@ export class Session implements SessionContext {
     }
 
     const toolName = fc.name;
+    if (
+      this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+      !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
+    ) {
+      return earlyErrorResponse(
+        new Error(
+          `Tool "${toolName}" is unavailable on this CodeModeOnly call surface.`,
+        ),
+        toolName,
+        {
+          status: 'error',
+          errorType: ToolErrorType.EXECUTION_DENIED,
+          executionStatus: 'not_started',
+        },
+      );
+    }
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(toolName);
 
@@ -12356,6 +12436,12 @@ export class Session implements SessionContext {
         // matching daemon/ACP tool spans during the migration window.
         call_id: callId,
         tool_name: policyToolName,
+        ...(codeModeContext
+          ? {
+              'tool.parent_call_id': codeModeContext.parentCallId,
+              'tool.source': codeModeContext.source,
+            }
+          : {}),
       },
       tool.description,
       promptId,
@@ -13733,12 +13819,108 @@ export class Session implements SessionContext {
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
             executeAttempted = true;
+            executionStartedAt = performance.now();
             try {
-              toolResult = await invocation.execute(
-                activeToolAbortSignal,
-                onToolProgress,
-                this.config.getShellExecutionConfig(),
-              );
+              const execute = () =>
+                invocation.execute(
+                  activeToolAbortSignal,
+                  onToolProgress,
+                  this.config.getShellExecutionConfig(),
+                );
+              if (toolName !== ToolNames.EXEC) {
+                toolResult = await execute();
+              } else {
+                let dispatchTail = Promise.resolve();
+                const dispatch = (
+                  nestedName: string,
+                  nestedArgs: Record<string, unknown>,
+                  nestedSignal: AbortSignal,
+                  onResult?: (response: ToolCallResponseInfo) => void,
+                ): Promise<CodeModeToolResult> => {
+                  const next = dispatchTail.then(async () => {
+                    if (!isCodeModeToolCallAllowed(nestedName, 'code_mode')) {
+                      throw new Error(
+                        `Tool "${nestedName}" is not callable from exec.`,
+                      );
+                    }
+                    const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                    const nested = await runWithoutToolCallRuntime(() =>
+                      this.runTool(
+                        nestedSignal,
+                        promptId,
+                        {
+                          id: nestedCallId,
+                          name: nestedName,
+                          args: nestedArgs,
+                        },
+                        onStopAfterPermissionCancel,
+                        toolLoopState,
+                        recordSkippedToolCall,
+                        queueToolResultRecord,
+                        nestedCallId,
+                        onFullTurnModel,
+                        { parentCallId: callId, source: 'code_mode' },
+                      ),
+                    );
+                    const nestedParts = finalizeCodeModeToolResult
+                      ? await finalizeCodeModeToolResult(nested)
+                      : nested.parts;
+                    const functionResponse = nestedParts
+                      .map((part) => part.functionResponse)
+                      .find((part) => part?.id === nestedCallId);
+                    const response = functionResponse?.response as
+                      | Record<string, unknown>
+                      | undefined;
+                    const nestedError = response?.['error'];
+                    onResult?.({
+                      callId: nestedCallId,
+                      responseParts: nestedParts,
+                      resultDisplay: undefined,
+                      error:
+                        nestedError === undefined
+                          ? undefined
+                          : new Error(String(nestedError)),
+                      errorType: undefined,
+                      ...('modelOverride' in nested
+                        ? { modelOverride: nested.modelOverride }
+                        : {}),
+                      ...(nested.terminateTurn ? { terminateTurn: true } : {}),
+                    });
+                    if (nestedError !== undefined) {
+                      throw new Error(
+                        typeof nestedError === 'string'
+                          ? nestedError
+                          : JSON.stringify(nestedError),
+                      );
+                    }
+                    const nestedOutput =
+                      response?.['output'] ?? response?.['content'] ?? '';
+                    const content = extractCodeModeImageContent(nestedParts);
+                    return {
+                      callId: nestedCallId,
+                      name: nestedName,
+                      status: 'success' as const,
+                      output:
+                        typeof nestedOutput === 'string'
+                          ? nestedOutput
+                          : JSON.stringify(nestedOutput),
+                      ...(content ? { content } : {}),
+                    };
+                  });
+                  dispatchTail = next.then(
+                    () => undefined,
+                    () => undefined,
+                  );
+                  return next;
+                };
+                toolResult = await runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    dispatch,
+                  },
+                  execute,
+                );
+              }
               executeReturned = true;
               try {
                 settledArtifacts = toolResult.artifacts;
@@ -13929,6 +14111,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              elapsedExecutionMs(),
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -13997,6 +14180,7 @@ export class Session implements SessionContext {
                 permissionMode,
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -14116,6 +14300,12 @@ export class Session implements SessionContext {
               'event.name': 'tool_call',
               'event.timestamp': new Date().toISOString(),
               call_id: callId,
+              ...(codeModeContext
+                ? {
+                    parent_call_id: codeModeContext.parentCallId,
+                    source: codeModeContext.source,
+                  }
+                : {}),
               function_name: toolName,
               function_args: args,
               duration_ms: durationMs,
@@ -14184,8 +14374,13 @@ export class Session implements SessionContext {
           }
           return {
             parts: responseParts,
+            ...('modelOverride' in toolResult && succeeded
+              ? { modelOverride: toolResult.modelOverride }
+              : {}),
             stopAfterPermissionCancel: nestedPermissionCancelled,
-            ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
+            ...(toolResult.terminateTurn && succeeded
+              ? { terminateTurn: true }
+              : {}),
             memoryWriteCandidates:
               status === 'success'
                 ? [
@@ -14223,6 +14418,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(

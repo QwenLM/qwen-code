@@ -7193,6 +7193,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       artifacts: new SessionArtifactStore({
         sessionId,
         workspaceCwd,
+        runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
       artifactWorkspaceCwd: workspaceCwd,
@@ -11781,6 +11782,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const artifacts = new SessionArtifactStore({
           sessionId,
           workspaceCwd: expectation.child.canonicalPath,
+          runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
           persistence: createSessionArtifactPersistence(
             entry.connection,
             sessionId,
