@@ -85,13 +85,54 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     const validName = name?.trim() || undefined;
+    // Some OpenAI-compatible proxies stamp tool-call chunks with an invalid
+    // index (e.g. -1 or a float). An id still identifies the call
+    // unambiguously, and an id-less continuation can follow the remap a
+    // salvaged opener registered, so route those to a real slot instead of
+    // dropping the chunk and failing the whole turn with a malformed tool
+    // call (#10689). Without either signal there is no safe routing; keep
+    // dropping the chunk and flagging the stream as invalid.
     if (!Number.isSafeInteger(index) || index < 0) {
-      this.conflictingToolCallIdentity = true;
-      this.invalidToolCallIndex = true;
-      return {
-        complete: false,
-        error: new Error(`Invalid tool call index: ${index}`),
-      };
+      const rawIndex = index;
+      const knownSlot =
+        id !== undefined ? this.idToIndexMap.get(id) : undefined;
+      const remappedSlot = this.pendingIndexRemaps.get(rawIndex);
+      // A remapped slot is only adoptable by a NEW id while it has not been
+      // claimed by one yet — mirrors the pendingIndexRemaps adoption rule
+      // below, so a second call reusing the bogus index cannot hijack the
+      // first call's slot.
+      const remapAdoptable =
+        remappedSlot !== undefined &&
+        this.toolCallMeta.get(remappedSlot)?.id === undefined;
+      const salvageSlot =
+        knownSlot !== undefined
+          ? knownSlot
+          : id !== undefined
+            ? remapAdoptable
+              ? remappedSlot
+              : // This is a NEW call placement, not a continuation: the slot
+                // must be strictly unoccupied. findNextAvailableIndex() is
+                // written for continuation chunks and can hand back a slot
+                // another call is still assembling (no name, no id, or
+                // incomplete JSON), which would concatenate two calls'
+                // argument fragments into one buffer.
+                this.findFirstUnoccupiedIndex()
+            : remappedSlot;
+      if (salvageSlot === undefined) {
+        this.conflictingToolCallIdentity = true;
+        this.invalidToolCallIndex = true;
+        return {
+          complete: false,
+          error: new Error(`Invalid tool call index: ${rawIndex}`),
+        };
+      }
+      index = salvageSlot;
+      // The id→index registration is deliberately left to the routing logic
+      // below, which registers a new id only after deciding it is a new call.
+      // Pre-registering here would make a first-seen id look "known", so the
+      // replay guard in the body would silently discard its opener (including
+      // function.name) if the salvaged slot already held complete JSON.
+      this.pendingIndexRemaps.set(rawIndex, salvageSlot);
     }
     if (!id && !validName && !chunk.trim()) {
       const depth = this.depths.get(index) ?? 0;
@@ -147,8 +188,9 @@ export class StreamingToolCallParser {
               }
             }
             if (existingComplete) {
-              actualIndex = 0;
-              while (this.buffers.has(actualIndex)) actualIndex += 1;
+              // Relocate to the first strictly unoccupied slot so the new
+              // call never lands on another call's buffer.
+              actualIndex = this.findFirstUnoccupiedIndex();
               if (!existingMeta.name) {
                 this.conflictingToolCallIdentity = true;
               }
@@ -417,6 +459,28 @@ export class StreamingToolCallParser {
               args = safeJsonParse(buffer, {});
             }
           }
+          // Some proxies double-encode the arguments: the buffer parses to a
+          // JSON *string* whose contents are the real arguments object. Parse
+          // that string exactly once and keep it only when it yields a JSON
+          // object; anything else falls through to the collapse below (#10689).
+          const parsedArgs: unknown = args;
+          if (typeof parsedArgs === 'string') {
+            try {
+              const unwrapped: unknown = JSON.parse(parsedArgs);
+              if (
+                typeof unwrapped === 'object' &&
+                unwrapped !== null &&
+                !Array.isArray(unwrapped)
+              ) {
+                args = unwrapped as Record<string, unknown>;
+                debugLogger.debug(
+                  `Unwrapped JSON-encoded string arguments for tool call ${meta.name} (id=${meta.id}) at index ${index}`,
+                );
+              }
+            } catch {
+              // Not JSON inside the string either; collapse below.
+            }
+          }
           // Tool arguments are always JSON objects; a corrupted buffer can
           // parse or repair to a non-object value (e.g. a bare string), so
           // collapse anything else to {}.
@@ -446,6 +510,26 @@ export class StreamingToolCallParser {
     }
 
     return completed;
+  }
+
+  /**
+   * Finds the first strictly unoccupied index: a slot with no buffer at all.
+   *
+   * Unlike {@link findNextAvailableIndex}, which is written for continuation
+   * chunks and may hand back a slot another call is still assembling (no
+   * name, no id, or incomplete JSON), this never returns an occupied slot.
+   * Placing a NEW tool call into an occupied slot would append its argument
+   * fragments onto the other call's buffer, which then parses to garbage or
+   * collapses to `{}` and executes with wrong arguments.
+   *
+   * @returns The first index with no buffer registered for it
+   */
+  private findFirstUnoccupiedIndex(): number {
+    let candidate = 0;
+    while (this.buffers.has(candidate)) {
+      candidate += 1;
+    }
+    return candidate;
   }
 
   /**

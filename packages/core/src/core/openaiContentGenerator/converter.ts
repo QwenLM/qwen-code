@@ -1812,18 +1812,47 @@ export function convertOpenAIChunkToLlm(
       requestContext.pendingThinkingTagCandidate = undefined;
     }
 
-    if (
-      choice.finish_reason &&
-      (toolCallParser.hasInvalidToolCallIndex() ||
-        toolCallWithoutName ||
-        (choice.finish_reason === 'tool_calls' &&
-          completedToolCalls.length === 0))
-    ) {
-      requestContext.pendingUntrustedResponseParts = undefined;
-      throw new InvalidStreamError(
-        'Model response contained a malformed tool call.',
-        'MALFORMED_TOOL_CALL',
-      );
+    if (choice.finish_reason) {
+      // Diagnose exactly which malformation fired instead of a single opaque
+      // message, so users on misbehaving OpenAI-compatible proxies can tell
+      // what the provider actually delivered (#10689).
+      const malformedToolCallConditions: string[] = [];
+      if (toolCallParser.hasInvalidToolCallIndex()) {
+        malformedToolCallConditions.push('invalid tool-call index sequencing');
+      }
+      if (toolCallWithoutName) {
+        malformedToolCallConditions.push(
+          'a tool call that never delivered a function name',
+        );
+      }
+      if (
+        choice.finish_reason === 'tool_calls' &&
+        completedToolCalls.length === 0
+      ) {
+        malformedToolCallConditions.push(
+          'finish_reason "tool_calls" with no assemblable tool call',
+        );
+      }
+      if (malformedToolCallConditions.length > 0) {
+        if (completedToolCalls.length > 0) {
+          // Salvage: at least one tool call assembles cleanly, so downgrade
+          // the unassemblable ones instead of failing the whole turn (#10689).
+          // The emission loop below only emits named calls, so malformed
+          // slots are simply skipped; the model sees which calls produced
+          // results next turn and can re-issue the dropped ones.
+          debugLogger.warn(
+            `Salvaging ${completedToolCalls.length} completed tool call(s); ` +
+              `dropping malformed ones (${malformedToolCallConditions.join('; ')}).`,
+          );
+        } else {
+          requestContext.pendingUntrustedResponseParts = undefined;
+          throw new InvalidStreamError(
+            'Model response contained a malformed tool call ' +
+              `(${malformedToolCallConditions.join('; ')}).`,
+            'MALFORMED_TOOL_CALL',
+          );
+        }
+      }
     }
 
     const shouldHoldParts =
