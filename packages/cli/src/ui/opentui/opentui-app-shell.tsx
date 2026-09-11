@@ -943,12 +943,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             onSelect={mcpApproval.handleMcpApprovalSelect}
           />
         ) : activeToolCall ? (
-          <OpenTuiToolConfirmation
-            key={activeToolCall.callId}
-            call={activeToolCall}
-            config={config}
-            onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
-          />
+          <box key="tool-confirm-area" flexDirection="column">
+            <OpenTuiToolConfirmation
+              key={activeToolCall.callId}
+              call={activeToolCall}
+              config={config}
+              onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
+            />
+            {/* ink's Composer marginTop: one blank between the confirmation's
+                own bottom padding and the waiting row. */}
+            <box marginTop={1}>
+              <OpenTuiLoadingIndicator streaming={Boolean(streaming)} waiting />
+            </box>
+          </box>
         ) : activeModal ? (
           activeModal.kind === 'shell' ? (
             <OpenTuiShellConfirmation

@@ -86,7 +86,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(container.textContent).toContain('SECRET_PAYLOAD');
-    expect(container.textContent).toContain('awaiting approval');
+    expect(container.textContent).toContain('←');
   });
 
   it('keeps a long pending payload approvable and caps it once settled (R5-9)', () => {
@@ -112,7 +112,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(pending.container.textContent).toContain('TAIL_MARKER');
-    expect(pending.container.textContent).toContain('awaiting approval');
+    expect(pending.container.textContent).toContain('←');
     pending.unmount();
 
     const settled = render(
@@ -128,6 +128,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(settled.container.textContent).not.toContain('TAIL_MARKER');
+    expect(settled.container.textContent).not.toContain('←');
     expect(settled.container.textContent).toContain('... last');
   });
 
@@ -154,17 +155,16 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('... last');
     expect(text).not.toContain('PAYLOAD_TAIL');
-    expect(text).toContain('awaiting approval');
+    expect(text).toContain('←');
   });
 
   it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
-    // The mem0 confirmation duplicates the card's description inside its
-    // dialog body: once ctrl-s expands it, the whole payload plus dialog
-    // chrome must fit the viewport, so a ~4k-char payload must shrink the
-    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
-    // at 110 columns). A marker placed past the yielded budget pins the
-    // shrink — that bound alone would still show it and the e2e expansion
-    // stage would stay red.
+    // The mem0 confirmation duplicates the card's description inside its own
+    // body: once ctrl-s expands it, the whole payload plus the confirmation's
+    // chrome must fit the viewport, so a ~4k-char payload must shrink the card
+    // BELOW the collapsed bound (37 rows at h=80). A marker placed past the
+    // yielded budget pins the shrink — that bound alone would still show it
+    // and the e2e expansion stage would stay red.
     const description =
       '{"content":"' +
       'a'.repeat(2500) +
@@ -185,7 +185,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('awaiting approval');
+    expect(text).toContain('←');
     expect(text).toContain('... last');
     expect(text).not.toContain('MID_MARKER');
   });

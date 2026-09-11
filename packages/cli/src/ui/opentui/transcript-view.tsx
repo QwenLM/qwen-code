@@ -312,13 +312,13 @@ function ToolCard({
   // fallback path does (R6-2).
   const text = toolCardText(description);
   // The description stays visible while a call awaits approval: an MCP
-  // confirmation dialog shows only the server and tool names, so the card
-  // is the only surface carrying the arguments (R5-9) — the settled 5-row
-  // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
+  // confirmation body shows only the server and tool names, so the card is
+  // the only surface carrying the arguments (R5-9) — the settled 5-row cap
+  // would hide the tail of exactly the payload being approved. The pending
+  // budget stays viewport- and payload-aware (pendingCardMaxRows): the
+  // confirmation renders in flow below the transcript, and a hook-forced
   // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
+  // yield rows for it or ctrl-s expansion pushes the options off screen.
   const cap = capToolCardDescription(
     text,
     name,
@@ -348,13 +348,15 @@ function ToolCard({
           </text>
         ) : null}
         {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
+        {item.confirm === 'pending' && !item.done ? (
+          // ink's TrailingIndicator: a primary-coloured arrow at the end of the
+          // awaiting call's own row, not a row of its own.
+          <text fg={C.text}>{' ←'}</text>
+        ) : null}
       </box>
       {cap.hiddenRows > 0 && (
         <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
       )}
-      {item.confirm === 'pending' && !item.done ? (
-        <text fg={C.yellow}> (awaiting approval)</text>
-      ) : null}
       <ToolCardBody item={item} maxRows={maxRows} width={width} />
     </box>
   );

@@ -63,6 +63,12 @@ function Spinner() {
 export interface OpenTuiLoadingIndicatorProps {
   streaming: boolean;
   /**
+   * A tool call is parked on a confirmation. ink swaps the phrase for its
+   * waiting text and drops the timer/token/cancel suffix in this state — there
+   * is no in-flight request to cancel and no tokens to count.
+   */
+  waiting?: boolean;
+  /**
    * Live streaming-character count. Animated locally (ink `LoadingIndicator`
    * parity) so the 100ms tick re-renders only this row, never the transcript.
    */
@@ -74,20 +80,21 @@ export interface OpenTuiLoadingIndicatorProps {
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
 export function OpenTuiLoadingIndicator({
   streaming,
+  waiting = false,
   streamingCharsRef,
   isReceivingContent = false,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
-  const phrase = usePhraseCycler(streaming, false);
+  const phrase = usePhraseCycler(streaming, waiting);
   const elapsedTime = useTimer(streaming, 0);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
     streamingCharsRef && streaming ? 100 : null,
   );
-  if (!streaming) return null;
+  if (!streaming && !waiting) return null;
 
   const isNarrow = isNarrowWidth(width);
   const outputTokens = Math.round(animatedChars / 4);
@@ -98,14 +105,16 @@ export function OpenTuiLoadingIndicator({
     elapsedTime < 60
       ? `${Math.floor(Math.max(0, elapsedTime))}s`
       : formatDuration(elapsedTime * 1000);
-  const suffix = t('({{time}}{{tokens}} · esc to cancel)', {
-    time: timeStr,
-    tokens: showTokens
-      ? ` · ${isReceivingContent ? '↓' : '↑'} ${formatTokenCount(
-          outputTokens,
-        )} tokens`
-      : '',
-  });
+  const suffix = waiting
+    ? ''
+    : t('({{time}}{{tokens}} · esc to cancel)', {
+        time: timeStr,
+        tokens: showTokens
+          ? ` · ${isReceivingContent ? '↓' : '↑'} ${formatTokenCount(
+              outputTokens,
+            )} tokens`
+          : '',
+      });
   // ink truncates the phrase (`wrap="truncate-end"`) rather than letting it wrap,
   // so the cancel hint survives a narrow terminal. Budget = width − 2 padding −
   // 2 spinner cells − 1 separating space − the suffix (which moves to its own
@@ -120,10 +129,10 @@ export function OpenTuiLoadingIndicator({
       <box flexDirection="row">
         <Spinner />
         <text fg={C.dim}>
-          {isNarrow ? phraseText : `${phraseText} ${suffix}`}
+          {isNarrow || !suffix ? phraseText : `${phraseText} ${suffix}`}
         </text>
       </box>
-      {isNarrow && <text fg={C.dim}>{suffix}</text>}
+      {isNarrow && suffix ? <text fg={C.dim}>{suffix}</text> : null}
     </box>
   );
 }

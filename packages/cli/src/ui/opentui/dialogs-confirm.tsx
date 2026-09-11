@@ -85,11 +85,13 @@ export interface PendingToolConfirmation {
 const MAX_BODY_ROWS = 20;
 
 /**
- * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
- * options, footer) plus the transcript region that keeps its place above the
- * dialog. The expanded tail window is budgeted as terminal height minus this
- * reserve, so the end of the content — where the options still are — stays on
- * screen (ink reaches the same visible outcome through terminal scrollback).
+ * Rows reserved around an EXPANDED body: the inline confirmation's chrome
+ * (padding, question, outcome list, waiting row) plus the transcript region
+ * that keeps its place above it. The expanded tail window is budgeted as
+ * terminal height minus this reserve, so the end of the content — where the
+ * options still are — stays on screen (ink reaches the same visible outcome
+ * through terminal scrollback). Deliberately generous: erring low hides a few
+ * payload rows, erring high pushes the options off screen.
  */
 const EXPANDED_BODY_RESERVE_ROWS = 20;
 
@@ -515,6 +517,21 @@ export interface OpenTuiToolConfirmationProps {
 }
 
 /**
+ * ink renders a tool confirmation inline in the transcript, as a sibling
+ * directly below the pending tool's own row — no border, no title row and no
+ * navigation hint. The two-column margin is the transcript's own and the
+ * one-column padding is ink's outer box, which together put the question and
+ * the options at column 3; the body adds two more columns of its own.
+ */
+function InlineConfirmation(props: { children?: ReactNode }) {
+  return (
+    <box flexDirection="column" marginLeft={2} padding={1}>
+      {props.children}
+    </box>
+  );
+}
+
+/**
  * Renders one awaiting tool call and settles it through
  * `confirmationDetails.onConfirm`. ask_user_question gets its own flow; every
  * other type shows its body plus the outcome list.
@@ -534,7 +551,7 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
     [details, onSettled],
   );
 
-  // Esc declines, matching the "No (esc)" option and the footer hint.
+  // Esc declines, matching the "No (esc)" option label.
   useKeyboard((key) => {
     if (toOriginalKey(key).name === 'escape') {
       settle(ToolConfirmationOutcome.Cancel);
@@ -565,24 +582,23 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
 
   const prompt = buildConfirmationPrompt(details, config.isTrustedFolder());
   return (
-    <DialogFrame borderColor={C.yellow}>
-      <box flexDirection="column">
-        <text fg={C.text} attributes={1}>
-          {sanitizeTerminalText(details.title)}
-        </text>
-        <box marginTop={1} marginBottom={1}>
-          <ConfirmationBody details={details} />
-        </box>
-        <text fg={C.text}>{sanitizeTerminalText(prompt.question)}</text>
-        <OutcomeSelect
-          options={prompt.options}
-          onChoose={(outcome) => settle(outcome)}
-        />
-        <FooterHint
-          text={t('↑↓ to choose · Enter to confirm · Esc to cancel')}
-        />
+    <InlineConfirmation>
+      <box
+        flexDirection="column"
+        marginLeft={1}
+        paddingLeft={1}
+        marginBottom={1}
+      >
+        <ConfirmationBody details={details} />
       </box>
-    </DialogFrame>
+      <box marginBottom={1}>
+        <text fg={C.text}>{sanitizeTerminalText(prompt.question)}</text>
+      </box>
+      <OutcomeSelect
+        options={prompt.options}
+        onChoose={(outcome) => settle(outcome)}
+      />
+    </InlineConfirmation>
   );
 }
 
