@@ -83,6 +83,29 @@ function Scene({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * The exclusivity fixture: an ordinary key consumer listening while the menu
+ * is open. Single definition for every test that asserts what leaked (or was
+ * consumed) under the open menu.
+ */
+function ExclusiveScene({
+  items,
+  onKey,
+}: {
+  items: ContextMenuItem[];
+  onKey: (key: string) => void;
+}) {
+  return (
+    <Scene>
+      <ContextMenuProvider>
+        <InnocentBystander onKey={onKey} />
+        <MenuOpener items={items} />
+        <ContextMenuOverlay />
+      </ContextMenuProvider>
+    </Scene>
+  );
+}
+
 describe('ContextMenuOverlay', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -150,13 +173,10 @@ describe('ContextMenuOverlay', () => {
     const handlers = { open: vi.fn(), copy: vi.fn() };
     const bystanderKeys: string[] = [];
     const { lastFrame, stdin } = renderWithProviders(
-      <Scene>
-        <ContextMenuProvider>
-          <InnocentBystander onKey={(k) => bystanderKeys.push(k)} />
-          <MenuOpener items={makeItems(handlers)} />
-          <ContextMenuOverlay />
-        </ContextMenuProvider>
-      </Scene>,
+      <ExclusiveScene
+        items={makeItems(handlers)}
+        onKey={(k) => bystanderKeys.push(k)}
+      />,
     );
     await waitFor(() => expect(lastFrame()).toContain('Open Link'));
     stdin.write('\u001b[B'); // ArrowDown
@@ -174,24 +194,6 @@ describe('ContextMenuOverlay', () => {
   // #11228: while the menu is open its overlay owns the keyboard. The
   // composer, approval dialog, and tab bar must not act on the same key.
   describe('key exclusivity', () => {
-    function ExclusiveScene({
-      items,
-      onKey,
-    }: {
-      items: ContextMenuItem[];
-      onKey: (key: string) => void;
-    }) {
-      return (
-        <Scene>
-          <ContextMenuProvider>
-            <InnocentBystander onKey={onKey} />
-            <MenuOpener items={items} />
-            <ContextMenuOverlay />
-          </ContextMenuProvider>
-        </Scene>
-      );
-    }
-
     it('an ordinary handler does not receive Enter aimed at the open menu', async () => {
       const handlers = { open: vi.fn(), copy: vi.fn() };
       const bystanderKeys: string[] = [];
@@ -205,6 +207,26 @@ describe('ContextMenuOverlay', () => {
 
       stdin.write('\r'); // Enter — executes the menu item
       await waitFor(() => expect(handlers.open).toHaveBeenCalledTimes(1));
+
+      expect(bystanderKeys).toEqual([]);
+    });
+
+    it('an unmodified ArrowUp is consumed by the open menu', async () => {
+      const handlers = { open: vi.fn(), copy: vi.fn() };
+      const bystanderKeys: string[] = [];
+      const { lastFrame, stdin } = renderWithProviders(
+        <ExclusiveScene
+          items={makeItems(handlers)}
+          onKey={(k) => bystanderKeys.push(k)}
+        />,
+      );
+      await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+
+      // Legacy unparameterized form — the only Up that decodes as a bare
+      // 'up' under the kitty protocol (KeypressContext matches \u001b[A but
+      // not \u001b[1A), so this reaches the unmodified up claim branch.
+      stdin.write('\u001b[A');
+      await wait();
 
       expect(bystanderKeys).toEqual([]);
     });
