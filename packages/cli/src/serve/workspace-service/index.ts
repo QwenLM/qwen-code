@@ -65,6 +65,7 @@ import {
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
+  resolveLegacyArtifactNamedWorkspaceSkill,
   WorkspaceSkillManagementError,
 } from '../workspace-skill-management.js';
 
@@ -1092,10 +1093,33 @@ export function createDaemonWorkspaceService(
       const skill =
         scopedMatches.find((candidate) => candidate.name === exactName) ??
         (scopedMatches.length === 1 ? scopedMatches[0] : undefined);
-      if (!skill && matches.length === 0) {
-        throw new WorkspaceSkillNotFoundError(requestedSkillName);
-      }
-      if (!skill?.installedPath) {
+      let skillName: string;
+      let installedPath: string;
+      if (skill?.installedPath) {
+        skillName = skill.name;
+        installedPath = skill.installedPath;
+      } else if (!skill && matches.length === 0) {
+        // Legacy mapping (R5-1 follow-up to the reinstall-atomicity fix):
+        // a Skill directory whose name exactly matches an install-artifact
+        // shape is skipped by the loader artifact filter, so it can never be
+        // found through the listing above — yet versions before the
+        // reserved-name rejection could install such names, which left them
+        // permanently undeletable. Resolve directly on disk; a crashed swap
+        // artifact's manifest declares the base skill name, not the
+        // artifact-shaped directory name, so artifacts resolve to undefined
+        // here and keep failing closed with NotFound.
+        const legacyInstalledPath =
+          await resolveLegacyArtifactNamedWorkspaceSkill(
+            boundWorkspace,
+            scope,
+            exactName,
+          );
+        if (!legacyInstalledPath) {
+          throw new WorkspaceSkillNotFoundError(requestedSkillName);
+        }
+        skillName = exactName;
+        installedPath = legacyInstalledPath;
+      } else {
         throw new WorkspaceSkillManagementError(
           'skill_not_managed',
           'Skill is not managed in the requested scope',
@@ -1107,8 +1131,8 @@ export function createDaemonWorkspaceService(
         result = await deleteWorkspaceSkill(
           boundWorkspace,
           scope,
-          skill.name,
-          skill.installedPath,
+          skillName,
+          installedPath,
           assertGenerationOpen,
         );
       } catch (error) {

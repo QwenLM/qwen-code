@@ -4,11 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Storage, type Config } from '@qwen-code/qwen-code-core';
+import {
+  isInstallArtifactName,
+  isInstallArtifactOfSkill,
+  installArtifactPid,
+  isSelfNamedSkillDirectory,
+  resolveLegacyArtifactNamedSkillFile,
+  Storage,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { RequestError } from '@agentclientprotocol/sdk';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { downloadSkill } from './skill-source-download.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 function toRecord(value: unknown): Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -89,7 +98,7 @@ function validateSkillSlug(slug: string): void {
 }
 
 function rejectInstallArtifactSlug(slug: string): void {
-  if (/\.(backup|installing)-\d+-\d+$/.test(slug)) {
+  if (isInstallArtifactName(slug)) {
     throw RequestError.invalidParams(
       undefined,
       'Invalid skill.slug: name ends with a reserved install-artifact suffix',
@@ -275,6 +284,69 @@ export async function setManagedSkillEnabled(
   return setGlobalSkillEnabled(config, readSkillSetEnabledRequest(params), cwd);
 }
 
+// A pid is "alive" when signal 0 is delivered (ESRCH means no such process;
+// EPERM means it exists but belongs to another user). Used to keep the sweep
+// below from deleting artifacts a concurrent install of the same slug is
+// still writing — fail-open on "maybe alive" so the sweep stays conservative.
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// Removes `.backup-*` / `.installing-*` directories orphaned under
+// `skillsBaseDir` by crashed installs of `slug` (the swap in
+// `installSkillFromUrl` below names its staging and backup dirs
+// `<slug>.installing-<pid>-<ts>` / `<slug>.backup-<pid>-<ts>`; a crash
+// between creating and cleaning them strands them). The sweep is
+// best-effort hygiene: it never fails the install, and it skips
+//
+// - directories that are actually legacy self-named skills (installed by
+//   versions before the reserved-name rejection; their SKILL.md declares
+//   the artifact-shaped name itself, while a real artifact of `slug`
+//   declares `slug`), and
+// - artifacts whose embedded pid belongs to a live process other than us
+//   (a concurrent install may still be mid-swap; our own artifacts cannot
+//   be in flight because installs run sequentially per process and the
+//   sweep happens before staging).
+async function removeStaleInstallArtifacts(
+  skillsBaseDir: string,
+  slug: string,
+): Promise<void> {
+  const entries = await fs
+    .readdir(skillsBaseDir, { withFileTypes: true })
+    .catch((error: unknown) => {
+      // First-ever install: the skills directory does not exist yet.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    });
+  await Promise.all(
+    entries
+      .filter(
+        (entry) =>
+          entry.isDirectory() && isInstallArtifactOfSkill(entry.name, slug),
+      )
+      .map(async (entry) => {
+        const artifactDir = path.join(skillsBaseDir, entry.name);
+        if (await isSelfNamedSkillDirectory(artifactDir)) {
+          return;
+        }
+        const pid = installArtifactPid(entry.name);
+        if (pid !== undefined && pid !== process.pid && isProcessAlive(pid)) {
+          return;
+        }
+        await fs.rm(artifactDir, { recursive: true, force: true }).catch(() => {
+          writeStderrLineSafe(
+            `qwen: failed to sweep stale skill install artifact ${artifactDir} before reinstalling "${slug}"`,
+          );
+        });
+      }),
+  );
+}
+
 async function installSkillFromUrl(
   config: Config,
   request: QwenSkillInstallRequest,
@@ -302,6 +374,13 @@ async function installSkillFromUrl(
       `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
     );
   }
+
+  // Sweep artifacts orphaned by earlier crashed installs of this same slug
+  // before staging anything new, mirroring the serve-side installer's
+  // `removeInstallArtifacts`. Without this, a crash between the backup and
+  // cleanup renames leaves `.backup-*` / `.installing-*` siblings that the
+  // loaders filter out forever — invisible, unbounded garbage.
+  await removeStaleInstallArtifacts(skillsBaseDir, request.slug);
 
   // Install atomically: stage all files in a sibling temp directory, then
   // swap it in with a rollback-capable rename sequence. A mid-write failure
@@ -332,7 +411,18 @@ async function installSkillFromUrl(
       await fs.rename(stagingDir, skillDir);
     } catch (error) {
       if (backedUp) {
-        await fs.rename(backupDir, skillDir).catch(() => {});
+        // The restore rename is best-effort — the caller must still see the
+        // original swap error, not a secondary rollback failure. But a failed
+        // restore strands the previous skill in a loader-filtered `.backup-*`
+        // directory where nothing would ever mention it again, so at minimum
+        // leave a loud, actionable hint on stderr.
+        await fs.rename(backupDir, skillDir).catch((restoreError: unknown) => {
+          writeStderrLineSafe(
+            `qwen: skill rollback failed for "${request.slug}": could not restore the previous install from ${backupDir} ` +
+              `(${restoreError instanceof Error ? restoreError.message : String(restoreError)}). ` +
+              `The previous skill is stranded there and hidden from skill listings; restore it manually or reinstall "${request.slug}" to sweep the artifact.`,
+          );
+        });
       }
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       throw error;
@@ -467,6 +557,23 @@ async function readManagedSkillFile(
   };
 }
 
+async function readProjectSkillFile(
+  slug: string,
+  skillFile: string,
+): Promise<QwenManagedSkillFile> {
+  const content = await fs.readFile(skillFile, 'utf8').catch(() => {
+    throw RequestError.invalidParams(
+      undefined,
+      `Project skill not found: ${slug}`,
+    );
+  });
+  return {
+    skillDir: path.dirname(skillFile),
+    skillFile,
+    content,
+  };
+}
+
 async function findProjectSkillFileFromCwd(
   slug: string,
   cwd: string,
@@ -478,19 +585,25 @@ async function findProjectSkillFileFromCwd(
     const skills = await skillManager.loadSkillsFromDir(baseDir, 'project');
     const skill = skills.find((candidate) => candidate.name === slug);
     const skillFile = skill?.filePath;
-    if (!skillFile) continue;
+    if (skillFile) {
+      return readProjectSkillFile(slug, skillFile);
+    }
 
-    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-      throw RequestError.invalidParams(
-        undefined,
-        `Project skill not found: ${slug}`,
-      );
-    });
-    return {
-      skillDir: path.dirname(skillFile),
-      skillFile,
-      content,
-    };
+    // Legacy mapping: a skill directory whose name exactly matches an
+    // install-artifact shape is skipped by the loader's artifact filter, so
+    // it can never be found through the listing above — yet versions before
+    // the reserved-name rejection could install such names. Resolve it
+    // directly on disk when it is a genuine self-named skill (a crashed
+    // swap artifact's manifest declares the base skill name, not the
+    // artifact-shaped directory name, so artifacts still resolve to
+    // undefined and keep failing closed with "not found").
+    const legacySkillFile = await resolveLegacyArtifactNamedSkillFile(
+      baseDir,
+      slug,
+    );
+    if (legacySkillFile) {
+      return readProjectSkillFile(slug, legacySkillFile);
+    }
   }
   return undefined;
 }

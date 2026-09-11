@@ -50,6 +50,77 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     }
   }
 
+  // Minimal SkillManager stand-in: only the surface workspace-skill-management
+  // touches (base-dir enumeration + manifest name parsing for deletes).
+  class SkillManager {
+    constructor(private readonly config: unknown) {}
+
+    getSkillsBaseDirs(level: string): string[] {
+      if (level === 'project') {
+        const root = (
+          this.config as { getProjectRoot: () => string }
+        ).getProjectRoot();
+        return ['.qwen', '.agents'].map((dir) => `${root}/${dir}/skills`);
+      }
+      return [`${Storage.getGlobalQwenDir()}/skills`];
+    }
+
+    parseSkillContent(content: string) {
+      const name = content.match(/^name:\s*(.+)$/m)?.[1]?.trim();
+      return { name, description: 'stub skill' };
+    }
+  }
+
+  // Minimal stand-ins for the install-artifact name contract consumed by
+  // workspace-skill-management (the real module is covered by its own
+  // suite). Mirrors skill-install-artifacts.ts in core.
+  const isInstallArtifactName = (name: string) =>
+    /\.(backup|installing)-\d+-\d+$/.test(name);
+  const isInstallArtifactOfSkill = (name: string, skillName: string) => {
+    const escaped = skillName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^${escaped}\\.(?:backup|installing)-\\d+-\\d+$`).test(
+      name,
+    );
+  };
+  const installArtifactPid = (name: string) => {
+    const match = /\.(?:backup|installing)-(\d+)-\d+$/.exec(name);
+    return match ? Number(match[1]) : undefined;
+  };
+  const readDeclaredSkillName = async (skillDir: string) => {
+    const fs = await import('node:fs/promises');
+    const pathModule = await import('node:path');
+    try {
+      const content = await fs.readFile(
+        pathModule.join(skillDir, 'SKILL.md'),
+        'utf8',
+      );
+      const match = content.match(/^---\n([\s\S]*?)\n---/);
+      const name = match?.[1].match(/^name:\s*(.+)$/m)?.[1];
+      return name ? name.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const isSelfNamedSkillDirectory = async (skillDir: string) => {
+    const pathModule = await import('node:path');
+    const declared = await readDeclaredSkillName(skillDir);
+    return declared !== undefined && declared === pathModule.basename(skillDir);
+  };
+  const resolveLegacyArtifactNamedSkillFile = async (
+    baseDir: string,
+    skillName: string,
+  ) => {
+    if (!isInstallArtifactName(skillName)) return undefined;
+    const fs = await import('node:fs/promises');
+    const pathModule = await import('node:path');
+    const skillFile = pathModule.join(baseDir, skillName, 'SKILL.md');
+    const stats = await fs.stat(skillFile).catch(() => undefined);
+    if (!stats?.isFile()) return undefined;
+    return (await isSelfNamedSkillDirectory(pathModule.dirname(skillFile)))
+      ? skillFile
+      : undefined;
+  };
+
   return {
     SkillError,
     FatalConfigError,
@@ -84,6 +155,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     QWEN_DIR: '.qwen',
     Storage,
     ModelsConfig,
+    SkillManager,
+    isInstallArtifactName,
+    isInstallArtifactOfSkill,
+    installArtifactPid,
+    isSelfNamedSkillDirectory,
+    resolveLegacyArtifactNamedSkillFile,
     atomicWriteFileSync: vi.fn(),
     createDebugLogger: () => noopLogger,
     getErrorMessage: (error: unknown) =>
@@ -1140,6 +1217,79 @@ describe('createDaemonWorkspaceService', () => {
         svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global'),
       ).rejects.toMatchObject({ code: 'skill_not_managed' });
       expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
+    });
+
+    it('deletes a legacy artifact-shaped Skill hidden from the runtime listing', async () => {
+      const workspace = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-facade-legacy-'),
+      );
+      const slug = 'foo.backup-1-2';
+      const skillDir = path.join(workspace, '.qwen', 'skills', slug);
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        `---\nname: ${slug}\ndescription: Legacy skill\n---\nBody\n`,
+        'utf8',
+      );
+      // The live runtime inventory hides artifact-shaped names (the loader
+      // artifact filter skips them), which is exactly what made such Skills
+      // undeletable before the legacy disk fallback.
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: workspace }),
+      );
+
+      try {
+        await expect(
+          svc.deleteWorkspaceSkill(makeCtx(), slug, 'workspace'),
+        ).resolves.toEqual({
+          skillName: slug,
+          scope: 'workspace',
+          deleted: true,
+        });
+        await expect(fs.stat(skillDir)).rejects.toThrow();
+      } finally {
+        await fs.rm(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps failing closed for crashed artifacts during legacy resolution', async () => {
+      const workspace = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-facade-crashed-'),
+      );
+      const slug = 'foo.backup-1-2';
+      const skillDir = path.join(workspace, '.qwen', 'skills', slug);
+      await fs.mkdir(skillDir, { recursive: true });
+      // Crashed swap artifact of `foo`: the manifest declares the base skill
+      // name, not the artifact-shaped directory name.
+      await fs.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: foo\ndescription: Previous install\n---\nBody\n',
+        'utf8',
+      );
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: workspace }),
+      );
+
+      try {
+        await expect(
+          svc.deleteWorkspaceSkill(makeCtx(), slug, 'workspace'),
+        ).rejects.toMatchObject({ name: 'WorkspaceSkillNotFoundError' });
+        await expect(fs.stat(skillDir)).resolves.toBeDefined();
+      } finally {
+        await fs.rm(workspace, { recursive: true, force: true });
+      }
     });
 
     it('fails closed when config Skill enumeration is unavailable', async () => {

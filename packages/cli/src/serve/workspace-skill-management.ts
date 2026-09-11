@@ -4,8 +4,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
-import { SkillManager, Storage, type Config } from '@qwen-code/qwen-code-core';
+import {
+  isInstallArtifactName,
+  resolveLegacyArtifactNamedSkillFile,
+  SkillManager,
+  Storage,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export type WorkspaceSkillScope = 'workspace' | 'global';
 
@@ -70,7 +77,7 @@ export function validateWorkspaceSkillName(name: string): string {
 }
 
 function rejectInstallArtifactSkillName(name: string): void {
-  if (/\.(backup|installing)-\d+-\d+$/.test(name)) {
+  if (isInstallArtifactName(name)) {
     skillError(
       'invalid_skill_name',
       'Skill name ends with a reserved install-artifact suffix',
@@ -838,7 +845,17 @@ export async function installWorkspaceSkill(
       })
       .catch(() => undefined);
     if (movedExisting) {
-      await fs.rename(backup, destination).catch(() => undefined);
+      // Best-effort restore that must not mask the original commit error —
+      // but a failed restore strands the previous Skill in a loader-filtered
+      // backup directory nothing would ever mention again, so leave a loud,
+      // actionable hint on stderr (mirrors the ACP installer).
+      await fs.rename(backup, destination).catch((restoreError: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: Skill rollback failed for "${skillName}": could not restore the previous install from ${backup} ` +
+            `(${restoreError instanceof Error ? restoreError.message : String(restoreError)}). ` +
+            `The previous Skill is stranded there and hidden from Skill listings; restore it manually or reinstall "${skillName}" to sweep the artifact.`,
+        );
+      });
     }
     throw error;
   }
@@ -852,6 +869,35 @@ export async function installWorkspaceSkill(
     scope: request.scope,
     installedPath: path.join(destination, 'SKILL.md'),
   };
+}
+
+// Legacy mapping for listing-based management surfaces (R5-1 follow-up to
+// the reinstall-atomicity fix): a Skill directory whose name exactly matches
+// an install-artifact shape is skipped by the loader artifact filter, so it
+// never appears in a skills status listing — yet versions before the
+// reserved-name rejection could install such names, which made them
+// unmanageable (delete routes threw NotFound for a Skill that visibly sat on
+// disk). Resolves the manifest path directly from the same base directories
+// `deleteWorkspaceSkill` trusts, but only when the directory is a genuine
+// self-named skill; a crashed swap artifact's manifest declares the base
+// skill name, not the artifact-shaped directory name, so artifacts resolve
+// to undefined and callers keep failing closed.
+export async function resolveLegacyArtifactNamedWorkspaceSkill(
+  workspace: string,
+  scope: WorkspaceSkillScope,
+  skillName: string,
+): Promise<string | undefined> {
+  const baseDirs = new SkillManager({
+    getProjectRoot: () => workspace,
+  } as Config).getSkillsBaseDirs(scope === 'workspace' ? 'project' : 'user');
+  for (const baseDir of baseDirs) {
+    const skillFile = await resolveLegacyArtifactNamedSkillFile(
+      baseDir,
+      skillName,
+    );
+    if (skillFile) return skillFile;
+  }
+  return undefined;
 }
 
 export async function deleteWorkspaceSkill(
