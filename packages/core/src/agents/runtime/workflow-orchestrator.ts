@@ -272,7 +272,7 @@ export function resolveSubagentMaxTimeMinutes(
  * workflow subagents do not register. Defense-in-depth alongside the workflow
  * system prompt's return-value contract.
  */
-const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,

@@ -14450,6 +14450,7 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
     if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
       config.setGoalProposalHostSupported(true);
     }
