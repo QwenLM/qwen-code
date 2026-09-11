@@ -338,13 +338,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    *
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
-   *   and the latest history message
+   *   and the latest history message — or, when a reattach region trails the
+   *   conversation, the last stable block before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
    *
    * @param request - The original chat completion request parameters
    * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @param reattachBlockCount - Number of trailing blocks in the last message that
+   *   belong to the regenerated reattach region; the conversation cache breakpoint
+   *   is placed before them. Defaults to 0 (last block of the last message).
    * @returns Configured request with DashScope-specific parameters applied
    */
   override buildRequest(
@@ -804,9 +808,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     let remaining = reattachBlockCount;
     for (let index = messages.length - 1; index >= 0; index--) {
       const content = (messages[index] as { content?: unknown }).content;
+      // An empty string (an empty tool result, or a reasoning-only assistant
+      // turn) carries no stable block; score it zero so the walk continues to
+      // a message with real content instead of anchoring on a fabricated
+      // zero-length text block.
       const blockCount =
         typeof content === 'string'
-          ? 1
+          ? content.length > 0
+            ? 1
+            : 0
           : Array.isArray(content)
             ? content.length
             : 0;
@@ -880,9 +890,18 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return contentArray;
     }
 
-    const targetIndex = contentArray.length - 1 - excludeTail;
+    let targetIndex = contentArray.length - 1 - excludeTail;
     if (targetIndex < 0) {
       return contentArray;
+    }
+
+    // When a reattach region is being skipped, keep walking the anchor back
+    // past non-text blocks (e.g. a current-turn inline image the next turn
+    // textualizes) so the breakpoint lands on stable text instead of an image.
+    if (excludeTail > 0) {
+      while (targetIndex > 0 && contentArray[targetIndex].type !== 'text') {
+        targetIndex -= 1;
+      }
     }
 
     // Add cache_control to the last stable content item.

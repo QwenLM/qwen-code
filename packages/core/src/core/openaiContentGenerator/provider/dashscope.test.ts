@@ -2718,6 +2718,71 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
       expect(content?.[0]).not.toHaveProperty('cache_control');
     });
+
+    it('skips an empty-string tool result when walking back to a stable block', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The empty tool result stays a bare string — not rewritten into a
+      // fabricated zero-length text part carrying cache_control.
+      expect(result.messages[1]?.content).toBe('');
+      // The breakpoint degrades to the system message (system-only caching).
+      expect(result.messages[0]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'System prompt',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('walks the anchor back past a current-turn inline image to stable text', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'look at this screenshot' },
+              reattachImageBlock,
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Breakpoint lands on the prompt text, not the inline image the next
+      // turn textualizes.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'look at this screenshot',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+    });
   });
 
   describe('output token limits', () => {
