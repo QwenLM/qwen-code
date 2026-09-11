@@ -1567,15 +1567,21 @@ export async function processSingleFileContent(
               filePath,
               signal ?? new AbortController().signal,
             );
+            // CodeModeOnly hides tool_search and binds zoom_image into the
+            // `exec` description, so the discovery step does not exist there.
+            const zoomHint = config.getCodeModeOnly?.()
+              ? `If details are too small, call tools.zoom_image with ` +
+                `coordinates normalized from 0 to 1000.`
+              : `If details are too small, call zoom_image with coordinates normalized ` +
+                `from 0 to 1000 (if it is not in your tool list, review it with ` +
+                `tool_search first, then invoke it through tool_call).`;
             return {
               llmContent: [
                 {
                   text:
                     `Image overview: ${view.outputWidth}x${view.outputHeight}; ` +
                     `oriented source: ${view.sourceWidth}x${view.sourceHeight}. ` +
-                    `If details are too small, call zoom_image with coordinates normalized ` +
-                    `from 0 to 1000 (if it is not in your tool list, review it with ` +
-                    `tool_search first, then invoke it through tool_call).`,
+                    zoomHint,
                 },
                 {
                   inlineData: {

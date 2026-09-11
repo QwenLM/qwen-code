@@ -577,27 +577,46 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
 });
 
 describe('foldLiveEvent tool-output', () => {
-  it('appends live output to the running tool card', () => {
-    let items = foldLiveEvent([], {
+  const started = () =>
+    foldLiveEvent([], {
       type: 'tool-start',
       id: 'tool1',
       tool: 'run_shell_command',
       title: 'run_shell_command',
     });
-    items = foldLiveEvent(items, {
+
+  it('replaces the running card output with each snapshot', () => {
+    let items = foldLiveEvent(started(), {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line1\n',
+      output: 'line1\n',
     });
     items = foldLiveEvent(items, {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line2\n',
+      output: 'line1\nline2\n',
     });
     expect(items[0]).toMatchObject({
       kind: 'tool',
       done: false,
       output: 'line1\nline2\n',
+    });
+  });
+
+  it('holds one copy when the result repeats the streamed output', () => {
+    let items = foldLiveEvent(started(), {
+      type: 'tool-output',
+      id: 'tool1',
+      output: 'ACCEPT_TOOL_RAN\n',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: 'ACCEPT_TOOL_RAN\n',
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      output: 'ACCEPT_TOOL_RAN\n',
     });
   });
 });
