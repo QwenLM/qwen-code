@@ -1786,6 +1786,176 @@ describe('ToolRegistry', () => {
         resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
       ).toEqual(['file:///review.md']);
     });
+
+    it('restores the snapshot when the rediscovery resolves without registering (R1-3 production shape)', async () => {
+      // The legacy manager path never rejects for a dead connection —
+      // `discoverMcpToolsForServerInternal` catches connect errors, logs,
+      // and deliberately does not rethrow, and the policy early-returns
+      // (untrusted / disabled / pending-approval / budget-refused /
+      // stopped) also resolve without registering. The restore must fire
+      // on the observed OUTCOME (server had tools, came back with none),
+      // not only on a rejection.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+
+      // The production failure shape: resolve while registering nothing.
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      // Resolves — no throw — yet the server must not end up empty.
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
+    });
+
+    it('does not restore the snapshot over a successful rediscovery', async () => {
+      // The restore must fire ONLY when the server came back empty.
+      // Re-registering the pre-purge snapshot over a FRESH successful
+      // rediscovery would collide in `registerTool` (which renames MCP
+      // tools instead of overwriting) and accumulate dead-client
+      // duplicates per reconnect.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      const staleTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(staleTool);
+
+      const freshTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'fresh description',
+        {},
+      );
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(async () => {
+        // The real path registers tools through the client's discover
+        // while the registry-level purge has already happened.
+        toolRegistry.registerTool(freshTool);
+      });
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      // The fresh tool won; the stale snapshot entry was purged before
+      // the fresh registration and NOT re-added afterwards. The count
+      // pins "exactly one tool for the server" — the observable symptom
+      // of restoring the snapshot over a successful rediscovery is a
+      // second (renamed, fully-qualified) duplicate.
+      expect(toolRegistry.getTool(freshTool.name)).toBe(freshTool);
+      const serverTools = toolRegistry
+        .getAllTools()
+        .filter(
+          (t) =>
+            t instanceof DiscoveredMCPTool && t.serverName === 'flaky-server',
+        );
+      expect(serverTools).toHaveLength(1);
+    });
+
+    it('a concurrent second discoverToolsForServer neither purges nor loses the first pass registrations (R2-1)', async () => {
+      // The purge runs synchronously before the await. Without a
+      // per-server in-flight guard, call B snapshots-and-deletes the
+      // tools call A's discovery just registered, then dedups onto A's
+      // promise (manager `serverDiscoveryPromises`) which RESOLVES — so
+      // no restore runs and a CONNECTED server ends the session with
+      // zero registrations. Call B must await A's outcome untouched.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      let resolveA: () => void = () => {};
+      let entered = 0;
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            entered += 1;
+            if (entered === 1) {
+              resolveA = () => resolve(undefined);
+            } else {
+              resolve(undefined);
+            }
+          }),
+      );
+
+      const callA = toolRegistry.discoverToolsForServer('flaky-server');
+      // A's discovery is now in flight and has re-registered the tool
+      // (simulating `client.discover()`): simulate by re-registering the
+      // same tool the way the real discovery would.
+      const reRegistered = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+        undefined,
+        mcpTool.name,
+      );
+      toolRegistry.registerTool(reRegistered);
+
+      const callB = toolRegistry.discoverToolsForServer('flaky-server');
+      // B dedups onto A: only one discovery ever started.
+      expect(entered).toBe(1);
+
+      resolveA();
+      await Promise.all([callA, callB]);
+
+      // The mid-flight registration survived B.
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBeDefined();
+      expect(toolRegistry.getTool(reRegistered.name)).toBeDefined();
+    });
   });
 
   describe('disableMcpServer', () => {

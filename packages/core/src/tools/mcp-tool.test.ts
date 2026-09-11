@@ -2653,6 +2653,55 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
+    it('should not trigger background recovery when the registry manager is pooled', async () => {
+      // Pool-baked tools carry the daemon's bootstrap Config. The pool
+      // skip must detect them even when that Config instance was never
+      // handed `setMcpTransportPool` — the manager behind the registry
+      // the recovery would purge is the authoritative fact (R1-5).
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      // Bootstrap-shaped config: NO getMcpTransportPool accessor at all —
+      // only the manager reveals pool mode.
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+          getMcpClientManager: () => ({
+            getServerStatus: () => MCPServerStatus.DISCONNECTED,
+            isPooled: () => true,
+          }),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort('qwen:user-cancel');
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
     it('should not reconnect for an MCP isError result', async () => {
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({

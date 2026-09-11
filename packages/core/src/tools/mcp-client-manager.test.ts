@@ -3577,6 +3577,77 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // getServerStatus falls back to DISCONNECTED.
     expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
     expect(manager.getMcpClientAccounting().total).toBe(1);
+
+    // --- R1-15 follow-up: the trailing release must not fire while the
+    // replacement still holds the reservation. Same interleaving, but
+    // under a real enforce-mode budget so `reservedSlots` is populated:
+    // the rediscovery inside the disconnect window re-uses the held slot
+    // ('already_held'), and an unconditional releaseSlotName would drop
+    // it, letting the enforce branch admit one server past the cap.
+    let releaseOperatorDisconnect2: (() => void) | undefined;
+    let originalDisconnectCalls2 = 0;
+    let call2 = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call2 += 1;
+      if (call2 === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            originalDisconnectCalls2 += 1;
+            if (originalDisconnectCalls2 === 1) {
+              return new Promise<void>((resolve) => {
+                releaseOperatorDisconnect2 = resolve;
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const budgeted = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const budgetManager = mkManager({
+      config: budgeted,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await budgetManager.discoverAllMcpTools(budgeted);
+    // Budget of 1: 'b' was refused during the bulk pass.
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+
+    const operatorDisconnect2 = budgetManager.disconnectServer('a');
+    await vi.waitFor(() => expect(releaseOperatorDisconnect2).toBeDefined());
+    // Replacement discovery re-uses the still-held slot.
+    await budgetManager.discoverMcpToolsForServer('a', budgeted);
+    releaseOperatorDisconnect2?.();
+    await operatorDisconnect2;
+
+    // The replacement survives AND keeps its reservation; the cap of 1
+    // still refuses 'b'. Without the `!clients.has` condition on the
+    // trailing release both assertions go red: the slot is dropped and
+    // 'b' is admitted.
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    await budgetManager.discoverMcpToolsForServer('b', budgeted);
+    expect(budgetManager.getServerStatus('b')).not.toBe(
+      MCPServerStatus.CONNECTED,
+    );
+    // 'b' records a fresh refusal; the surviving replacement 'a' keeps
+    // the one slot.
+    expect(budgetManager.getMcpClientAccounting().refusedServerNames).toEqual([
+      'b',
+    ]);
+    expect(budgetManager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
   });
 
   it('discoverMcpToolsForServerInternal rejects disabled servers (wenshao R7 #2 line 528)', async () => {

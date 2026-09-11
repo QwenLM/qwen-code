@@ -262,12 +262,14 @@ function createParentAbortRace(
 type ToolParams = Record<string, unknown>;
 
 /**
- * The slice of `McpClientManager` the abort-recovery evidence check reads.
+ * The slice of `McpClientManager` the abort-recovery checks read.
  * Kept structural so this file needs no manager import and test fixtures
  * can supply a plain object.
  */
 interface McpClientManagerLike {
   getServerStatus(serverName: string): MCPServerStatus;
+  /** True when this manager routes discovery through `McpTransportPool`. */
+  isPooled?(): boolean;
 }
 
 /**
@@ -524,8 +526,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // legacy child outside the pool while the cancelling session keeps its
     // torn-down view (exactly what `skipMcpDiscovery` on the bootstrap
     // exists to prevent). Pool entries recover through their own
-    // eviction/re-acquire path; skip here.
-    if (this.cliConfig.getMcpTransportPool?.()) {
+    // eviction/re-acquire path; skip here. The daemon wires the pool onto
+    // that same bootstrap Config, so this reads the fact from the exact
+    // instance the recovery would purge. Belt-and-braces: a config whose
+    // registry routes through a pooled manager also implies pool mode
+    // (legacy managers are constructed pool-less), covering any config
+    // variant that did not get the accessor set.
+    if (
+      this.cliConfig.getMcpTransportPool?.() ||
+      this.registryManagerIsPooled()
+    ) {
       return;
     }
     const now = Date.now();
@@ -597,6 +607,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return MCP_CONNECTION_ERROR_PATTERNS.some((pattern) =>
       pattern.test(message),
     );
+  }
+
+  /**
+   * Whether the manager behind this tool's registry routes discovery
+   * through the shared transport pool. Complements the Config accessor
+   * check in `scheduleRecoveryAfterAbort`: the config a pool-baked tool
+   * carries is the daemon's bootstrap Config, and only the daemon decides
+   * whether that instance got the pool wired on. Reading the manager's
+   * own flag asks the object the recovery would actually purge.
+   */
+  private registryManagerIsPooled(): boolean {
+    const registry = this.cliConfig?.getToolRegistry?.() as
+      | { getMcpClientManager?: () => McpClientManagerLike }
+      | undefined;
+    return registry?.getMcpClientManager?.()?.isPooled?.() === true;
   }
 
   private async reconnectAndRefreshDeclarations(): Promise<void> {

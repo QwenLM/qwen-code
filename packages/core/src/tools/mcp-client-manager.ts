@@ -724,6 +724,15 @@ export class McpClientManager {
     );
   }
 
+  /** True when non-SDK discovery routes through the shared
+   * `McpTransportPool`. The abort-recovery path in `mcp-tool.ts` reads
+   * this to detect pool-baked tools whose cliConfig is the daemon's
+   * bootstrap Config (an instance the pool was not necessarily wired
+   * onto). */
+  isPooled(): boolean {
+    return this.pool !== undefined;
+  }
+
   /** Resolved budget mode (env-var or constructor-supplied). */
   getMcpBudgetMode(): McpBudgetMode {
     return this.budgetMode;
@@ -1989,16 +1998,24 @@ export class McpClientManager {
       }
     }
     // explicit operator-driven disconnect releases the budget
-    // slot AND drops the entry from the per-pass refusal log. Outside
-    // the `if (client)` guard because a budget-refused server has NO
-    // `McpClient` instance — but operator intent ("stop tracking this
-    // server") still demands the records be cleared so a subsequent
-    // snapshot doesn't keep tagging it as `budget_exhausted`. The
-    // internal reconnect path (`discoverMcpToolsForServerInternal`)
-    // calls `existingClient.disconnect()` directly, NOT this public
-    // method, so reconnect still doesn't release the slot.
-    this.releaseSlotName(serverName);
-    this.dropRefusalEntry(serverName);
+    // slot AND drops the entry from the per-pass refusal log — but only
+    // when no live client remains for the name. A rediscovery that
+    // installed a replacement client during the `await
+    // client.disconnect()` above re-used the still-held reservation
+    // (`tryReserveSlot` returns 'already_held' and does not re-add the
+    // name), so releasing here would drop that replacement's slot:
+    // `reservedSlots` under-counts live clients and the enforce branch
+    // then admits one server past `clientBudget`. The `client ===
+    // undefined` case (budget-refused: no McpClient instance exists)
+    // still clears both records so a subsequent snapshot doesn't keep
+    // tagging the name `budget_exhausted`. The internal reconnect path
+    // (`discoverMcpToolsForServerInternal`) calls
+    // `existingClient.disconnect()` directly, NOT this public method, so
+    // reconnect still doesn't release the slot.
+    if (!this.clients.has(serverName)) {
+      this.releaseSlotName(serverName);
+      this.dropRefusalEntry(serverName);
+    }
   }
 
   getDiscoveryState(): MCPDiscoveryState {
