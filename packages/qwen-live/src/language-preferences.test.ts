@@ -64,7 +64,10 @@ describe('Live language preference', () => {
       ...raw,
       language: 'zh-CN',
     });
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits.
+    if (process.platform !== 'win32') {
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
 

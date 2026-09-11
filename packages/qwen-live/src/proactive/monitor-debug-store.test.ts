@@ -225,25 +225,29 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
-    for (const path of [
-      root,
-      archive.directory,
-      join(archive.directory, 'requests'),
-      directory,
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o700);
-    }
-    for (const path of [
-      join(archive.directory, 'monitor.json'),
-      ...[
-        'request.json',
-        'response.json',
-        'image-0001.jpg',
-        'image-0002.jpg',
-        'input.wav',
-      ].map((file) => join(directory, file)),
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits; privateDirectory skips the mode
+    // check there (see monitor-debug-store.ts).
+    if (process.platform !== 'win32') {
+      for (const path of [
+        root,
+        archive.directory,
+        join(archive.directory, 'requests'),
+        directory,
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o700);
+      }
+      for (const path of [
+        join(archive.directory, 'monitor.json'),
+        ...[
+          'request.json',
+          'response.json',
+          'image-0001.jpg',
+          'image-0002.jpg',
+          'input.wav',
+        ].map((file) => join(directory, file)),
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o600);
+      }
     }
     expect(log).toHaveBeenCalledWith(
       'proactive.monitor_request_saved',
@@ -406,10 +410,14 @@ describe('MonitorDebugStore', () => {
 
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
-    await chmod(root, 0o755);
     await writeFile(join(root, 'keep.txt'), 'keep');
-    expect(await store.initialize()).toBe(false);
-    expect(store.create(INFO)).toBeUndefined();
+    // Windows has no POSIX permission bits; a shared-looking mode cannot be
+    // expressed or rejected there.
+    if (process.platform !== 'win32') {
+      await chmod(root, 0o755);
+      expect(await store.initialize()).toBe(false);
+      expect(store.create(INFO)).toBeUndefined();
+    }
     const linked = new MonitorDebugStore(
       log,
       join(temporary, 'linked-archives'),
@@ -418,6 +426,14 @@ describe('MonitorDebugStore', () => {
     await symlink(root, linked.root);
     expect(await linked.initialize()).toBe(false);
     expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('accepts directories on Windows, where POSIX permission bits do not exist', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    await mkdir(root, { mode: 0o700 });
+    // Stand-in for Windows reporting every directory with group/other bits.
+    await chmod(root, 0o755);
+    expect(await store.initialize()).toBe(true);
   });
 
   it('does not recreate an active directory pruned by another store', async () => {

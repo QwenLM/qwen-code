@@ -5,7 +5,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MEMORY_CONFIG,
@@ -51,7 +51,7 @@ describe('memory configuration', () => {
   });
 
   it('resolves relative and tilde paths without requiring the directory to exist', () => {
-    expect(resolve({ dir: 'saved' }).dir).toBe(join(dataDir, 'saved'));
+    expect(resolve({ dir: 'saved' }).dir).toBe(resolvePath(dataDir, 'saved'));
     expect(resolve({ dir: '~/qwen-memory-config-tests' }).dir).toBe(
       join(homedir(), 'qwen-memory-config-tests'),
     );
