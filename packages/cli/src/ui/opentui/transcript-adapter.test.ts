@@ -92,7 +92,10 @@ describe('transcriptToEvents subtyped user records', () => {
             callId: 'read1',
             status: 'success',
             resultDisplay: 'Read 2 lines',
-            responseParts: [
+          },
+          message: {
+            role: 'user',
+            parts: [
               {
                 functionResponse: {
                   id: 'read1',

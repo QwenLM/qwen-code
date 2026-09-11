@@ -10,6 +10,15 @@ import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { toolResultPresentation } from './tool-result-presentation.js';
 
 describe('toolResultPresentation', () => {
+  it('preserves structured bridge disclosures without duplicating their text', () => {
+    expect(
+      toolResultPresentation({
+        type: 'vision_bridge_notice',
+        summary: 'Read PDF',
+        notice: 'EGRESS',
+      }),
+    ).toEqual({ hasNotice: true });
+  });
   it('recognizes legacy tool aliases', () => {
     expect(
       toolResultPresentation(

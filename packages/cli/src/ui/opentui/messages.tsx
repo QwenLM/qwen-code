@@ -355,12 +355,22 @@ export function toolCardText(v: string): string {
   return sanitizeMultilineForDisplay(v.replace(/\s*\n\s*/g, ' ').trim());
 }
 
-export function toolCardDescription(rawName: string, args?: string): string {
-  let parsed: Record<string, unknown> = {};
-  try {
-    parsed = JSON.parse(args ?? '{}') as Record<string, unknown>;
-  } catch {
-    return '';
+export function toolCardDescription(
+  rawName: string,
+  args?: string,
+  parsedArgs?: Record<string, unknown>,
+): string {
+  let parsed = parsedArgs;
+  if (!parsed) {
+    try {
+      const value: unknown = JSON.parse(args ?? '{}');
+      parsed =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : {};
+    } catch {
+      return '';
+    }
   }
   const str = (v: unknown): string | undefined =>
     typeof v === 'string' && v.length > 0 ? v : undefined;

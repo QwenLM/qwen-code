@@ -83,6 +83,25 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('parses resumed focus arguments once and reuses them across renders', () => {
+    const args = '{"file_path":"src/main.ts","content":"BODY"}';
+    const spy = vi.spyOn(JSON, 'parse');
+    try {
+      const items = [
+        toolItem({ args, tool: 'write_file', done: true, success: true }),
+      ];
+      const view = render(<OpenTuiTranscriptView focusMode items={items} />);
+      view.rerender(
+        <OpenTuiTranscriptView focusMode availableWidth={100} items={items} />,
+      );
+      expect(spy.mock.calls.filter(([value]) => value === args)).toHaveLength(
+        1,
+      );
+      expect(view.container.textContent).toContain('main.ts');
+    } finally {
+      spy.mockRestore();
+    }
+  });
   it('localizes the Focus memory counter in Portuguese', async () => {
     await setLanguageAsync('pt');
     try {
@@ -272,6 +291,7 @@ describe('OpenTuiTranscriptView', () => {
     { imageMimeTypes: ['image/png'] },
     { omittedImageCount: 2 },
     { visionBridgeNotice: 'VISION_NOTICE' },
+    { hasNotice: true },
   ])('keeps exceptional tools visible: %j', (override) => {
     const view = render(
       <OpenTuiTranscriptView

@@ -16,7 +16,7 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
@@ -332,17 +332,19 @@ function ToolCard({
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
-  const description =
-    item.description ?? toolCardDescription(item.tool, item.args);
-  let args: Record<string, unknown> | undefined;
-  if (focusMode)
+  const args = useMemo(() => {
+    if (!focusMode) return undefined;
     try {
       const parsed: unknown = JSON.parse(item.args ?? '{}');
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-        args = parsed as Record<string, unknown>;
+        return parsed as Record<string, unknown>;
     } catch {
       // Legacy replay may have only a display description.
     }
+    return {};
+  }, [focusMode, item.args]);
+  const description =
+    item.description ?? toolCardDescription(item.tool, item.args, args);
   const memoryLabel =
     focusMode && item.isMemoryOp
       ? ` · ${formatMemorySummary(item.isMemoryOp === 'read' ? 1 : 0, item.isMemoryOp === 'write' ? 1 : 0)}`
@@ -373,7 +375,7 @@ function ToolCard({
             hasImages: Boolean(
               item.imageMimeTypes?.length || item.omittedImageCount,
             ),
-            hasNotice: Boolean(item.visionBridgeNotice),
+            hasNotice: Boolean(item.visionBridgeNotice) || item.hasNotice,
           },
         ],
         {

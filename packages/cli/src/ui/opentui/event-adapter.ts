@@ -179,6 +179,8 @@ export type OpenTuiStreamEvent =
  */
 export interface EventMapperContext {
   projectRoot?: string;
+  /** Live scheduling projects results itself and does not need request retention. */
+  retainToolRequests?: boolean;
   /**
    * Formats an `error` event payload for display (ink parity:
    * parseAndFormatApiError + auth-type hints). Falls back to the raw
@@ -524,7 +526,7 @@ export function createEventMapper(
           args?: Record<string, unknown>;
         };
         const id = v.callId ?? `tool-${++toolSeq}`;
-        requests.set(id, v);
+        if (context?.retainToolRequests !== false) requests.set(id, v);
         out.push({ type: 'tool-start', id, tool: v.name, title: v.name });
         const args = formatToolArgs(v.args);
         if (args) out.push({ type: 'tool-args', id, args });
@@ -541,7 +543,7 @@ export function createEventMapper(
           details: { title?: string };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
-        requests.set(id, v.request);
+        if (context?.retainToolRequests !== false) requests.set(id, v.request);
         out.push({
           type: 'confirm',
           id,
@@ -562,12 +564,13 @@ export function createEventMapper(
           responseParts?: Part[];
         };
         const failed = v.error !== undefined || v.executionStatus === 'error';
+        const cancelled = v.executionStatus === 'cancelled';
         const presentation = toolResultPresentation(
           v.resultDisplay,
           v.responseParts,
           requests.get(v.callId),
           context?.projectRoot,
-          failed,
+          failed || cancelled,
         );
         requests.delete(v.callId);
         // ink parity: the egress disclosure rides the tool card whenever a
@@ -583,7 +586,6 @@ export function createEventMapper(
           presentation,
         );
         if (result) out.push(result);
-        const cancelled = v.executionStatus === 'cancelled';
         out.push({
           type: 'tool-end',
           id: v.callId,

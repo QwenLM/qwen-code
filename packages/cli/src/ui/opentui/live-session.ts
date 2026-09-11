@@ -675,6 +675,7 @@ export async function* livePromptEvents(
     inline: options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
+    retainToolRequests: false,
     projectRoot: config.getTargetDir(),
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
     // hint travels on the error event's `hint` field (ErrorMessage renders

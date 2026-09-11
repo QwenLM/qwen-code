@@ -164,6 +164,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
               __error?: boolean;
+              __resultDisplay?: unknown;
             };
             return {
               request: {
@@ -189,7 +190,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                     },
                   },
                 ],
-                resultDisplay: 'done',
+                resultDisplay: a.__resultDisplay ?? 'done',
               },
             };
           }),
@@ -306,6 +307,31 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('projects successful memory and structured notices through the scheduler', async () => {
+    const config = createFakeConfig(
+      oneToolBatchStream({
+        callId: 'memory1',
+        name: 'write_file',
+        args: {
+          file_path: `${getAutoMemoryRoot('/tmp/focus-test-project')}/MEMORY.md`,
+          __resultDisplay: {
+            type: 'vision_bridge_notice',
+            summary: 'Read PDF',
+            notice: 'EGRESS',
+          },
+        },
+      }),
+    );
+    const events = await drain(livePromptEvents(config, 'start'));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-result',
+        isMemoryOp: 'write',
+        hasNotice: true,
+        display: 'Read PDF\nEGRESS',
+      }),
+    );
+  });
   it.each(['error', 'cancelled'])(
     'does not count scheduler memory %s as completed writes',
     async (status) => {

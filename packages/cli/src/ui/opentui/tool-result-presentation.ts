@@ -9,9 +9,11 @@ import type { Part } from '@google/genai';
 import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
 import { isAnyAutoMemPath } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 export interface ToolResultPresentation {
+  hasNotice?: boolean;
   detailedDisplay?: string;
   imageMimeTypes?: string[];
   omittedImageCount?: number;
@@ -27,6 +29,7 @@ export function toolResultPresentation(
   isError = false,
 ): ToolResultPresentation {
   const result: ToolResultPresentation = {};
+  if (isVisionBridgeNoticeDisplay(resultDisplay)) result.hasNotice = true;
   const canonicalName = canonicalToolName(request?.name ?? '');
   const name =
     typeof canonicalName === 'string' ? canonicalName : request?.name;

@@ -52,6 +52,8 @@ describe('foldLiveEvent segment-end (finished parity)', () => {
       imageMimeTypes: ['image/png'],
       isSubagent: true,
       isMemoryOp: 'read',
+      hasNotice: true,
+      omittedImageCount: 2,
     });
     expect(items[0]).toMatchObject({
       output: 'SUMMARY',
@@ -59,6 +61,8 @@ describe('foldLiveEvent segment-end (finished parity)', () => {
       imageMimeTypes: ['image/png'],
       isSubagent: true,
       isMemoryOp: 'read',
+      hasNotice: true,
+      omittedImageCount: 2,
     });
   });
 

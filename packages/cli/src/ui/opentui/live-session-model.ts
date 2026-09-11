@@ -338,6 +338,7 @@ export function foldLiveEvent(
           if (ev.omittedImageCount)
             next.omittedImageCount = ev.omittedImageCount;
           if (ev.isSubagent) next.isSubagent = true;
+          if (ev.hasNotice) next.hasNotice = true;
           if (ev.isMemoryOp) next.isMemoryOp = ev.isMemoryOp;
         }
         if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
