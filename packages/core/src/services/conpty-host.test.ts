@@ -35,13 +35,40 @@ describe('conpty-host', () => {
   });
 
   it('pins the verified @lydell/node-pty version', () => {
-    const packageJson = JSON.parse(
+    const coreManifest = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
     ) as { optionalDependencies: Record<string, string> };
+    const rootManifest = JSON.parse(
+      readFileSync(
+        new URL('../../../../package.json', import.meta.url),
+        'utf8',
+      ),
+    ) as { optionalDependencies: Record<string, string> };
 
-    expect(packageJson.optionalDependencies['@lydell/node-pty']).toBe(
-      VERIFIED_NODE_PTY,
+    const corePins = Object.fromEntries(
+      Object.entries(coreManifest.optionalDependencies).filter(([name]) =>
+        name.startsWith('@lydell/node-pty'),
+      ),
     );
+    const rootPins = Object.fromEntries(
+      Object.entries(rootManifest.optionalDependencies).filter(([name]) =>
+        name.startsWith('@lydell/node-pty'),
+      ),
+    );
+
+    // Every platform pin core declares must be the verified version, so a bump
+    // of any one — not just the loader key — turns this red and forces the
+    // human re-check the comment above describes. The WindowsPtyAgent field
+    // shape and conpty.cc baton-erase semantics live in the win32 prebuilds, so
+    // those keys must trip the same guard as the loader.
+    expect(Object.keys(corePins)).toHaveLength(6);
+    expect(
+      Object.values(corePins).every((version) => version === VERIFIED_NODE_PTY),
+    ).toBe(true);
+    // packages/cli declares no node-pty and resolves the root-hoisted copy, so
+    // the root manifest's six must stay in lockstep with core's six — the
+    // declaration agent-view actually loads in a dev tree.
+    expect(corePins).toEqual(rootPins);
   });
 
   it('drives the release through the WindowsPtyAgent internals shape', () => {
