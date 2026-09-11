@@ -19,7 +19,10 @@ turn; unrelated cron and notification turns use an isolated owner that is
 removed when the turn ends. Inject the reminder on the first request of a retry
 or related automatic turn and after function responses on later tool turns.
 Clear it when all todos complete, when an ordinary turn starts with no reminder
-registered, or when the session changes.
+registered, when the conversation timeline is discarded (a rewind, a history
+restore, or a wholesale `setHistory` / `truncateHistory`) so a reminder
+describing removed work cannot steer the model back to it, or when the session
+changes.
 
 A registered reminder is the signal that the plan still has unfinished items,
 because `todo_write` deletes it once the list completes. An ordinary user turn
@@ -66,5 +69,8 @@ change instead preserves task context before that decision.
   Both frontends behave the same.
 - A tool-result batch carrying a top-level Agent result forces the reminder due
   even though the turn budget is not filled; a batch without one stays budgeted.
+- A rewind or history restore clears the reminder, its work-chain owners and the
+  cadence counters in both frontends; a compaction that only strips old tool
+  results does not.
 - Independent automatic turns are isolated; related automatic turns inherit.
 - Terminal automatic turns release their temporary ownership state.
