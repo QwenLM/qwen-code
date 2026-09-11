@@ -699,6 +699,13 @@ export interface SandboxOptions {
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 
+/**
+ * How long the script's synchronous code may run before its first `await`
+ * returns control. Exported so the authoring reference's statement of it is
+ * pinned to this value.
+ */
+export const WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS = 30_000;
+
 function resolveMaxWallClockMs(opts: SandboxOptions): number {
   if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
     return opts.maxWallClockMs;
@@ -1951,7 +1958,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
         const runOpts: vm.RunningScriptOptions = {
-          timeout: 30_000,
+          timeout: WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS,
         };
         const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
 

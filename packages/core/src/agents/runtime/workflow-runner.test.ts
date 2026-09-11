@@ -180,6 +180,36 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  // The only path from the Workflow tool's authoring hint to a backgrounded
+  // run's notification goes through the runner's registration. A backgrounded
+  // run has no trailer; without this the hint would never reach it.
+  it('carries the authoring hint into a failed background run notification', async () => {
+    const { config, registry } = configWithRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const hint =
+      'hint: Load the `workflow-authoring` skill for the script reference if you have not, fix the script, and retry.';
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'throw new Error("boom")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+      authoringHint: hint,
+    });
+    await handle.completion;
+    await vi.waitFor(() => expect(completion).toHaveBeenCalled());
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const recovery = modelText.slice(
+      modelText.indexOf('<recovery>'),
+      modelText.indexOf('</recovery>'),
+    );
+    expect(recovery).toContain(hint);
+  });
+
   async function generatedReview(script: string) {
     const { config, registry } = configWithRegistry();
     const root = await makeStorageRoot();

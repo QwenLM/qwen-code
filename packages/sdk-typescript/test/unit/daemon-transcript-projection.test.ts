@@ -27,6 +27,56 @@ function record(
 }
 
 describe('projectChatRecordsToDaemonTranscript', () => {
+  it('restores explicit cancellation timing from the persisted turn result', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('user-1', null),
+      record('cancel-1', 'user-1', {
+        type: 'system',
+        subtype: 'turn_result',
+        message: undefined,
+        systemPayload: {
+          promptId: 'p1',
+          state: 'cancelled',
+          startedAt: 1000,
+          cancelledAt: 11999,
+          endedAt: 20000,
+        },
+      }),
+    ]);
+    expect(projection.complete).toBe(true);
+    expect(projection.blocks).toHaveLength(2);
+    expect(projection.blocks[1]).toMatchObject({
+      kind: 'prompt_cancelled',
+      promptId: 'p1',
+      elapsedMs: 10999,
+      serverTimestamp: 11999,
+      sourceRecordIds: ['cancel-1'],
+    });
+  });
+
+  it.each([
+    { state: 'completed', cancelledAt: 2000 },
+    { state: 'error', cancelledAt: 2000 },
+    { state: 'cancelled' },
+    { state: 'cancelled', cancelledAt: '2000' },
+    { state: 'cancelled', cancelledAt: 2000, startedAt: '1000' },
+  ])('does not invent a user cancellation for %j', (payload) => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('cancel-1', null, {
+        type: 'system',
+        subtype: 'turn_result',
+        message: undefined,
+        systemPayload: {
+          promptId: 'p1',
+          startedAt: 1000,
+          endedAt: 3000,
+          ...payload,
+        },
+      }),
+    ]);
+    expect(projection.blocks).toEqual([]);
+  });
+
   it('projects the active branch with deterministic record boundaries', () => {
     const records = [
       record('root', null, {

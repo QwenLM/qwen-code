@@ -391,6 +391,13 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /**
+   * Failure hint naming where the authoring reference is in this session, for
+   * a script the model authored. The foreground tool result carries it in the
+   * run trailer; a backgrounded run has only its completion notification, so
+   * it rides here. Process-local, like the notification it feeds.
+   */
+  authoringHint?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -1838,6 +1845,9 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  if (entry.authoringHint) {
+    lines.push(stripAnsiAndControl(entry.authoringHint));
   }
   return lines;
 }

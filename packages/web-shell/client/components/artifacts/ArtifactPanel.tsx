@@ -3080,13 +3080,15 @@ function SourceDetail({
         <span className="truncate text-xs text-muted-foreground" title={path}>
           {path}
         </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setAttempt((value) => value + 1)}
-        >
-          {t('common.retry')}
-        </Button>
+        {error && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            {t('common.retry')}
+          </Button>
+        )}
       </div>
       {error ? (
         <div className={styles.previewError} role="alert">
@@ -3130,6 +3132,7 @@ function SourceDetail({
           key={attempt}
           workspacePath={path}
           workspaceActions={workspaceActions!}
+          onLoadError={setError}
           previewData={data}
           previewOnly={locator.type === 'attachment'}
           previewMimeType={data?.type}
@@ -3188,6 +3191,7 @@ function WorkspaceFilePreview({
   imageMimeType,
   previewKind,
   previewOnly,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
@@ -3198,6 +3202,7 @@ function WorkspaceFilePreview({
   imageMimeType?: string;
   previewKind?: 'html' | 'markdown' | 'image' | 'source';
   previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
 }) {
   if (previewData) {
     return (
@@ -3207,6 +3212,7 @@ function WorkspaceFilePreview({
         data={previewData}
         mimeType={previewMimeType}
         previewKind={previewKind}
+        onLoadError={onLoadError}
       />
     );
   }
@@ -3230,6 +3236,7 @@ function WorkspaceFilePreview({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewOnly={previewOnly}
+        onLoadError={onLoadError}
       />
     );
   }
@@ -3241,6 +3248,7 @@ function WorkspaceFilePreview({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewOnly={previewOnly}
+        onLoadError={onLoadError}
       />
     );
   }
@@ -3251,6 +3259,7 @@ function WorkspaceFilePreview({
         artifactVersion={artifactVersion}
         workspaceActions={workspaceActions}
         mimeType={resolvedImageMimeType}
+        onLoadError={onLoadError}
       />
     );
   }
@@ -3261,6 +3270,7 @@ function WorkspaceFilePreview({
       workspaceActions={workspaceActions}
       previewContent={previewContent}
       previewOnly={previewOnly}
+      onLoadError={onLoadError}
     />
   );
 }
@@ -3271,12 +3281,14 @@ function AttachmentBlobPreview({
   data,
   mimeType,
   previewKind,
+  onLoadError,
 }: {
   workspacePath: string;
   workspaceActions: ArtifactWorkspaceActions;
   data: Blob;
   mimeType?: string;
   previewKind?: 'html' | 'markdown' | 'image' | 'source';
+  onLoadError?: (error: string) => void;
 }) {
   const resolvedMimeType = (mimeType || data.type || 'application/octet-stream')
     .split(';', 1)[0]!
@@ -3306,6 +3318,7 @@ function AttachmentBlobPreview({
       workspaceActions={workspaceActions}
       data={data}
       previewKind={previewKind}
+      onLoadError={onLoadError}
     />
   );
 }
@@ -3315,11 +3328,13 @@ function TextAttachmentPreview({
   workspaceActions,
   data,
   previewKind,
+  onLoadError,
 }: {
   workspacePath: string;
   workspaceActions: ArtifactWorkspaceActions;
   data: Blob;
   previewKind?: 'html' | 'markdown' | 'image' | 'source';
+  onLoadError?: (error: string) => void;
 }) {
   const { t } = useI18n();
   const [content, setContent] = useState<string>();
@@ -3329,12 +3344,16 @@ function TextAttachmentPreview({
     setContent(undefined);
     setError(undefined);
     reader.onload = () => setContent(String(reader.result ?? ''));
-    reader.onerror = () => setError(t('attachment.readFailed'));
+    reader.onerror = () => {
+      const message = t('attachment.readFailed');
+      setError(message);
+      onLoadError?.(message);
+    };
     reader.readAsText(data);
     return () => {
       if (reader.readyState === FileReader.LOADING) reader.abort();
     };
-  }, [data, t]);
+  }, [data, onLoadError, t]);
   if (error) return <div className={styles.previewError}>{error}</div>;
   if (content === undefined) {
     return <div className={styles.empty}>{t('attachment.loadingFile')}</div>;
@@ -3405,11 +3424,13 @@ function ImageArtifactPreview({
   artifactVersion,
   workspaceActions,
   mimeType,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   mimeType: string;
+  onLoadError?: (error: string) => void;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3435,13 +3456,15 @@ function ImageArtifactPreview({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        onLoadError?.(message);
       });
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [artifactVersion, mimeType, workspaceActions, workspacePath]);
+  }, [artifactVersion, mimeType, onLoadError, workspaceActions, workspacePath]);
 
   return (
     <div className={styles.imagePreviewWrap}>
@@ -3477,6 +3500,7 @@ function useWorkspaceFileContent({
   previewContent,
   previewOnly,
   truncatedMessage,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
@@ -3484,6 +3508,7 @@ function useWorkspaceFileContent({
   previewContent?: string;
   previewOnly?: boolean;
   truncatedMessage: string;
+  onLoadError?: (error: string) => void;
 }) {
   const [content, setContent] = useState<string | null>(previewContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -3509,7 +3534,9 @@ function useWorkspaceFileContent({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        onLoadError?.(message);
       });
     return () => {
       cancelled = true;
@@ -3519,6 +3546,7 @@ function useWorkspaceFileContent({
     previewContent,
     previewOnly,
     truncatedMessage,
+    onLoadError,
     workspaceActions,
     workspacePath,
   ]);
@@ -3532,12 +3560,14 @@ function HtmlArtifactPreview({
   workspaceActions,
   previewContent,
   previewOnly,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
 }) {
   const { content, error } = useWorkspaceFileContent({
     workspacePath,
@@ -3546,6 +3576,7 @@ function HtmlArtifactPreview({
     previewContent,
     previewOnly,
     truncatedMessage: 'Preview is truncated because the file is too large.',
+    onLoadError,
   });
 
   return (
@@ -3572,12 +3603,14 @@ function FileArtifactPreview({
   workspaceActions,
   previewContent,
   previewOnly,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -3588,6 +3621,7 @@ function FileArtifactPreview({
     previewContent,
     previewOnly,
     truncatedMessage: 'File is truncated because it is too large.',
+    onLoadError,
   });
 
   useEffect(() => {
@@ -3634,12 +3668,14 @@ function MarkdownArtifactPreview({
   workspaceActions,
   previewContent,
   previewOnly,
+  onLoadError,
 }: {
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   previewOnly?: boolean;
+  onLoadError?: (error: string) => void;
 }) {
   const { content, error } = useWorkspaceFileContent({
     workspacePath,
@@ -3648,6 +3684,7 @@ function MarkdownArtifactPreview({
     previewContent,
     previewOnly,
     truncatedMessage: 'Preview is truncated because the file is too large.',
+    onLoadError,
   });
 
   return (
