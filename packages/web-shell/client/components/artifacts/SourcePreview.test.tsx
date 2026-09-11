@@ -109,6 +109,63 @@ afterEach(async () => {
 });
 
 describe('source preview', () => {
+  it('offers retry only after attachment loading fails', async () => {
+    mock.standalone = true;
+    mock.sessionActions.readAttachment
+      .mockRejectedValueOnce(new Error('Attachment read failed'))
+      .mockResolvedValueOnce({
+        data: btoa('Recovered attachment'),
+        mimeType: 'text/plain',
+      });
+    await render(source({ type: 'attachment', attachmentId: 'reference.txt' }));
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Attachment read failed'),
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).not.toBeUndefined();
+    await act(async () => retry!.click());
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Recovered attachment'),
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Try again',
+      ),
+    ).toBe(false);
+    expect(mock.sessionActions.readAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers retry only after workspace file loading fails', async () => {
+    mock.actions.readWorkspaceFile
+      .mockRejectedValueOnce(new Error('Workspace read failed'))
+      .mockResolvedValueOnce({
+        content: 'Recovered workspace file',
+        truncated: false,
+      });
+    await render(
+      source({ type: 'workspace_file', workspacePath: 'reference.txt' }),
+    );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Workspace read failed'),
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).not.toBeUndefined();
+    await act(async () => retry!.click());
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Recovered workspace file'),
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Try again',
+      ),
+    ).toBe(false);
+    expect(mock.actions.readWorkspaceFile).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['text/plain', 'text/html'])(
     'previews standalone attachment bytes as %s without workspace access',
     async (mimeType) => {

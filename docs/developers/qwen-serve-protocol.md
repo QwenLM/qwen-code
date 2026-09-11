@@ -104,7 +104,7 @@ Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` 
 }
 ```
 
-When `--max-total-sessions` rejects a fresh session, the same response shape is returned with `"scope": "total"`.
+When the effective daemon-wide total cap rejects a fresh session — `--max-total-sessions`, or the default described under `limits.maxTotalSessions` — the same response shape is returned with `"scope": "total"`.
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
@@ -703,8 +703,10 @@ Response shape:
     "sessionShellCommandEnabled": false
   },
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxSessions": 32,
-    "maxTotalSessions": null,
+    "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
@@ -773,7 +775,7 @@ ACP child event loop lag is not included in `/daemon/status`.
 warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
-`mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`, and
+`mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`,
 `channel_worker_partial_connect`, and `workspace_status_unavailable`. During
 the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
@@ -790,7 +792,9 @@ runtime routes return `503`.
 
 `runtime.memory.pressure` is additive within that block and reports the daemon root's own memory pressure: `mode` (`off` / `observe`), `level` (`normal` / `soft` / `hard` / `critical`), `source` (`rss` / `heap` / `unknown`), `ratio`, and the six raw figures the ratios come from — `rssBytes`, `rssRatio`, `availableBytes`, `heapUsedBytes`, `heapRatio`, `heapLimitBytes`. `ratio` is the larger of `rssRatio` and `heapRatio`, and `source` names which one it was; ties are reported as `rss`. `availableBytes` is `limits.memory.availableMemoryMb` in bytes — deliberately the detected cgroup/host figure rather than `effectiveBudgetMb`, because what ends the process is the real limit, not an operator's policy number. `source: "unknown"` means neither denominator was measurable and must not be read as healthy; `level` is `normal` in that case only because there is nothing to classify. The figures cover the daemon **root process only**: they are this process's own `memoryUsage()`, so children growing does not move them. `runtime.memory.children` reports those separately, and neither figure is process-tree memory. Both modes report the whole block; only `observe` additionally raises the path-free `daemon_memory_pressure` warning into the status rollup, so `off` leaves the top-level `status` unchanged. Nothing remediates in either mode. The field is optional in the SDK mirror because daemons that shipped `runtime.memory` before it exists send the block without it.
 
-`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When several startup/restored workspaces are present, `--max-total-sessions` is omitted, and `maxSessionsPerWorkspace` is finite, the daemon derives the effective total cap once as `maxSessionsPerWorkspace * startupWorkspaceCount`; later dynamic registration does not recompute it. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
+`limits.maxRegisteredWorkspaces` is additive and reports the resolved user registration cap (default 256, configurable from 1 through 256). `limits.maxChannelControlWorkspaces` reports the independent control/recovery owner cap of 25 on the standard daemon, even while channels are disabled. Custom controllers advertise that field only when they enforce it. These fields are present on both bootstrap and ready responses; older daemons may omit them. The channel controller rejects transitional owner unions over its cap with `409 channel_control_workspace_limit_reached` before constructing candidate workers; an initial boot-time union over the cap fails startup before the listener is published, so it has no HTTP surface. Registration capacity does not determine the SDK channel timeout.
+
+`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When the resolved registration capacity (default 256, configurable through `QWEN_SERVE_MAX_WORKSPACES` or embedded `maxRegisteredWorkspaces`) exceeds 25 and `--max-total-sessions` is omitted, the standard daemon uses a fixed total of 800, even with one startup workspace. At registration capacities of 25 or less, several startup/restored workspaces with a finite `maxSessionsPerWorkspace` derive the effective total once as `maxSessionsPerWorkspace * workspaceCount` over that same startup-plus-restored count; one startup or restored workspace retains an unlimited default. Explicit total limits, including disabled values, take precedence. Later dynamic registration does not recompute the total. Direct `createServeApp` embeds must supply their own shared admission policy. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -799,8 +803,28 @@ not the channel-adapter worker. Daemon-managed channels use
 and then exits, `/daemon/status` keeps the daemon online and reports warning
 issue code `channel_worker_exited`.
 
-Daemon-managed channel worker startup remains fail-fast: if `qwen serve
---channel ...` cannot start a worker that reaches ready, serve startup fails.
+Daemon-managed channel worker startup from an explicit `qwen serve --channel
+...` remains fail-fast and takes precedence over persisted startup settings.
+A flagless boot restores `serve.channels` from the trusted primary workspace.
+Secondary workspaces do not independently restore their own `serve.channels`.
+With no explicit or primary-workspace selection, channel runtime loading stays
+lazy.
+
+Stored startup names must be non-empty, have no leading or trailing whitespace,
+and contain no unsafe control or invisible characters. Invalid entries are
+skipped individually and logged by array index; startup does not trim them into
+other instance names or rewrite settings. Worker arguments use
+`--channel=<value>`, preserving a leading dash as part of the name.
+
+An invalid startup field or a validation or lease error before workers start
+skips the automatic restore, with a log identifying `serve.channels`, while
+unrelated settings remain in effect. A failed worker startup allows the daemon
+to continue after cleanup succeeds. Global runtime startup timeouts and
+unconfirmed worker stops follow the existing startup-failure path; the lease
+remains held while worker termination is unconfirmed. Inspect daemon logs for
+skipped or failed restores. Channel management reports persisted startup
+settings and actual runtime state.
+
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
 window, with 1s, 5s, then 15s backoff. The worker sends IPC heartbeats every
@@ -898,7 +922,7 @@ Stable control errors are:
 
 - `400 invalid_channel_selection`, `channel_workspace_mismatch`, or `ambiguous_channel_workspace`
 - `403 untrusted_workspace`
-- `409 channel_service_conflict` or `channel_worker_not_enabled`
+- `409 channel_service_conflict`, `channel_worker_not_enabled`, or `channel_control_workspace_limit_reached`
 - `500 channel_worker_stop_failed`
 - `502 channel_worker_start_failed`, with `rolledBack` and an optional credential-redacted `rollbackError`
 - `503 daemon_draining`
@@ -917,8 +941,11 @@ For `502 channel_worker_start_failed`, the response may also include
 trusted `workspaceCwd` of the attempted worker. These fields describe the
 failed transaction, while `state` describes the current state after rollback;
 a later GET does not retain the failed attempt. A partially connected worker
-instead returns success and exposes its failures in the worker snapshot. Boot-
-time all-failure still aborts `qwen serve` before a queryable daemon exists.
+instead returns success and exposes its failures in the worker snapshot. An
+explicit `--channel` boot with no connected adapter fails startup. A settings-
+derived startup failure is logged and allows the daemon to continue after
+cleanup succeeds, subject to the global runtime startup timeout. Failure to
+confirm cleanup retains the normal startup-failure behavior and service lease.
 
 `qwen channel status` without `--daemon-url` continues to read pidfile metadata;
 with `--daemon-url` it reads `GET /workspace/channel`. During a restart
@@ -1108,9 +1135,11 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
     "..."
   ],
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 32,
-    "maxTotalSessions": 64,
+    "maxTotalSessions": 800,
     "sessionRestoreTimeoutMs": 60000
   },
   "modelServices": [],
@@ -1197,7 +1226,7 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 
 `displayName` must be a string no longer than 256 characters after surrounding whitespace is trimmed. An empty result is treated as no name, and internal C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters are rejected. JSON `null` is not a creation value and returns `400 invalid_display_name`; omit the field to supply no initial name. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart. Repeating the request for an already-persistent workspace is idempotent and does not rename it.
 
-Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached` / `workspace_registration_store_too_large`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
 
 ### `PATCH /workspaces/:workspace`
 
