@@ -231,12 +231,20 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows above a pending card's expanded confirmation dialog: the transcript
- * rows that stay on screen above it (prompt echo plus the card's own
- * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
- * title, body margins, outcome list, footer ≈ 11).
+ * Rows above a pending card's expanded confirmation dialog, plus the
+ * dialog's own chrome. The count has to cover every row that is neither a
+ * card description row nor an expanded dialog body row, or ctrl-s pushes
+ * the payload's tail below the viewport: the persistent banner (≈ 6, it
+ * never scrolls off in this renderer), the startup rows (context-files
+ * announcement, prompt echo and its margin ≈ 4), the card's hidden-tail
+ * and awaiting rows (2), and the dialog's frame, title, margins, question,
+ * outcome list and footer hint (≈ 11), plus a row of slack for a stray
+ * notice. The collapsed-case reserve already budgets the same rows above
+ * the card (PENDING_CARD_VIEWPORT_RESERVE_ROWS exceeds the collapsed
+ * dialog by ≈ 10 for exactly them); this one originally omitted them and
+ * the zero-slack fit broke as soon as a transcript row was added.
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 24;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
