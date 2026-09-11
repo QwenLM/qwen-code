@@ -332,14 +332,40 @@ export class NativeLspService {
     }
   }
 
+  /** The tracked set for one server: delivered documents and durable replay obligations. */
+  private trackedUrisFor(serverName: string): Set<string> {
+    return new Set([
+      ...(this.openedDocuments.get(serverName)?.keys() ?? []),
+      ...(this.replayUris.get(serverName) ?? []),
+    ]);
+  }
+
+  /**
+   * Drop the delivered snapshot without dropping the obligation to re-deliver it: a
+   * connection change wipes openedDocuments, but a later sweep must still know what the
+   * new connection never received. Callers keep lastConnections bookkeeping themselves.
+   */
+  private parkTrackedUris(serverName: string): void {
+    const prior = this.openedDocuments.get(serverName);
+    if (prior && prior.size > 0) {
+      const durable = this.replayUris.get(serverName) ?? new Set<string>();
+      for (const tracked of prior.keys()) durable.add(tracked);
+      this.replayUris.set(serverName, durable);
+    }
+    this.openedDocuments.delete(serverName);
+    this.documentLifecycles.delete(serverName);
+  }
+
   private snapshotOpenDocuments(
     serverNames: string[],
   ): Map<string, Set<string>> {
     const snapshots = new Map<string, Set<string>>();
     for (const name of serverNames) {
-      const documents = this.openedDocuments.get(name);
-      if (documents) {
-        snapshots.set(name, new Set(documents.keys()));
+      // A durable-only entry must still be replayed, and its presence must defeat the
+      // early return in replayOpenDocuments.
+      const uris = this.trackedUrisFor(name);
+      if (uris.size > 0) {
+        snapshots.set(name, uris);
       }
     }
     return snapshots;
@@ -550,17 +576,9 @@ export class NativeLspService {
       );
     }
     if (this.lastConnections.get(serverName) !== handle.connection) {
-      // Preserve the replay set across the connection change: openedDocuments must
-      // not retain stale entries (the new connection never saw them), but a later
-      // workspaceDiagnostics still needs to know what to re-deliver.
-      const prior = this.openedDocuments.get(serverName);
-      if (prior && prior.size > 0) {
-        const durable = this.replayUris.get(serverName) ?? new Set<string>();
-        for (const tracked of prior.keys()) durable.add(tracked);
-        this.replayUris.set(serverName, durable);
-      }
-      this.openedDocuments.delete(serverName);
-      this.documentLifecycles.delete(serverName);
+      // Preserve the replay obligation across the connection change: openedDocuments
+      // must not retain stale entries (the new connection never saw them).
+      this.parkTrackedUris(serverName);
     }
 
     const documents =
@@ -603,6 +621,11 @@ export class NativeLspService {
         });
         documents.delete(uri);
         this.closeUnsynchronizableDocument(serverName, handle, uri);
+      } else {
+        // Unreadable and never delivered on this connection: it can never be
+        // delivered, and a retained entry rejects every later sweep before the
+        // request. A URI whose send threw is not evicted here and stays parked.
+        this.replayUris.get(serverName)?.delete(uri);
       }
       throw error;
     }
@@ -1777,15 +1800,10 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
-      // Capture the replay set before warmup: for a TypeScript server the warmup's
-      // own connection-change reset would otherwise wipe it first. Union with the
-      // durable set so a swap triggered by an earlier query is still replayed.
-      const trackedUris = [
-        ...new Set([
-          ...(this.openedDocuments.get(name)?.keys() ?? []),
-          ...(this.replayUris.get(name) ?? []),
-        ]),
-      ];
+      // Capture the tracked set before warmup: for a TypeScript server the warmup's
+      // own connection-change reset would otherwise wipe it first, including the
+      // durable URIs parked by a swap triggered by an earlier query.
+      const trackedUris = [...this.trackedUrisFor(name)];
       await this.warmupAndTrack(name, handle);
       // Querying a connection that never received the replayed documents can
       // return empty diagnostics, which the tool would display as clean.
@@ -1797,8 +1815,7 @@ export class NativeLspService {
         throw new Error(`LSP server ${name} connection is no longer active`);
       }
       if (this.lastConnections.get(name) !== connection) {
-        this.openedDocuments.delete(name);
-        this.documentLifecycles.delete(name);
+        this.parkTrackedUris(name);
         this.lastConnections.set(name, connection);
       }
       for (const [uri, lifecycle] of this.documentLifecycles.get(name) ?? []) {
@@ -1821,6 +1838,8 @@ export class NativeLspService {
         // Isolate per URI so one unreadable tracked file still lets the survivors
         // re-deliver before the call rejects; a survivor stranded behind a throw
         // would leave the connection queried with zero documents and report clean.
+        // Eviction of a never-delivered, unreadable URI happens where its read
+        // failed; a URI whose send threw stays parked for the next sweep.
         try {
           openedAny =
             this.synchronizeDocument(name, handle, uri).opened || openedAny;

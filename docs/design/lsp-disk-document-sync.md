@@ -83,7 +83,10 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   trigger rediscovery and missing candidates are not negatively cached. Workspace diagnostics additionally
   synchronize already tracked documents for each queried server, inside the
   result-limited loop (default limit 100). They neither discover more documents
-  nor synchronize servers skipped after the limit. Reconnection resync opens every
+  nor synchronize servers skipped after the limit. Tracked means delivered on this
+  connection or parked by an earlier connection change; the reload snapshot and the
+  sweep use the same union, and the reload's clear consumes the parked set.
+  Reconnection resync opens every
   tracked URI, then settles once on new opens only (no delay for didChange).
   Replacement during that await rejects rather than querying an unsynchronized
   connection. A fixed delay does not prove server analysis has completed. Pending closes are retried without rediscovering documents. The tool's optional top-symbol
@@ -96,7 +99,11 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
 - Document and workspace diagnostics reject synchronization failures even after
   an earlier server returned diagnostics. Workspace synchronization failures
   (unreadable/deleted tracked files, thrown sends, or unsupported changes) escape
-  the ordinary pull-request catch; no empty or partial success is returned. The manager catches internal TypeScript
+  the ordinary pull-request catch; no empty or partial success is returned. A
+  tracked URI that is unreadable and was never delivered on the current connection
+  is dropped from the parked set before the rejection, so one permanently
+  unreadable file cannot wedge later sweeps; a URI whose send threw stays parked
+  for retry. The manager catches internal TypeScript
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty

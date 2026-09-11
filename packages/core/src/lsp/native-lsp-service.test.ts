@@ -390,6 +390,106 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('replays URIs that were only parked when a server reloads', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-parked-'));
+    try {
+      const firstPath = path.join(tempDir, 'main.ts');
+      const secondPath = path.join(tempDir, 'second.ts');
+      const firstUri = pathToFileURL(firstPath).toString();
+      const secondUri = pathToFileURL(secondPath).toString();
+      fs.writeFileSync(firstPath, 'const value = 1;\n', 'utf-8');
+      fs.writeFileSync(secondPath, 'const other = 2;\n', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        textDocumentSync: 1,
+        connection,
+      };
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: [],
+        removed: [],
+        restarted: ['typescript-language-server'],
+        unchanged: [],
+        failed: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+      };
+      const internals = service as unknown as {
+        openedDocuments: Map<
+          string,
+          Map<string, { text: string; version: number }>
+        >;
+        replayUris: Map<string, Set<string>>;
+      };
+      internals.openedDocuments.set(
+        'typescript-language-server',
+        new Map([[firstUri, { text: 'old', version: 1 }]]),
+      );
+      internals.replayUris.set(
+        'typescript-language-server',
+        new Set([secondUri]),
+      );
+
+      const reinitialize = service.reinitialize();
+      await vi.runAllTimersAsync();
+      await reinitialize;
+
+      const openedUris = connection.send.mock.calls
+        .filter(([message]) => message.method === 'textDocument/didOpen')
+        .map(
+          ([message]) =>
+            (message.params as { textDocument: { uri: string } }).textDocument
+              .uri,
+        );
+      expect(new Set(openedUris)).toEqual(new Set([firstUri, secondUri]));
+      // The reload snapshot consumed the durable set.
+      expect(internals.replayUris.has('typescript-language-server')).toBe(
+        false,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize continues replaying documents after one server send fails', async () => {
     vi.useFakeTimers();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));

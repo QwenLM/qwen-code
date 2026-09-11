@@ -2082,16 +2082,25 @@ describe('NativeLspService disk document synchronization', () => {
     const other = path.join(directory, 'other.ts');
     fs.writeFileSync(other, 'other');
     const otherUri = pathToFileURL(other).toString();
+    // Pin the warmup candidate so the assertion cannot be satisfied by the warmup
+    // opening the file the durable replay set is also expected to re-deliver.
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(file);
     await run(service.hover({ uri, range }));
     await run(service.hover({ uri: otherUri, range }));
     // Simulate an in-place crash restart: a new connection on the same handle and
     // a cleared warmup latch, without notifying the service.
     const replacement = createConnection();
     handle.connection = replacement;
+    // An ordinary query after the restart parks the pre-swap URIs in the durable
+    // set and re-opens only its own target; the sweep must replay the rest from there.
+    await run(service.hover({ uri, range }));
     handle.warmedUp = false;
     await run(service.workspaceDiagnostics());
-    // The warmup's own connection-change reset must not wipe the replay set: both
-    // previously tracked URIs are re-opened before workspace/diagnostic is issued.
+    // The warmup's own connection-change reset must not wipe the tracked set: both
+    // previously tracked URIs reach the replacement before workspace/diagnostic is issued.
     const openedUris = replacement.send.mock.calls
       .filter(([message]) => message.method === 'textDocument/didOpen')
       .map(
@@ -2126,6 +2135,52 @@ describe('NativeLspService disk document synchronization', () => {
             .uri,
       );
     expect(new Set(openedUris)).toEqual(new Set([uri, otherUri]));
+  });
+
+  it('re-delivers a URI whose first send failed on a replaced connection', async () => {
+    const other = path.join(directory, 'other.ts');
+    fs.writeFileSync(other, 'other');
+    const otherUri = pathToFileURL(other).toString();
+    await run(service.hover({ uri, range }));
+    await run(service.hover({ uri: otherUri, range }));
+    const replacement = createConnection();
+    handle.connection = replacement;
+    // The replacement connection's first didOpen throws once: the reset inside
+    // workspaceDiagnostics must park the wiped URIs for the next sweep.
+    replacement.send.mockImplementationOnce(() => {
+      throw new Error('write EPIPE');
+    });
+    await expect(service.workspaceDiagnostics()).rejects.toThrow('write EPIPE');
+    const afterFirst = replacement.send.mock.calls.length;
+    await run(service.workspaceDiagnostics());
+    expect(
+      replacement.send.mock.calls
+        .slice(afterFirst)
+        .map(([message]) => [
+          message.method,
+          (message.params as { textDocument: { uri: string } }).textDocument
+            .uri,
+        ]),
+    ).toEqual([['textDocument/didOpen', uri]]);
+  });
+
+  it('evicts a never-delivered unreadable URI so later sweeps resolve', async () => {
+    const other = path.join(directory, 'other.ts');
+    fs.writeFileSync(other, 'other');
+    const otherUri = pathToFileURL(other).toString();
+    await run(service.hover({ uri, range }));
+    await run(service.hover({ uri: otherUri, range }));
+    const replacement = createConnection();
+    handle.connection = replacement;
+    // An ordinary query parks both pre-swap URIs, then only its own target is
+    // delivered; the unreadable one must be evicted instead of wedging every sweep.
+    await run(service.hover({ uri: otherUri, range }));
+    fs.unlinkSync(file);
+    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    await run(service.workspaceDiagnostics());
+    expect(replacement.requests.map(({ method }) => method)).toContain(
+      'workspace/diagnostic',
+    );
   });
 
   it('rejects workspace connection replacement during reopen settling', async () => {

@@ -207,6 +207,9 @@ describe('LspServerManager', () => {
     // textDocumentSync omitted: resolveTextDocumentSync must yield openClose:false
     // so a no-notification delivery latches warm instead of awaiting the delay.
     const pending = manager.warmupTypescriptServer(handle, () => false);
+    // The no-notification branch must return before awaiting the warmup delay:
+    // flushing timers first would mask a hoisted setTimeout.
+    expect(vi.getTimerCount()).toBe(0);
     await vi.runAllTimersAsync();
     await pending;
     expect(handle.warmedUp).toBe(true);
