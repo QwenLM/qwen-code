@@ -14,6 +14,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -125,6 +126,7 @@ export async function installChromeNativeHost(
       '',
     ].join('\n'),
     0o700,
+    existingLauncher,
   );
 
   const manifest =
@@ -156,7 +158,7 @@ export async function installChromeNativeHost(
       continue;
     }
     await mkdir(dirname(manifestPath), { recursive: true });
-    await atomicWrite(manifestPath, manifest, 0o600);
+    await atomicWrite(manifestPath, manifest, 0o600, existing);
   }
   return {
     launcherPath: resolved.launcherPath,
@@ -303,7 +305,14 @@ async function atomicWrite(
   target: string,
   contents: string,
   mode: number,
+  existingContents: string | null,
 ): Promise<void> {
+  if (existingContents === contents) {
+    if (((await stat(target)).mode & 0o777) !== mode) {
+      await chmod(target, mode);
+    }
+    return;
+  }
   const temporary = target + '.' + randomUUID() + '.tmp';
   try {
     await writeFile(temporary, contents, { mode });

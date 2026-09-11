@@ -256,11 +256,22 @@ describe('Chrome Native Host installer', () => {
       ...fixture,
       platform: 'linux',
     });
+    const files = [
+      first.launcherPath,
+      ...first.manifestPaths.filter((file) => fs.existsSync(file)),
+    ];
+    const before = files.map((file) => fs.statSync(file));
     const second = await installChromeNativeHost({
       ...fixture,
       platform: 'linux',
     });
     expect(second).toEqual(first);
+    expect(files.map((file) => fs.statSync(file).ino)).toEqual(
+      before.map((file) => file.ino),
+    );
+    expect(files.map((file) => fs.statSync(file).mtimeMs)).toEqual(
+      before.map((file) => file.mtimeMs),
+    );
     expect(second.manifestPaths).toEqual(
       expect.arrayContaining([
         path.join(
@@ -286,6 +297,83 @@ describe('Chrome Native Host installer', () => {
     });
     expect(status.installedPaths).toHaveLength(3);
   });
+
+  it
+    .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
+    .each(['launcher', 'manifest'] as const)(
+    'keeps a correct %s usable in a read-only directory',
+    async (kind) => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+      const options = { ...fixture, platform: 'darwin' as const };
+      const installed = await installChromeNativeHost(options);
+      const target =
+        kind === 'launcher'
+          ? installed.launcherPath
+          : installed.manifestPaths[0]!;
+      const before = fs.statSync(target);
+      const directory = path.dirname(target);
+      fs.chmodSync(directory, 0o500);
+      try {
+        await expect(installChromeNativeHost(options)).resolves.toEqual(
+          installed,
+        );
+        expect(fs.statSync(target)).toMatchObject({
+          ino: before.ino,
+          mtimeMs: before.mtimeMs,
+          mode: before.mode,
+        });
+      } finally {
+        fs.chmodSync(directory, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'repairs permissions on unchanged owned files',
+    async () => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+      const options = { ...fixture, platform: 'darwin' as const };
+      const installed = await installChromeNativeHost(options);
+      const manifest = installed.manifestPaths[0]!;
+      fs.chmodSync(installed.launcherPath, 0o600);
+      fs.chmodSync(manifest, 0o644);
+
+      await installChromeNativeHost(options);
+
+      expect(fs.statSync(installed.launcherPath).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(manifest).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'propagates a required launcher update failure and updates when writable',
+    async () => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+      const options = { ...fixture, platform: 'darwin' as const };
+      const installed = await installChromeNativeHost(options);
+      const before = fs.readFileSync(installed.launcherPath, 'utf8');
+      const updated = { ...options, nodePath: '/updated/node' };
+      const directory = path.dirname(installed.launcherPath);
+      fs.chmodSync(directory, 0o500);
+      try {
+        await expect(installChromeNativeHost(updated)).rejects.toMatchObject({
+          code: 'EACCES',
+        });
+        expect(fs.readFileSync(installed.launcherPath, 'utf8')).toBe(before);
+      } finally {
+        fs.chmodSync(directory, 0o700);
+      }
+
+      await installChromeNativeHost(updated);
+
+      expect(fs.readFileSync(installed.launcherPath, 'utf8')).toContain(
+        "exec '/updated/node'",
+      );
+    },
+  );
 
   it('uninstalls owned files without deleting a foreign manifest', async () => {
     const fixture = createFixture();
