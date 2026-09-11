@@ -17518,6 +17518,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
 
+    // getMemoryPaths must resolve through the same helper as getMemory /
+    // setMemory, so the project memory file points at the worktree rather
+    // than the daemon's boot directory.
+    const memoryPaths = (await agent.extMethod('qwen/settings/getMemoryPaths', {
+      sessionId: 'worktree-session',
+    })) as { paths: { projectMemoryFile: string } };
+    expect(memoryPaths.paths.projectMemoryFile).toBe(
+      path.join(worktreeRoot, 'QWEN.md'),
+    );
+
     // An explicit cwd still wins over the session target dir.
     await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });
     expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith('/explicit');

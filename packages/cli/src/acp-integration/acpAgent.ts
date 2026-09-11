@@ -6469,7 +6469,10 @@ class QwenAgent implements Agent {
    * daemon's bootstrap `this.config`), so `session.getConfig().getTargetDir()`
    * points at a worktree while `process.cwd()` stays pinned to the daemon's
    * boot workspace. Falls back to the bootstrap Config when the client sends no
-   * `sessionId`, matching the previous `process.cwd()` behaviour for
+   * `sessionId`, following `this.config.getTargetDir()` rather than
+   * `process.cwd()`. The two coincide at boot, but diverge once that Config has
+   * been relocated (ACP relocation uses `skipProcessChdir: true`, leaving
+   * `process.cwd()` behind), so this is not a no-op preservation for
    * non-session-scoped calls.
    */
   private settingsCwdFor(
@@ -8993,12 +8996,16 @@ class QwenAgent implements Agent {
         return { path: this.settings.user.path };
       }
       case 'qwen/settings/getMemoryPaths': {
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const projectRoot =
           typeof params['projectRoot'] === 'string'
             ? params['projectRoot']
-            : cwd;
+            : settingsCwd;
         return {
-          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+          paths: await resolveQwenMemoryPaths({
+            cwd: settingsCwd,
+            projectRoot,
+          }),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
