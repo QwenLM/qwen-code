@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/providers/WebViewProvider.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
-import { shouldResolveAgainstWorkspace } from '../utils/file-path.js';
+import { resolveWorkspacePath } from '../utils/file-path.js';
 import { CHAT_VIEW_ID_SIDEBAR } from '../constants/viewIds.js';
 
 type Logger = (message: string) => void;
@@ -22,22 +22,6 @@ export const authCommand = 'qwen-code.auth';
 export const focusChatCommand = 'qwen-code.focusChat';
 export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
-
-/**
- * DiffManager keys entries by the normalized absolute path it received from
- * showDiff, so a closeDiff that arrives with the same workspace-relative
- * path the daemon sent would never match unless it is resolved the same way.
- */
-function resolveWorkspaceRelativePath(filePath: string): string {
-  if (!shouldResolveAgainstWorkspace(filePath)) {
-    return filePath;
-  }
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
-    return filePath;
-  }
-  return vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
-}
 
 /**
  * Register all Qwen Code chat-related commands.
@@ -86,7 +70,7 @@ export function registerNewCommands(
         permissionRequestId?: string;
       }) => {
         try {
-          const absolutePath = resolveWorkspaceRelativePath(args.path);
+          const absolutePath = resolveWorkspacePath(args.path);
           log(`[Command] Showing diff for ${absolutePath}`);
           await diffManager.showDiff(absolutePath, args.oldText, args.newText, {
             readOnly: args.readOnly === true,
@@ -106,7 +90,7 @@ export function registerNewCommands(
       closeDiffCommand,
       async (filePath: string, permissionRequestId?: string) =>
         diffManager.closeDiff(
-          resolveWorkspaceRelativePath(filePath),
+          resolveWorkspacePath(filePath),
           true,
           permissionRequestId,
         ),

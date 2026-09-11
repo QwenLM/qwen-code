@@ -18702,6 +18702,62 @@ describe('createServeApp', () => {
       }
     });
 
+    it('requires explicit submission provenance and never upgrades a rejected worker', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const cases = [
+        { meta: undefined, expected: undefined },
+        {
+          meta: { 'qwen.daemon.submittedPrompt': 'forged' },
+          expected: undefined,
+        },
+        {
+          meta: { 'qwen.submittedPrompt': ' original question\n' },
+          expected: ' original question\n',
+        },
+        { meta: { 'qwen.submittedPrompt': 42 }, expected: undefined },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            [CHANNEL_PROMPT_META_KEY]: true,
+          },
+          expected: undefined,
+        },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'revoked-worker',
+          },
+          expected: undefined,
+        },
+        {
+          meta: {
+            'qwen.submittedPrompt': 'label',
+            'qwen.daemon.promptDisplayText': 'label',
+          },
+          expected: undefined,
+        },
+      ];
+      for (const { meta, expected } of cases) {
+        const result = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'request wrapper' }],
+            ...(meta ? { _meta: meta } : {}),
+          });
+        expect(result.status).toBe(202);
+        const call = bridge.promptCalls.at(-1);
+        expect(call?.context?.submittedPrompt).toBe(expected);
+        expect(call?.req._meta ?? {}).not.toHaveProperty(
+          'qwen.submittedPrompt',
+        );
+        expect(call?.req._meta ?? {}).not.toHaveProperty(
+          'qwen.daemon.submittedPrompt',
+        );
+      }
+    });
+
     it('accepts channel-prompt classification only from the workspace worker', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection;
       // a forged key from an unauthorized caller must be dropped at the
