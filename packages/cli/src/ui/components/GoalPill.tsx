@@ -9,7 +9,10 @@ import { useEffect, useState } from 'react';
 import { Text } from 'ink';
 import { elapsedActiveTime } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import {
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { GoalRuntime } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
@@ -98,13 +101,24 @@ function presentation(snapshot: GoalSnapshotV2): {
   if (!goal || goal.status === 'complete') return null;
 
   if (goal.status === 'active') {
-    return snapshot.activity === 'verifying'
-      ? {
-          icon: ICON.CIRCLE_EMPTY,
-          label: 'checking',
-          color: theme.text.secondary,
-        }
-      : { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
+    if (snapshot.activity === 'verifying') {
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        label: 'checking',
+        color: theme.text.secondary,
+      };
+    }
+    // A Goal paying a failed checkpoint every turn otherwise looks exactly
+    // like one that is working, until the stall breaker stops it.
+    const stalls = goal.checkpointStalls ?? 0;
+    if (stalls > 0) {
+      return {
+        icon: '!',
+        label: `checkpoint ${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`,
+        color: theme.status.warning,
+      };
+    }
+    return { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
   }
   switch (goal.status) {
     case 'paused':

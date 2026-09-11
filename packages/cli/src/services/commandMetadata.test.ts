@@ -11,7 +11,8 @@ import {
   formatSupportedModes,
   getCommandDisplayName,
   getCommandSubcommandNames,
-  formatCommandSourceLabel,
+  MAX_EXTENSION_OWNER_LABEL_WIDTH,
+  extensionOwnerLabel,
 } from './commandMetadata.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
@@ -92,6 +93,9 @@ describe('getCommandSourceBadge', () => {
   });
 
   it('returns [Plugin] for plugin-command with Extension: prefix but no source detail', () => {
+    // `sourceDetail` — not the wording of a display label — is what routes the
+    // decision, so a command that never declared itself an extension still
+    // reads as a plugin.
     expect(
       getCommandSourceBadge(
         makeCmd({ source: 'plugin-command', sourceLabel: 'Extension: my-ext' }),
@@ -99,13 +103,58 @@ describe('getCommandSourceBadge', () => {
     ).toBe('[Plugin]');
   });
 
-  it('returns [Extension] for localized plugin-command with extension source detail', () => {
+  it('badges an extension command with its owner, localization and all', () => {
     expect(
       getCommandSourceBadge(
         makeCmd({
           source: 'plugin-command',
           sourceLabel: '扩展：my-ext',
           sourceDetail: 'extension',
+        }),
+      ),
+    ).toBe('[扩展：my-ext]');
+  });
+
+  it('badges an extension skill command with its owner', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'plugin-command',
+          sourceLabel: extensionOwnerLabel({
+            name: 'rust',
+            displayName: 'Rust',
+          }),
+          sourceDetail: 'extension',
+        }),
+      ),
+    ).toBe('[Extension: Rust]');
+  });
+
+  it('bounds the badge so a long display name cannot widen the label column', () => {
+    // The popup sizes its label column to the longest row and renders the
+    // badge in a `flexShrink: 0` box, so an unbounded display name squeezes
+    // the description column instead of truncating.
+    const badge = getCommandSourceBadge(
+      makeCmd({
+        source: 'plugin-command',
+        sourceLabel: extensionOwnerLabel({
+          displayName: 'Alibaba Cloud Database Suite for Production Workloads',
+        }),
+        sourceDetail: 'extension',
+      }),
+    );
+
+    expect(badge).toBe('[Extension: Alibaba Cloud Database …]');
+    expect(badge?.length).toBe(MAX_EXTENSION_OWNER_LABEL_WIDTH + 2);
+  });
+
+  it('falls back to [Extension] for an extension command with no owner label', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'plugin-command',
+          sourceDetail: 'extension',
+          sourceLabel: undefined,
         }),
       ),
     ).toBe('[Extension]');
@@ -261,52 +310,28 @@ describe('getCommandSubcommandNames', () => {
 });
 
 // ---------------------------------------------------------------------------
-// formatCommandSourceLabel
+// extensionOwnerLabel
 // ---------------------------------------------------------------------------
-describe('formatCommandSourceLabel', () => {
-  it('returns sourceLabel when present', () => {
-    const cmd = makeCmd({ source: 'builtin-command', sourceLabel: 'My Label' });
-    expect(formatCommandSourceLabel(cmd)).toBe('My Label');
+describe('extensionOwnerLabel', () => {
+  it('derives the owner from the display name and falls back to the id', () => {
+    expect(extensionOwnerLabel({ name: 'rust', displayName: 'Rust' })).toBe(
+      'Extension: Rust',
+    );
+    expect(extensionOwnerLabel({ name: 'rust' })).toBe('Extension: rust');
   });
 
-  it('returns Built-in for builtin-command without sourceLabel', () => {
-    const cmd = makeCmd({ source: 'builtin-command', sourceLabel: undefined });
-    expect(formatCommandSourceLabel(cmd)).toBe('Built-in');
+  it('names an unknown owner rather than an empty label', () => {
+    // A row whose extension fields were never populated still has to say it
+    // came from an extension; a bare `Extension:` reads as a formatting bug.
+    expect(extensionOwnerLabel({})).toBe('Extension: unknown');
   });
 
-  it('returns Skill for bundled-skill', () => {
-    const cmd = makeCmd({ source: 'bundled-skill', sourceLabel: undefined });
-    expect(formatCommandSourceLabel(cmd)).toBe('Skill');
-  });
-
-  it('returns Custom for skill-dir-command', () => {
-    const cmd = makeCmd({
-      source: 'skill-dir-command',
-      sourceLabel: undefined,
-    });
-    expect(formatCommandSourceLabel(cmd)).toBe('Custom');
-  });
-
-  it('returns Plugin for plugin-command', () => {
-    const cmd = makeCmd({ source: 'plugin-command', sourceLabel: undefined });
-    expect(formatCommandSourceLabel(cmd)).toBe('Plugin');
-  });
-
-  it('returns MCP for mcp-prompt', () => {
-    const cmd = makeCmd({ source: 'mcp-prompt', sourceLabel: undefined });
-    expect(formatCommandSourceLabel(cmd)).toBe('MCP');
-  });
-
-  it('returns Workflow for workflow-command', () => {
-    const cmd = makeCmd({ source: 'workflow-command', sourceLabel: undefined });
-    expect(formatCommandSourceLabel(cmd)).toBe('Workflow');
-  });
-
-  it('returns Unknown when source is falsy', () => {
-    const cmd = makeCmd({
-      source: undefined as unknown as SlashCommand['source'],
-      sourceLabel: undefined,
-    });
-    expect(formatCommandSourceLabel(cmd)).toBe('Unknown');
+  it('treats an empty display name as no display name', () => {
+    // `"displayName": ""` in a manifest is legal and reaches here as an empty
+    // string, so an `??` fallback would print `Extension: ` with no owner.
+    expect(extensionOwnerLabel({ name: 'rust', displayName: '' })).toBe(
+      'Extension: rust',
+    );
+    expect(extensionOwnerLabel({ displayName: '' })).toBe('Extension: unknown');
   });
 });
