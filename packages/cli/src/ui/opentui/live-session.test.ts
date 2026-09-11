@@ -869,6 +869,11 @@ describe('livePromptEvents', () => {
           tool: 'Read File(s)',
           title: 'src/a.ts',
         },
+        {
+          type: 'tool-description',
+          id: 'client-read-1',
+          description: 'src/a.ts',
+        },
         { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
         { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
       ]),
@@ -903,6 +908,11 @@ describe('livePromptEvents', () => {
           type: 'tool-result',
           id: 'client-read-1',
           display: 'Error reading files (missing.ts): no such file',
+        },
+        {
+          type: 'tool-description',
+          id: 'client-read-1',
+          description: 'Error attempting to read files',
         },
         {
           type: 'tool-end',

@@ -42,7 +42,7 @@ const waitingTool = (id = 'tool1'): LiveToolItem => ({
   confirm: 'pending',
 });
 
-describe('foldLiveEvent segment-end (finished parity)', () => {
+describe('foldLiveEvent tool-result presentation', () => {
   it('preserves presentation metadata without replacing the stored result', () => {
     const items = foldLiveEvent([runningTool()], {
       type: 'tool-result',
@@ -65,7 +65,9 @@ describe('foldLiveEvent segment-end (finished parity)', () => {
       omittedImageCount: 2,
     });
   });
+});
 
+describe('foldLiveEvent segment-end (finished parity)', () => {
   it('closes the streaming assistant block', () => {
     const items = foldLiveEvent([assistant('hello')], { type: 'segment-end' });
     expect(items).toHaveLength(1);
