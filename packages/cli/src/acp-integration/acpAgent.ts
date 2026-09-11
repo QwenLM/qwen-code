@@ -15067,7 +15067,15 @@ class QwenAgent implements Agent {
       // session already: a person's `/rename` outranks us, and so does the
       // title a previous attach wrote, which is why an attach does not repeat
       // this. `auto` rather than `manual` keeps `/rename` free to replace it.
-      const agentSessionTitle = config.getWorkspaceAgentName();
+      // Guarded like `getWarnings`, `getSessionId` and `getFailedMcpServerNames`
+      // above: this layer is handed Config-shaped objects that are not always a
+      // full Config — derived configs, shims and test doubles among them — and
+      // an unguarded call turns a missing method into a failed session
+      // creation rather than a session with no agent title.
+      const agentSessionTitle =
+        typeof config.getWorkspaceAgentName === 'function'
+          ? config.getWorkspaceAgentName()
+          : undefined;
       if (agentSessionTitle) {
         const recording = config.getChatRecordingService();
         if (recording && !recording.getCurrentCustomTitle()) {
