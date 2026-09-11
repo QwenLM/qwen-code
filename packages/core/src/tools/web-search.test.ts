@@ -2013,7 +2013,7 @@ describe('WebSearchTool citations', () => {
     );
     const content = (await runSearch(makeConfig())).llmContent as string;
     expect(content).toContain('as bare URLs, one per line');
-    expect(content).toContain('any title would be invented');
+    expect(content).toContain('cannot be verified');
     expect(content).not.toContain('as markdown links');
   });
 
