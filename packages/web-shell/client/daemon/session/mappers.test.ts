@@ -1015,6 +1015,93 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it.each(['turn_budget', 'time_budget'])(
+    'carries a %s limitKind through from the wire',
+    (limitKind) => {
+      // The mapper enumerates the kinds by value, so a kind it does not name
+      // is dropped on the live path even though the daemon sent it.
+      const next = applyEvent(
+        { status: 'connected', workspaceCwd: '/workspace' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-1',
+                    revision: 3,
+                    objective: 'ship it',
+                    status: 'usage_limited',
+                    evidenceCursor: { recordId: 'record-1' },
+                    turnCount: 20,
+                    activeTimeMs: 1_800_000,
+                    turnBudget: 20,
+                    activeTimeBudgetMs: 1_800_000,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    limitKind,
+                  },
+                },
+              },
+            },
+          },
+        } as DaemonEvent,
+      );
+
+      expect(next.goalState?.goal).toMatchObject({
+        limitKind,
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    },
+  );
+
+  it('leaves out the cadence ceilings when the daemon omits them', () => {
+    // Spreading them in unconditionally would leave `turnBudget: undefined` on
+    // the record, which renders the same but does not compare the same.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('turnBudget');
+    expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
+  });
+
   it('carries checkpoint health through from the wire', () => {
     // Same pin as limitKind: the field-by-field rebuild must not drop the
     // stall streak or the failure the Goals dialog shows before a stop.

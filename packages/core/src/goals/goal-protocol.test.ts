@@ -21,9 +21,11 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalActiveTimeBudgetReason,
   goalPauseReasonForFailure,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
+  goalTurnBudgetReason,
   validateGoalPauseReason,
 } from './goal-protocol.js';
 
@@ -173,5 +175,19 @@ describe('goal checkpoint stall reasons', () => {
     expect(codePoints(capped)).toBe(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
     expect(capped.endsWith('…')).toBe(true);
     expect([...capped].slice(0, -1).every((char) => char === '😀')).toBe(true);
+  });
+});
+
+describe('Goal cadence budget reasons', () => {
+  it('formats singular and plural turn budgets', () => {
+    expect(goalTurnBudgetReason(1)).toContain('(1 turn)');
+    expect(goalTurnBudgetReason(2)).toContain('(2 turns)');
+  });
+
+  it('reports sub-minute time budgets in seconds', () => {
+    expect(goalActiveTimeBudgetReason(500)).toContain('(1 second)');
+    expect(goalActiveTimeBudgetReason(30_000)).toContain('(30 seconds)');
+    expect(goalActiveTimeBudgetReason(60_000)).toContain('(1 minute)');
+    expect(goalActiveTimeBudgetReason(120_000)).toContain('(2 minutes)');
   });
 });

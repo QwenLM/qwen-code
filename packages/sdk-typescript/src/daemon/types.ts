@@ -39,13 +39,17 @@ export interface TranscriptCursor {
  * `lastReason` — that stays the human-readable half, this is the half a client
  * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
  * window: the objective and revision carry over, but evidence recorded before
- * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
- * authorization that a resume re-arms.
+ * the resume is no longer citable. The three budget kinds each mark a spent
+ * autonomous authorization that a resume re-arms: `token_budget` for model
+ * spend, `turn_budget` for finished turns, `time_budget` for active wall time.
+ * Older daemons never send the last two.
  */
 export type GoalLimitKind =
   | 'evidence_catalog'
   | 'checkpoint_request'
-  | 'token_budget';
+  | 'token_budget'
+  | 'turn_budget'
+  | 'time_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -68,6 +72,18 @@ export interface GoalRecord {
    * daemon's snapshot looks like.
    */
   tokenBudget?: number;
+  /**
+   * The count `turnCount` may reach before the Goal stops and waits for the
+   * user. Absent means no turn ceiling, which is both the default and what an
+   * older daemon's snapshot looks like.
+   */
+  turnBudget?: number;
+  /**
+   * The ceiling on `activeTimeMs` -- wall time spent running -- before the
+   * Goal stops and waits for the user, in milliseconds. Absent means no time
+   * ceiling, which is both the default and what an older daemon sends.
+   */
+  activeTimeBudgetMs?: number;
   createdAt: number;
   updatedAt: number;
   /**
