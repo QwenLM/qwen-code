@@ -496,11 +496,20 @@ export class SessionArtifactStore {
             : [],
         );
         for (const artifact of rollbackArtifacts) {
-          await retainArtifactSnapshot(
-            artifact,
-            this.runtimeBaseDir,
-            this.sessionId,
-          );
+          try {
+            await retainArtifactSnapshot(
+              artifact,
+              this.runtimeBaseDir,
+              this.sessionId,
+            );
+          } catch (error) {
+            if (validationStrict || persistenceStrict) throw error;
+            warnings.push(
+              `artifact ${artifact.id} kept without retaining its snapshot: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
         }
         const overflowRemoved = await this.evictOverflow(
           createdIds,

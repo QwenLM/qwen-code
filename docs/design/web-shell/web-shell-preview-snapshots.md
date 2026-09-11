@@ -66,6 +66,12 @@ and is cleared by a subsequent successful durable change or complete snapshot
 or restore. This keeps failed batches from leaking references without deleting
 bytes still needed by recorded history.
 
+Non-strict ingestion keeps accepted records and their change notifications
+aligned when snapshot reference bookkeeping fails: it reports an artifact-specific
+warning and continues through normal persistence and notification. Strict
+validation or persistence still aborts and rolls back the batch. Existing
+references and missing snapshot storage remain tolerated without a new warning.
+
 The new `GET /session/:id/artifacts/:artifactId/content` route is
 **live-session-owner scoped**, with the same owner resolution, client filtering,
 trust and cwd-bound read behavior as the artifact listing. It looks up the

@@ -6652,41 +6652,156 @@ describe('SessionArtifactStore', () => {
       },
     );
 
-    it('cleans the whole batch when retaining its first snapshot fails after writing its reference', async () => {
-      const first = await saved('owner', 'first');
-      const second = await saved('owner', 'second');
-      await retainArtifactSnapshot(second, workspace, 'owner');
-      const live = store('owner');
-      const references = path.join(
-        path.dirname(fileURLToPath(first.url)),
-        'references',
-      );
-      const writeFile = fs.writeFile;
-      const spy = vi
-        .spyOn(fs, 'writeFile')
-        .mockImplementation(async (...args) => {
-          await writeFile(...args);
-          if (path.dirname(String(args[0])) === references) {
-            throw new Error('reference write failed');
-          }
+    it.each(['before', 'after'] as const)(
+      'returns the complete non-strict batch when retaining a snapshot fails %s its reference write',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordSnapshot: async (payload) => {
+              snapshots.push(payload);
+            },
+          },
         });
-      try {
-        await expect(
-          live.upsertMany([first, second], {
-            strict: true,
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              if (failure === 'after') await writeFile(...args);
+              throw Object.assign(new Error('ENOSPC: reference write failed'), {
+                code: 'ENOSPC',
+              });
+            }
+            await writeFile(...args);
+          });
+        try {
+          const result = await live.upsertMany([first, second], {
             trustedPublisher: true,
-          }),
-        ).rejects.toThrow('reference write failed');
-        expect((await live.list()).artifacts).toEqual([]);
-        for (const page of [first, second]) {
-          await expect(
-            fs.stat(path.dirname(fileURLToPath(page.url))),
-          ).rejects.toMatchObject({ code: 'ENOENT' });
+          });
+          expect(result.warnings).toEqual([
+            `artifact ${first.id} kept without retaining its snapshot: ENOSPC: reference write failed`,
+          ]);
+          expect(result.changes.map((change) => change.action)).toEqual([
+            'created',
+            'created',
+          ]);
+          expect(result.changes.map((change) => change.artifact)).toEqual(
+            (await live.list()).artifacts,
+          );
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+          expect(snapshots.at(-1)?.artifacts.map((page) => page.id)).toEqual(
+            result.changes.map((change) => change.artifactId),
+          );
+          await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+            'first',
+          );
+          await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+            'second',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(second.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        } finally {
+          spy.mockRestore();
         }
-      } finally {
-        spy.mockRestore();
-      }
-    });
+      },
+    );
+
+    it.each(['EEXIST', 'ENOENT'] as const)(
+      'does not warn when snapshot retention tolerates %s',
+      async (code) => {
+        const page = await saved('owner', 'original');
+        const references = path.join(
+          path.dirname(fileURLToPath(page.url)),
+          'references',
+        );
+        if (code === 'ENOENT') await fs.unlink(fileURLToPath(page.url));
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              await writeFile(...args);
+            }
+            await writeFile(...args);
+          });
+        try {
+          const live = store('owner');
+          const result = await live.upsertMany([page], {
+            trustedPublisher: true,
+          });
+          expect(result.warnings).toBeUndefined();
+          expect(result.changes).toHaveLength(1);
+          expect(result.changes[0]!.artifact).toEqual(
+            (await live.list()).artifacts[0],
+          );
+          if (code === 'EEXIST') {
+            expect(spy).toHaveBeenCalledTimes(1);
+            await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+              'original',
+            );
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      { strict: true },
+      { validationStrict: true },
+      { persistenceStrict: true },
+    ])(
+      'cleans the whole batch after a reference write fails with %j',
+      async (strictOptions) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(second, workspace, 'owner');
+        const live = store('owner');
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            await writeFile(...args);
+            if (path.dirname(String(args[0])) === references) {
+              throw new Error('reference write failed');
+            }
+          });
+        try {
+          await expect(
+            live.upsertMany([first, second], {
+              ...strictOptions,
+              trustedPublisher: true,
+            }),
+          ).rejects.toThrow('reference write failed');
+          expect((await live.list()).artifacts).toEqual([]);
+          for (const page of [first, second]) {
+            await expect(
+              fs.stat(path.dirname(fileURLToPath(page.url))),
+            ).rejects.toMatchObject({ code: 'ENOENT' });
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
 
     it.each([false, true])(
       'protects failed durable pruning through rollback after partial restore: %s',
