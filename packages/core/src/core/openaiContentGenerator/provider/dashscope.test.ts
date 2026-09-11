@@ -736,6 +736,66 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       temperature: 0.7,
     };
 
+    // DashScope is an aggregating gateway. `metadata` is a platform-private
+    // tracing object that only its own inference path understands; forwarded to a
+    // third-party vendor backend that types `metadata` as a string it fails to
+    // deserialize and the request comes back as a flat 400, which made those
+    // models unusable through Qwen Code entirely.
+    it.each([['qwen-max'], ['qwen3.8-max'], ['coder-model']] as const)(
+      'ships metadata for the qwen-family model %s',
+      (model) => {
+        const result = provider.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it.each([
+      ['ZHIPU/GLM-5.3-Flash'],
+      ['deepseek-v4-pro'],
+      ['moonshot/kimi-k3'],
+    ] as const)('omits metadata for the non-qwen model %s', (model) => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+      // The gate is metadata-only: everything else the provider ships is untouched.
+      expect(result['messages']).toBeDefined();
+      expect(result['preserve_thinking']).toBe(true);
+    });
+
+    it('still ships metadata for a qwen model reached through an alicloudapi gateway', () => {
+      // #9103 widened which *origins* count as DashScope-compatible. Gating on the
+      // wire model is orthogonal to that and must not walk it back.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+          model: 'qwen-max',
+        },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
     it.each([
       ['gpt-5.4', 'high', 'high'],
       ['gpt-5.4', 'max', 'xhigh'],
