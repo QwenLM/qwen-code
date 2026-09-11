@@ -1077,12 +1077,12 @@ import {
   selectVisibleHistoryRecords,
   createManagedExternalToolGuard,
 } from './acpAgent.js';
-import type { Config, GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
   BranchPointInvalidError,
+  ExtensionManager,
   SessionEndReason,
   MCPServerConfig,
   SessionService,
@@ -1120,6 +1120,8 @@ import {
   GoalInvalidTransitionError,
   sessionIdContext,
   uiTelemetryService,
+  type Config,
+  type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -1138,7 +1140,6 @@ import type {
   NewSessionResponse,
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
-import { ExtensionManager } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   reloadEnvironment,
