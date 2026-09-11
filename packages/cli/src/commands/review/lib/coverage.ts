@@ -1926,6 +1926,12 @@ export function coverageFromTranscripts(
     const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
+    // The chunks THIS record may not be credited with, decided by the two
+    // declarer arms below — the assigned one and its chunk-less twin — and
+    // consumed by the credit loop at the end of this iteration. Per record,
+    // because it is a fact about this record's own return, not about the
+    // chunk; declared before either arm, because both write it.
+    const withheldFromCredit = new Set<number>();
     if (chunk !== null && declaresOwnUncoverable(rec, chunk)) {
       // The same supersession guard the sibling flags carry. Without it a
       // stale declaration — a prior attempt's agent on a resumed run, or a
@@ -2006,7 +2012,23 @@ export function coverageFromTranscripts(
         uncoverable.add(chunk);
         noteChunkCause(rec, chunk, 'declared-uncoverable');
       }
-      continue;
+      // Withheld PER ID, and the record walks on — the same rule its
+      // chunk-less twin follows, for the same reason and now on the same
+      // mechanism. The unconditional `continue` that stood here stopped the
+      // whole record, so a chunk agent that declared its own chunk and
+      // demonstrably read its neighbours' lines forfeited those too:
+      // measured on identical facts, the ASSIGNED record reported
+      // `covered []` where the paraphrased one — the shape this file trusts
+      // LESS — reported `covered [1, 3]`. Fixing R36-6 on one arm and
+      // leaving the other inverted the asymmetry rather than removing it
+      // (undirected audit).
+      //
+      // Withheld whether the declaration was admitted or refused: an
+      // admitted one must not credit what it declared, and a refused one is
+      // a record whose own return says it could not read those lines. The
+      // credit gate's own seals still decide everything else — a record
+      // whose territory conjunct fails earns nothing here either way.
+      withheldFromCredit.add(chunk);
     }
 
     // The anchored CHUNK_RE de-assigns a launch the orchestrator
@@ -2033,11 +2055,6 @@ export function coverageFromTranscripts(
     // assigned declarer's posture — no credit off the declared attempt —
     // while one admitted makes the chunk uncoverable, its reads
     // crediting nothing, the declaration having answered them.
-    // The chunks THIS record may not be credited with, decided by the
-    // declarer arm below and consumed by the credit loop at the end of this
-    // iteration. Per record, because it is a fact about this record's own
-    // return, not about the chunk.
-    const withheldFromCredit = new Set<number>();
     if (chunk === null) {
       const declaredIds = declaredUncoverableChunkIds(rec);
       if (

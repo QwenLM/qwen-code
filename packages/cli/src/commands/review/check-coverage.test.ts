@@ -3626,6 +3626,46 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(run('chunk 2 of 2')).toMatchObject({ missing: [2], ok: false });
   });
 
+  it('costs only the declared chunk on BOTH declarer arms alike', () => {
+    // The assigned arm and its chunk-less twin adjudicate the same fact and
+    // must charge the same price for it. Fixing the blanket stop on one arm
+    // and leaving it on the other inverted the asymmetry instead of removing
+    // it: on identical facts the ASSIGNED record — the shape this file
+    // trusts MORE — reported `covered []` while the paraphrased one reported
+    // `covered [1, 3]`. Asserted as an equality between the two arms rather
+    // than as two numbers, so the invariant is what is pinned.
+    const runOne = (slot: string) => {
+      const p = plan(3, { longLineChunk: 2 });
+      const g3 = (c: number) =>
+        `You are review agent \`chunk ${c} of 3\` — the territory agent.\n` +
+        `read_file(file_path="${chunkBrief(c)}")\n` +
+        `read_file(file_path="${DIFF}", offset=${(c - 1) * 100}, limit=100)`;
+      for (let c = 1; c <= 3; c++) built(p, c, g3(c));
+      transcript('d', g3(2).replace('chunk 2 of 3', slot), {
+        ranges: [
+          [0, 100],
+          [100, 100],
+          [200, 100],
+        ],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      });
+      const r = coverageFromTranscripts(p, ENV);
+      rmSync(join(dir, 'subagents', 'S1', 'agent-d.jsonl'));
+      return {
+        covered: r.coveredChunks,
+        uncoverable: r.uncoverableChunks,
+        missing: r.missingChunks,
+      };
+    };
+    const assigned = runOne('chunk 2 of 3');
+    expect(assigned).toEqual({
+      covered: [1, 3],
+      uncoverable: [2],
+      missing: [],
+    });
+    expect(runOne('chunk 2 of 3 (round 2)')).toEqual(assigned);
+  });
+
   it('an ADMITTED chunk-less declaration costs only the chunk it named', () => {
     // The blanket `if (declarerRouted) continue;` stopped the whole record on
     // admission, so a declarer that read all three chunks reported
