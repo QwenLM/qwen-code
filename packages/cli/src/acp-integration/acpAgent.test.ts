@@ -261,6 +261,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   normalizeClaudeMcpServer: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).normalizeClaudeMcpServer,
+  // The real workspace env snapshot (config/environment.ts) needs these.
+  QWEN_DIR: (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+    .QWEN_DIR,
+  getErrorMessage: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getErrorMessage,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -28363,6 +28372,104 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       }
     },
   );
+
+  // Two live Configs in one process: each snapshot must come from ITS workspace's
+  // settings.env, not the bootstrap workspace's.
+  it('workspaceMcpReload resolves each Config against its own workspace settings.env', async () => {
+    const dirA = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-iso-a-'));
+    const dirB = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-iso-b-'));
+    const mcpJson = JSON.stringify({
+      mcpServers: {
+        srv: {
+          httpUrl: 'https://h.example/mcp',
+          headers: { Authorization: 'Bearer ${ACP_ISO_TOKEN}' },
+        },
+      },
+    });
+    try {
+      await fs.writeFile(path.join(dirA, '.mcp.json'), mcpJson);
+      await fs.writeFile(path.join(dirB, '.mcp.json'), mcpJson);
+      delete process.env['ACP_ISO_TOKEN'];
+      const settingsFor = (token: string) =>
+        ({
+          merged: { mcpServers: {}, env: { ACP_ISO_TOKEN: token } },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+          getUserHooks: vi.fn().mockReturnValue({}),
+          getProjectHooks: vi.fn().mockReturnValue({}),
+        }) as unknown as LoadedSettings;
+      vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
+        cwd === dirB ? settingsFor('B') : settingsFor('A'),
+      );
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(dirA);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue('default');
+      const discoveryManager = {
+        discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+        getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+        getMcpClientAccounting: vi.fn().mockReturnValue({
+          total: 0,
+          refusedServerNames: [],
+        }),
+        getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+        getMcpBudgetMode: vi.fn().mockReturnValue(undefined),
+      };
+      const discoveryConfig = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        reinitializeMcpServers: vi.fn().mockResolvedValue(undefined),
+        setMcpTransportPool: vi.fn(),
+        getTargetDir: vi.fn().mockReturnValue(dirB),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
+        getRuntimeMcpServers: vi.fn().mockReturnValue({}),
+        getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+        getApprovalMode: vi.fn().mockReturnValue('default'),
+        getBareMode: vi.fn().mockReturnValue(false),
+        isSafeMode: vi.fn().mockReturnValue(false),
+        setExcludedMcpServers: vi.fn(),
+        setAllowedMcpServers: vi.fn(),
+        setPendingMcpServers: vi.fn(),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getMcpClientManager: vi.fn().mockReturnValue(discoveryManager),
+        }),
+      } as unknown as Config;
+      vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+
+      const { agent, agentPromise } = await getAgent();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+      ).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(
+          discoveryManager.discoverAllMcpToolsIncremental,
+        ).toHaveBeenCalledWith(discoveryConfig),
+      );
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+      ).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(discoveryConfig.reinitializeMcpServers).toHaveBeenCalled(),
+      );
+      const headerOf = (fn: unknown) =>
+        (
+          (fn as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+            string,
+            { headers?: Record<string, string> }
+          >
+        )['srv']?.headers;
+      expect(headerOf(mockConfig.reinitializeMcpServers)).toEqual({
+        Authorization: 'Bearer A',
+      });
+      expect(headerOf(discoveryConfig.reinitializeMcpServers)).toEqual({
+        Authorization: 'Bearer B',
+      });
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      delete process.env['ACP_ISO_TOKEN'];
+      await fs.rm(dirA, { recursive: true, force: true });
+      await fs.rm(dirB, { recursive: true, force: true });
+    }
+  });
 
   it('bare mode: workspaceMcpReload does NOT leak settings.mcpServers/mcp.allowed into an already-running session', async () => {
     // Bare-mode counterpart of the safe-mode test above — suggested by an

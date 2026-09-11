@@ -13,7 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './settings.js';
 import type { SettingsWatcher } from './settingsWatcher.js';
-import { assembleMcpServers } from './mcpServers.js';
+import { assembleMcpServers, mcpExpansionOptions } from './mcpServers.js';
 import {
   getPendingGatedMcpServers,
   getPromptableMcpServers,
@@ -161,7 +161,7 @@ export function registerMcpHotReload(
             settings.merged.mcpServers,
             cwd,
             topTierMcpServers,
-            { expandEnv: gateArmed },
+            mcpExpansionOptions(settings.merged, cwd, gateArmed),
           );
     // Same bare/safe guard as `next` above, applied to the admission lists:
     // `recomputeMcpGating` reads settings.merged.mcp.allowed/excluded

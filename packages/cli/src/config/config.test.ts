@@ -6264,8 +6264,9 @@ describe('loadCliConfig `.mcp.json` expansion follows the approval gate', () => 
     await loadCliConfig({}, argv, undefined, []);
 
     expect(assembleMcpServers).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(assembleMcpServers).mock.calls[0][3]).toEqual({
+    expect(vi.mocked(assembleMcpServers).mock.calls[0][3]).toMatchObject({
       expandEnv: true,
+      env: expect.any(Object),
     });
     expect(lastConfigParams()?.pendingMcpServers).toEqual([]);
   });

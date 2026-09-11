@@ -5,8 +5,29 @@
  */
 
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
-import { loadProjectMcpServers } from './mcpJson.js';
+import {
+  loadProjectMcpServers,
+  type LoadProjectMcpServersOptions,
+} from './mcpJson.js';
+import { buildWorkspaceEnvSnapshot } from './environment.js';
+import type { Settings } from './settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+
+export type McpExpansionOptions = LoadProjectMcpServersOptions;
+
+/**
+ * Expansion options for one call site: the workspace's own environment
+ * snapshot while the approval gate is armed, none when it is off.
+ */
+export function mcpExpansionOptions(
+  settings: Settings,
+  cwd: string,
+  gateArmed = true,
+): McpExpansionOptions {
+  return gateArmed
+    ? { expandEnv: true, env: buildWorkspaceEnvSnapshot(settings, cwd) }
+    : { expandEnv: false };
+}
 
 /**
  * Assemble the effective MCP server map from every source in precedence order,
@@ -27,8 +48,8 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 export function assembleMcpServers(
   mergedSettingsServers: Record<string, MCPServerConfig> | undefined,
   cwd: string,
-  cliMcpServers?: Record<string, MCPServerConfig> | null,
-  options: { expandEnv?: boolean } = {},
+  cliMcpServers: Record<string, MCPServerConfig> | null | undefined,
+  options: McpExpansionOptions,
 ): Record<string, MCPServerConfig> {
   const belowProject: Record<string, MCPServerConfig> = {};
   const aboveProject: Record<string, MCPServerConfig> = {};
@@ -42,11 +63,7 @@ export function assembleMcpServers(
     }
   }
 
-  // `expandEnv: false` when the approval gate is off — see
-  // LoadProjectMcpServersOptions.
-  const projectResult = loadProjectMcpServers(cwd, {
-    expandEnv: options.expandEnv,
-  });
+  const projectResult = loadProjectMcpServers(cwd, options);
   for (const error of projectResult.errors) {
     writeStderrLine(`Warning: ${error}`);
   }

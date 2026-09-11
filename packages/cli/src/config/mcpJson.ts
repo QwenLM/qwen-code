@@ -91,7 +91,10 @@ export function exceedsMaxDepth(root: unknown, maxDepth: number): boolean {
  * Expand `$VAR` / `${VAR}` in the transport fields of one entry, leaving every
  * other field byte-identical. Returns the input unchanged when nothing expanded.
  */
-function resolveTransportEnvVars(config: MCPServerConfig): MCPServerConfig {
+function resolveTransportEnvVars(
+  config: MCPServerConfig,
+  env: Readonly<NodeJS.ProcessEnv>,
+): MCPServerConfig {
   const source = config as unknown as Record<string, unknown>;
   let resolved: Record<string, unknown> | undefined;
   for (const field of ENV_EXPANDED_TRANSPORT_FIELDS) {
@@ -99,7 +102,9 @@ function resolveTransportEnvVars(config: MCPServerConfig): MCPServerConfig {
       continue;
     }
     const original = source[field];
-    const value = resolveEnvVarsInObject(original);
+    const value = resolveEnvVarsInObject(original, env, {
+      processEnvFallback: false,
+    });
     if (value === original) {
       continue;
     }
@@ -123,19 +128,18 @@ export interface LoadProjectMcpServersResult {
   errors: string[];
 }
 
-/** Options for {@link loadProjectMcpServers}. */
-export interface LoadProjectMcpServersOptions {
-  /**
-   * Expand `$VAR` / `${VAR}` in transport fields. Default true.
-   *
-   * Pass false whenever the approval gate is off (bare mode, safe mode, or
-   * `--yolo`), because then nothing stands between a checked-in `.mcp.json` and
-   * a live connection: a repository could name any variable in its own headers
-   * and have the real value posted to an endpoint it chose. Unexpanded, the
-   * placeholder travels as the literal text it is.
-   */
-  expandEnv?: boolean;
-}
+/**
+ * Options for {@link loadProjectMcpServers}. Expanding needs the workspace's
+ * own environment (`buildWorkspaceEnvSnapshot`), never `process.env`, which in
+ * a process hosting several workspaces carries the other ones' `.env` values —
+ * so the snapshot is required by the type whenever `expandEnv` is true. Pass
+ * `expandEnv: false` when the approval gate is off (`--yolo`): then nothing
+ * stands between a checked-in `.mcp.json` and a live connection, and the
+ * placeholder travels as the literal text it is.
+ */
+export type LoadProjectMcpServersOptions =
+  | { expandEnv: false }
+  | { expandEnv: true; env: Readonly<NodeJS.ProcessEnv> };
 
 /**
  * Load project-scoped MCP servers from `<projectRoot>/.mcp.json`, each tagged
@@ -146,16 +150,16 @@ export interface LoadProjectMcpServersOptions {
  * over-deep or otherwise unusable is reported via `errors` and skipped, per
  * entry, so one bad server cannot cost the session.
  *
- * Note `getHomeEnvFallbackVars()` is deliberately NOT passed: the only keys it
- * would add over `process.env` are the ones `loadEnvironment` refused to apply
+ * Note `getHomeEnvFallbackVars()` is deliberately NOT merged into the snapshot:
+ * the only keys it would add are the ones `loadEnvironment` refused to apply
  * (loader-affecting keys such as `NODE_OPTIONS`, private provenance markers),
  * and a repository-supplied file must not be able to read those (#8653).
  */
 export function loadProjectMcpServers(
   projectRoot: string,
-  options: LoadProjectMcpServersOptions = {},
+  options: LoadProjectMcpServersOptions,
 ): LoadProjectMcpServersResult {
-  const expandEnv = options.expandEnv ?? true;
+  const expandEnv = options.expandEnv;
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
 
   let raw: string;
@@ -219,8 +223,8 @@ export function loadProjectMcpServers(
       // `type`-based transport shape; normalize them to Qwen's field-based shape.
       servers[name] = {
         ...normalizeClaudeMcpServer(
-          expandEnv
-            ? resolveTransportEnvVars(value as MCPServerConfig)
+          options.expandEnv
+            ? resolveTransportEnvVars(value as MCPServerConfig, options.env)
             : (value as MCPServerConfig),
         ),
         scope: 'project',

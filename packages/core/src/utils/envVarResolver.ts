@@ -6,6 +6,16 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+export interface ResolveEnvVarsOptions {
+  /**
+   * Fall back to `process.env` for a name `customEnv` lacks. Default true.
+   * `false` confines resolution to `customEnv` — for a repository-supplied
+   * file resolved against one workspace's environment, where `process.env`
+   * may carry another workspace's `.env` values.
+   */
+  processEnvFallback?: boolean;
+}
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
@@ -26,6 +36,8 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  * Callers splicing into a shell string own their quoting.
  *
  * @param value - The string that may contain environment variable placeholders
+ * @param customEnv - Looked up before `process.env`
+ * @param options - See {@link ResolveEnvVarsOptions}
  * @returns The string with environment variables resolved
  *
  * @example
@@ -35,7 +47,8 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  */
 export function resolveEnvVarsInString(
   value: string,
-  customEnv?: Record<string, string>,
+  customEnv?: Readonly<Record<string, string | undefined>>,
+  options: ResolveEnvVarsOptions = {},
 ): string {
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
@@ -51,7 +64,12 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (process && process.env && typeof process.env[varName] === 'string') {
+    if (
+      options.processEnvFallback !== false &&
+      process &&
+      process.env &&
+      typeof process.env[varName] === 'string'
+    ) {
       return process.env[varName]!;
     }
     return match;
@@ -64,6 +82,8 @@ export function resolveEnvVarsInString(
  * Protected against circular references using a WeakSet to track visited objects.
  *
  * @param obj - The object to process for environment variable resolution
+ * @param customEnv - Looked up before `process.env`
+ * @param options - See {@link ResolveEnvVarsOptions}
  * @returns A new object with environment variables resolved
  *
  * @example
@@ -79,9 +99,10 @@ export function resolveEnvVarsInString(
  */
 export function resolveEnvVarsInObject<T>(
   obj: T,
-  customEnv?: Record<string, string>,
+  customEnv?: Readonly<Record<string, string | undefined>>,
+  options: ResolveEnvVarsOptions = {},
 ): T {
-  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv);
+  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv, options);
 }
 
 /**
@@ -94,7 +115,8 @@ export function resolveEnvVarsInObject<T>(
 function resolveEnvVarsInObjectInternal<T>(
   obj: T,
   visited: WeakSet<object>,
-  customEnv?: Record<string, string>,
+  customEnv: Readonly<Record<string, string | undefined>> | undefined,
+  options: ResolveEnvVarsOptions,
 ): T {
   if (
     obj === null ||
@@ -106,7 +128,7 @@ function resolveEnvVarsInObjectInternal<T>(
   }
 
   if (typeof obj === 'string') {
-    return resolveEnvVarsInString(obj, customEnv) as unknown as T;
+    return resolveEnvVarsInString(obj, customEnv, options) as unknown as T;
   }
 
   if (Array.isArray(obj)) {
@@ -118,7 +140,7 @@ function resolveEnvVarsInObjectInternal<T>(
 
     visited.add(obj);
     const result = obj.map((item) =>
-      resolveEnvVarsInObjectInternal(item, visited, customEnv),
+      resolveEnvVarsInObjectInternal(item, visited, customEnv, options),
     ) as unknown as T;
     visited.delete(obj);
     return result;
@@ -139,6 +161,7 @@ function resolveEnvVarsInObjectInternal<T>(
           newObj[key],
           visited,
           customEnv,
+          options,
         );
       }
     }

@@ -124,6 +124,38 @@ describe('resolveEnvVarsInString', () => {
 
     expect(result).toBe('value and $UNDEFINED mixed');
   });
+
+  describe('processEnvFallback', () => {
+    it('falls back to process.env by default', () => {
+      process.env['ONLY_IN_PROCESS'] = 'proc';
+      expect(resolveEnvVarsInString('$ONLY_IN_PROCESS', {})).toBe('proc');
+    });
+
+    it('confines resolution to customEnv when false', () => {
+      process.env['ONLY_IN_PROCESS'] = 'proc';
+      const custom = { IN_CUSTOM: 'custom' };
+      expect(
+        resolveEnvVarsInString('$ONLY_IN_PROCESS $IN_CUSTOM', custom, {
+          processEnvFallback: false,
+        }),
+      ).toBe('$ONLY_IN_PROCESS custom');
+      expect(
+        resolveEnvVarsInObject({ h: '${ONLY_IN_PROCESS}' }, custom, {
+          processEnvFallback: false,
+        }),
+      ).toEqual({ h: '${ONLY_IN_PROCESS}' });
+    });
+
+    it('still refuses internal secrets from customEnv when false', () => {
+      expect(
+        resolveEnvVarsInString(
+          '$QWEN_SERVER_TOKEN',
+          { QWEN_SERVER_TOKEN: 'leak' },
+          { processEnvFallback: false },
+        ),
+      ).toBe('$QWEN_SERVER_TOKEN');
+    });
+  });
 });
 
 describe('resolveEnvVarsInObject', () => {

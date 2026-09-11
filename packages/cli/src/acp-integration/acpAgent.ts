@@ -227,7 +227,10 @@ import {
   isMcpApprovalGateArmed,
   loadMcpApprovals,
 } from '../config/mcpApprovals.js';
-import { assembleMcpServers } from '../config/mcpServers.js';
+import {
+  assembleMcpServers,
+  mcpExpansionOptions,
+} from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
 import {
   REDACTED_MCP_SECRET,
@@ -4027,7 +4030,8 @@ class QwenAgent implements Agent {
     accepted: boolean;
   } {
     return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
-      const settings = loadSettings(this.config.getTargetDir());
+      const bootstrapCwd = this.config.getTargetDir();
+      const settings = loadSettings(bootstrapCwd);
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const liveConfigs = new Set([
         this.config,
@@ -4047,13 +4051,18 @@ class QwenAgent implements Agent {
             config.isSafeMode(),
             config.getApprovalMode(),
           );
+          // The env snapshot comes from THIS workspace's settings (its
+          // `settings.env`, `excludedEnvVars`); the server map and admission
+          // lists keep the bootstrap settings, as before.
+          const workspaceSettings =
+            cwd === bootstrapCwd ? settings : loadSettingsCached(cwd);
           const mcpServers = isBareOrSafe
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
                 cwd,
                 config.getTopTierMcpServers(),
-                { expandEnv: gateArmed },
+                mcpExpansionOptions(workspaceSettings.merged, cwd, gateArmed),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
           const gating = isBareOrSafe

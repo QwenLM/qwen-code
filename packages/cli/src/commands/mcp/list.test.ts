@@ -30,6 +30,7 @@ vi.mock('../../config/settings.js', () => ({
 }));
 vi.mock('../../config/mcpServers.js', () => ({
   assembleMcpServers: vi.fn((servers) => servers ?? {}),
+  mcpExpansionOptions: vi.fn(() => ({ expandEnv: true, env: {} })),
 }));
 vi.mock('../../config/mcpApprovals.js', () => ({
   loadMcpApprovals: vi.fn(() => ({
