@@ -1912,6 +1912,24 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2: Do another thing');
   });
 
+  it('renders structured question answers as their display text', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'ask_user_question_answers',
+          text: 'Selected Staging',
+          answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('MockMarkdown:Selected Staging');
+    expect(lastFrame()).not.toContain('ask_user_question_answers');
+  });
+
   it('renders MCP App fallback text instead of stringifying HTML', () => {
     const html = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
     const { lastFrame } = renderWithContext(

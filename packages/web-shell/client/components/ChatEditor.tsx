@@ -2,6 +2,7 @@ import {
   forwardRef,
   memo,
   useImperativeHandle,
+  useId,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -66,7 +67,6 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
-import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -130,6 +130,7 @@ const MAX_DROP_DIALOG_ROWS = 100;
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'plan'
   | 'contextUsage'
   | 'gitBranch'
   | 'model'
@@ -138,10 +139,7 @@ export type ComposerToolbarAction =
   | 'widthMode'
   | 'voice'
   | 'workspace'
-  // Unlike the actions above, `addMenu` is never shown unless the host
-  // lists it explicitly in `visibleToolbarActions` — the generic gate
-  // defaults to "show" when the prop is absent, so `+` checks the prop
-  // directly to stay off by default.
+  // Like Plan, addMenu is only shown when explicitly listed by the host.
   | 'addMenu';
 
 // Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
@@ -163,6 +161,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'plan',
   'commands',
   'contextUsage',
   'gitBranch',
@@ -203,6 +202,9 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
   gitBranch?: string;
@@ -244,7 +246,10 @@ interface ChatEditorProps {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
-  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
+  onSelectReasoningEffort?: (
+    value: ReasoningSelection,
+    source?: 'toggle',
+  ) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -1086,16 +1091,20 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect?: (value: ReasoningSelection) => Promise<void> | void;
+  onSelect?: (
+    value: ReasoningSelection,
+    source?: 'toggle',
+  ) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
-  const select = async (value: ReasoningSelection) => {
+  const select = async (value: ReasoningSelection, source?: 'toggle') => {
     if (busy || !onSelect) return;
     setBusy(true);
     try {
-      await onSelect(value);
+      if (source) await onSelect(value, source);
+      else await onSelect(value);
     } catch {
       // The owning surface reports action errors.
     } finally {
@@ -1112,11 +1121,23 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy || !onSelect || reasoning.canDisable === false}
+          disabled={
+            busy ||
+            !onSelect ||
+            reasoning.canDisable === false ||
+            (!reasoning.enabled && reasoning.canEnable === false)
+          }
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? 'default' : 'none')
+            void select(
+              enabled
+                ? (reasoning.enableValue ??
+                    reasoning.defaultEffort ??
+                    'default')
+                : 'none',
+              'toggle',
+            )
           }
         />
       </div>
@@ -1422,18 +1443,51 @@ function SlashCommandPanel({
   );
 }
 
+// The textarea backend cannot receive the CodeMirror keymap, so the arrow
+// hint buttons move the caret directly. An existing selection collapses to
+// its leading edge first, and movement steps whole code points so a caret
+// never lands between an emoji's surrogate halves.
+function moveTextareaCaret(
+  textarea: HTMLTextAreaElement | null,
+  forward: boolean,
+) {
+  if (!textarea) return;
+  const { selectionStart, selectionEnd, value } = textarea;
+  const length = value.length;
+  if (selectionEnd !== selectionStart) {
+    textarea.setSelectionRange(
+      forward ? selectionEnd : selectionStart,
+      forward ? selectionEnd : selectionStart,
+    );
+    return;
+  }
+  let caret = selectionStart;
+  if (forward) {
+    if (caret >= length) return;
+    const next = value.codePointAt(caret) ?? 0;
+    caret += next > 0xffff ? 2 : 1;
+  } else {
+    if (caret <= 0) return;
+    const prev = value.charCodeAt(caret - 1);
+    const beforePrev = caret > 1 ? value.charCodeAt(caret - 2) : 0;
+    const overLowSurrogate =
+      prev >= 0xdc00 &&
+      prev <= 0xdfff &&
+      beforePrev >= 0xd800 &&
+      beforePrev <= 0xdbff;
+    caret -= overLowSurrogate ? 2 : 1;
+  }
+  textarea.setSelectionRange(caret, caret);
+}
+
 function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
-  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
-  // The keyboard shortcut grid is pointless without a hardware keyboard, so
-  // the mobile textarea backend hides it.
-  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -1457,22 +1511,20 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        {showKeyHints && (
-          <div className={styles.quickKeysGrid}>
-            {QUICK_KEY_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={styles.quickKey}
-                title={t(item.descriptionKey)}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => onPressKey(item)}
-              >
-                <span className={styles.quickKeyLabel}>{item.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        <div className={styles.quickKeysGrid}>
+          {QUICK_KEY_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={styles.quickKey}
+              title={t(item.descriptionKey)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onPressKey(item)}
+            >
+              <span className={styles.quickKeyLabel}>{item.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1500,7 +1552,9 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
-      sessionWorkflowEnabled = false,
+      planMode = false,
+      modeControlsDisabled = false,
+      onTogglePlan,
       currentModel = '',
       gitBranch,
       gitWorktree,
@@ -2037,7 +2091,11 @@ export const ChatEditor = memo(
       onAttachmentsChange?.(core.hasAttachments);
     }, [core.hasAttachments, onAttachmentsChange]);
 
+    const planDescriptionId = useId();
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+    useEffect(() => {
+      if (modeControlsDisabled) setModeDropdownOpen(false);
+    }, [modeControlsDisabled]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
@@ -2060,6 +2118,7 @@ export const ChatEditor = memo(
       workspace: false,
       gitBranch: false,
       mode: false,
+      plan: false,
       model: false,
     });
     const toolbarLabelVisibilityRef = useRef(toolbarLabelVisibility);
@@ -2144,20 +2203,13 @@ export const ChatEditor = memo(
 
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.map((id) => ({
+        DAEMON_APPROVAL_MODES.filter((id) => id !== 'plan').map((id) => ({
           id,
-          label:
-            id === 'plan' && sessionWorkflowEnabled
-              ? t('mode.listLabel.planReview')
-              : getModeListLabel(id, t),
-          description: t(
-            id === 'plan' && sessionWorkflowEnabled
-              ? 'mode.desc.planReview'
-              : `mode.desc.${id}`,
-          ),
+          label: getModeListLabel(id, t),
+          description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [sessionWorkflowEnabled, t],
+      [t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2171,6 +2223,9 @@ export const ChatEditor = memo(
       return visibleActionSet.has(action);
     };
     const showModeAction = showToolbarAction('approvalMode');
+    const showPlanAction = Boolean(
+      onTogglePlan && visibleActionSet?.has('plan'),
+    );
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
@@ -2306,11 +2361,12 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
+        if (modeControlsDisabled) return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core],
+      [onSelectMode, core, modeControlsDisabled],
     );
 
     const handleModelSelect = useCallback(
@@ -2321,14 +2377,46 @@ export const ChatEditor = memo(
       },
       [onSelectModel, core],
     );
+    const showCancelButton = isRunning && !core.hasContent;
+    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
         if (core.mobileComposer) {
-          // No CodeMirror to dispatch into. History search is the one key
-          // action with a non-keyboard equivalent; the rest are hidden on
-          // the textarea backend.
-          if (event.ctrlKey && event.key === 'r') {
-            core.searchState.openHistorySearch();
+          // No CodeMirror to dispatch into: apply the desktop keymap effects
+          // directly to the textarea backend.
+          switch (event.key) {
+            case 'ArrowUp':
+              core.navigatePrevHistory();
+              return;
+            case 'ArrowDown':
+              core.navigateNextHistory();
+              return;
+            case 'ArrowLeft':
+            case 'ArrowRight':
+              moveTextareaCaret(
+                core.mobileComposer.textareaRef.current,
+                event.key === 'ArrowRight',
+              );
+              return;
+            case 'Escape':
+              // Mirrors the CodeMirror Escape binding: exit shell mode, then
+              // fall through to canceling an in-flight turn.
+              if (core.shellMode) {
+                core.setShellMode(false);
+              } else if (isRunning && !composerPreparing) {
+                onCancel?.();
+              }
+              return;
+            case 'Tab':
+              // Tab accepts completions, which the textarea backend does not
+              // have; nothing to apply.
+              return;
+            case 'r':
+              if (event.ctrlKey) {
+                core.searchState.openHistorySearch();
+              }
+              return;
           }
           return;
         }
@@ -2343,7 +2431,7 @@ export const ChatEditor = memo(
           }),
         );
       },
-      [core],
+      [core, composerPreparing, isRunning, onCancel],
     );
     const runQuickAction = useCallback(
       (action: QuickActionItem) => {
@@ -2439,10 +2527,11 @@ export const ChatEditor = memo(
     };
 
     // Mode display label
-    const modeLabel =
-      currentMode === 'plan' && sessionWorkflowEnabled
-        ? t('mode.label.planReview')
-        : getModeLabel(currentMode, t);
+    const modeLabel = getModeLabel(currentMode, t);
+    const planLabel = t('mode.label.plan');
+    const planTooltip = planMode
+      ? t('plan.toggle.off', { mode: modeLabel })
+      : t('plan.toggle.on');
 
     const currentModelLabel = currentModel
       ? (availableModels.find((model) => model.id === currentModel)?.label ??
@@ -2500,9 +2589,8 @@ export const ChatEditor = memo(
     const showWorkspaceLabel = toolbarLabelVisibility.workspace;
     const showGitBranchLabel = toolbarLabelVisibility.gitBranch;
     const showModeLabel = toolbarLabelVisibility.mode;
+    const showPlanLabel = toolbarLabelVisibility.plan;
     const showModelLabel = toolbarLabelVisibility.model;
-    const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -2566,6 +2654,9 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
+          ...(showPlanAction
+            ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
+            : []),
           ...(showModelAction
             ? [
                 {
@@ -2609,6 +2700,7 @@ export const ChatEditor = memo(
           workspace: itemVisibility.workspace ?? false,
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
+          plan: itemVisibility.plan ?? false,
           model: itemVisibility.model ?? false,
         };
         const unchanged = Object.keys(next).every(
@@ -2668,11 +2760,13 @@ export const ChatEditor = memo(
       isRunning,
       modelLabelReady,
       modeLabel,
+      planLabel,
       normalizedModelChipLabel,
       sessionName,
       showAddMenuAction,
       showModelAction,
       showModeAction,
+      showPlanAction,
       workspaceIndicatorVisible,
       workspaceName,
       workspaceSelectVisible,
@@ -2785,6 +2879,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          data-at-panel-open={hasAtMenu || undefined}
           data-upload-drag-active={uploadDragActive || undefined}
           data-image-drag-active={
             (core.imageDragActive && !uploadDragActive) || undefined
@@ -3270,6 +3365,7 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
+                            disabled={modeControlsDisabled}
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3294,6 +3390,47 @@ export const ChatEditor = memo(
                         }
                       />
                     </div>
+                  )}
+                  {showPlanAction && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <label
+                            className={`${styles.toolBtn} ${styles.planControl}`}
+                            data-web-shell-plan-control
+                            data-disabled={
+                              modeControlsDisabled ? '' : undefined
+                            }
+                          >
+                            {showPlanLabel ? (
+                              <span className={styles.toolBtnText}>
+                                {planLabel}
+                              </span>
+                            ) : (
+                              <span className={styles.toolBtnModeIcon}>
+                                <ModeIcon mode="plan" />
+                              </span>
+                            )}
+                            <Switch
+                              size="sm"
+                              className="after:inset-x-0"
+                              data-web-shell-plan-button
+                              aria-label={planLabel}
+                              aria-describedby={planDescriptionId}
+                              checked={planMode}
+                              disabled={modeControlsDisabled}
+                              onCheckedChange={onTogglePlan}
+                            />
+                          </label>
+                        </TooltipTrigger>
+                        <span id={planDescriptionId} className="sr-only">
+                          {planTooltip}
+                        </span>
+                        <TooltipContent side="top">
+                          {planTooltip}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   )}
                   {showModelAction && (
                     <div
@@ -3487,15 +3624,79 @@ export const ChatEditor = memo(
                                 }
                               />
                             </span>
+                            {contextWindow > 0 && tokenCount > 0 && (
+                              <span
+                                className={styles.contextUsagePercentage}
+                                data-level={getContextUsageLevel(
+                                  (tokenCount / contextWindow) * 100,
+                                )}
+                                aria-hidden="true"
+                              >
+                                {((tokenCount / contextWindow) * 100).toFixed(
+                                  1,
+                                )}
+                                %
+                              </span>
+                            )}
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent side="top">
-                          {contextWindow > 0 && tokenCount > 0
-                            ? formatContextUsageDetail(
-                                tokenCount,
-                                contextWindow,
-                              )
-                            : t('contextUsage.title')}
+                        <TooltipContent
+                          side="top"
+                          className={styles.contextTooltip}
+                          aria-label={
+                            contextWindow > 0 && tokenCount > 0
+                              ? t('contextUsage.accessibleUsage', {
+                                  used: tokenCount.toLocaleString(),
+                                  total: contextWindow.toLocaleString(),
+                                })
+                              : t('contextUsage.title')
+                          }
+                        >
+                          <div className={styles.contextTooltipHeader}>
+                            <span>{t('contextUsage.title')}</span>
+                            {contextWindow > 0 && tokenCount > 0 && (
+                              <strong>
+                                {((tokenCount / contextWindow) * 100).toFixed(
+                                  1,
+                                )}
+                                %
+                              </strong>
+                            )}
+                          </div>
+                          {contextWindow > 0 && tokenCount > 0 && (
+                            <>
+                              <div
+                                className={styles.contextTooltipMeter}
+                                aria-hidden="true"
+                              >
+                                <span
+                                  data-level={getContextUsageLevel(
+                                    (tokenCount / contextWindow) * 100,
+                                  )}
+                                  style={{
+                                    width: `${Math.min((tokenCount / contextWindow) * 100, 100)}%`,
+                                  }}
+                                />
+                              </div>
+                              <dl className={styles.contextTooltipStats}>
+                                <dt>{t('contextUsage.used')}</dt>
+                                <dd>
+                                  {tokenCount.toLocaleString()}{' '}
+                                  {t('contextUsage.tokens')}
+                                </dd>
+                                <dt>{t('contextUsage.contextWindow')}</dt>
+                                <dd>
+                                  {contextWindow.toLocaleString()}{' '}
+                                  {t('contextUsage.tokens')}
+                                </dd>
+                              </dl>
+                            </>
+                          )}
+                          {onShowContextUsage && (
+                            <div className={styles.contextTooltipHint}>
+                              {t('contextUsage.viewInConversation')}
+                            </div>
+                          )}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
@@ -3709,6 +3910,26 @@ export const ChatEditor = memo(
                   <ChevronDownIcon />
                 </span>
               </span>
+              {showPlanAction && (
+                <>
+                  <span
+                    data-toolbar-measure="plan:collapsed"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <ModeIcon mode="plan" />
+                    </span>
+                    <Switch size="sm" tabIndex={-1} checked={planMode} />
+                  </span>
+                  <span
+                    data-toolbar-measure="plan:expanded"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnText}>{planLabel}</span>
+                    <Switch size="sm" tabIndex={-1} checked={planMode} />
+                  </span>
+                </>
+              )}
               <span
                 data-toolbar-measure="model:collapsed"
                 className={`${styles.toolBtn} ${styles.modelToolBtn} ${styles.toolBtnCompact}`}
@@ -3745,7 +3966,6 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
-            showKeyHints={!core.mobileComposer}
           />
         )}
         <Dialog

@@ -108,6 +108,18 @@ vi.mock('./MessageItem', async () => {
               'data-testid': `disclosure-${message.id}`,
             })
           : null,
+        message.role === 'thinking'
+          ? React.createElement(
+              'details',
+              null,
+              React.createElement(
+                'summary',
+                { 'data-testid': `native-disclosure-${message.id}` },
+                React.createElement('span', null, 'Context details'),
+              ),
+              'Context contents',
+            )
+          : null,
         showAssistantBranch
           ? React.createElement('button', {
               'data-testid': `branch-${message.id}`,
@@ -984,7 +996,7 @@ describe('MessageList — compact mode', () => {
     ).toBeNull();
   });
 
-  it.each(['TodoWrite', 'AskUserQuestion'])(
+  it.each(['TodoWrite'])(
     'folds %s groups into the summary across hidden thinking',
     (toolName) => {
       const container = mount(
@@ -1011,7 +1023,6 @@ describe('MessageList — compact mode', () => {
 
   it.each([
     ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
-    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
     ['agent', agentMsg('special')],
   ])(
     'merges a leading %s group with later thinking and tools',
@@ -1037,6 +1048,49 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it.each([false, true])(
+    'keeps completed questions outside a collapsed mixed tool group (compact=%s)',
+    (compactMode) => {
+      const question = standaloneToolMsg('ask', 'AskUserQuestion').tools[0];
+      const c = mount(
+        [
+          userMsg('u1'),
+          thinkingMsg('thought'),
+          {
+            ...toolMsg('mixed'),
+            tools: [
+              toolMsg('before').tools[0],
+              question,
+              toolMsg('after').tools[0],
+            ],
+          },
+          asstMsg('a1'),
+        ],
+        undefined,
+        { compactMode },
+      );
+      expect(c.textContent).toContain('2 tool calls');
+      expect(c.textContent).not.toContain('3 tool calls');
+      const assertAnswerVisible = () => {
+        expect(c.querySelectorAll('[data-tool-ids="call-ask"]')).toHaveLength(
+          1,
+        );
+        expect(has(c, 'u1')).toBe(true);
+        expect(has(c, 'a1')).toBe(true);
+      };
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).not.toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).not.toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+    },
+  );
+
   it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
     const c = mount(
       [
@@ -4353,6 +4407,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
+  it.each([
+    [7069, '8s'],
+    [0, '0s'],
+    ['1000', '14s'],
+    [-1, '14s'],
+    [NaN, '14s'],
+    [Infinity, '14s'],
+  ] as const)(
+    'uses valid cancellation duration %s for the processed summary',
+    (elapsedMs, expected) => {
+      const c = mount([
+        { ...userMsg('u1'), timestamp: 1_000 },
+        {
+          id: 't1',
+          role: 'thinking',
+          content: 'thinking before cancel',
+          timestamp: 2_000,
+        },
+        { ...asstMsg('a1'), timestamp: 3_000 },
+        { ...systemMsg('c1'), timestamp: 15_000, data: { elapsedMs } },
+      ]);
+      expect(c.textContent).toContain(`Processed ${expected}`);
+    },
+  );
+
   it('renders collapse metrics in the standalone turn row', () => {
     const c = mount([
       { ...userMsg('u1'), timestamp: 1_000 },
@@ -5115,8 +5194,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = mockMessageListWidth(1000);
+  it('hides the session timeline below the default content width', async () => {
+    const rectSpy = mockMessageListWidth(999);
 
     const c = mount(simpleTurns(4));
     await nextFrame();
@@ -6536,40 +6615,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 
-  it('reports scroll-to-bottom affordance when a clicked disclosure grows during streaming', async () => {
-    let scrollHeight = 600;
-    let scrollTop = 0;
-    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
-      configurable: true,
-      get: () => scrollHeight,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
-      configurable: true,
-      value: 600,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => {
-        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
-      },
-    });
-    const onCanScrollToBottomChange = vi.fn();
-    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
-      isResponding: true,
-      onCanScrollToBottomChange,
-    });
-    await nextFrame();
+  it.each(['aria', 'native'])(
+    'pauses follow when a %s disclosure grows during streaming',
+    async (kind) => {
+      let scrollHeight = 600;
+      let scrollTop = 0;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+        },
+      });
+      const onCanScrollToBottomChange = vi.fn();
+      const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+        isResponding: true,
+        onCanScrollToBottomChange,
+      });
+      await nextFrame();
 
-    click(disclosure(c, 't1'));
+      const target =
+        kind === 'native'
+          ? c.querySelector<HTMLElement>(
+              '[data-testid="native-disclosure-t1"] span',
+            )!
+          : disclosure(c, 't1');
+      click(target);
 
-    scrollHeight = 1200;
-    act(() => triggerResizeObservers());
-    await nextFrame();
-    await nextFrame();
+      scrollHeight = 1200;
+      act(() => triggerResizeObservers());
+      await nextFrame();
+      await nextFrame();
 
-    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
-  });
+      expect(scrollTop).toBe(0);
+      expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+    },
+  );
 
   it('keeps the scroll-to-bottom affordance hidden when disclosure growth stays near bottom', async () => {
     let scrollHeight = 600;

@@ -290,6 +290,12 @@ export function renderResultDisplay(display: unknown): string {
         .map((line) => line.map((t) => t.text ?? '').join(''))
         .join('\n');
     }
+    if (
+      o['type'] === 'ask_user_question_answers' &&
+      typeof o['text'] === 'string'
+    ) {
+      return o['text'];
+    }
     // Structured displays ink's classifyDisplay handles individually.
     if (o['type'] === 'plan_summary') {
       const message = typeof o['message'] === 'string' ? o['message'] : '';
@@ -703,6 +709,11 @@ export function createEventMapper(
         // ink parity: stop_hook_system_message renders `⎿ Stop says:` +
         // an indented markdown body.
         out.push({ type: 'stop-hook-message', message: ev.value as string });
+        break;
+      }
+      case 'goal_settlement_failed': {
+        closeThought();
+        out.push({ type: 'warning', text: ev.value as string });
         break;
       }
       case 'user_prompt_submit_blocked': {

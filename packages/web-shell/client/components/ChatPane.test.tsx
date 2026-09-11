@@ -48,6 +48,10 @@ let latestOnSubmit:
     ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
+type ToolApprovalTestProps = Parameters<
+  typeof import('./messages/ToolApproval').ToolApproval
+>[0];
+let latestToolApprovalProps: ToolApprovalTestProps | undefined;
 let renderRealChatEditor: boolean;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
@@ -64,6 +68,7 @@ const transcriptDispatch = vi.fn();
 const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => true);
+const respondToPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
@@ -78,6 +83,7 @@ const getContextUsage = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
+  respondToPermission,
   cancel,
   setApprovalMode,
   setModel,
@@ -370,18 +376,22 @@ vi.mock('./QueuedPromptDisplay', () => ({
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
-  ToolApproval: (props: any) => (
-    <button
-      data-testid="tool-approval"
-      data-keyboard-active={String(props.keyboardActive)}
-      data-plan-todos={JSON.stringify(
-        props.planTodos?.map((todo: any) => todo.id) ?? [],
-      )}
-      onClick={() => props.onConfirm(props.request.id, 'proceed')}
-    >
-      approve
-    </button>
-  ),
+  ToolApproval: (props: ToolApprovalTestProps) => {
+    latestToolApprovalProps = props;
+    return (
+      <button
+        data-testid="tool-approval"
+        disabled={props.disabled}
+        data-keyboard-active={String(props.keyboardActive)}
+        data-plan-todos={JSON.stringify(
+          props.planTodos?.map((todo) => todo.id) ?? [],
+        )}
+        onClick={() => props.onConfirm(props.request.id, 'proceed')}
+      >
+        approve
+      </button>
+    );
+  },
 }));
 vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => (
@@ -421,6 +431,7 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  latestToolApprovalProps = undefined;
   renderRealChatEditor = false;
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
@@ -455,6 +466,7 @@ beforeEach(() => {
   clearFollowup.mockClear();
   insertText.mockClear();
   submitPermission.mockClear();
+  respondToPermission.mockClear();
   cancel.mockClear();
   setApprovalMode.mockClear();
   setModel.mockClear();
@@ -1474,6 +1486,47 @@ describe('ChatPane', () => {
     ).toContain('composerHidden');
   });
 
+  it.each([undefined, 'yolo'])(
+    'uses only the reported Plan execution policy for approval: %s',
+    (planExecutionMode) => {
+      connectionState.currentMode = 'plan';
+      connectionState.planExecutionMode = planExecutionMode;
+      pendingPermission = {
+        id: 'plan-approval',
+        toolName: 'exit_plan_mode',
+        toolKind: 'switch_mode',
+        options: [],
+      };
+      render();
+      expect(latestToolApprovalProps?.planExecutionMode).toBe(
+        planExecutionMode,
+      );
+    },
+  );
+
+  it('hides the composer during plan approval and restores it after resolution', () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'default';
+    pendingPermission = {
+      id: 'perm-plan',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    const composerWrapper = () =>
+      container!.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).toContain('composerHidden');
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(submitPermission).not.toHaveBeenCalled();
+
+    pendingPermission = null;
+    rerender();
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+    expect(testid('pane-approval')).toBeNull();
+  });
+
   it('restores the pane composer after the approval resolves', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
@@ -1517,6 +1570,15 @@ describe('ChatPane', () => {
     render({ title: 'Side task', embedded: true });
     expect(container!.querySelector('header')).toBeNull();
     expect(testid('pane-messages')).not.toBeNull();
+  });
+
+  it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
+    render();
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');
+    rerender({ planControlVisible: true });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('plan');
+    rerender();
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');
   });
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
@@ -1804,6 +1866,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      submittedPrompt: 'hello there',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1959,6 +2022,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -1982,6 +2046,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      '/deploy staging',
     );
   });
 
@@ -2015,6 +2080,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2030,6 +2096,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      submittedPrompt: '/usr/local/bin/tool',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2095,6 +2162,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('with image', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      submittedPrompt: 'with image',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2110,6 +2178,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
+      submittedPrompt: '',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2142,6 +2211,7 @@ describe('ChatPane', () => {
       });
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      submittedPrompt: 'check @.husky/',
       inputAnnotations,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2164,6 +2234,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued next',
     );
     expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -2282,6 +2353,7 @@ describe('ChatPane', () => {
       undefined,
       inputAnnotations,
       expect.any(Function),
+      'queue @.husky/',
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -2300,6 +2372,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued image',
     );
   });
 
@@ -2312,7 +2385,15 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '',
+      images,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '',
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -2608,7 +2689,12 @@ describe('ChatPane', () => {
   });
 
   it('renders a tool approval and resolves it via submitPermission', () => {
-    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
     render();
     expect(testid('tool-approval')).not.toBeNull();
     expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('yes');
@@ -2837,6 +2923,28 @@ describe('ChatPane', () => {
     );
   });
 
+  it('suppresses stale context and its action after a pane session becomes unavailable', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = null;
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('suppresses stale context while the pane connection is in error', () => {
+    connectionState.status = 'error';
+    connectionState.sessionId = 'sess-1';
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
   it('shows context usage for this pane session', async () => {
     render();
 
@@ -2898,6 +3006,266 @@ describe('ChatPane', () => {
     expect(models.map((m: { id: string }) => m.id)).toEqual(['qwen-max']);
   });
 
+  it.each(['default', 'auto-edit', 'auto', 'yolo'])(
+    'keeps %s selected while Plan is active and restores it on completion',
+    (mode) => {
+      connectionState.currentMode = 'plan';
+      connectionState.planExecutionMode = mode;
+      render({ planControlVisible: true });
+      expect(latestChatEditorProps.currentMode).toBe(mode);
+      expect(latestChatEditorProps.planMode).toBe(true);
+      expect(latestChatEditorProps.visibleToolbarActions).toContain('plan');
+      connectionState.currentMode = mode;
+      rerender();
+      expect(latestChatEditorProps.currentMode).toBe(mode);
+      expect(latestChatEditorProps.planMode).toBe(false);
+    },
+  );
+
+  it('blocks same-tick plan handoff during a mode request and permits approval after it settles', async () => {
+    connectionState.currentMode = 'plan';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const mode = deferred<{ mode: string }>();
+    setApprovalMode.mockReturnValueOnce(mode.promise);
+    render();
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('yolo');
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+      ).rejects.toThrow('still pending');
+    });
+    expect(submitPermission).not.toHaveBeenCalled();
+    expect(latestToolApprovalProps!.disabled).toBe(true);
+    await act(async () => {
+      mode.resolve({ mode: 'plan' });
+    });
+    expect(latestToolApprovalProps!.disabled).toBe(false);
+    await act(async () =>
+      latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+    );
+    expect(submitPermission).toHaveBeenCalledOnce();
+  });
+
+  it('holds plan handoff until authoritative mode exit, blocking permission and Plan changes', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const permission = deferred<boolean>();
+    respondToPermission.mockReturnValueOnce(permission.promise);
+    render();
+    let submitted: void | Promise<void>;
+    act(() => {
+      submitted = latestToolApprovalProps!.onConfirm(
+        'plan-approval',
+        'restore_previous',
+      );
+      latestChatEditorProps.onSelectMode('default');
+      latestChatEditorProps.onTogglePlan();
+    });
+    expect(respondToPermission).toHaveBeenCalledWith('plan-approval', {
+      outcome: { outcome: 'selected', optionId: 'restore_previous' },
+      expectedPlanExecutionMode: 'yolo',
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    await act(async () => {
+      permission.resolve(true);
+      await submitted;
+    });
+    pendingPermission = null;
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    pendingPermission = {
+      id: 'background-approval',
+      toolName: 'write_file',
+      toolKind: 'edit',
+      options: [],
+    };
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    connectionState.currentMode = 'yolo';
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    await act(async () => latestChatEditorProps.onTogglePlan());
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+  });
+
+  it('releases plan handoff on failure and owner replacement', async () => {
+    connectionState.currentMode = 'plan';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    submitPermission.mockRejectedValueOnce(new Error('permission failed'));
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+      ).rejects.toThrow('permission failed');
+    });
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
+    );
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+    ownerVersion += 1;
+    rerender();
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+    setApprovalMode.mockRejectedValueOnce(new Error('mode failed'));
+    await act(async () => latestChatEditorProps.onTogglePlan());
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+  });
+
+  it('changes execution permission during Plan without approving the pending plan', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'default';
+    pendingPermission = {
+      id: 'plan-approval',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    render();
+    await act(async () => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(['/plan', '/plan on', '/plan off', '/plan exit'])(
+    'retains %s during a pending mode request and accepts it after completion',
+    async (command) => {
+      connectionState.currentMode = 'yolo';
+      const pendingMode = deferred<{ mode: string }>();
+      setApprovalMode.mockReturnValueOnce(pendingMode.promise);
+      const onError = vi.fn();
+      render({ onError });
+      act(() => {
+        latestChatEditorProps.onSelectMode('yolo');
+      });
+      expect(latestChatEditorProps.modeControlsDisabled).toBe(true);
+
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(false);
+      expect(setApprovalMode).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+      });
+      await act(async () => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(true);
+      expect(setApprovalMode).toHaveBeenCalledTimes(2);
+      expect(setApprovalMode).toHaveBeenLastCalledWith('yolo', {
+        planMode: command === '/plan' || command === '/plan on',
+      });
+    },
+  );
+
+  it.each(['/plan', '/plan on', '/plan off'])(
+    'does not consume %s while disconnected without a session',
+    (command) => {
+      connectionState.status = 'disconnected';
+      connectionState.sessionId = undefined;
+      render();
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!(command);
+      });
+      expect(accepted).toBe(false);
+      expect(setApprovalMode).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends /plan prompts through normal admission callbacks after applying Plan', async () => {
+    const firstPrompt = vi.fn();
+    const commit = vi.fn();
+    connectionState.currentMode = 'yolo';
+    render({ onFirstPromptAdmitted: firstPrompt });
+    await act(async () => {
+      latestOnSubmit!(
+        '/plan explain the migration',
+        undefined,
+        undefined,
+        commit,
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: true });
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'explain the migration',
+      expect.objectContaining({
+        onAdmissionStarted: expect.any(Function),
+        onAdmitted: expect.any(Function),
+      }),
+    );
+    expect(commit).not.toHaveBeenCalled();
+    act(() => sendPromptAdmit!());
+    expect(commit).toHaveBeenCalledOnce();
+    expect(firstPrompt).toHaveBeenCalledWith('explain the migration');
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
+  });
+
+  it('locks uncertain /plan prompt admission instead of permitting a duplicate', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render();
+    await act(async () => {
+      latestOnSubmit!('/plan explain the migration');
+    });
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    act(() => {
+      latestOnSubmit!('/plan duplicate');
+    });
+    expect(sendPrompt).toHaveBeenCalledOnce();
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    warn.mockRestore();
+  });
+
+  it('does not send a prepared /plan prompt into a replacement owner', async () => {
+    const prepared = deferred<{ mode: string }>();
+    setApprovalMode.mockReturnValueOnce(prepared.promise);
+    render();
+    act(() => {
+      latestOnSubmit!('/plan explain');
+    });
+    ownerVersion += 1;
+    connectionState.sessionId = 'replacement';
+    rerender();
+    await act(async () => {
+      prepared.resolve({ mode: 'plan' });
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it("drives THIS pane's approval mode when one is picked", () => {
     render();
     act(() =>
@@ -2905,7 +3273,7 @@ describe('ChatPane', () => {
         new MouseEvent('click', { bubbles: true }),
       ),
     );
-    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
   });
 
   it("switches THIS pane's model when one is picked", () => {
@@ -2988,7 +3356,7 @@ describe('ChatPane', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 

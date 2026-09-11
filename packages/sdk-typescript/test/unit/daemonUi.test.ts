@@ -5375,6 +5375,39 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     ).toBeUndefined();
   });
 
+  it('preserves bounded question answer pairs without unknown raw fields', () => {
+    const output = {
+      type: 'ask_user_question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Question A?',
+          answer: 'first\n**B**: embedded',
+          secret: 'do not retain',
+        },
+      ],
+      secret: 'do not retain',
+    };
+    expect(createDaemonToolResultPreview(output)).toEqual({
+      kind: 'question_answers',
+      text: output.text,
+      answers: [{ question: 'Question A?', answer: 'first\n**B**: embedded' }],
+    });
+    for (const answers of [
+      [{ question: 'Question A?', answer: 42 }],
+      [{ question: 'Question A?', answer: 'x'.repeat(100_000) }],
+      Array.from({ length: 1_001 }, () => ({ question: '', answer: '' })),
+    ]) {
+      expect(createDaemonToolResultPreview({ ...output, answers })).toEqual({
+        kind: 'text',
+        text: output.text,
+      });
+    }
+    expect(
+      createDaemonToolResultPreview({ ...output, text: 'x'.repeat(100_001) }),
+    ).toBeUndefined();
+  });
+
   it('does not retain a stale result preview when a later result is unsafe to preview', () => {
     let state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -8487,6 +8520,76 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
 });
 
 describe('cross-client event recognition (prompt_cancelled / replay_complete)', () => {
+  it('merges authoritative cancellation timing without changing the previous snapshot', () => {
+    const [provisional] = normalizeDaemonEvent({
+      v: 1,
+      type: 'prompt_cancelled',
+      promptId: 'p1',
+      data: {},
+    });
+    expect(provisional).toMatchObject({
+      type: 'prompt.cancelled',
+      promptId: 'p1',
+    });
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      provisional,
+    ]);
+    const timing = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'p1',
+      data: {
+        stopReason: 'cancelled',
+        promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+      },
+    });
+    let after = reduceDaemonTranscriptEvents(before, timing);
+    after = reduceDaemonTranscriptEvents(after, [provisional, ...timing]);
+    expect(before.blocks).toHaveLength(1);
+    expect(before.blocks[0]).not.toHaveProperty('elapsedMs');
+    expect(after.blocks).toEqual([
+      expect.objectContaining({
+        id: before.blocks[0].id,
+        kind: 'prompt_cancelled',
+        promptId: 'p1',
+        elapsedMs: 10999,
+        serverTimestamp: 12000,
+      }),
+    ]);
+    const enriched = reduceDaemonTranscriptEvents(after, [
+      { type: 'prompt.cancelled', promptId: 'p1', elapsedMs: 11000 },
+    ]);
+    expect(enriched.blocks[0]).toMatchObject({
+      serverTimestamp: 12000,
+      elapsedMs: 11000,
+    });
+    expect(after.blocks[0]).toMatchObject({ elapsedMs: 10999 });
+    after = reduceDaemonTranscriptEvents(after, [
+      { ...timing[0], promptId: 'p2' },
+    ]);
+    expect(after.blocks).toHaveLength(2);
+  });
+
+  it.each([
+    { elapsedMs: -1, cancelledAt: 12000 },
+    { elapsedMs: NaN, cancelledAt: 12000 },
+    { elapsedMs: 1000, cancelledAt: Infinity },
+    { elapsedMs: '1000', cancelledAt: 12000 },
+    undefined,
+  ])(
+    'ignores malformed or legacy cancellation timing %j',
+    (promptCancelled) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'p1',
+          data: { stopReason: 'cancelled', promptCancelled },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes prompt_cancelled to prompt.cancelled (not debug)', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -8503,6 +8606,34 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     ]);
     // No reason for a plain user cancel.
     expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('uses the persisted cancellation identity when replayed during another prompt', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      promptId: 'current-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            promptCancelled: {
+              promptId: 'cancelled-prompt',
+              cancelledAt: 1000,
+              elapsedMs: 0,
+            },
+          },
+        },
+      },
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'prompt.cancelled',
+        promptId: 'cancelled-prompt',
+        elapsedMs: 0,
+      }),
+    ]);
   });
 
   it('forwards the prompt_cancelled reason (C3 forward_failed)', () => {
@@ -10202,4 +10333,114 @@ describe('parallel subAgent text interleaving fix', () => {
       ]);
     }
   });
+});
+
+describe('subagent session readiness', () => {
+  it.each([true, false])(
+    'updates a started agent from meta-only readiness with compact=%s',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (sessionUpdate: string, subagentSessionReady: boolean) => {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          normalizeDaemonEvent({
+            id: subagentSessionReady ? 2 : 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate,
+                toolCallId: 'agent-1',
+                ...(sessionUpdate === 'tool_call'
+                  ? { title: 'Review changes', status: 'in_progress' }
+                  : {}),
+                _meta: { toolName: 'agent', subagentSessionReady },
+              },
+            },
+          }),
+        );
+      };
+      apply('tool_call', false);
+      expect(state.blocks).toMatchObject([{ subagentSessionReady: false }]);
+      const id = state.blocks[0].id;
+      apply('tool_call_update', true);
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        id,
+        toolCallId: 'agent-1',
+        title: 'Review changes',
+        status: 'in_progress',
+        subagentSessionReady: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'retains readiness through compact=%s and partial updates',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (update: Record<string, unknown>) => {
+        const events = normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-1',
+              ...update,
+            },
+          },
+        });
+        state = reduceDaemonTranscriptEvents(state, events);
+      };
+      apply({
+        toolName: 'agent',
+        _meta: { subagentSessionReady: false, phase: 'preparing' },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({ rawOutput: { type: 'task_execution', status: 'running' } });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({
+        rawOutput: { type: 'task_execution', subagentSessionReady: true },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: true });
+      apply({ _meta: { subagentSessionReady: false } });
+      apply({ status: 'failed' });
+      expect(state.blocks[0]).toMatchObject({
+        subagentSessionReady: true,
+        status: 'failed',
+      });
+    },
+  );
+
+  it.each([undefined, 'false', 0])(
+    'does not interpret legacy or invalid readiness %s as creating',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'legacy',
+            toolName: 'agent',
+            _meta: { subagentSessionReady: value },
+          },
+        },
+      });
+      expect(events[0]).not.toHaveProperty('subagentSessionReady');
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      expect(state.blocks[0]).not.toHaveProperty('subagentSessionReady');
+    },
+  );
 });

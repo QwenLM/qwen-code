@@ -821,6 +821,7 @@ export class ToolRegistry {
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter((tool) => this.isToolDeclared(tool.name))
       .filter(
         (tool) =>
           (tool.name !== ToolNames.SEARCH_MEMORY &&
@@ -930,6 +931,7 @@ export class ToolRegistry {
       if (
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
+        this.isToolDeclared(tool.name) &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
         summary.push({
@@ -1026,11 +1028,17 @@ export class ToolRegistry {
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
       const tool = this.tools.get(name);
-      if (tool) {
+      if (tool && this.isToolDeclared(tool.name)) {
         declarations.push(tool.schema);
       }
     }
     return declarations;
+  }
+
+  isToolDeclared(name: string): boolean {
+    return (
+      name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
+    );
   }
 
   /**

@@ -713,13 +713,6 @@ export function transcriptBlocksToDaemonMessages(
         if (toolBlock.serverTimestamp !== undefined) {
           serverStartTimes.set(toolCall.callId, toolBlock.serverTimestamp);
         }
-        const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
-        if (permissionInfo?.title) {
-          toolCall.title = permissionInfo.title;
-        }
-        if (!toolCall.args && permissionInfo?.args) {
-          toolCall.args = permissionInfo.args;
-        }
         const parentSubAgent = toolCall.parentToolCallId
           ? toolsByCallId.get(toolCall.parentToolCallId)
           : undefined;
@@ -1025,6 +1018,9 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(block.elapsedMs !== undefined
+            ? { data: { elapsedMs: block.elapsedMs } }
+            : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
         });
@@ -1037,6 +1033,11 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   for (const tool of toolsByCallId.values()) {
+    const permissionInfo = permissionToolInfoByCallId.get(tool.callId);
+    if (permissionInfo?.title) tool.title = permissionInfo.title;
+    if (!Array.isArray(tool.args?.questions) && permissionInfo?.args) {
+      tool.args = permissionInfo.args;
+    }
     if (
       isSubAgentToolCall(tool) &&
       isActiveToolStatus(tool.status) &&
@@ -1205,6 +1206,10 @@ function mergeToolCall(
     target.args = source.args ?? target.args;
   }
   target.executionMode = source.executionMode ?? target.executionMode;
+  target.subagentSessionReady =
+    target.subagentSessionReady === true
+      ? true
+      : (source.subagentSessionReady ?? target.subagentSessionReady);
   target.locations = source.locations ?? target.locations;
 }
 
@@ -1296,6 +1301,7 @@ function daemonToolBlockToToolCall(
     executionMode: isTaskExecutionMode(executionMode)
       ? executionMode
       : undefined,
+    subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime:
@@ -1488,6 +1494,13 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'question_answers') {
+    return {
+      type: 'ask_user_question_answers',
+      text: preview.text,
+      answers: preview.answers,
+    };
+  }
   if (preview.kind === 'text') return preview.text;
   if (preview.kind === 'generic') return preview.summary;
   return {
@@ -1744,7 +1757,7 @@ function extractJsonObject(text: string, start: number): string | null {
   return null;
 }
 
-function splitInsightSegments(text: string): InsightSegment[] | null {
+export function splitInsightSegments(text: string): InsightSegment[] | null {
   const segments: InsightSegment[] = [];
   let lastIndex = 0;
   let pos = 0;

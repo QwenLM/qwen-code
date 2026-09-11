@@ -921,6 +921,52 @@ export class PermissionManager {
           }
         : undefined;
 
+    const denyRules = [...this.sessionRules.deny, ...this.persistentRules.deny];
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Mirrors evaluate(): a shell command can be denied by a Read/Edit/Write/
+    // WebFetch rule matching an operation extracted from the command, even
+    // though the deny rule's toolName (e.g. `read_file`) never matches the
+    // shell tool name. Without this pass the citation silently drops.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      for (const op of ops) {
+        const opMatchArgs = [
+          op.virtualTool,
+          undefined,
+          op.filePath,
+          op.domain,
+          pathCtx,
+          undefined,
+        ] as const;
+        for (const rule of denyRules) {
+          if (
+            matchesRule(rule, ...opMatchArgs, undefined, undefined, 'canonical')
+          ) {
+            return rule.raw;
+          }
+        }
+      }
+    }
+
+    // ── Compound-command pass ────────────────────────────────────────────
+    // Mirrors evaluate(): each segment is evaluated independently, so a deny
+    // rule matching any segment is the deciding rule. Recurse per segment so
+    // nested compounds and per-segment virtual ops are covered.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        for (const subCmd of subCommands) {
+          const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
+          if (rule) {
+            return rule;
+          }
+        }
+      }
+    }
+
+    // ── Single-context match ─────────────────────────────────────────────
     const matchArgs = [
       toolName,
       command,
@@ -932,10 +978,7 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
-    for (const rule of [
-      ...this.sessionRules.deny,
-      ...this.persistentRules.deny,
-    ]) {
+    for (const rule of denyRules) {
       if (matchesRule(rule, ...matchArgs, 'canonical')) {
         return rule.raw;
       }

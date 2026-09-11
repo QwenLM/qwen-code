@@ -245,6 +245,14 @@ export function validateSettingValue(
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }
+  if (
+    (typeof value === 'string' || typeof value === 'number') &&
+    // `includes` is SameValueZero, so a `[0]` exclusion also catches the `-0`
+    // that `Number('-0')` produces and `JSON.stringify` would persist as `0`.
+    def.excludedValues?.includes(value as string | number)
+  ) {
+    return `Value must not be ${String(value)}`;
+  }
   return undefined;
 }
 
@@ -395,6 +403,21 @@ export function settingExistsInScope(
   const path = key.split('.');
   const value = getNestedValue(scopeSettings as Record<string, unknown>, path);
   return value !== undefined;
+}
+
+function settingPathExists(key: string, settings: Settings): boolean {
+  let current: unknown = settings;
+  for (const segment of key.split('.')) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      !Object.hasOwn(current, segment)
+    ) {
+      return false;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return true;
 }
 
 /**
@@ -574,7 +597,7 @@ export function getDisplayValue(
   const definition = getSettingDefinition(key);
 
   let value: SettingsValue;
-  if (pendingSettings && settingExistsInScope(key, pendingSettings)) {
+  if (pendingSettings && settingPathExists(key, pendingSettings)) {
     // Show the value from the pending (unsaved) edits when it exists
     value = getEffectiveValue(key, pendingSettings, {});
   } else if (settingExistsInScope(key, settings)) {
@@ -585,12 +608,16 @@ export function getDisplayValue(
     value = getDefaultValue(key);
   }
 
-  let valueString = String(value);
+  let valueString = value === undefined ? t('(not set)') : String(value);
 
   // Special handling for outputLanguage 'auto' value
   if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
     valueString = t('Auto (follow user input)');
-  } else if (definition?.type === 'enum' && definition.options) {
+  } else if (
+    value !== undefined &&
+    definition?.type === 'enum' &&
+    definition.options
+  ) {
     const option = definition.options?.find((option) => option.value === value);
     if (option?.label) {
       valueString = t(option.label) || option.label;
@@ -613,6 +640,14 @@ export function getDisplayValue(
   }
 
   return valueString;
+}
+
+export function nextBooleanSettingValue(
+  currentValue: unknown,
+  defaultValue?: unknown,
+): boolean {
+  if (currentValue !== undefined) return !currentValue;
+  return defaultValue === undefined ? false : !defaultValue;
 }
 
 /**

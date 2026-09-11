@@ -32,6 +32,43 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it.each([
+    ['zh-CN', 10999, '你在 11 秒后取消了请求'],
+    ['zh-CN', 999, '你在 1 秒后取消了请求'],
+    ['zh-CN', 0, '你在 0 秒后取消了请求'],
+    ['zh-CN', 7069, '你在 8 秒后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11 seconds'],
+  ] as const)('renders elapsed seconds in %s', (language, elapsedMs, text) => {
+    const container = render(
+      <SystemMessage
+        content=""
+        variant="info"
+        source="prompt_cancelled"
+        data={{ elapsedMs }}
+      />,
+      language,
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(text);
+  });
+
+  it.each(['1000', -1, NaN, Infinity])(
+    'falls back for invalid elapsed time %s',
+    (elapsedMs) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs }}
+        />,
+        'zh-CN',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        '你已取消请求',
+      );
+    },
+  );
+
   it('renders the user-cancelled marker as a status region', () => {
     const container = render(
       <SystemMessage content="" variant="info" source="prompt_cancelled" />,
@@ -406,6 +443,20 @@ describe('SystemMessage — background notification label', () => {
 });
 
 describe('SystemMessage — background notification i18n body', () => {
+  it('renders an overflow summary record without task metadata verbatim', () => {
+    const content =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const container = render(
+      <SystemMessage
+        content={content}
+        variant="info"
+        source="background_notification"
+      />,
+    );
+
+    expect(container.textContent).toContain(content);
+  });
+
   it('renders shell notifications with structured command via i18n', () => {
     const container = render(
       <SystemMessage

@@ -50,6 +50,8 @@ import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
@@ -104,6 +106,7 @@ import {
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
 } from './bridgeTypes.js';
 import {
   CHANNEL_LIVENESS_INTERVAL_MS,
@@ -431,6 +434,11 @@ describe('createAcpSessionBridge', () => {
           v: CHANNEL_STARTUP_PROFILE_VERSION,
         },
       });
+      expect(
+        handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
+      ).toEqual({
+        'qwen.goalProposals': true,
+      });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
       // than idle, and graded `partial` — the channel did negotiate, it just
@@ -743,6 +751,59 @@ describe('createAcpSessionBridge', () => {
         expect(bridge.sessionCount).toBe(0);
       } finally {
         await bridge.shutdown();
+      }
+    });
+
+    it('logs the child close-refusal detail on the explicit-close and kill paths', async () => {
+      // The child's refusal crosses the ACP wire as a JSON-RPC error
+      // record (a plain object with `code`/`message`, not an `Error`
+      // instance). Both the explicit-close and kill notification-failure
+      // logs must carry that real detail — a raw `String()` interpolation
+      // collapses it to `[object Object]`.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            throw new RequestError(
+              -32603,
+              'Session close is already in progress',
+            );
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        try {
+          const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+          // Explicit close: the definitive refusal rethrows after logging.
+          await expect(bridge.closeSession(first.sessionId)).rejects.toThrow();
+          // Kill: the definitive refusal spares the channel.
+          await expect(bridge.killSession(second.sessionId)).resolves.toBe(
+            false,
+          );
+
+          const logged = stderrSpy.mock.calls
+            .map((call) => String(call[0]))
+            .join('\n');
+          expect(logged).toContain(
+            'closeSession ACP session close notification failed',
+          );
+          expect(logged).toContain(
+            'killSession ACP session close notification failed',
+          );
+          expect(logged).toContain('Session close is already in progress');
+          expect(logged).not.toContain('[object Object]');
+        } finally {
+          await bridge.shutdown();
+        }
+      } finally {
+        stderrSpy.mockRestore();
       }
     });
 
@@ -3193,6 +3254,11 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.releaseManagedConversationBinding(sessionId, expectation);
       expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      await bridge.getSessionSources(sessionId);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: 'qwen/session/sources/list',
+        params: { sessionId },
+      });
       const deferredArtifactId = stableSessionArtifactId(
         sessionId,
         'url:https://example.com/deferred-artifact',
@@ -6584,6 +6650,380 @@ describe('createAcpSessionBridge', () => {
 
     await bridge.shutdown();
   });
+
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
+      toolCall: {
+        toolCallId: 'q1',
+        title: 'Ask user 1 question',
+        _meta: {
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The guard is kind-agnostic: a plain tool-approval request with no
+      // question metadata must be re-presented exactly like a question.
+      // Narrowing the guard to the question kind must turn this variant red.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
+      toolCall: {
+        toolCallId: 'perm-1',
+        title: 'Run command',
+        kind: 'execute',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      // 'allow' alone would be satisfied by the option kind ("allow_once")
+      // even if its optionId were stripped — match the frame's own spelling.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
+    },
+  ])(
+    'serves the in-memory journal on refreshed load while a $label is pending',
+    async (variant) => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          // The persisted page can never contain the pending interaction:
+          // permission requests are journaled in memory only.
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-pending-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      // Park the session on an unanswered interaction. A parked
+      // Goal/background-notification turn does not keep promptActive set, so
+      // the refreshed-load guard would otherwise serve the persisted page
+      // with an empty liveJournal — stranding the interaction (badge on, no
+      // card) for the re-opening client.
+      const pendingAnswer = (
+        handle.agentConnection as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: loaded.sessionId,
+        toolCall: variant.toolCall,
+        options: variant.options,
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionSummary(loaded.sessionId)?.[variant.waitFlag],
+        ).toBe(true),
+      );
+
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      // The re-presented card must carry the payload that makes it
+      // answerable (questions + options), not merely the frame's type.
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      // The card the client renders must be the interaction the mediator
+      // accepts a vote for: the delivered frame's id equals the registry key.
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
+      // The guard's observable effect: no persisted-page fetch happens at all
+      // while an interaction is pending (this fixture's journal emits no
+      // history_truncated marker, so the anchor backfill fetches nothing).
+      expect(loopTranscriptFetches()).toBe(0);
+      // The guarded branch switches the history source to the in-memory
+      // replay; the session's prior history must survive the switch.
+      const reopenedEvents = [
+        ...(reopened.compactedReplay ?? []),
+        ...(reopened.liveJournal ?? []),
+      ];
+      expect(
+        reopenedEvents.some(
+          (event) =>
+            event.type === 'session_update' &&
+            JSON.stringify(event.data).includes('initial prompt'),
+        ),
+      ).toBe(true);
+
+      // Delivery alone is not enough — the re-presented card must stay
+      // answerable for the client that just attached: vote with its
+      // registered identity through the session-scoped route.
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
+
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
+      toolCall: {
+        toolCallId: 'q-mid-fetch',
+        title: 'Ask user 1 question',
+        _meta: {
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The loop-exit break is kind-agnostic: a plain tool approval arriving
+      // mid-fetch must stop the retry exactly like a question does.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
+      toolCall: {
+        toolCallId: 'perm-mid-fetch',
+        title: 'Run command',
+        kind: 'execute',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      // 'allow' alone would be satisfied by the option kind ("allow_once");
+      // match the frame's own spelling so a stripped optionId fails here.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
+    },
+  ])(
+    'stops refetching the persisted page when a $label arrives mid-fetch',
+    async (variant) => {
+      let pendingAnswer: Promise<unknown> | undefined;
+      let reopening = false;
+      let interactionRegistered = false;
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          if (reopening && pendingAnswer === undefined) {
+            // The interaction arrives while the reopened load's transcript
+            // fetch is in flight: publish + registration land before the
+            // page returns. Read the session id from the request itself —
+            // reading the later-declared `loaded` binding here would be a
+            // TDZ hazard if a cold load ever fetched a page.
+            pendingAnswer = (
+              handle.agentConnection as unknown as {
+                requestPermission(p: unknown): Promise<unknown>;
+              }
+            ).requestPermission({
+              sessionId: String(params['sessionId']),
+              toolCall: variant.toolCall,
+              options: variant.options,
+            });
+            await vi.waitFor(() =>
+              expect(
+                bridge.getSessionSummary(String(params['sessionId']))?.[
+                  variant.waitFlag
+                ],
+              ).toBe(true),
+            );
+            // Recorded outside the production catch: a failed precondition
+            // inside this mock would otherwise be swallowed by
+            // refreshedReplayFieldsFor's catch and leave the test green
+            // without ever exercising the guarded path.
+            interactionRegistered = true;
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-mid-fetch-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      // Premise: the cold load issues no fetch, so the one fetch asserted
+      // below belongs to the reopened load.
+      expect(loopTranscriptFetches()).toBe(0);
+      reopening = true;
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      expect(interactionRegistered).toBe(true);
+      // Exactly one fetch: the interaction arrived mid-fetch, so the loop
+      // leaves instead of re-fetching a page that cannot contain it.
+      expect(loopTranscriptFetches()).toBe(1);
+      // The fetched page was discarded, not spliced in front of the journal.
+      expect(
+        [
+          ...(reopened.compactedReplay ?? []),
+          ...(reopened.liveJournal ?? []),
+        ].some((event) =>
+          JSON.stringify(event.data).includes('persisted tail'),
+        ),
+      ).toBe(false);
+
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
+
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
 
   it('keeps the current turn error when refreshing from persisted history', async () => {
     const handle = makeChannel({
@@ -15444,6 +15884,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('forwards only explicitly declared submission text from trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'machine wrapper' }],
+        _meta: {
+          'qwen.submittedPrompt': 'forged public declaration',
+          'qwen.daemon.submittedPrompt': 'forged private declaration',
+        },
+      } as PromptRequest;
+      await bridge.sendPrompt(session.sessionId, req);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: ' original question\n',
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe(' original question\n');
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: 'human channel message',
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
       // so a forged key must not reach the child; only the authenticated
@@ -15480,6 +15955,51 @@ describe('createAcpSessionBridge', () => {
         true,
       );
 
+      await bridge.shutdown();
+    });
+
+    it('only grants Goal proposal approval to an attached prompt originator', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const request = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text' as const, text: 'draft a goal' }],
+        _meta: { 'qwen.goalProposalApproval': true },
+      };
+      await bridge.sendPrompt(session.sessionId, request);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.goalProposalApproval'],
+      ).toBe(true);
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        restoreAskUserQuestion: true,
+      });
+      expect(
+        handle.agent.promptCalls[3]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        continue: true,
+      });
+      expect(
+        handle.agent.promptCalls[4]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -17792,6 +18312,62 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('logs the child close-refusal detail when branchSession cleanup fails', async () => {
+      // The restore of a committed branch fails, and the child then also
+      // refuses the live-state cleanup close with a RequestError. The
+      // cleanup log must carry the child's real detail — the refusal
+      // crosses the ACP wire as a plain JSON-RPC error record, which raw
+      // template interpolation collapses to `[object Object]`.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const handle = makeChannel({
+          loadSessionImpl: () => {
+            throw new Error('branch restore exploded');
+          },
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+              return {
+                newSessionId: 'branch-restore-fail',
+                title: 'Branch',
+              };
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              throw new RequestError(
+                -32603,
+                'Session close is already in progress',
+              );
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        try {
+          const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await expect(
+            bridge.branchSession(session.sessionId, {}),
+          ).rejects.toThrow();
+
+          const logged = stderrSpy.mock.calls
+            .map((call) => String(call[0]))
+            .join('\n');
+          expect(logged).toContain(
+            'branchSession live-state close for branch-restore-fail failed',
+          );
+          expect(logged).toContain('Session close is already in progress');
+          expect(logged).not.toContain('[object Object]');
+        } finally {
+          await bridge.shutdown();
+        }
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('dispatches a historical branch on the source channel without restoring it', async () => {
       // Overlap construction: channel A hosts two sessions; killing the
       // first one fails at the agent close, so the bridge marks A dying
@@ -18065,6 +18641,54 @@ describe('createAcpSessionBridge', () => {
         }),
       ).rejects.toBeInstanceOf(SessionNotFoundError);
     });
+  });
+
+  describe('turn_complete promptCancelled', () => {
+    it.each([
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
+      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
+    ])(
+      'validates %s cancellation metadata %j',
+      async (stopReason, metadata, valid) => {
+        const events: BridgeEvent[] = [];
+        const handle = makeChannel({
+          promptImpl: () =>
+            ({
+              stopReason,
+              _meta: { 'qwen.promptCancelled': metadata },
+            }) as PromptResponse,
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const sub = (async () => {
+          for await (const event of bridge.subscribeEvents(session.sessionId)) {
+            events.push(event);
+          }
+        })();
+        sub.catch(() => {});
+        await bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'cancel me' }],
+        });
+        await vi.waitFor(() =>
+          expect(events.some((event) => event.type === 'turn_complete')).toBe(
+            true,
+          ),
+        );
+        const terminal = events.find((event) => event.type === 'turn_complete');
+        if (valid) {
+          expect(terminal?.data).toHaveProperty('promptCancelled', metadata);
+        } else {
+          expect(terminal?.data).not.toHaveProperty('promptCancelled');
+        }
+        await bridge.shutdown();
+      },
+    );
   });
 
   describe('turn_complete branchPoint', () => {
@@ -20310,6 +20934,7 @@ describe('createAcpSessionBridge', () => {
         const terms = terminalsFor(events, 'prompt-b');
         expect(terms).toHaveLength(1);
         expect(terms[0]?.type).toBe('turn_complete');
+        expect(terms[0]?.data).not.toHaveProperty('promptCancelled');
         expect((terms[0]?.data as { stopReason?: string }).stopReason).toBe(
           'cancelled',
         );
@@ -21936,6 +22561,66 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each(['yolo', 123, undefined])(
+      'forwards only a string expected Plan execution policy (%s)',
+      async (expectedPlanExecutionMode) => {
+        const { bridge, session, conn } = await setupForPermission();
+        const subAbort = new AbortController();
+        const events = bridge
+          .subscribeEvents(session.sessionId, {
+            signal: subAbort.signal,
+          })
+          [Symbol.asyncIterator]();
+        try {
+          const pending = (
+            conn as unknown as {
+              requestPermission(p: unknown): Promise<unknown>;
+            }
+          ).requestPermission({
+            sessionId: session.sessionId,
+            toolCall: {
+              toolCallId: 'exit-plan',
+              title: 'Exit plan mode',
+              _meta: { toolName: 'exit_plan_mode' },
+            },
+            options: [
+              {
+                optionId: 'restore_previous',
+                name: 'Approve',
+                kind: 'allow_once',
+              },
+            ],
+          });
+          const event = await events.next();
+          const { requestId } = event.value!.data as { requestId: string };
+          expect(
+            bridge.respondToSessionPermission(
+              session.sessionId,
+              requestId,
+              {
+                outcome: { outcome: 'selected', optionId: 'restore_previous' },
+                expectedPlanExecutionMode,
+                answers: { '0': 'Keep answers too' },
+                ignored: true,
+              } as RequestPermissionResponse,
+              { clientId: session.clientId },
+            ),
+          ).toBe(true);
+          const response = await pending;
+          expect(response).toEqual({
+            outcome: { outcome: 'selected', optionId: 'restore_previous' },
+            answers: { '0': 'Keep answers too' },
+            ...(typeof expectedPlanExecutionMode === 'string'
+              ? { expectedPlanExecutionMode }
+              : {}),
+          });
+        } finally {
+          subAbort.abort();
+          await bridge.shutdown();
+        }
+      },
+    );
+
     it('forwards session-scoped permission answers without arbitrary metadata', async () => {
       const { bridge, session, conn } = await setupForPermission();
 
@@ -22756,18 +23441,23 @@ describe('createAcpSessionBridge', () => {
         setModelResult?: Record<string, unknown>;
       } = {},
     ) {
-      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const setModelCalls: Array<{
+        sessionId: string;
+        modelId: string;
+        _meta?: Record<string, unknown> | null;
+      }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
-              return async (req: { sessionId: string; modelId: string }) => {
-                setModelCalls.push({
-                  sessionId: req.sessionId,
-                  modelId: req.modelId,
-                });
+              return async (req: {
+                sessionId: string;
+                modelId: string;
+                _meta?: Record<string, unknown> | null;
+              }) => {
+                setModelCalls.push(req);
                 if (opts.setModelImpl) await opts.setModelImpl();
                 return opts.setModelResult ?? {};
               };
@@ -22834,6 +23524,26 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
       expect(session.modelApplied).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('marks a scheduled-task run model as transient', async () => {
+      const { bridge, setModelCalls } = setup();
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen-max(openai)',
+        sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+        sourceId: `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}task-1`,
+      });
+
+      expect(session.modelApplied).toBe(true);
+      expect(setModelCalls).toEqual([
+        {
+          sessionId: session.sessionId,
+          modelId: 'qwen-max(openai)',
+          _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+        },
+      ]);
       await bridge.shutdown();
     });
 
@@ -26193,6 +26903,301 @@ describe('createAcpSessionBridge', () => {
       shellSpy.mockRestore();
     });
   });
+
+  it('preserves DAC plan policies through controls, notifications and reconnect snapshots', async () => {
+    let currentMode = 'plan';
+    let planExecutionMode: string | undefined = 'yolo';
+    let reconcileMode: string | undefined;
+    let connection: AgentSideConnection;
+    const controls: Array<Record<string, unknown>> = [];
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const modes = () => ({
+        currentModeId: currentMode,
+        availableModes: [],
+        _meta: { planExecutionMode },
+      });
+      const agent = new FakeAgent({
+        newSessionImpl: (params) =>
+          Promise.resolve({ sessionId: `sess:${params.cwd}`, modes: modes() }),
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+            if (reconcileMode) {
+              planExecutionMode = reconcileMode;
+              reconcileMode = undefined;
+            }
+            return Promise.resolve({ state: { modes: modes() } });
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            const control = params as Record<string, unknown>;
+            controls.push(control);
+            const previous = currentMode;
+            currentMode = control['planMode']
+              ? 'plan'
+              : String(control['mode']);
+            planExecutionMode = control['planMode']
+              ? String(control['mode'])
+              : undefined;
+            return Promise.resolve({
+              previous,
+              current: currentMode,
+              planExecutionMode,
+            });
+          }
+          return Promise.resolve({});
+        },
+      });
+      connection = new AgentSideConnection(() => agent as Agent, agentStream);
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const events = bridge
+      .subscribeEvents(session.sessionId, {
+        snapshot: true,
+        signal: abort.signal,
+      })
+      [Symbol.asyncIterator]();
+    const nextMode = async () => {
+      for (;;) {
+        const event = await events.next();
+        if (event.done) throw new Error('Mode stream ended');
+        if (event.value.type === 'approval_mode_changed')
+          return event.value.data;
+      }
+    };
+    try {
+      expect((await events.next()).value?.data).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await expect(
+        bridge.setSessionApprovalMode(session.sessionId, ApprovalMode.DEFAULT, {
+          persist: false,
+          planMode: true,
+        }),
+      ).resolves.toMatchObject({ mode: 'plan', planExecutionMode: 'default' });
+      expect(controls).toEqual([
+        { sessionId: session.sessionId, mode: 'default', planMode: true },
+      ]);
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'default',
+      });
+      const reconnect = bridge
+        .subscribeEvents(session.sessionId, {
+          snapshot: true,
+          signal: abort.signal,
+        })
+        [Symbol.asyncIterator]();
+      expect((await reconnect.next()).value?.data).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'default',
+      });
+      reconcileMode = 'yolo';
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        {
+          persist: false,
+          planMode: true,
+        },
+      );
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'default',
+      });
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await connection!.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModeId: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        {
+          persist: false,
+          planMode: false,
+        },
+      );
+      const exited = await nextMode();
+      expect(exited).toMatchObject({ next: 'auto-edit' });
+      expect(exited).not.toHaveProperty('planExecutionMode');
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'auto-edit',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).not.toHaveProperty(
+        'planExecutionMode',
+      );
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+    }
+  });
+
+  it.each([true, false])(
+    'keeps peer Plan and execution state unchanged when persisting DAC planMode=%s',
+    async (planMode) => {
+      const modesById = new Map<
+        string,
+        {
+          currentModeId: string;
+          availableModes: [];
+          _meta: { planExecutionMode: string | undefined };
+        }
+      >();
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          newSessionImpl: () => {
+            const index = modesById.size;
+            const sessionId = `dac-persist-${index}`;
+            const modes = {
+              currentModeId: index === 1 ? 'plan' : 'auto-edit',
+              availableModes: [] as [],
+              _meta: { planExecutionMode: index === 1 ? 'default' : undefined },
+            };
+            modesById.set(sessionId, modes);
+            return Promise.resolve({ sessionId, modes });
+          },
+          extMethodImpl: (method, params) => {
+            const control = params as Record<string, unknown>;
+            const modes = modesById.get(String(control['sessionId']));
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext)
+              return Promise.resolve({ state: { modes } });
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode &&
+              modes
+            ) {
+              const previous = modes.currentModeId;
+              modes.currentModeId = control['planMode']
+                ? 'plan'
+                : String(control['mode']);
+              modes._meta.planExecutionMode = control['planMode']
+                ? String(control['mode'])
+                : undefined;
+              return Promise.resolve({
+                previous,
+                current: modes.currentModeId,
+                planExecutionMode: modes._meta.planExecutionMode,
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const persistApprovalMode = vi.fn(async () => {});
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode,
+      });
+      const sessions = [];
+      for (let index = 0; index < 3; index++) {
+        sessions.push(
+          await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sessionScope: 'thread',
+          }),
+        );
+      }
+      expect(new Set(sessions.map((session) => session.sessionId)).size).toBe(
+        3,
+      );
+      const abort = new AbortController();
+      const modeEvents: unknown[][] = [[], [], []];
+      const collecting = sessions.map(async (session, index) => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'approval_mode_changed')
+            modeEvents[index]!.push(event.data);
+        }
+      });
+      try {
+        await expect(
+          bridge.setSessionApprovalMode(
+            sessions[0]!.sessionId,
+            ApprovalMode.YOLO,
+            { planMode, persist: true },
+          ),
+        ).resolves.toMatchObject({
+          mode: planMode ? 'plan' : 'yolo',
+          persisted: true,
+        });
+        expect(persistApprovalMode).toHaveBeenCalledWith(
+          WS_A,
+          ApprovalMode.YOLO,
+        );
+        for (const index of [1, 2]) {
+          const snapshot = bridge
+            .subscribeEvents(sessions[index]!.sessionId, {
+              snapshot: true,
+              signal: abort.signal,
+            })
+            [Symbol.asyncIterator]();
+          const event = (await snapshot.next()).value;
+          expect(event?.type).toBe('session_snapshot');
+          expect(event?.data).toMatchObject({
+            currentApprovalMode: index === 1 ? 'plan' : 'auto-edit',
+          });
+          if (index === 1)
+            expect(event?.data).toMatchObject({ planExecutionMode: 'default' });
+          else expect(event?.data).not.toHaveProperty('planExecutionMode');
+        }
+        await vi.waitFor(() => expect(modeEvents[0]).toHaveLength(1));
+        expect(modeEvents[0]![0]).toMatchObject({
+          next: planMode ? 'plan' : 'yolo',
+          persisted: true,
+        });
+        if (planMode)
+          expect(modeEvents[0]![0]).toMatchObject({
+            planExecutionMode: 'yolo',
+          });
+        else expect(modeEvents[0]![0]).not.toHaveProperty('planExecutionMode');
+        expect(modeEvents.slice(1)).toEqual([[], []]);
+      } finally {
+        abort.abort();
+        await Promise.all(collecting);
+        await bridge.shutdown();
+      }
+    },
+  );
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
     /**
@@ -37160,9 +38165,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
   it('promotes messages after their client detaches without reapplying the cap', async () => {
     const prompts: string[] = [];
+    const goalApprovalMeta: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async (req) => {
+        goalApprovalMeta.push(req._meta?.['qwen.goalProposalApproval']);
         prompts.push(
           (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
         );
@@ -37209,6 +38216,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    expect(goalApprovalMeta).toEqual([true, undefined]);
     expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
       messages: [],
       settledMessageIds: [],

@@ -29,6 +29,15 @@ if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
 delete process.env['QWEN_REVIEW_SANDBOX'];
 delete process.env['SANDBOX_SET_UID_GID'];
 
+// Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
+// `runQwenServe` read it straight from the ambient environment when no explicit
+// option or `daemonEnv` is supplied. A maintainer who exports the documented
+// downgrade value would otherwise turn the capacity assertions red, and an
+// invalid value would throw at app construction, failing every test that builds
+// one. Deleting rather than pinning, so tests that want a capacity still pass
+// one explicitly.
+delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+
 import { configure } from '@testing-library/react';
 
 import './src/test-utils/customMatchers.js';

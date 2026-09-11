@@ -31,6 +31,8 @@ interface RegisterCapabilitiesRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   permissionPolicy: AcpSessionBridge['permissionPolicy'];
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
@@ -103,6 +105,10 @@ export function registerCapabilitiesRoutes(
           activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
       },
       limits: {
+        maxRegisteredWorkspaces: deps.maxRegisteredWorkspaces,
+        ...(deps.maxChannelControlWorkspaces !== undefined
+          ? { maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces }
+          : {}),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
@@ -110,7 +116,7 @@ export function registerCapabilitiesRoutes(
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
           : {}),
-        ...(multipleAdmissionPools
+        ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
                 deps.maxSessionsPerWorkspace,

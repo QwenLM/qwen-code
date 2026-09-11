@@ -644,20 +644,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const userMeta: UpdateMetaOptions =
+      typeof record.daemonPromptId === 'string' &&
+      record.daemonPromptId.trim().length > 0
+        ? { ...meta, extra: { ...meta.extra, promptId: record.daemonPromptId } }
+        : meta;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
-            ...meta,
+            ...userMeta,
             extra: {
-              ...meta.extra,
+              ...userMeta.extra,
               source: 'mid_turn_message_injected',
               qwenDiscreteMessage: true,
             },
           }
-        : meta;
+        : userMeta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -976,6 +981,75 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'turn_result') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const startedAt = finiteNumber(payload?.['startedAt']);
+      const promptId = payload?.['promptId'];
+      if (
+        payload?.['state'] !== 'cancelled' ||
+        cancelledAt === undefined ||
+        typeof promptId !== 'string' ||
+        !promptId ||
+        (payload['startedAt'] !== undefined && startedAt === undefined)
+      )
+        return;
+      const elapsedMs = Math.max(0, cancelledAt - (startedAt ?? cancelledAt));
+      if (!Number.isFinite(elapsedMs)) return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            qwenDiscreteMessage: true,
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'agent_session_ready') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (
+        typeof payload?.['callId'] !== 'string' ||
+        payload['callId'].length === 0 ||
+        typeof payload['subagentSessionReady'] !== 'boolean'
+      ) {
+        this.report(
+          'malformed_agent_session_ready',
+          'Skipped a malformed subagent session readiness record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const callId = payload['callId'];
+      if (!this.pendingToolCalls.has(callId)) {
+        this.report(
+          'orphan_agent_session_ready',
+          'Skipped subagent readiness without a matching pending tool call.',
+          record.uuid,
+          'systemPayload.callId',
+        );
+        return;
+      }
+      yield emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        _meta: buildUpdateMeta({
+          ...meta,
+          extra: {
+            subagentSessionReady: payload['subagentSessionReady'],
+          },
+        }),
+      });
+      return;
+    }
     if (record.subtype === 'goal_state') {
       const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
       if (!payload) {
