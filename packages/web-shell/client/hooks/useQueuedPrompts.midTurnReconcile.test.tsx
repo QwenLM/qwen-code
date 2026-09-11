@@ -2035,7 +2035,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('does not bind a files-only fallback to an earlier text-less prompt', async () => {
+  it('does not bind a file-bearing fallback to a prompt carrying only its image', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
         opts?.onAdmissionStarted?.();
@@ -2054,33 +2054,35 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         harness
           .result()
-          .enqueuePrompt('', undefined, [
-            { name: 'notes.md', media_type: 'text/markdown' },
-          ]);
+          .enqueuePrompt(
+            '',
+            [{ data: 'aGVsbG8=', media_type: 'image/png' }],
+            [{ name: 'notes.md', media_type: 'text/markdown' }],
+          );
         for (let i = 0; i < 4; i++) await Promise.resolve();
       });
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
-      const filesOnlyRows = harness.result().queuedPrompts;
-      expect(filesOnlyRows).toHaveLength(1);
-      expect(filesOnlyRows[0]).toEqual(
+      const attachmentRows = harness.result().queuedPrompts;
+      expect(attachmentRows).toHaveLength(1);
+      expect(attachmentRows[0]).toEqual(
         expect.objectContaining({ text: '', serverState: 'submitting' }),
       );
       await act(async () => {
-        // The daemon renders a text-less prompt with no image block as '',
-        // which collides with the row's own empty text. Files-bearing rows
-        // never bind through the snapshot route at all — not even against a
-        // server prompt carrying the very same file — so this pins the
-        // categorical refusal.
+        // Every other term of the matcher accepts this pair — the same
+        // originator, a text-less row, the placeholder rendering, a fully
+        // hydrated image byte-identical to the row's — so the only thing
+        // refusing the bind is the row's file, which the snapshot route
+        // cannot compare against a server-side attachment reference.
         sdkMock.actions.getPendingPrompts.mockResolvedValueOnce({
           pendingPrompts: [
             {
               promptId: 'prompt-earlier',
-              text: '',
+              text: '[image]',
               content: [
                 {
-                  type: 'resource',
-                  attachmentId: 'notes.md',
-                  mimeType: 'text/markdown',
+                  type: 'image',
+                  data: 'aGVsbG8=',
+                  mimeType: 'image/png',
                 },
               ],
               queuedAt: Date.now(),
@@ -9855,16 +9857,17 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
               resolvePending = resolve;
             }),
         );
-        harness.result().enqueuePrompt('read this', undefined, [file]);
+        harness.result().enqueuePrompt('', undefined, [file]);
         await Promise.resolve();
       });
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
       act(() => {
         harness.result().clearQueuedPrompts();
       });
-      // The started event reproduces the text but not the file, so the echo
-      // has to come from the payload the submit body stashed: without it the
-      // file chip is missing from a message the daemon received with one.
+      // A caption-less file message renders as nothing, so the started event
+      // carries no text either: the echo has to come from the payload the
+      // submit body stashed, or a message the daemon received with a file
+      // chip never reaches the transcript.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -9874,7 +9877,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
             data: {
               sessionId: 'session-a',
               promptId: 'prompt-1',
-              text: 'read this',
+              text: '',
             },
           },
         ]);
@@ -9882,7 +9885,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
-        'read this',
+        '',
         undefined,
         { promptId: 'prompt-1' },
         [{ name: 'notes.txt', mimeType: 'text/plain' }],
@@ -9892,7 +9895,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           pendingPrompts: [
             {
               promptId: 'prompt-1',
-              text: 'read this',
+              text: '',
               queuedAt: Date.now(),
               state: 'running',
             },
@@ -13473,6 +13476,151 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         'continue',
         undefined,
         { promptId: 'prompt-2' },
+        undefined,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('echoes a claimed idle-fallback resend whose row a stale sync consumed', async () => {
+    // The daemon has already settled but the activity mirror still shows a
+    // prompt, so the insert is refused with session_idle and the fallback
+    // resubmits. While that admission is in flight a sync whose snapshot
+    // lists the displayed twin claims and splices the row, so the body's
+    // claim arm holds the message's only payload copy.
+    const rejectInsert = deferred<void>();
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return new Promise((resolve) => {
+          rejectInsert.resolve();
+          resolve({ accepted: false, reason: 'session_idle' });
+        });
+      },
+    );
+    let resolveResubmit: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResubmit = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-twin',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-twin',
+              text: 'continue',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        harness.result().enqueuePrompt('continue');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await rejectInsert.promise;
+      await act(async () => {
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      const resubmitted = harness
+        .result()
+        .queuedPrompts.find(
+          (p) => p.text === 'continue' && p.serverState === 'submitting',
+        );
+      expect(resubmitted?.resubmittedAfterIdleRejection).toBe(true);
+      // A sync whose snapshot lists only the displayed twin claims the
+      // identical unbound row and splices it.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-twin',
+              text: 'continue',
+              queuedAt: Date.now(),
+              state: 'running' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(
+        harness
+          .result()
+          .queuedPrompts.some((p) => p.resubmittedAfterIdleRejection === true),
+      ).toBe(false);
+      // The body's confirming refresh lists the admitted prompt too, and the
+      // row it materializes cannot echo: the started event's only source is
+      // the payload this body still holds.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-twin',
+              text: 'continue',
+              queuedAt: Date.now(),
+              state: 'running' as const,
+              originatorClientId: CLIENT_ID,
+            },
+            {
+              promptId: 'prompt-1',
+              text: 'continue',
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        resolveResubmit?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'continue',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledTimes(2);
+      expect(harness.store.appendLocalUserMessage).toHaveBeenLastCalledWith(
+        'continue',
+        undefined,
+        { promptId: 'prompt-1' },
         undefined,
       );
     } finally {

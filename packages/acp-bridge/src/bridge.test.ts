@@ -36677,6 +36677,43 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('declines a dead attachment reference before the idle verdict', async () => {
+    const { factory } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const reference = await bridge.storeSessionAttachment(
+      session.sessionId,
+      Uint8Array.of(1, 2, 3),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    expect(
+      await bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        { clientId: session.clientId },
+      ),
+    ).toBe(true);
+
+    // Nothing is running, so the cheap verdict would answer
+    // `{ accepted: false, reason: 'session_idle' }` and send the client to the
+    // ordinary prompt route — which validates references too, so the message
+    // would dead-end two hops later behind a verdict that was never the real
+    // cause. The decline runs first.
+    expect(() =>
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'look at this',
+        { clientId: session.clientId },
+        'dead-reference-idle',
+        { rejectIfIdle: true, content: [reference] },
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: 'session_attachment_gone' }),
+    );
+    await bridge.shutdown();
+  });
+
   it('does not recreate a deleted stable id when its admission is retried', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });

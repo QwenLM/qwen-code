@@ -450,7 +450,7 @@ function matchesUnboundSubmittingRow(
     return false;
   }
   const serverImages = contentToImages(server.content);
-  if (!serverImages || contentToFiles(server.content)) return false;
+  if (!serverImages) return false;
   const itemImages = item.images ?? [];
   if (itemImages.length !== serverImages.length) return false;
   return itemImages.every(
@@ -566,14 +566,17 @@ export function useQueuedPrompts({
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
   /**
-   * The in-flight pending-prompts GET, if any. At most one GET per session
-   * is in flight: a caller that finds one waits it out rather than
-   * dispatching beside it, then takes exactly one fresh snapshot — or joins
-   * a flight dispatched after its own `notBefore` anchor, which is what
-   * keeps two re-awaiting submit bodies from invalidating each other
-   * forever. `seq` is the dispatch sequence: the wait path joins only a
-   * newer flight, and the `finally` clears this ref only while it still
-   * holds that dispatch.
+   * The tracked in-flight pending-prompts GET, if any. A caller that finds its
+   * own session's flight under a current owner token waits it out rather than
+   * dispatching beside it, then takes exactly one fresh snapshot — or joins a
+   * flight dispatched after its own `notBefore` anchor, which is what keeps
+   * two re-awaiting submit bodies from invalidating each other forever. One
+   * slot means a dispatch for another session, or one after an owner-token
+   * invalidation, leaves the previous flight untracked while a second GET for
+   * the same session runs beside it; the dispatch-sequence fence, not this
+   * ref, is what stops that older flight from syncing a stale snapshot. `seq`
+   * is the dispatch sequence: the wait path joins only a newer flight, and the
+   * `finally` clears this ref only while it still holds that dispatch.
    */
   const inflightRefreshRef = useRef<{
     sessionId: string;
@@ -718,8 +721,8 @@ export function useQueuedPrompts({
         if (!p.serverPromptId) return true;
         // A binding made at or after this flight's dispatch is invisible to
         // the flight's snapshot — the daemon had not admitted the prompt yet
-        // — so its absence here proves nothing. Keep the row for a snapshot
-        // that postdates the bind.
+        // — so its absence here proves nothing: keep a row whose bind is not
+        // older than the dispatch that produced this snapshot.
         if ((p.boundAtSeq ?? 0) >= refreshRequestSeqRef.current) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
@@ -2053,8 +2056,19 @@ export function useQueuedPrompts({
               if (syncClaimedSubmittingRowIdsRef.current.delete(localId)) {
                 // The confirming sync attributed this row to an
                 // already-displayed prompt with the same rendered text and
-                // dropped it — nothing was cleared, and the sync
-                // materialized its own row for this prompt.
+                // dropped it — nothing was cleared, so the admitted prompt
+                // stays. The row a later snapshot materializes for it is
+                // summary-only and cannot echo, so the started event's
+                // source is the payload this body still holds: stash it
+                // under the daemon's id.
+                pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+                while (pendingEchoByPromptIdRef.current.size > 200) {
+                  const oldestClaimEcho = pendingEchoByPromptIdRef.current
+                    .keys()
+                    .next().value;
+                  if (typeof oldestClaimEcho !== 'string') break;
+                  pendingEchoByPromptIdRef.current.delete(oldestClaimEcho);
+                }
                 if (prompt.onComplete) {
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }

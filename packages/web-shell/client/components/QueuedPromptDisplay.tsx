@@ -137,7 +137,7 @@ export interface QueuedPrompt {
    * The pending-prompts refresh sequence at the moment this row was bound to
    * `serverPromptId`. A snapshot from a flight dispatched before the binding
    * cannot list the prompt, so its absence proves nothing: the sync's
-   * retention filter keeps the row for a snapshot that postdates the bind.
+   * retention filter keeps a row bound at or after that flight's dispatch.
    */
   boundAtSeq?: number;
   resubmittedAfterIdleRejection?: boolean;
