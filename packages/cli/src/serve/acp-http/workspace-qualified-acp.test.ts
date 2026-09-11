@@ -849,6 +849,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(primaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
       requireZeroAttaches: true,
+      retireRememberedApprovalMode: true,
     });
   });
 
@@ -916,7 +917,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(primaryBridge.killSession).toHaveBeenCalledWith(
       'forked-primary-session',
-      { requireZeroAttaches: true },
+      { requireZeroAttaches: true, retireRememberedApprovalMode: true },
     );
     expect(replacementBridge.killSession).not.toHaveBeenCalled();
   });
@@ -961,6 +962,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(secondaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
       requireZeroAttaches: true,
+      retireRememberedApprovalMode: true,
     });
   });
 

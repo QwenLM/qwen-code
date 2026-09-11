@@ -12882,7 +12882,10 @@ describe('createServeApp', () => {
       expect(bridge.killCalls).toEqual([
         {
           sessionId: 'stale-session',
-          opts: { requireZeroAttaches: true },
+          opts: {
+            requireZeroAttaches: true,
+            retireRememberedApprovalMode: true,
+          },
         },
       ]);
     });
@@ -12956,7 +12959,10 @@ describe('createServeApp', () => {
           expect(bridge.killCalls).toEqual([
             {
               sessionId: 'stale-worktree-session',
-              opts: { requireZeroAttaches: true },
+              opts: {
+                requireZeroAttaches: true,
+                retireRememberedApprovalMode: true,
+              },
             },
           ]);
           // Relocation never ran, so nothing can own the checkout: the
@@ -13150,7 +13156,10 @@ describe('createServeApp', () => {
       expect(bridge.killCalls).toEqual([
         {
           sessionId: 'a-different-id-than-requested',
-          opts: { requireZeroAttaches: true },
+          opts: {
+            requireZeroAttaches: true,
+            retireRememberedApprovalMode: true,
+          },
         },
       ]);
     });
@@ -14054,7 +14063,10 @@ describe('createServeApp', () => {
           expect(bridge.killCalls).toEqual([
             {
               sessionId: 'fake-0',
-              opts: { requireZeroAttaches: true },
+              opts: {
+                requireZeroAttaches: true,
+                retireRememberedApprovalMode: true,
+              },
             },
           ]);
           expect(removed).toEqual(expectedRemoved);
@@ -14214,7 +14226,10 @@ describe('createServeApp', () => {
           expect(bridge.killCalls).toEqual([
             {
               sessionId: 'fake-0',
-              opts: { requireZeroAttaches: true },
+              opts: {
+                requireZeroAttaches: true,
+                retireRememberedApprovalMode: true,
+              },
             },
           ]);
           expect(removed).toEqual(expectedRemoved);
@@ -14280,7 +14295,10 @@ describe('createServeApp', () => {
         expect(bridge.killCalls).toEqual([
           {
             sessionId: 'fake-0',
-            opts: { requireZeroAttaches: true },
+            opts: {
+              requireZeroAttaches: true,
+              retireRememberedApprovalMode: true,
+            },
           },
         ]);
         expect(removed).toEqual(['my-task']);
