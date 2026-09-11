@@ -1195,6 +1195,12 @@ describe('QwenLogger', () => {
       ).toBe('env USER=alice PATH=/usr/bin max_tokens=8192');
     });
 
+    it('treats short counters the same in flag and env spellings', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError('run --max-tokens 8192 max_tokens=8192'),
+      ).toBe('run --max-tokens 8192 max_tokens=8192');
+    });
+
     it('redacts error_message on the enqueue boundary', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');

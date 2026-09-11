@@ -142,17 +142,21 @@ const AUTHORIZATION_PATTERN = new RegExp(
  * Secret-bearing long flags: `--token x`, `--password=y`, `--aws-access-key
  * w`. The secret keyword may sit anywhere inside the flag name, so long flags
  * like `--github-api-key` or `--_authToken` are caught too, not only the exact
- * spellings `--token` / `--password`.
+ * spellings `--token` / `--password`. The value must be a quoted run or an
+ * unquoted run of at least 10 characters, mirroring {@link ENV_SECRET_PATTERN}
+ * so `--max-tokens 8192` and `max_tokens=8192` are treated the same.
  */
+const SECRET_FLAG_VALUE = String.raw`(?:"[^"]{10,}"|'[^']{10,}'|[^\s"'\`\\][^\s]{9,})`;
+
 const SECRET_FLAG_PATTERN = new RegExp(
-  String.raw`(--[A-Za-z0-9_-]*?(?:token|password|secret|credential|key)[A-Za-z0-9_-]*(?:[=:]|\s+)(?:\\\s*)?)` +
-    SECRET_VALUE,
+  String.raw`(--[A-Za-z0-9_-]{0,64}?(?:token|password|secret|credential|key)[A-Za-z0-9_-]{0,64}(?:[=:]|\s+)(?:\\\s*)?)` +
+    SECRET_FLAG_VALUE,
   'gi',
 );
 
 /**
- * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_xxx`,
- * `OPENAI_API_KEY=sk_xxx`, `AWS_SECRET_ACCESS_KEY=…`.
+ * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_0123456789ab`,
+ * `OPENAI_API_KEY=sk-0123456789ab`, `AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI`.
  * The key must name a secret — any of the canonical secret words, including
  * `key` for the `*_API_KEY` / `*_ACCESS_KEY*` LLM credential variables — and
  * the value must be a quoted run or an unquoted run of at least 10 characters,
@@ -160,7 +164,7 @@ const SECRET_FLAG_PATTERN = new RegExp(
  * `USER=alice` pass through untouched.
  */
 const ENV_SECRET_PATTERN = new RegExp(
-  String.raw`\b([A-Za-z0-9_]*(?:token|password|secret|credential|key)[A-Za-z0-9_]*\s*=\s*(?:\\\s*)?)(?:"[^"]{10,}"|'[^']{10,}'|[^\s&;,]{10,})`,
+  String.raw`\b([A-Za-z0-9_]{0,64}(?:token|password|secret|credential|key)[A-Za-z0-9_]{0,64}\s*=\s*(?:\\\s*)?)(?:"[^"]{10,}"|'[^']{10,}'|[^\s&;,]{10,})`,
   'gi',
 );
 
