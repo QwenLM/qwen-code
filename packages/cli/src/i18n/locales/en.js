@@ -228,6 +228,12 @@ export default {
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
+  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
+  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
+  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
+  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
+  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
   // ============================================================================
   // Help / UI Components
   // ============================================================================

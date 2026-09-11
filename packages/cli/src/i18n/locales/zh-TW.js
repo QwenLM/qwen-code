@@ -219,6 +219,12 @@ export default {
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.ThreadPost': '發文到討論串',
+  'toolDisplayName.ThreadWait': '等待協作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞問題',
+  'toolDisplayName.ThreadReview': '提交待審閱',
+  'toolDisplayName.ThreadCreate': '建立子討論串',
+  'toolDisplayName.ThreadRead': '讀取討論串',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
