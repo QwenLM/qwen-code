@@ -172,9 +172,7 @@ describe('Desktop OSS mirror workflow', () => {
       'Resolve Qwen Code source',
     );
     expect(source).toContain('ancestor="$sha"');
-    expect(source).toContain(
-      'if [ "$GITHUB_EVENT_NAME" = \'release\' ]; then',
-    );
+    expect(source).toContain('if [ "$GITHUB_EVENT_NAME" = \'release\' ]; then');
     expect(source).toContain('ancestor="$(git rev-parse "${sha}^")"');
     expect(source).toContain(
       'git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main',
@@ -184,9 +182,7 @@ describe('Desktop OSS mirror workflow', () => {
 
 describe('Desktop release sync caller', () => {
   it('gates the release-following publish on the CLI release signal', () => {
-    expect(syncCallerWorkflow).toContain(
-      "release:\n    types: ['published']",
-    );
+    expect(syncCallerWorkflow).toContain("release:\n    types: ['published']");
     const publish = getWorkflowJob(syncCallerWorkflow, 'publish');
     expect(publish).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(publish).toContain("vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true'");
@@ -203,7 +199,9 @@ describe('Desktop release sync caller', () => {
     ]) {
       expect(publish).toContain(withValue);
     }
-    expect(publish).toContain("uses: './.github/workflows/desktop-release.yml'");
+    expect(publish).toContain(
+      "uses: './.github/workflows/desktop-release.yml'",
+    );
     expect(publish).toContain("secrets: 'inherit'");
   });
 
