@@ -16,6 +16,7 @@ import {
 } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -380,6 +381,250 @@ You are a helpful assistant.
 `;
 
   describe('parseSubagentContent', () => {
+    it.each([
+      'null',
+      'false',
+      '0',
+      '""',
+      '{ kind: ACP, command: npx }',
+      '{ kind: acp, command: " " }',
+      '{ kind: acp, command: npx, args: [null] }',
+    ])('rejects invalid executor frontmatter %s', async (executor) => {
+      const content = `---\nname: test-agent\ndescription: Test\nexecutor: ${executor}\n---\nPrompt`;
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects an executor whose null argument the shared parser would sanitize away', async () => {
+      // Pins the load-bearing guard that validates the ORIGINAL YAML node
+      // (parseDocument) rather than the shared parser's sanitized result. The
+      // shared parser strips null sequence items, turning `args: [null]` into
+      // `args: []` — which parseAgentExecutor ACCEPTS, launching the command
+      // with truncated arguments. Only the original node still carries [null]
+      // and is rejected. Drive the real shared parser so the stripping actually
+      // happens; with the guard reverted to the sanitized value this no longer
+      // throws and the test goes red.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementationOnce(yaml.parse);
+      const content =
+        '---\nname: test-agent\ndescription: Test\nexecutor:\n  kind: acp\n  command: npx\n  args:\n    - null\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects a definition whose frontmatter has a YAML syntax error rather than trusting a repaired executor node', async () => {
+      // parseDocument repairs invalid YAML instead of throwing; document.errors
+      // is the only signal. Without this guard an unterminated quote yields a
+      // silently repaired executor node that dispatches a different command than
+      // the file declares.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        "---\nname: test-agent\ndescription: Test\nexecutor:\n  kind: acp\n  command: 'npx\n---\nPrompt";
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid YAML frontmatter|invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('still loads a non-executor definition whose frontmatter strict YAML rejects', async () => {
+      // R5-1: the document.errors refusal must be scoped to executor-bearing
+      // files. A description containing a colon makes strict YAML reject, but
+      // the shared parser's parseSimple fallback still loads it; with no
+      // executor block the definition must keep loading exactly as at the merge
+      // base, or the agent silently vanishes from /agents and subagent_type
+      // fails as agent-not-found. Drive the real shared parser so the lenient
+      // fallback is actually exercised; an unconditional document.errors guard
+      // makes this throw and the test go red.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: reviewer\ndescription: Reviews code: fast and careful\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      const config = await manager.parseSubagentFile(
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.name).toBe('reviewer');
+      expect(config.description).toBe('Reviews code: fast and careful');
+      expect(config.executor).toBeUndefined();
+    });
+
+    it('refuses a quoted top-level "executor" key when the frontmatter YAML is malformed (R7-1 under-refusal leg)', async () => {
+      // A quoted `"executor":` plus a YAML error the lenient parser tolerates
+      // (an unquoted colon in description) is missed by parseSimple (keeps the
+      // quotes in the key) and by a repaired parseDocument (nests it). Only the
+      // column-0 raw-text probe catches it; without that the file loads with no
+      // executor and silently runs in-process — the exact substitution this PR
+      // exists to prevent.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: worker\ndescription: Reviews code: fast\n"executor":\n  kind: acp\n  command: npx\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('refuses a malformed file whose only "executor" token is nested, fail-closed (R10-1 re-scopes the R7-1 over-refusal leg)', async () => {
+      // R10-1 widened the claim probe to indentation-tolerant so an executor key
+      // the real AST dropped cannot slip through to a silent in-process run (a
+      // TAB- or space-indented top-level `executor:` that the column-0 anchor
+      // missed). The accepted cost: an `executor:` token nested under another
+      // key, in a file that ALSO has a YAML error, is now treated as a claim the
+      // AST lost and refused — a visible, user-fixable over-refusal that beats an
+      // invisible substitution. Reverting the probe to column-0 anchoring turns
+      // this red (the definition loads again). A nested executor token in a file
+      // with NO YAML error still loads: the guard is gated on errors.length > 0.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: reviewer\ndescription: Reviews code: fast\nmetadata:\n  executor: legacy-note\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('loads a valid executor whose frontmatter has an unrelated tolerated YAML error before it (R7-1 over-refusal, narrowed)', async () => {
+      // A duplicate `name:` key from a bad merge is a tolerated YAML error that
+      // sits BEFORE the executor line, so it cannot reach the executor subtree:
+      // `document.toJS().executor` stays byte-faithful. The old
+      // `claimsExecutor && document.errors.length > 0` guard hard-refused this,
+      // deleting a valid external-agent definition from /agents (and breaking
+      // `subagent_type:`) over an unrelated quirk that loads at the merge base.
+      // Removing the line-scoping must turn this red, while the quoted-key and
+      // unterminated-quote refusals (errors at/after the executor line) stay
+      // green.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: a\nname: b\ndescription: Test\nexecutor:\n  kind: acp\n  command: claude-agent-acp\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      const config = await manager.parseSubagentFile(
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.executor).toEqual({
+        kind: 'acp',
+        command: 'claude-agent-acp',
+      });
+    });
+
+    it('refuses an executor whose node parseDocument dropped via an earlier error, not trusting the parseSimple fallback (R9-2)', async () => {
+      // A compact-mapping error on an EARLIER line (the unquoted colon in
+      // description) makes parseDocument drop the whole remainder, so the
+      // executor node is ABSENT (has('executor') is false) rather than
+      // byte-faithful — YAML errors are not line-local, so an error before the
+      // executor line does not mean the executor survived. The lenient
+      // parseSimple fallback then rebuilds `command: |` plus an indented `npx`
+      // as `{command:'|', npx:''}` (it is a line-based heuristic, not a YAML
+      // parser), and parseAgentExecutor would accept `command:'|'`, spawning an
+      // executable literally named `|` that the file never declared. The refusal
+      // must key on parseDocument losing the node (!hasExecutor), not on
+      // parseSimple also missing it. Reverting that leg to
+      // `!hasExecutor && frontmatter.executor === undefined` turns this red,
+      // while the duplicate-key load test above (has('executor') true) stays
+      // green.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: explore\ndescription: Reviews code: fast\nexecutor:\n  kind: acp\n  command: |\n    npx\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('refuses an executor whose frontmatter has an unresolved YAML alias instead of throwing a raw parse error (R9 deferred :1968)', async () => {
+      // parseDocument tolerates an unresolved alias (`command: *undef`) with an
+      // EMPTY document.errors, so the errors-based executor guard cannot catch
+      // it, but document.toJS() throws when it resolves the node. Without the
+      // try/catch around toJS() the raw "Unresolved alias" YAML error escapes
+      // parseSubagentContent; with it the definition is refused as an invalid
+      // executor block. Removing the try/catch turns this red (the rejection
+      // message becomes the raw YAML error, not /invalid executor block/).
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: explore\ndescription: Test\nexecutor:\n  kind: acp\n  command: *undefined_anchor\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('loads a block-scalar prose "executor:" as no executor, not a hoisted command (R10-1)', async () => {
+      // A `description: |` block scalar whose prose contains an `executor:` line,
+      // plus an unresolved alias elsewhere so the strict parse fails and the
+      // lenient parseSimple fallback runs. parseSimple hoists the prose
+      // `executor:` into a top-level key ({kind:acp, command:npx}); the old code
+      // used that value as executorRaw and loaded the definition as EXTERNAL,
+      // dispatching `npx` — a command that exists only as prose. parseDocument
+      // correctly sees no top-level executor (hasExecutor false) and, with no
+      // document error, the guard does not fire, so the fix loads with executor
+      // undefined. Restoring the parseSimple fallback for executorRaw turns this
+      // red (config.executor becomes {kind:'acp', command:'npx'}).
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: x\ndescription: |\n  executor:\n    kind: acp\n    command: npx\nother: *undefined_anchor\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      const config = await manager.parseSubagentFile(
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.executor).toBeUndefined();
+    });
+
+    it('visibly reports invalid executors while continuing discovery', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.mocked(fs.readdir).mockResolvedValue(['bad.md', 'good.md'] as never);
+      vi.mocked(fs.readFile).mockImplementation(async (file) =>
+        String(file).endsWith('bad.md')
+          ? '---\nname: bad\ndescription: Test\nexecutor: { kind: acp, command: " " }\n---\nPrompt'
+          : validMarkdown,
+      );
+      const agents = await manager.listSubagents({
+        level: 'project',
+        force: true,
+      });
+      expect(agents.map((agent) => agent.name)).toEqual(['test-agent']);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('invalid executor block'),
+      );
+    });
+
     it('should parse valid markdown content', () => {
       const config = manager.parseSubagentContent(
         validMarkdown,
@@ -767,7 +1012,7 @@ You are a monitor.
       expect(config.background).toBe(true);
     });
 
-    it('should not set background when background: false', () => {
+    it('preserves background: false for foreground agents', () => {
       const markdownWithBgFalse = `---
 name: monitor
 description: A foreground agent
@@ -783,7 +1028,7 @@ You are an agent.
         'project',
       );
 
-      expect(config.background).toBeUndefined();
+      expect(config.background).toBe(false);
     });
 
     it('should not set background when omitted', () => {
@@ -1029,6 +1274,48 @@ You are weird.
   });
 
   describe('serializeSubagent', () => {
+    it('preserves the executor through save and reload', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockStringifyYaml.mockImplementationOnce(yaml.stringify);
+      mockParseYaml.mockImplementationOnce(yaml.parse);
+      const executor = {
+        kind: 'acp' as const,
+        command: 'npx',
+        args: ['-y', 'adapter'],
+      };
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        executor,
+      });
+      expect(
+        manager.parseSubagentContent(
+          serialized,
+          validConfig.filePath!,
+          'project',
+        ).executor,
+      ).toEqual(executor);
+    });
+
+    it.each([null, false, 0, '', { kind: 'acp', command: ' ' }])(
+      'refuses to save invalid executor %j without writing',
+      async (executor) => {
+        vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
+        const config = {
+          ...validConfig,
+          executor,
+        } as unknown as SubagentConfig;
+        expect(() => manager.serializeSubagent(config)).toThrow(
+          /executor block failed validation/,
+        );
+        await expect(
+          manager.createSubagent(config, { level: 'project' }),
+        ).rejects.toThrow(/executor block failed validation/);
+        expect(fs.writeFile).not.toHaveBeenCalled();
+      },
+    );
+
     it('should serialize basic configuration', () => {
       const serialized = manager.serializeSubagent(validConfig);
 
@@ -1154,21 +1441,24 @@ You are weird.
       expect(frontmatterArg.hooks).toBeUndefined();
     });
 
-    it('should roundtrip background through serialize and parse', () => {
-      const configWithBackground: SubagentConfig = {
-        ...validConfig,
-        background: true,
-      };
+    it.each([true, false])(
+      'roundtrips background=%s through serialize and parse',
+      (background) => {
+        const configWithBackground: SubagentConfig = {
+          ...validConfig,
+          background,
+        };
 
-      const serialized = manager.serializeSubagent(configWithBackground);
-      const parsed = manager.parseSubagentContent(
-        serialized,
-        validConfig.filePath!,
-        'project',
-      );
+        const serialized = manager.serializeSubagent(configWithBackground);
+        const parsed = manager.parseSubagentContent(
+          serialized,
+          validConfig.filePath!,
+          'project',
+        );
 
-      expect(parsed.background).toBe(true);
-    });
+        expect(parsed.background).toBe(background);
+      },
+    );
 
     // --- CC 2.1.168 declarative-agent fields serialization ---
 
@@ -1559,6 +1849,172 @@ You are a helpful assistant.`;
         path.normalize('/test/project/.qwen/agents/misnamed-file.md'),
       );
     });
+
+    it('refuses a by-name dispatch matching a skipped invalid-executor file instead of falling through to a builtin (R10-2)', async () => {
+      // A project file declares the builtin name 'Explore' with an invalid
+      // executor (typo'd `kind: ACP`), so discovery skips it with a warning.
+      // Without R10-2, loadSubagent('Explore') falls through
+      // session>project>user>extension>builtin and resolves the BUILTIN Explore
+      // — an in-process agent under a Qwen model — silently substituting it for
+      // the external agent the file asked for, with only a console.warn as the
+      // trace. loadSubagent must instead refuse with the recorded executor error.
+      // Reverting to skip-and-continue (no recorded refusal) turns this red: the
+      // call resolves the builtin instead of rejecting.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('clears a stale executor refusal when the directory later becomes unreadable (R12-4)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // First scan: a malformed-executor file records a refusal for 'explore'.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+      // The directory then disappears / becomes unreadable (git checkout of a
+      // branch with no agents dir, rm -rf, an unreadable dir). Without resetting
+      // the level's refusals on the scan-failure path, loadSubagent keeps
+      // throwing the stale refusal for a file that no longer exists, leaving the
+      // builtin permanently unreachable. With the reset, the scan returns [] and
+      // the dispatch falls through to the builtin again. Deleting the catch reset
+      // turns this red (the second call rejects with the stale error).
+      vi.mocked(fs.readdir).mockRejectedValue(
+        new Error('ENOENT: no such directory'),
+      );
+      const resolved = await manager.loadSubagent('Explore');
+      expect(resolved?.isBuiltin).toBe(true);
+    });
+
+    it('does not refuse an in-process definition whose block-scalar prose mentions executor: (R12-5)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['foo.md'] as any);
+      // A `description: |` block scalar documents the executor syntax as prose; a
+      // duplicate `name:` key is a tolerated YAML quirk (control: it loads
+      // alone). The raw-text probe matches the prose `executor:` line, so without
+      // the block-scalar exclusion `claimsExecutor` is true and astLostExecutor
+      // refuses (the duplicate key makes has('executor') false). With the
+      // exclusion the prose match is not a claim, no refusal is recorded, and the
+      // in-process definition loads — reverting the exclusion turns this red
+      // (loadSubagent rejects /invalid executor block/).
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: foo\nname: foo\ndescription: |\n  Reviews code. To run externally use:\n  executor: acp\n  for details.\n---\nPrompt',
+      );
+      const config = await manager.loadSubagent('foo');
+      expect(config).not.toBeNull();
+      expect(config!.name).toBe('foo');
+      expect(config!.executor).toBeUndefined();
+    });
+
+    it('does not refuse an in-process definition whose folded-block-scalar prose mentions executor: (R12-5)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['foo.md'] as any);
+      // Same as above but with a folded block scalar (`description: >`).
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: foo\nname: foo\ndescription: >\n  Reviews code. To run externally use:\n  executor: acp\n  for details.\n---\nPrompt',
+      );
+      const config = await manager.loadSubagent('foo');
+      expect(config).not.toBeNull();
+      expect(config!.executor).toBeUndefined();
+    });
+
+    it('refuses a by-name dispatch for an executor-claiming file that fails an earlier validation (R11-1)', async () => {
+      // A project file declares an executor but OMITS the description, so it
+      // fails the earlier required-field validation BEFORE the executor block is
+      // reached. Without hoisting the claim probe + declared name above those
+      // validations, the file is skipped with nothing recorded and loadSubagent
+      // falls through to the builtin Explore — the substitution R10-2 prevents.
+      // The catch now converts any load failure of an executor-claiming file into
+      // a named executor refusal. Reverting the catch conversion turns this red
+      // (loadSubagent resolves the builtin instead of rejecting).
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\nexecutor:\n  kind: acp\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('keys the executor refusal by the AST-parsed name, so a quoted name still refuses the dispatch (R11-4)', async () => {
+      // parseSimple's parseValue strips only double quotes, so `name: 'Explore'`
+      // (single-quoted) would otherwise be recorded under "'explore'" and miss
+      // the 'explore' dispatch lookup. The refusal must be keyed by the name the
+      // real YAML AST sees. The colon in description forces the astLostExecutor
+      // refusal path; reverting `declaredName ?? name` to `name` turns this red.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        "---\nname: 'Explore'\ndescription: Reviews code: fast and careful\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt",
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('refuses a by-name dispatch for an extension-level executor refusal instead of falling through to a builtin (R10-2 extension leg)', async () => {
+      // Extension agents load via loadSubagentFromDir, which skips + warns on a
+      // refusal — so the directory-scan recording never ran for them and the
+      // R10-2 extension leg read an empty map (a no-op). The refusals are now
+      // carried on the loaded extension and merged into the 'extension' bucket,
+      // so the fall-through refuses. Reverting the merge (dropping the
+      // executorRefusals.set('extension', ...)) turns this red: loadSubagent
+      // resolves the builtin instead of rejecting.
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          agents: [],
+          agentExecutorRefusals: new Map([
+            [
+              'explore',
+              new SubagentError(
+                'Agent file /ext/agents/explore.md has an invalid executor block: it declares an executor but failed to load.',
+                SubagentErrorCode.INVALID_CONFIG,
+                'Explore',
+              ),
+            ],
+          ]),
+        } as never,
+      ]);
+      // No project/user file declares 'Explore' — only the extension refusal.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue([] as any);
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
   });
 
   describe('updateSubagent', () => {
@@ -1662,6 +2118,74 @@ You are a helpful assistant.`;
   });
 
   describe('deleteSubagent', () => {
+    it.each([
+      ['codex', 'project'],
+      ['claude-code', 'project'],
+      ['codex', 'user'],
+      ['claude-code', 'user'],
+      ['codex', undefined],
+      ['claude-code', undefined],
+    ] as const)(
+      'deletes a custom %s definition at level %s despite its builtin name',
+      async (name, level) => {
+        vi.mocked(fs.readdir).mockResolvedValue([`${name}.md`] as never);
+        vi.mocked(fs.readFile).mockResolvedValue(
+          `---\nname: ${name}\ndescription: Custom native agent\n---\nInspect.`,
+        );
+        mockParseYaml.mockReturnValue({
+          name,
+          description: 'Custom native agent',
+        });
+        vi.mocked(fs.unlink).mockResolvedValue(undefined);
+        await manager.deleteSubagent(name, level);
+        expect(fs.unlink).toHaveBeenCalledTimes(level === undefined ? 2 : 1);
+        expect(
+          vi
+            .mocked(fs.unlink)
+            .mock.calls.every(([file]) => String(file).endsWith(`${name}.md`)),
+        ).toBe(true);
+      },
+    );
+
+    it.each(['codex', 'claude-code'])(
+      'protects the builtin %s definition from deletion',
+      async (name) => {
+        vi.mocked(fs.readdir).mockResolvedValue([]);
+        await expect(manager.deleteSubagent(name, 'builtin')).rejects.toThrow(
+          /Cannot delete built-in/,
+        );
+        await expect(manager.deleteSubagent(name)).rejects.toThrow(
+          /Cannot delete built-in/,
+        );
+        await expect(
+          manager.deleteSubagent(name, 'project'),
+        ).rejects.toMatchObject({
+          code: SubagentErrorCode.INVALID_CONFIG,
+        });
+        expect(fs.unlink).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports a file error when a custom builtin-name definition cannot be deleted', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue(['codex.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: codex\ndescription: Custom native agent\n---\nInspect.',
+      );
+      mockParseYaml.mockReturnValue({
+        name: 'codex',
+        description: 'Custom native agent',
+      });
+      vi.mocked(fs.unlink).mockRejectedValue(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+      await expect(
+        manager.deleteSubagent('codex', 'project'),
+      ).rejects.toMatchObject({
+        code: SubagentErrorCode.FILE_ERROR,
+        message: expect.stringContaining('permission denied'),
+      });
+    });
+
     it('should delete subagent from specified level', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
@@ -1859,7 +2383,7 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(7); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup, review-agent (built-in)
+      expect(subagents).toHaveLength(9);
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -1868,6 +2392,8 @@ System prompt 3`);
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
     });
 
@@ -1898,6 +2424,8 @@ System prompt 3`);
         'agent1',
         'agent2',
         'agent3',
+        'claude-code',
+        'codex',
         'Explore',
         'general-purpose',
         'review-agent',
@@ -1913,12 +2441,14 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // Only built-in agents remain
+      expect(subagents).toHaveLength(6); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -1930,12 +2460,14 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // Only built-in agents remain
+      expect(subagents).toHaveLength(6); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
         'statusline-setup',
         'review-agent',
+        'claude-code',
+        'codex',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -2067,6 +2599,26 @@ bad`);
 
   describe('Runtime Configuration Methods', () => {
     describe('convertToRuntimeConfig', () => {
+      it.each([{ kind: 'acp', command: 'npx' }, null, false, 0, ''])(
+        'refuses external executor %j before in-process conversion',
+        async (executor) => {
+          await expect(
+            manager.convertToRuntimeConfig({
+              ...validConfig,
+              tools: ['read_file'],
+              executor,
+            } as unknown as SubagentConfig),
+          ).rejects.toMatchObject({
+            code: SubagentErrorCode.INVALID_CONFIG,
+            message: expect.stringContaining(
+              'cannot be converted to an in-process agent',
+            ),
+          });
+          expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        },
+      );
+
       it('should convert basic configuration', async () => {
         const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
 
@@ -2283,6 +2835,268 @@ bad`);
       });
     });
 
+    describe('createAgentHeadless — external executor dispatch', () => {
+      const executorConfig: SubagentConfig = {
+        name: 'external-agent',
+        description: 'Runs somewhere else',
+        systemPrompt: 'You are external.',
+        level: 'session' as const,
+        executor: { kind: 'acp', command: 'npx', args: ['-y', 'some-acp'] },
+      };
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+        vi.restoreAllMocks();
+      });
+
+      it('refuses to run in-process when no executor is registered', async () => {
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue(
+          undefined,
+        );
+
+        await expect(
+          manager.createAgentHeadless(executorConfig, mockConfig),
+        ).rejects.toThrow(/registered no external agent executor/);
+
+        // The load-bearing assertion: it must NOT silently substitute the
+        // in-process executor. A definition that asked for an external agent
+        // and got AgentHeadless would bill the wrong provider and report the
+        // wrong agent, with no signal either way.
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it.each([null, false, 0, '', {}, { kind: 'ACP', command: 'npx' }])(
+        'rejects injected executor %j without side effects',
+        async (executor) => {
+          const create = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create,
+          });
+          manager.loadSessionSubagents([
+            { ...executorConfig, executor } as unknown as SubagentConfig,
+          ]);
+          const loaded = await manager.loadSubagent(
+            executorConfig.name,
+            'session',
+          );
+          await expect(
+            manager.createAgentHeadless(loaded!, mockConfig),
+          ).rejects.toThrow(/failed validation/);
+          expect(create).not.toHaveBeenCalled();
+          expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+          expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        { tools: [] },
+        { tools: ['read_file'] },
+        { disallowedTools: ['write_file'] },
+        { mcpServers: { server: { command: 'node' } } },
+        { hooks: { PreToolUse: [] } },
+        { model: 'anthropic:claude' },
+        { maxTurns: 3 },
+        { runConfig: { max_turns: 3 } },
+      ])(
+        'rejects unsupported definition %j before factory or setup',
+        async (constraint) => {
+          const create = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create,
+          });
+          const hooks = vi.spyOn(mockConfig, 'getHookSystem');
+          await expect(
+            manager.createAgentHeadless(
+              { ...executorConfig, ...constraint },
+              mockConfig,
+            ),
+          ).rejects.toThrow(/does not support/);
+          expect(create).not.toHaveBeenCalled();
+          expect(hooks).not.toHaveBeenCalled();
+          expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+          expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        { toolConfigOverride: { tools: ['structured_output'] } },
+        { promptConfigOverrides: { initialMessages: [] } },
+        { promptConfigOverrides: { renderedSystemPrompt: 'schema' } },
+        { runtimeAuthOverrides: { authType: 'anthropic' } },
+        { modelConfigOverrides: { model: 'claude' } },
+        {
+          modelConfigOverrides: { temperature: 0.5 } as unknown as {
+            model?: string;
+          },
+        },
+        { hooks: { onStop: vi.fn() } },
+        { runConfigOverrides: { max_turns: 3 } },
+      ])('rejects unsupported options %j before factory', async (options) => {
+        const create = vi.fn();
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+        await expect(
+          manager.createAgentHeadless(executorConfig, mockConfig, options),
+        ).rejects.toThrow(/does not support/);
+        expect(create).not.toHaveBeenCalled();
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it.each(['project', 'builtin'] as const)(
+        'refuses %s executables in an untrusted workspace',
+        async (level) => {
+          const create = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create,
+          });
+          vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+          await expect(
+            manager.createAgentHeadless(
+              { ...executorConfig, level },
+              mockConfig,
+            ),
+          ).rejects.toThrow(/untrusted project/);
+          expect(create).not.toHaveBeenCalled();
+        },
+      );
+
+      it('refuses an external executor in safe mode even in a trusted folder (R8-2)', async () => {
+        const create = vi.fn();
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(true);
+        // Safe mode promises only built-in subagents and no repo-supplied
+        // execution. Discovery filtering does not stop loadSubagent resolving a
+        // repo-shipped executor definition from disk, so the dispatch gate must
+        // refuse it — even at project level in a trusted folder.
+        await expect(
+          manager.createAgentHeadless(
+            { ...executorConfig, level: 'project' },
+            mockConfig,
+          ),
+        ).rejects.toThrow(/safe mode/);
+        expect(create).not.toHaveBeenCalled();
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      });
+
+      it('preserves external factory errors without AgentHeadless labeling', async () => {
+        const error = new Error('spawn ENOENT');
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create: vi.fn().mockRejectedValue(error),
+        });
+        await expect(
+          manager.createAgentHeadless(executorConfig, mockConfig),
+        ).rejects.toBe(error);
+      });
+
+      it('composes external disposal and propagates its error', async () => {
+        const error = new Error('dispose failed');
+        const dispose = vi.fn().mockRejectedValue(error);
+        const create = vi.fn().mockResolvedValue({ dispose });
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+        const result = await manager.createAgentHeadless(
+          { ...executorConfig, model: 'inherit' },
+          mockConfig,
+          {
+            modelConfigOverrides: {},
+            runConfigOverrides: { max_time_minutes: 2 },
+          },
+        );
+        expect(create.mock.calls[0][0]).toMatchObject({
+          modelConfig: {},
+          runConfig: { max_time_minutes: 2 },
+          toolConfig: { disallowedTools: [ToolNames.ASK_USER_QUESTION] },
+        });
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+        await expect(result.dispose()).rejects.toBe(error);
+        expect(dispose).toHaveBeenCalledOnce();
+      });
+
+      it('derives the peer permission mode from the host-resolved approval policy, not the raw definition', async () => {
+        const create = vi.fn().mockResolvedValue({});
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+        // The definition asks for the most permissive mode; the host has
+        // clamped the effective policy to DEFAULT (resolveSubagentApprovalMode
+        // stamps that onto the runtimeContext the Agent tool hands in).
+        vi.spyOn(mockConfig, 'getApprovalMode').mockReturnValue(
+          ApprovalMode.DEFAULT,
+        );
+        await manager.createAgentHeadless(
+          { ...executorConfig, approvalMode: 'yolo' },
+          mockConfig,
+        );
+        // The executor must receive the host's clamped policy, so a definition
+        // cannot escalate the external agent past the parent session's limit.
+        expect(create.mock.calls[0]![0]).toMatchObject({
+          approvalMode: ApprovalMode.DEFAULT,
+        });
+      });
+
+      it('re-validates the executor block at the consumption point', async () => {
+        // Session-level subagents are injected as plain objects and spread
+        // verbatim by loadSessionSubagents, bypassing frontmatter parsing — so
+        // an arbitrarily shaped executor can reach the dispatch.
+        const injected = {
+          ...executorConfig,
+          executor: { kind: 'acp', command: '   ' },
+        } as unknown as SubagentConfig;
+
+        await expect(
+          manager.createAgentHeadless(injected, mockConfig),
+        ).rejects.toThrow(/failed validation/);
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      });
+
+      it('dispatches to the registered executor with the validated spec', async () => {
+        const externalSubagent = { execute: vi.fn() };
+        const create = vi.fn().mockResolvedValue(externalSubagent as never);
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+
+        const result = await manager.createAgentHeadless(
+          executorConfig,
+          mockConfig,
+        );
+
+        expect(result.subagent).toBe(externalSubagent);
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        expect(create.mock.calls[0][0]).toMatchObject({
+          spec: { kind: 'acp', command: 'npx', args: ['-y', 'some-acp'] },
+          name: 'external-agent',
+        });
+      });
+
+      it('leaves the in-process path untouched when no executor is declared', async () => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+        } as never);
+        const create = vi.fn();
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        } as never);
+
+        await manager.createAgentHeadless(
+          { ...executorConfig, executor: undefined },
+          mockConfig,
+        );
+
+        expect(mockAgentHeadlessCreate).toHaveBeenCalled();
+        expect(create).not.toHaveBeenCalled();
+      });
+    });
+
     describe('createAgentHeadless model override', () => {
       const agentConfig: SubagentConfig = {
         name: 'model-test-agent',
@@ -2307,6 +3121,7 @@ bad`);
         });
         vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
           getResolvedModel: vi.fn().mockReturnValue(undefined),
+          getGenerationConfig: vi.fn().mockReturnValue({}),
         } as unknown as ReturnType<Config['getModelsConfig']>);
       });
 

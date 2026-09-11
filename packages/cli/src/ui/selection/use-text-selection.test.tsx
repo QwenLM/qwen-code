@@ -12,7 +12,10 @@ import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { TextSelectionController } from './use-text-selection.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from './use-text-selection.js';
 
 const mocks = vi.hoisted(() => ({
   stdout: { rows: 10 },
@@ -797,6 +800,188 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+    });
+  });
+
+  const renderController = (eventsPaused: boolean) =>
+    render(
+      <TextSelectionController
+        isActive
+        eventsPaused={eventsPaused}
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+
+  it('does not start a selection while eventsPaused', () => {
+    renderController(true);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('move', 5));
+    handler(makeEvent('left-release', 5));
+
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('preserves an existing selection when eventsPaused flips on', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    selectHello(handler);
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
+    setSelection.mockClear();
+
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('left-press', 1));
+    pausedHandler(makeEvent('left-release', 1));
+
+    // No clear (setSelection(null)) and no new selection — the range survives.
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the selection on a wheel tick while not paused', () => {
+    const handler = mount();
+    selectHello(handler);
+    setSelection.mockClear();
+
+    handler(makeEvent('scroll-down', 1));
+
+    expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('drops a wheel tick while eventsPaused instead of clearing', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    selectHello(handler);
+    setSelection.mockClear();
+
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('scroll-down', 1));
+
+    // Nothing scrolled while the menu owns the pointer — the selection the
+    // menu's Copy Selection offers must survive the wheel tick.
+    expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('finishes an in-flight drag when the release lands while eventsPaused', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('move', 3));
+
+    // The context menu opens mid-drag and pauses events before the release.
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('left-release', 4));
+    setSelection.mockClear();
+    vi.mocked(copyToClipboard).mockClear();
+
+    // After resume, a bare release (no press) must not resurrect the stale
+    // drag and copy a range the user never selected.
+    rerender(
+      <TextSelectionController
+        isActive
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const resumedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    resumedHandler(makeEvent('left-release', 5));
+
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  describe('selectionQueryRef', () => {
+    const mountWithQuery = () => {
+      const selectionQueryRef = { current: null as SelectionQuery | null };
+      render(
+        <TextSelectionController
+          isActive
+          getViewportRect={() => viewportRect}
+          getScrollState={() => scrollState}
+          hitTestScrollbar={() => false}
+          selectionQueryRef={selectionQueryRef}
+        />,
+      );
+      const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+      return { selectionQueryRef, handler };
+    };
+
+    it('reports the normalized range of a drag selection', () => {
+      const { selectionQueryRef, handler } = mountWithQuery();
+      expect(selectionQueryRef.current).not.toBeNull();
+      selectHello(handler);
+      expect(selectionQueryRef.current!.getRange()).toEqual({
+        sx: 0,
+        sy: 0,
+        ex: 4,
+        ey: 0,
+      });
+    });
+
+    it('reports null for a bare collapsed click', () => {
+      const { selectionQueryRef, handler } = mountWithQuery();
+      handler(makeEvent('left-press', 2));
+      handler(makeEvent('left-release', 2));
+      expect(selectionQueryRef.current!.getRange()).toBeNull();
+    });
+
+    it('still reports a collapsed word span from a single-cell double-click', () => {
+      frame = makeFrame('x = 5');
+      vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1100);
+      const { selectionQueryRef, handler } = mountWithQuery();
+      handler(makeEvent('left-press', 5));
+      handler(makeEvent('left-press', 5));
+      // The isolated '5' is a one-cell word span: collapsed but carrying
+      // text, so Copy Selection must still be offered.
+      expect(selectionQueryRef.current!.getRange()).toEqual({
+        sx: 4,
+        sy: 0,
+        ex: 4,
+        ey: 0,
+      });
+    });
+
+    it('clears the ref on unmount', () => {
+      const { selectionQueryRef } = mountWithQuery();
+      expect(selectionQueryRef.current).not.toBeNull();
+      cleanup();
+      expect(selectionQueryRef.current).toBeNull();
     });
   });
 });

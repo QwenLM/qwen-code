@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -374,6 +376,325 @@ describe('TelegramChannel', () => {
     expect(processOnceSpy).toHaveBeenCalled();
   });
 
+  it('preserves the document caption when the download fails', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    expect(handler).toBeDefined();
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe(
+      '/review inspect this\n\n(User sent a file "input.txt" but download failed)',
+    );
+  });
+
+  it('keeps document captions after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'input.txt' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('/review inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'input.txt',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('keeps voice captions after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('/review inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+      mimeType: 'audio/ogg',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('clears a captionless voice placeholder after download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    expect(preparation.envelope.syntheticText).toBe(true);
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('clears a captionless document placeholder after a successful download', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'report.pdf' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+    },
+  ])('marks a captionless $label as synthetic', async ({ event, message }) => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([registered]) => registered === event,
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        ...message,
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(channel.inboundPreparations[0]?.envelope.syntheticText).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+      placeholder: '(image)',
+      note: '(User sent an image but download failed)',
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      placeholder: '(file: report.pdf)',
+      note: '(User sent a file "report.pdf" but download failed)',
+    },
+    {
+      label: 'voice',
+      event: 'message:voice',
+      message: { voice: { file_id: 'voice-1', mime_type: 'audio/ogg' } },
+      placeholder: '(voice message)',
+      note: '(User sent a voice message but download failed)',
+    },
+  ])(
+    'drops the $label placeholder from the prompt when the download fails',
+    async ({ event, message, placeholder, note }) => {
+      const channel = createChannel();
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      await preparation.prepare();
+
+      expect(preparation.envelope.text).not.toContain(placeholder);
+      expect(preparation.envelope.text).toBe(`\n\n${note}`);
+    },
+  );
+
+  it('keeps a photo caption as user-authored text', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: 'inspect this photo',
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(channel.inboundPreparations[0]?.envelope.text).toBe(
+      'inspect this photo',
+    );
+    expect(
+      channel.inboundPreparations[0]?.envelope.syntheticText,
+    ).toBeUndefined();
+  });
+
   it('continues startup when Telegram command menu registration fails', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
@@ -453,6 +774,37 @@ describe('TelegramChannel', () => {
       'chat-1',
       expect.stringContaining('Qwen Code Telegram bot'),
       { parse_mode: 'HTML' },
+    );
+  });
+
+  it('handles the Telegram Start button', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:text',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        text: '/start',
+        entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+      },
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await vi.waitFor(() => expect(bot.api.sendMessage).toHaveBeenCalled());
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '1',
+      expect.stringContaining('Use /help'),
+      { parse_mode: 'HTML' },
+    );
+    expect(String(bot.api.sendMessage.mock.calls[0]?.[1])).toContain(
+      'Send any message to chat with Qwen Code.',
     );
   });
 

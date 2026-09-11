@@ -606,7 +606,7 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
-  it.each(['ui.mouseTracking', 'ui.showScrollbar'])(
+  it.each(['ui.mouseTracking', 'ui.showScrollbar', 'ui.showToolCallArgs'])(
     'rejects a TUI-only key (%s) that has no effect in the web shell',
     async (key) => {
       // These keys are read only inside the ink TUI (mouseTracking also
@@ -621,6 +621,31 @@ describe('POST /workspace/settings', () => {
         value: false,
       });
 
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
+    'keeps the web shell brand (%s) off the settings surface',
+    async (key) => {
+      // Brand is deployment configuration served by `GET /brand` from the
+      // system and user layers only. Exposing it here would make it writable
+      // from any connected browser, and would report a merged effective value
+      // that includes the workspace layer `GET /brand` deliberately excludes.
+      const { app, persistSetting } = makeApp();
+
+      const read = await request(app).get('/workspace/settings');
+      expect(
+        read.body.settings.map((setting: { key?: string }) => setting.key),
+      ).not.toContain(key);
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key,
+        value: 'QiuQiu Code',
+      });
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({ code: 'disallowed_key' });
       expect(persistSetting).not.toHaveBeenCalled();

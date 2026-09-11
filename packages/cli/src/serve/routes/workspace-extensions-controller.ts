@@ -639,16 +639,23 @@ export function createExtensionsController(
               async (release) => {
                 assertGenerationOpen?.();
                 return await task((generation) => {
-                  reconciliationReservation ??=
-                    options.reserveRuntimeReconciliation?.();
+                  // sendOperation passes reserveRuntimeReconciliation even on
+                  // skipRefresh routes; an operation that will not reconcile
+                  // never runs a reservation, so it must not take one.
+                  if (!options.skipRefresh) {
+                    reconciliationReservation ??=
+                      options.reserveRuntimeReconciliation?.();
+                  }
                   committedGeneration = generation;
                   release();
                 });
               },
             );
             if (committedGeneration === undefined) {
-              reconciliationReservation ??=
-                options.reserveRuntimeReconciliation?.();
+              if (!options.skipRefresh) {
+                reconciliationReservation ??=
+                  options.reserveRuntimeReconciliation?.();
+              }
               committedGeneration = result.generation;
             }
             for (const warning of result.warnings ?? []) {

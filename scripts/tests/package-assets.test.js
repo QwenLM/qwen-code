@@ -561,6 +561,106 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies the HTML export renderer into the published package', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    writeFile(
+      rootDir,
+      'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+      'window.QwenExportRenderer = true;',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-templates/src/export-html/dist/export-transcript-document.css',
+      'body{color:red}',
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist', 'export-transcript-document.js'),
+        'utf8',
+      ),
+    ).toBe('window.QwenExportRenderer = true;');
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist', 'export-transcript-document.css'),
+        'utf8',
+      ),
+    ).toBe('body{color:red}');
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.files).toContain('export-transcript-document.js');
+    expect(distPackageJson.files).toContain('export-transcript-document.css');
+  });
+
+  it('names the missing stylesheet when only the renderer JS was built', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+      'window.QwenExportRenderer = true;',
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    const warning = console.warn.mock.calls
+      .map(([message]) => String(message))
+      .find((message) => message.includes('HTML export renderer assets'));
+    // The reachable way into that branch with the JS present is a stale
+    // web-templates build, so the warning has to name the CSS that is actually
+    // missing rather than send the operator looking for a JS file that exists.
+    expect(warning).toContain(
+      path.join(
+        rootDir,
+        'packages',
+        'web-templates',
+        'src',
+        'export-html',
+        'dist',
+        'export-transcript-document.css',
+      ),
+    );
+    expect(warning).not.toContain('export-transcript-document.js');
+    // All-or-nothing stays: prepare-package.js requires both artifacts, so the
+    // renderer JS that *was* found must not be half-published into dist/.
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'export-transcript-document.js')),
+    ).toBe(false);
+  });
+
+  it('fails packaging when the published stylesheet is missing', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    rmSync(path.join(rootDir, 'dist', 'export-transcript-document.css'));
+    stubConsole();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+    // throw, so the exit has to become one to keep the rest of the suite alive.
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit(1)');
+    });
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow('process.exit(1)');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(
+      console.error.mock.calls
+        .map(([message]) => String(message))
+        .some(
+          (message) =>
+            message.includes('Required package artifact not found') &&
+            message.includes('export-transcript-document.css'),
+        ),
+    ).toBe(true);
+  });
+
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
     writeFile(
@@ -930,12 +1030,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 112 MiB default unpacked size budget', () => {
+  it('enforces a 128 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 111 * 1024 * 1024);
+    truncateSync(largeFile, 127 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -945,7 +1045,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 112 * 1024 * 1024);
+    truncateSync(largeFile, 128 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -953,7 +1053,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 117440512 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
     );
   });
 
@@ -1306,6 +1406,16 @@ describe('package asset scripts', () => {
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });
+    writeFile(
+      rootDir,
+      'dist/export-transcript-document.js',
+      'window.QwenExportRenderer = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'dist/export-transcript-document.css',
+      'body{color:red}\n',
+    );
   }
 
   function writeFile(rootDir, relativePath, content) {

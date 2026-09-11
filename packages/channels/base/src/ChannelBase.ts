@@ -8,6 +8,8 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -27,7 +29,6 @@ import type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
-import { BlockStreamer } from './BlockStreamer.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -39,9 +40,10 @@ import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
-import { SessionRouter } from './SessionRouter.js';
+import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
 import {
   NamedSessionManager,
+  NamedSessionTaskError,
   type NamedSessionOwnerInput,
   type NamedSessionSelection,
   type NamedSessionTaskReference,
@@ -59,6 +61,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -90,6 +93,11 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
+
+interface BackgroundResponseDeliveryTarget {
+  target: SessionTarget;
+  sourceLabel?: string;
+}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -221,8 +229,11 @@ interface ChannelMemoryRecallSelection {
 }
 
 export interface ChannelBaseOptions {
+  locale?: 'en' | 'zh';
   router?: SessionRouter;
   proxy?: string;
+  /** Qwen UI language used by adapter-owned presentation. */
+  displayLanguage?: string;
   /** Adapter-owned persistent state directory. */
   stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
@@ -247,6 +258,54 @@ export interface ChannelBaseOptions {
     /** Read persisted observations so adapters can hydrate label caches. */
     list?(): ObservedChannelContactGraph;
   };
+}
+
+const PERMISSION_COPY = {
+  en: {
+    toolUse: 'Tool use',
+    allowOnce: 'Allow once',
+    allowAlwaysProject: 'always allow for this project',
+    allowAlwaysUser: 'always allow for this user',
+    allowAlways: 'always allow',
+    deny: 'Deny',
+    required: 'Permission required to run a tool',
+    request: 'Request:',
+    tool: 'Tool:',
+    action: 'Action:',
+    parameters: 'Parameters:',
+    replyWith: 'Reply with:',
+  },
+  zh: {
+    toolUse: '工具调用',
+    allowOnce: '仅允许本次',
+    allowAlwaysProject: '始终允许此项目',
+    allowAlwaysUser: '始终允许此用户',
+    allowAlways: '始终允许',
+    deny: '拒绝',
+    required: '运行工具需要授权',
+    request: '请求：',
+    tool: '工具：',
+    action: '操作：',
+    parameters: '参数：',
+    replyWith: '回复以下命令：',
+  },
+} as const;
+
+/**
+ * Translate the stock prefix of a scoped always-allow label, keeping the
+ * command/tool scope that exec and mcp confirmations append to it.
+ */
+function localizedScopedAlwaysLabel(
+  label: string,
+  stockLabel: string,
+  localizedLabel: string,
+): string | undefined {
+  if (label === stockLabel) return localizedLabel;
+  const scopeSeparator = ': ';
+  if (!label.startsWith(stockLabel + scopeSeparator)) return undefined;
+  return `${localizedLabel}：${label.slice(
+    stockLabel.length + scopeSeparator.length,
+  )}`;
 }
 
 export interface ChannelLoopController {
@@ -279,6 +338,7 @@ type PendingPermission = {
   sourceLabel?: string;
   taskName?: string;
   userInputPresented?: boolean;
+  permissionPresented?: boolean;
   settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
   settled?: UserInputSettlementReason;
   responsePromise?: Promise<boolean>;
@@ -314,7 +374,6 @@ type ActivePrompt = {
   loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
-  stopStreaming?: () => void;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -412,6 +471,7 @@ export abstract class ChannelBase {
   protected proxy?: string;
   /** Adapter-owned persistent state directory, when supplied by the runtime. */
   protected readonly stateDir?: string;
+  protected readonly locale: 'en' | 'zh';
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -469,8 +529,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -482,6 +543,9 @@ export abstract class ChannelBase {
     event: SessionDiedEvent,
   ): void => {
     this.onSessionDied(event.sessionId);
+  };
+  private readonly bridgeDisconnectedListener = (): void => {
+    this.onBridgeDisconnected();
   };
   private readonly bridgePermissionRequestListener = (
     event: PermissionRequestEvent,
@@ -538,15 +602,21 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
-    let target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      text.trim().length === 0
-    ) {
+    if (text.trim().length === 0) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
     }
+    await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected async resolveBackgroundResponseDelivery(
+    sessionId: string,
+  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
+    let target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
@@ -569,6 +639,15 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
+    return { target, sourceLabel };
+  }
+
+  protected async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundResponseDeliveryTarget,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
@@ -615,7 +694,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not resolve the current task for /btw.',
+        `Could not resolve the current task for /btw.`,
         sourceLabel,
       );
       return;
@@ -872,6 +951,10 @@ export abstract class ChannelBase {
       if (presentation && (await presentation)) {
         return;
       }
+      const permissionPresentation = this.tryPresentPermission(pending);
+      if (permissionPresentation && (await permissionPresentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -987,6 +1070,150 @@ export abstract class ChannelBase {
     })();
   }
 
+  private tryPresentPermission(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const isUserQuestion =
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const decisions = this.permissionPresentationDecisions(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      isUserQuestion ||
+      !decisions
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelPermissionRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      title: this.permissionTitle(pending.request.toolCall),
+      decisions,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (decision) => {
+        const response = this.permissionPresentationResponse(pending, decision);
+        if (!response) return Promise.resolve(false);
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.permissionPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        const result = await this.presentPermissionRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] permission presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private permissionPresentationDecisions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['decisions'] | undefined {
+    const allowOnce = this.approvalOption(pending);
+    if (!allowOnce) return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    const allowAlways = this.approvalAlwaysOption(pending);
+    return [
+      {
+        kind: 'allow_once',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(allowOnce, copy.allowOnce),
+          80,
+        ),
+      },
+      ...(allowAlways
+        ? [
+            {
+              kind: 'allow_always' as const,
+              label: sanitizeQuotedText(allowAlways.label, 80),
+            },
+          ]
+        : []),
+      {
+        kind: 'deny',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(this.denialOption(pending), copy.deny),
+          80,
+        ),
+      },
+    ];
+  }
+
+  private permissionPresentationResponse(
+    pending: PendingPermission,
+    decision: ChannelPermissionDecision,
+  ): ChannelUserInputResponse | undefined {
+    if (decision === 'deny') return this.denialResponse(pending);
+    const optionId =
+      decision === 'allow_once'
+        ? this.approvalOptionId(pending)
+        : this.approvalAlwaysOption(pending)?.optionId;
+    return optionId
+      ? { outcome: { outcome: 'selected', optionId } }
+      : undefined;
+  }
+
   private normalizeUserQuestions(
     pending: PendingPermission,
   ): ChannelUserQuestion[] | undefined {
@@ -1067,7 +1294,8 @@ export abstract class ChannelBase {
     response: ChannelUserInputResponse,
   ): Promise<boolean> {
     if (pending.responsePromise) {
-      return pending.responsePromise;
+      await pending.responsePromise;
+      return false;
     }
     if (
       this.pendingPermissions.get(pending.requestId) !== pending ||
@@ -1142,6 +1370,7 @@ export abstract class ChannelBase {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
+    this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
@@ -1217,7 +1446,11 @@ export abstract class ChannelBase {
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
-  abstract disconnect(): void;
+  abstract disconnect(): void | Promise<void>;
+
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
@@ -1248,6 +1481,12 @@ export abstract class ChannelBase {
 
   protected async presentUserInputRequest(
     _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
+  protected async presentPermissionRequest(
+    _context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
   }
@@ -2471,6 +2710,7 @@ export abstract class ChannelBase {
       ]);
       if (!cancelled) {
         this.cancelBtw(sessionId);
+        this.onSessionRetiring(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -2562,7 +2802,6 @@ export abstract class ChannelBase {
           return false;
         }
         active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
@@ -2656,10 +2895,21 @@ export abstract class ChannelBase {
     this.removePendingPermissionsForSession(sessionId);
   }
 
+  /**
+   * Called when the standalone ACP bridge process exits. Its in-flight turns
+   * never settle, but crash recovery restores the sessions on a fresh bridge,
+   * so overrides must clear only turn-scoped transient state (never session
+   * routing) and must not fabricate terminal outcomes for interrupted turns.
+   */
+  onBridgeDisconnected(): void {}
+
+  protected onSessionRetiring(_sessionId: string): void {}
+
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
     bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
+    bridge.on('disconnected', this.bridgeDisconnectedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
   }
@@ -2668,6 +2918,7 @@ export abstract class ChannelBase {
     bridge.off('toolCall', this.bridgeToolCallListener);
     bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
+    bridge.off('disconnected', this.bridgeDisconnectedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
   }
@@ -3029,7 +3280,7 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
-      (!pending.userInputPresented ||
+      ((!pending.userInputPresented && !pending.permissionPresented) ||
         pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
@@ -3038,15 +3289,16 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
+    const copy = PERMISSION_COPY[this.locale];
     const parameters = this.permissionParameterSummary(toolCall);
     const approveLabel = this.permissionOptionLabel(
       this.approvalOption(pending),
-      'allow once',
+      copy.allowOnce.toLocaleLowerCase(this.locale),
     );
     const alwaysOption = this.approvalAlwaysOption(pending);
     const denyLabel = this.permissionOptionLabel(
       this.denialOption(pending),
-      'deny',
+      copy.deny.toLocaleLowerCase(this.locale),
     );
     const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
     const replyPadding = pending.taskName
@@ -3062,14 +3314,14 @@ export abstract class ChannelBase {
       `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
     return [
-      'Permission required to run a tool',
-      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
+      copy.required,
+      ...(pending.taskName ? [`${copy.request} ${pending.requestId}`] : []),
       '',
-      `Tool: ${this.permissionToolName(toolCall)}`,
-      `Action: ${this.permissionTitle(toolCall)}`,
-      ...(parameters ? [`Parameters: ${parameters}`] : []),
+      `${copy.tool} ${this.permissionToolName(toolCall)}`,
+      `${copy.action} ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`${copy.parameters} ${parameters}`] : []),
       '',
-      'Reply with:',
+      copy.replyWith,
       ...replies,
     ].join('\n');
   }
@@ -3079,7 +3331,10 @@ export abstract class ChannelBase {
   ): string {
     const rawTitle =
       typeof toolCall.title === 'string' ? toolCall.title : undefined;
-    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+    return (
+      sanitizeQuotedText(rawTitle || '', 160).trim() ||
+      PERMISSION_COPY[this.locale].toolUse
+    );
   }
 
   private permissionToolName(
@@ -3130,7 +3385,39 @@ export abstract class ChannelBase {
   ): string {
     const rawLabel = typeof option?.name === 'string' ? option.name : '';
     const label = sanitizeQuotedText(rawLabel, 160).trim();
-    return label || fallback;
+    if (!label) return fallback;
+    return this.localizedPermissionOptionLabel(option, label) ?? label;
+  }
+
+  private localizedPermissionOptionLabel(
+    option: PermissionOption | undefined,
+    label: string,
+  ): string | undefined {
+    if (this.locale !== 'zh') return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    if (option?.kind === 'allow_always') {
+      if (option.optionId === 'proceed_always_project') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow in project',
+          copy.allowAlwaysProject,
+        );
+      }
+      if (option.optionId === 'proceed_always_user') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow for user',
+          copy.allowAlwaysUser,
+        );
+      }
+      if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
+        return copy.allowAlways;
+      }
+      return undefined;
+    }
+    if (label === 'Allow' || label === 'Allow once') return copy.allowOnce;
+    if (label === 'Deny' || label === 'Reject') return copy.deny;
+    return undefined;
   }
 
   private approvalOption(
@@ -3183,13 +3470,14 @@ export abstract class ChannelBase {
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
+    const copy = PERMISSION_COPY[this.locale];
     if (option.optionId === 'proceed_always_project') {
-      return 'always allow for this project';
+      return copy.allowAlwaysProject;
     }
     if (option.optionId === 'proceed_always_user') {
-      return 'always allow for this user';
+      return copy.allowAlwaysUser;
     }
-    return 'always allow';
+    return copy.allowAlways;
   }
 
   private denialResponse(pending: PendingPermission): {
@@ -3298,7 +3586,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+        `Submit this question through its interactive card, or use /deny [request-id] to cancel it.`,
         pending.sourceLabel,
       );
       return true;
@@ -3329,9 +3617,10 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = pending.userInputPresented
-        ? await this.respondToUserInput(pending, response)
-        : await this.bridge.respondToPermission(pending.requestId, response);
+      accepted =
+        pending.userInputPresented || pending.permissionPresented
+          ? await this.respondToUserInput(pending, response)
+          : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
@@ -3424,6 +3713,25 @@ export abstract class ChannelBase {
     this.releaseQueuedTurn(binding.sessionId);
   }
 
+  /**
+   * Follow a task onto the session its reload healed to (a superseded
+   * redirect). The queue reservation and the staleness generation are keyed
+   * by session id, so both must move with the binding: leaving them behind
+   * keeps the stale id "busy" forever and drops the turn on a generation the
+   * replacement never had.
+   */
+  private moveNamedTurnBinding(
+    binding: NamedTurnBinding,
+    sessionId: string,
+  ): void {
+    if (binding.sessionId !== null) {
+      this.releaseQueuedTurn(binding.sessionId);
+    }
+    binding.sessionId = sessionId;
+    binding.generation = this.sessionGenerations.get(sessionId) ?? 0;
+    this.reserveQueuedTurn(sessionId);
+  }
+
   private finishNamedTurnBinding(envelope: Envelope): void {
     const binding = this.namedTurnBindings.get(envelope);
     if (!binding) return;
@@ -3489,14 +3797,88 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * The actionable recovery message for a worktree task whose ownership state
+   * the daemon refused to restore. Both codes come from the load/resume route
+   * — the reset route resumes an interrupted transfer itself and reports a
+   * broken marker as invalid state — so they surface on selection and on a
+   * message, wrapped in the manager's generic load failure.
+   *
+   * Clearing always acts on the *selected* task, so pointing the user at a
+   * clear is only safe when the task that failed is the selected one. Aimed at
+   * any other task it would run a full ownership transfer against a healthy
+   * one and destroy that conversation, so the alternative points at the close
+   * that works on the broken task without loading it. Both name that task.
+   */
+  private async worktreeRecoveryMessage(
+    envelope: Envelope,
+    error: unknown,
+  ): Promise<string | undefined> {
+    const code = readDaemonHttpErrorCode(error);
+    if (
+      code !== 'worktree_reset_interrupted' &&
+      code !== 'worktree_marker_missing'
+    ) {
+      return undefined;
+    }
+    const interrupted = code === 'worktree_reset_interrupted';
+    const failedTaskName =
+      error instanceof NamedSessionTaskError ? error.taskName : undefined;
+    // This message bypasses the wrapper's sanitizeDisplayText, so bound the one
+    // piece of interpolated text it adds.
+    const safeTaskName =
+      failedTaskName === undefined
+        ? undefined
+        : sanitizeDisplayText(failedTaskName, 32);
+    const subject =
+      safeTaskName === undefined ? 'The task' : `Task "${safeTaskName}"`;
+    const problem = interrupted
+      ? 'was interrupted while being reset'
+      : 'cannot verify its worktree because its ownership marker is missing';
+    if (
+      safeTaskName !== undefined &&
+      failedTaskName === (await this.selectedTaskName(envelope))
+    ) {
+      return `${subject} ${problem}. Its files were not changed. ${
+        interrupted
+          ? 'Clear the task again to finish the reset.'
+          : 'Clear the task to restart it in the same worktree, or close it.'
+      }`;
+    }
+    const remedy =
+      safeTaskName === undefined
+        ? 'select this task first or close it'
+        : `select this task first or close it with /session close ${safeTaskName}`;
+    return `${subject} ${problem}. Its files were not changed. Clearing now would reset the selected task instead, so ${remedy}.`;
+  }
+
+  private async selectedTaskName(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return undefined;
+    try {
+      return (await namedSessions.current(this.namedSessionOwner(envelope)))
+        ?.name;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendNamedSessionError(
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
-      error instanceof Error
+      (await this.worktreeRecoveryMessage(envelope, error)) ??
+      (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
-        : 'Named-session operation failed.';
+        : 'Named-session operation failed.');
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
@@ -3515,7 +3897,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /sessions [all]',
+        `Usage: /sessions [all]`,
       );
       return true;
     }
@@ -3568,25 +3950,31 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+              : `No task is currently selected. Use /session new <name> or /session use <name>.`,
           );
           return true;
         }
         case 'new': {
-          if (parts.includes('--worktree')) {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'Worktree tasks are planned for Part 4. Create a shared task with /session new <name>.',
-            );
-            return true;
+          const isolation =
+            parts.length === 2 && parts[1] === '--worktree'
+              ? 'worktree'
+              : 'shared';
+          if (
+            (isolation === 'shared' && parts.length !== 1) ||
+            (isolation === 'worktree' && parts.length !== 2) ||
+            parts[0]?.startsWith('-')
+          ) {
+            break;
           }
-          if (parts.length !== 1) break;
-          const created = await namedSessions.create(owner, parts[0]!);
+          const created = await namedSessions.create(
+            owner,
+            parts[0]!,
+            isolation,
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Created and selected task "${created.name}" (shared workspace).`,
+            `Created and selected task "${created.name}" (${created.isolation} workspace).`,
           );
           return true;
         }
@@ -3604,7 +3992,10 @@ export abstract class ChannelBase {
           if (parts.length !== 1) break;
           const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
-          if (closing) this.cancelBtw(closing.sessionId);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+            this.onSessionRetiring(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
@@ -3669,7 +4060,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      `Usage: /session current | /session new <name> [--worktree] | /session use <name> | /session close <name> | /session cancel [<name>]`,
     );
     return true;
   }
@@ -3678,15 +4069,42 @@ export abstract class ChannelBase {
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
+      let resetWorktreeKept = false;
       let removedIds: string[];
+      const retiringSessionId = this.namedSessions
+        ? undefined
+        : this.router.getSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
+      if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
         try {
           const reset = await this.namedSessions.reset(
             this.namedSessionOwner(envelope),
           );
           resetTaskName = reset?.name;
+          resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
+          // The reset route's busy signal has its own wording; every other
+          // typed failure goes through the shared named-session surface.
+          const code = readDaemonHttpErrorCode(error);
+          if (code !== undefined) {
+            process.stderr.write(
+              `[${sanitizeLogText(this.name, 64)}] worktree reset failed (${sanitizeLogText(code, 64)}): ${this.lifecycleError(error)}\n`,
+            );
+          }
+          if (code === 'worktree_reset_active') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+            );
+            return;
+          }
           await this.sendNamedSessionError(envelope, error);
           return;
         }
@@ -3701,6 +4119,7 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          if (id !== retiringSessionId) this.onSessionRetiring(id);
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -3809,7 +4228,9 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           resetTaskName
-            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            ? resetWorktreeKept
+              ? `Task "${resetTaskName}" reset with a fresh conversation; its worktree and files were kept.`
+              : `Task "${resetTaskName}" reset with a fresh conversation.`
             : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
@@ -3838,7 +4259,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.`,
         );
         return true;
       }
@@ -3926,24 +4347,24 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        '/help — Show this help',
+        `/help — Show this help`,
         this.isSharedSession(envelope)
-          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
-          : '/clear — Clear your session (aliases: /reset, /new)',
-        '/who — Show current session & workspace',
-        '/status — Show session info',
-        '/approve [request-id] — Approve a pending permission request',
-        '/approve-always [request-id] — Always approve a pending permission request',
-        '/deny [request-id] — Deny a pending permission request',
+          ? `/clear confirm — Clear the shared session (aliases: /reset, /new)`
+          : `/clear — Clear your session (aliases: /reset, /new)`,
+        `/who — Show current session & workspace`,
+        `/status — Show session info`,
+        `/approve [request-id] — Approve a pending permission request`,
+        `/approve-always [request-id] — Always approve a pending permission request`,
+        `/deny [request-id] — Deny a pending permission request`,
         ...(this.bridge.btw
           ? [
-              '/btw <question> — Ask a side question without interrupting the current task',
+              `/btw <question> — Ask a side question without interrupting the current task`,
             ]
           : []),
         ...(this.namedSessions
           ? [
-              '/sessions [all] — List your named tasks',
-              '/session current|new|use|close|cancel — Manage your named tasks',
+              `/sessions [all] — List your named tasks`,
+              `/session current|new|use|close|cancel — Manage your named tasks`,
             ]
           : []),
       ];
@@ -4083,7 +4504,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+          `Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>`,
         );
         return true;
     }
@@ -4116,7 +4537,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop add "<cron>" <prompt>',
+        `Usage: /loop add "<cron>" <prompt>`,
       );
       return true;
     }
@@ -4343,7 +4764,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop inspect <id>',
+        `Usage: /loop inspect <id>`,
       );
       return true;
     }
@@ -4423,7 +4844,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop cancel <id>',
+        `Usage: /loop cancel <id>`,
       );
       return true;
     }
@@ -4619,6 +5040,8 @@ export abstract class ChannelBase {
     if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
       return false;
     }
+
+    this.forgetPendingGroupHistory(envelope);
 
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
@@ -5415,23 +5838,8 @@ export abstract class ChannelBase {
     return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
-  private stopActiveStreaming(
-    active: ActivePrompt,
-    sessionId: string,
-    reason: string,
-  ): void {
-    try {
-      active.stopStreaming?.();
-    } catch (err) {
-      process.stderr.write(
-        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
-  }
-
   /**
-   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
-   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * Cancel the active turn and wait (bounded) for it to wind down. Fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
    * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
@@ -5445,7 +5853,6 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -5614,11 +6021,15 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
+    // An adapter placeholder is not something a member typed, so quoting it
+    // back as history would inject `(image)` into the next prompt as user
+    // text.
+    if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
@@ -5662,12 +6073,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -6120,6 +6547,7 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
@@ -6130,7 +6558,10 @@ export abstract class ChannelBase {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
       // Intercept /btw only where the bridge can answer it out of band. With no
@@ -6142,7 +6573,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Only authorized members can use /btw in this shared session.',
+            `Only authorized members can use /btw in this shared session.`,
           );
           return;
         }
@@ -6151,7 +6582,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Usage: /btw <question>',
+            `Usage: /btw <question>`,
           );
           return;
         }
@@ -6167,7 +6598,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            '/btw supports text-only questions.',
+            `/btw supports text-only questions.`,
           );
           return;
         }
@@ -6236,11 +6667,13 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        const resumed = await this.namedSessions.resumeReserved(
+        sessionId = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
-        sessionId = resumed ? namedTurn.sessionId : undefined;
+        if (sessionId && sessionId !== namedTurn.sessionId) {
+          this.moveNamedTurnBinding(namedTurn, sessionId);
+        }
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;
@@ -6269,7 +6702,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'No task is currently selected. Use /session new <name> or /session use <name>.',
+          `No task is currently selected. Use /session new <name> or /session use <name>.`,
         );
         return;
       }
@@ -6291,7 +6724,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not identify the selected task. Use /sessions, select it again, and retry.',
+        `Could not identify the selected task. Use /sessions, select it again, and retry.`,
       );
       return;
     }
@@ -6552,7 +6985,6 @@ export abstract class ChannelBase {
             process.stderr.write(
               `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
             );
-            this.stopActiveStreaming(active, sessionId, 'steer');
             // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
             // best-effort cancel that fails isn't silently invisible to operators.
             void this.bridge.cancelSession(sessionId).catch((err) => {
@@ -6612,7 +7044,6 @@ export abstract class ChannelBase {
     // resurrect it while preprocessing runs before this queue.
     const generation =
       namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
-    const useBlockStreaming = this.config.blockStreaming === 'on';
     if (namedTurn) {
       namedTurn.claimed = true;
     } else {
@@ -6699,6 +7130,9 @@ export abstract class ChannelBase {
         recallRead?.generation === recallRead?.state.generation
           ? recallContext
           : undefined;
+      if (recognizedSlashCommand) {
+        this.forgetPendingGroupHistory(envelope);
+      }
       const groupHistoryEntries = recognizedSlashCommand
         ? []
         : this.drainPendingGroupHistory(envelope);
@@ -6758,30 +7192,12 @@ export abstract class ChannelBase {
         );
       }
 
-      const streamer = useBlockStreaming
-        ? new BlockStreamer({
-            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
-            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
-            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) =>
-              this.sendResponseMessage(
-                envelope.chatId,
-                text,
-                sessionId,
-                sourceLabel,
-              ),
-          })
-        : null;
-      promptState.stopStreaming = () => streamer?.stop();
-
       // Chunks arriving while a cancel is PENDING are held here: pushing them
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
-      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
-          hasStreamedText = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
@@ -6793,7 +7209,6 @@ export abstract class ChannelBase {
             chunk: held,
           });
           this.onResponseChunk(envelope.chatId, held, sessionId, segment);
-          streamer?.push(held);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
@@ -6814,7 +7229,6 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
-        hasStreamedText = false;
         const segment = this.closeOutputSegment(sessionId, promptState);
         void this.notifyOutputSegmentEnd(
           envelope.chatId,
@@ -6822,7 +7236,6 @@ export abstract class ChannelBase {
           segment,
           'response_boundary',
         );
-        streamer?.stop();
       };
       // Queue wait and memory recall can outlive a bridge crash. Capture the
       // bridge only after the latest recovery has restored session routing.
@@ -6847,22 +7260,15 @@ export abstract class ChannelBase {
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
-          if (streamer) {
-            if (!hasStreamedText) {
-              streamer.push(response);
-            }
-            await streamer.flush();
-          } else {
-            const segment = this.ensureOutputSegment(sessionId, promptState);
-            await this.onResponseComplete(
-              envelope.chatId,
-              response,
-              sessionId,
-              segment,
-            );
-            if (segment && promptState.activeSegmentId === segment.segmentId) {
-              promptState.activeSegmentId = undefined;
-            }
+          const segment = this.ensureOutputSegment(sessionId, promptState);
+          await this.onResponseComplete(
+            envelope.chatId,
+            response,
+            sessionId,
+            segment,
+          );
+          if (segment && promptState.activeSegmentId === segment.segmentId) {
+            promptState.activeSegmentId = undefined;
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -6931,13 +7337,6 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        if (streamer) {
-          streamer.stop();
-          // Queued block sends belong to this turn: let them land before
-          // onPromptEnd settles turn-scoped adapter state, or a send racing
-          // the settle can recreate discarded state and leak unredacted text.
-          await streamer.drain();
-        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own

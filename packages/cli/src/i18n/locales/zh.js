@@ -185,6 +185,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.RecordSource': '记录来源',
   'toolDisplayName.ReportFindings': '上报评审发现',
   'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',
@@ -737,6 +738,7 @@ export default {
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
   'Hide Tips': '隐藏提示',
+  'Show Tool Call Arguments': '显示工具调用参数',
   'Show Line Numbers in Code': '在代码中显示行号',
   'Show Citations': '显示引用',
   'Custom Witty Phrases': '自定义诙谐短语',
@@ -1122,8 +1124,8 @@ export default {
     '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令输入为包含通知消息和类型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（受支持交互式 TUI 的提交文本投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（在受支持的提交边界捕获的文本投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -2233,8 +2235,10 @@ export default {
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
-  'Choose the output style that shapes how responses are written ({{styles}}).':
-    '选择用于塑造回答表达方式的输出风格（{{styles}}）。',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    '选择用于塑造回答表达方式的输出风格（{{styles}}，或自定义风格名称）。',
+  'It is saved but does not apply while this workspace is untrusted.':
+    '已保存，但此工作区不受信任时不会生效。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',
@@ -2633,6 +2637,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '仅受信任的工作区可以更改自动技能管理器。请通过 `/trust` 信任此文件夹后重试。',
   'Kept model as {{model}}': '模型保持为 {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny）',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
 };
