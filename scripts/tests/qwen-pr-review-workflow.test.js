@@ -2569,6 +2569,9 @@ describe('docs-only gate and relay, executed', () => {
     expect(review.env.AUTO_REVIEW).toBe(
       '${{ steps.context.outputs.auto_review }}',
     );
+    expect(review.env.QWEN_REVIEW_AUTOMATIC).toBe(
+      '${{ steps.context.outputs.auto_review }}',
+    );
   });
 });
 

@@ -4818,7 +4818,9 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       row?.querySelector('[data-web-shell-scheduled-task-session]'),
     ).toBeTruthy();
-    expect(row?.querySelector(scenario.selector)).toBeTruthy();
+    expect(Boolean(row?.querySelector(scenario.selector))).toBe(
+      scenario.activeWorkState === 'active',
+    );
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
