@@ -65,6 +65,59 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ).toEqual([{ type: 'tool-end', id: 'c1', success: true, summary: 'ok' }]);
   });
 
+  it('carries the confirmation type and expandable body on confirm events', () => {
+    // pendingCardMaxRows keys its expanded-dialog bound on the dialog's own
+    // body: only info/plan confirmations can expand, so the confirm event
+    // must carry the type and (for them) the body text.
+    const map = createEventMapper();
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c1', name: 'exit_plan_mode' },
+          details: {
+            title: 'Approve this plan?',
+            type: 'plan',
+            plan: 'step one\nstep two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c1',
+        tool: 'exit_plan_mode',
+        title: 'Approve this plan?',
+        confirmType: 'plan',
+        confirmBody: 'step one\nstep two',
+      },
+    ]);
+    // mcp confirmations have no expandable body: type only, no body text.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c2', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Allow?',
+            type: 'mcp',
+            serverName: 'fs',
+            toolName: 'write_file',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c2',
+        tool: 'mcp__fs__write_file',
+        title: 'Allow?',
+        confirmType: 'mcp',
+        confirmBody: undefined,
+      },
+    ]);
+  });
+
   it('carries FileDiff resultDisplay as a structured diff payload', () => {
     const map = createEventMapper();
     const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';

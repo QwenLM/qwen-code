@@ -176,11 +176,50 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
     // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
+    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
     expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
+    // The gate keeps a payload that fits the collapsed dialog body on the
+    // collapsed-dialog bound (100 - 46), where the unconditional bound would
+    // shrink it to (100 - 26 - 0) * 0.7 = 51.
     expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns, so the
-    // card yields down to what the expanded dialog leaves it.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(13);
+    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
+    // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
+    // Gate boundary: at exactly 20 folded payload rows the dialog body still
+    // fits collapsed (hiddenRows 0, no ctrl-s), so the expanded bound must
+    // not engage; at 21 rows it overflows, so it must ((80-26-21)*0.7 = 23).
+    // (2160/2268 are exact multiples of the 110-2=108-column divisor.)
+    expect(pendingCardMaxRows(80, 2160, 110)).toBe(34);
+    expect(pendingCardMaxRows(80, 2268, 110)).toBe(23);
+    // A mid-range payload under the gate keeps the collapsed-dialog budget
+    // even on tall terminals (the PR's small-payload claim).
+    expect(pendingCardMaxRows(100, 1080, 110)).toBe(54);
+    // An mcp dialog shows two fixed lines and cannot expand: the card is the
+    // only surface carrying the arguments (R5-9), so it keeps the
+    // collapsed-footprint budget no matter how wide the args payload is.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' })).toBe(34);
+    // A many-short-line body folds to ~3 card rows but fills 25 dialog rows:
+    // the expandable TextBody charges each logical row, so the card yields
+    // ((80-26-25)*0.7 = 20) even though the folded width sits under the gate.
+    const planBody = Array.from({ length: 25 }, () => 'x'.repeat(10)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 259, 110, { type: 'plan', body: planBody }),
+    ).toBe(20);
+    // The body measure keeps the same collapsed-cap boundary: a 20-row body
+    // fits collapsed (gate off), a 21-row body overflows (gate on).
+    const fits = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
+    expect(pendingCardMaxRows(80, 0, 110, { type: 'plan', body: fits })).toBe(
+      34,
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 110, { type: 'plan', body: fits + '\nx' }),
+    ).toBe(23);
+    // exec keeps the folded-payload proxy: its dialog body renders the
+    // command uncapped, and the yield is what brings the outcome list back
+    // on screen.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'exec' })).toBe(11);
   });
 
   it('falls back to the settled cap on short terminals', () => {

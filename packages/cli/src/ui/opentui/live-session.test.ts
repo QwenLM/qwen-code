@@ -1850,6 +1850,7 @@ describe('livePromptEvents', () => {
         id: 'b2',
         tool: 'run_shell_command',
         title: 'original',
+        confirmType: 'ask_user_question',
       },
       { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
       {
@@ -1857,6 +1858,7 @@ describe('livePromptEvents', () => {
         id: 'b2',
         tool: 'run_shell_command',
         title: 'Hook requested confirmation to run',
+        confirmType: 'ask_user_question',
       },
     ]);
   });

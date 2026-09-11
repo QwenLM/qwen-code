@@ -117,6 +117,27 @@ describe('foldLiveEvent done (turn end)', () => {
   });
 });
 
+describe('foldLiveEvent confirm (pending card dialog measure)', () => {
+  it('stores the confirmation type and expandable body on the card', () => {
+    // pendingCardMaxRows keys its expanded-dialog bound on these: only the
+    // type says whether the dialog's body can expand, and the body text is
+    // what it measures.
+    const items = foldLiveEvent([runningTool()], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'exit_plan_mode',
+      title: 'Approve this plan?',
+      confirmType: 'plan',
+      confirmBody: 'step one\nstep two',
+    });
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmType: 'plan',
+      confirmBody: 'step one\nstep two',
+    });
+  });
+});
+
 describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   it('records a rejected resolution and clears the pending marker', () => {
     const items = foldLiveEvent([waitingTool()], {

@@ -88,6 +88,10 @@ export interface PendingToolConfirmation {
  * dialog. The expanded tail window is budgeted as terminal height minus this
  * reserve, so the end of the content — where the options still are — stays on
  * screen (ink reaches the same visible outcome through terminal scrollback).
+ * messages.tsx's DIALOG_EXPANDED_RESERVE_ROWS prices the same region from the
+ * pending card's side, including the fresh-session banner and startup rows;
+ * this side stays lower so ctrl-s expansion still gains rows on shorter
+ * terminals. Keep the two consistent when the dialog chrome changes.
  */
 const EXPANDED_BODY_RESERVE_ROWS = 20;
 

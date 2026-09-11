@@ -31,6 +31,7 @@ import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
   sanitizeMultilineForDisplay,
+  sanitizeTerminalText,
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -231,13 +232,19 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows around a pending card's expanded confirmation dialog that the card
- * must yield: the banner (6), the startup transcript rows above the card
- * (extension/context notices plus the prompt echo ≈ 4), the card's own
- * hidden-tail and awaiting rows (2), and the dialog's chrome (frame, title,
- * body margins, question line, outcome list, footer ≈ 12).
+ * Rows a pending card's expanded confirmation dialog does not own. Above the
+ * card's description rows: the banner (6), the startup notices a fresh
+ * session shows (≈ 3), the prompt echo with its turn margin (2), and the
+ * card's own hidden-tail and awaiting rows (2). In the dialog itself, around
+ * the body: the frame's border and padding (4), title (1), body margins (2),
+ * question row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24,
+ * padded to 26 against notice timing) is what an 80-row viewport measured:
+ * at 14 the expanded tail and the outcome list ran off the bottom of the
+ * screen (mem0 e2e regression). dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS
+ * prices the same region from the dialog's side; keep the two consistent
+ * when the dialog chrome changes.
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 24;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 
 /**
  * Collapsed row cap for a confirmation dialog's body (dialogs-confirm's
@@ -256,31 +263,78 @@ export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
 const CARD_DESC_WRAP_RATIO = 0.7;
 
 /**
+ * What the transcript knows about the pending call's confirmation dialog.
+ * `type` is confirmationDetails.type; `body` is the text the dialog's
+ * expandable TextBody renders for the types that have one (info's prompt,
+ * plan's plan — see event-adapter's expandableConfirmationBody, which
+ * mirrors dialogs-confirm's ConfirmationBody switch).
+ */
+export interface PendingDialogBody {
+  type?: string;
+  body?: string;
+}
+
+/**
+ * Physical rows the pending confirmation's dialog body occupies once shown
+ * in full — the quantity the card must yield rows for — or null when the
+ * dialog can never grow past its collapsed footprint. Only info and plan
+ * render an expandable TextBody, so for them the body's OWN rows decide
+ * (measured like TextBody: sanitized, split on newlines, each logical row
+ * charged its wrapped height): a many-short-line plan folds to one card row
+ * but fills the dialog. mcp shows two fixed lines and edit a bounded
+ * DiffBody — the dialog cannot expand, so the card (the only surface
+ * carrying an mcp call's arguments, R5-9) keeps its rows. exec renders its
+ * command uncapped and unknown types carry no details, so both keep the
+ * folded card-payload proxy: there the yield is what brings the outcome
+ * list back on screen.
+ */
+function expandableBodyRows(
+  dialog: PendingDialogBody | undefined,
+  width: number,
+  payloadRows: number,
+): number | null {
+  const type = dialog?.type;
+  if (type === 'info' || type === 'plan') {
+    if (dialog?.body !== undefined) {
+      const cols = Math.max(width - 2, 10);
+      const rows = sanitizeTerminalText(dialog.body)
+        .split('\n')
+        .reduce((sum, row) => sum + physicalRowCount(row, cols), 0);
+      return rows > CONFIRM_BODY_COLLAPSED_ROWS ? rows : null;
+    }
+    // A typed confirmation without its body text keeps the proxy below.
+  } else if (type !== undefined && type !== 'exec') {
+    return null;
+  }
+  return payloadRows > CONFIRM_BODY_COLLAPSED_ROWS ? payloadRows : null;
+}
+
+/**
  * Description budget for a pending tool card, bounded three ways: never
  * past the ink-parity history cap, never so tall that the confirmation
- * dialog's collapsed body overflows the viewport, and — when the payload
- * is wide enough that the dialog will render it expanded (hook-forced
- * confirmations duplicate the card's description) — shrunk so the expanded
- * body plus chrome still fits. `descriptionWidth` is the display width of
- * the text the card would print; short terminals fall back to the settled
- * cap.
+ * dialog's collapsed body overflows the viewport, and — when the dialog
+ * will show the payload expanded (hook-forced confirmations duplicate the
+ * card's description in an info body) — shrunk so the expanded body plus
+ * chrome still fits. `descriptionWidth` is the display width of the text
+ * the card would print; short terminals fall back to the settled cap.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
   descriptionWidth: number,
   width: number,
+  dialog?: PendingDialogBody,
 ): number {
   const h = Math.floor(terminalHeight);
   const payloadRows = Math.ceil(
     descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
   );
+  const bodyRows = expandableBodyRows(dialog, width, payloadRows);
   const expandedDialogBound =
-    payloadRows > CONFIRM_BODY_COLLAPSED_ROWS
-      ? Math.floor(
-          (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) *
-            CARD_DESC_WRAP_RATIO,
-        )
-      : Number.POSITIVE_INFINITY;
+    bodyRows === null
+      ? Number.POSITIVE_INFINITY
+      : Math.floor(
+          (h - DIALOG_EXPANDED_RESERVE_ROWS - bodyRows) * CARD_DESC_WRAP_RATIO,
+        );
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(

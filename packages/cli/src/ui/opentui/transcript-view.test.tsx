@@ -190,6 +190,36 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('MID_MARKER');
   });
 
+  it('keeps the pending rows when the mcp dialog cannot expand (R5-9)', () => {
+    // Same payload as the hook-confirmation case above, but typed mcp: that
+    // dialog renders two fixed lines and has no ctrl-s expansion, so the
+    // card — the only surface carrying the arguments — keeps the
+    // collapsed-footprint budget and MID_MARKER stays on screen.
+    const description =
+      '{"content":"' +
+      'a'.repeat(2500) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('MID_MARKER');
+  });
+
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {
     // A live shell command can carry embedded newlines: each renders a
     // physical row while costing zero columns in capToolCardDescription's

@@ -35,6 +35,29 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
+ * The text a confirmation dialog's expandable body renders — an info
+ * confirmation's prompt, a plan confirmation's plan. Every other type's body
+ * never grows past its collapsed footprint (mcp shows two fixed lines, edit a
+ * bounded DiffBody, exec an uncapped command), so it has no expandable body.
+ * This mirrors dialogs-confirm's ConfirmationBody render switch and feeds the
+ * pending card's expanded-dialog bound (pendingCardMaxRows); it lives here,
+ * not in dialogs-confirm, so this module stays free of UI-runtime imports.
+ */
+export function expandableConfirmationBody(details: {
+  type?: string;
+  prompt?: unknown;
+  plan?: unknown;
+}): string | undefined {
+  const body =
+    details.type === 'info'
+      ? details.prompt
+      : details.type === 'plan'
+        ? details.plan
+        : undefined;
+  return typeof body === 'string' ? body : undefined;
+}
+
+/**
  * Neutral-model union extension: tool detail events the backend folds into
  * tool cards (args preview, result content, approval state), plus turn
  * segmentation and inline images.
@@ -72,7 +95,17 @@ export type OpenTuiStreamEvent =
        * machine via the vision model. */
       visionBridgeNotice?: string;
     }
-  | { type: 'confirm'; id: string; tool: string; title: string }
+  | {
+      type: 'confirm';
+      id: string;
+      tool: string;
+      title: string;
+      /** confirmationDetails.type — the card prices itself against the
+       * dialog's body (LiveToolItem.confirmType). */
+      confirmType?: string;
+      /** The dialog's expandable body text (info's prompt, plan's plan). */
+      confirmBody?: string;
+    }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
    * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
@@ -515,7 +548,12 @@ export function createEventMapper(
             name: string;
             args?: Record<string, unknown>;
           };
-          details: { title?: string };
+          details: {
+            title?: string;
+            type?: string;
+            prompt?: unknown;
+            plan?: unknown;
+          };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
         out.push({
@@ -523,6 +561,8 @@ export function createEventMapper(
           id,
           tool: v.request.name,
           title: v.details.title ?? v.request.name,
+          confirmType: v.details.type,
+          confirmBody: expandableConfirmationBody(v.details),
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

@@ -315,16 +315,21 @@ function ToolCard({
   // confirmation dialog shows only the server and tool names, so the card
   // is the only surface carrying the arguments (R5-9) — the settled 5-row
   // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
-  // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
+  // pending budget stays viewport- and dialog-aware (pendingCardMaxRows):
+  // the dialog renders in flow below the transcript, so when the dialog's
+  // own body can expand past its collapsed footprint (a hook-forced info
+  // confirmation duplicates this payload; a plan body is much taller than
+  // its folded card row) the card yields rows for it — and when it cannot
+  // (mcp, edit) the card keeps them.
   const cap = capToolCardDescription(
     text,
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
+      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width, {
+          type: item.confirmType,
+          body: item.confirmBody,
+        })
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
