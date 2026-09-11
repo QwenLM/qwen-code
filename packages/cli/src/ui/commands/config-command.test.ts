@@ -472,6 +472,20 @@ describe('configCommand', () => {
         content: expect.stringContaining('requires a restart'),
       });
     });
+
+    it('shows restart warning for Goal cadence settings', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(ctx, 'model.goalMaxTurns=20');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('requires a restart'),
+      });
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'model.goalMaxTurns', value: 20 },
+      ]);
+    });
   });
 
   describe('security-sensitive settings', () => {
