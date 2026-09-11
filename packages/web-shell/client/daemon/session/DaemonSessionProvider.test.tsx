@@ -2272,6 +2272,44 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('does not stamp source attribution on a workspace session restore', async () => {
+    // Restore-time attribution used to rewrite a pre-attribution session's
+    // source so the host's source-scoped catalog could see it. The catalog is
+    // no longer source-scoped, so a restore must leave the persisted source
+    // alone — re-adding it would silently re-stamp CLI and browser sessions.
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'legacy-unattributed',
+        workspaceCwd: '/mock-workspace',
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('legacy-unattributed');
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'legacy-unattributed',
+      expect.not.objectContaining({ sourceType: expect.anything() }),
+      expect.any(String),
+    );
+  });
+
   it('does not inherit a failed controlled target in a baseUrl-only provider', async () => {
     sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
       new Error('load failed'),
