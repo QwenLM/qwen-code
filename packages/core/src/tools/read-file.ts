@@ -16,6 +16,7 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -149,7 +150,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // per-read freshness `<system-reminder>` that must be re-emitted
     // on every read.
     const cacheEnabled = !this.config.getFileReadCacheDisabled();
-    const useFastPath = cacheEnabled && !isAutoMem;
+    const nestedRead = getCurrentToolCallSource()?.kind === 'code_mode';
+    const useFastPath = cacheEnabled && !isAutoMem && !nestedRead;
     const cache = this.config.getFileReadCache();
     // A request-level "full" Read asks for the whole file: no offset,
     // no limit, no PDF page range. The cache entry is only marked as
@@ -275,6 +277,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         full: isFullRead && !result.isTruncated,
         cacheable,
       });
+      // Reading into a program does not prove the full text reached history.
+      if (nestedRead) cache.markReadEvictedFromHistory(recordStats);
     }
 
     let llmContent: PartListUnion;

@@ -4,7 +4,6 @@ const path = require('node:path');
 const UNUSED_PERMISSION_KEYS = [
   'NSBluetoothAlwaysUsageDescription',
   'NSBluetoothPeripheralUsageDescription',
-  'NSCameraUsageDescription',
 ];
 
 module.exports = async function afterPack(context) {

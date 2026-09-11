@@ -346,18 +346,36 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 });
 
 describe('message meta (ink glyph/color parity)', () => {
+  // ink's ICON table appends U+FE0E to force the text presentation; the
+  // selector is invisible in source, so it must not be stripped as a typo.
   it('keeps the user/assistant prefixes', () => {
     expect(userMessageMeta().glyph).toBe('>');
-    expect(assistantMessageMeta().glyph).toBe('◆');
+    expect(assistantMessageMeta().glyph).toBe('◆\uFE0E');
   });
 
   it('keeps the thinking collapse hint semantics', () => {
     const live = thinkingMeta(false, false, true);
-    expect(live.icon).toBe('∵');
+    expect(live.icon).toBe('∵\uFE0E');
     expect(live.collapsed).toBe(false);
     const collapsed = thinkingMeta(true, false, true);
-    expect(collapsed.icon).toBe('∴');
+    expect(collapsed.icon).toBe('∴\uFE0E');
     expect(collapsed.hint).toContain('ctrl+o');
+  });
+
+  it('labels a committed thought with ink’s duration wording', () => {
+    expect(thinkingMeta(true, false, false, 400).label).toBe('Thought briefly');
+    expect(thinkingMeta(true, false, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    expect(thinkingMeta(true, true, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    // No duration stamped: ink falls back to the pending wording rather than
+    // naming a time it never measured.
+    expect(thinkingMeta(true, false, false).label).toBe('Thinking');
+    // The duration is only stamped when the thought ends, so a live row never
+    // carries one.
+    expect(thinkingMeta(false, false, false, 12_000).label).toBe('Thinking…');
   });
 
   it('marks canceled tools for strikethrough', () => {
