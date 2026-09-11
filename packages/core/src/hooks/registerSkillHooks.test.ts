@@ -450,6 +450,52 @@ describe('registerSkillHooks — the trust gate travels with the entry', () => {
       expect(registerSkillHooks(manager, 's1', skillA)).toBe(1);
     });
 
+    it('removes every hook the skill registered across events', () => {
+      const manager = new SessionHooksManager();
+      const twoEvents: SkillConfig = {
+        ...skillWithRoot('a', '/skills/a'),
+        hooks: {
+          [HookEventName.PreToolUse]: [
+            {
+              matcher: 'Bash',
+              hooks: [{ type: HookType.Command, command: 'echo a' }],
+            },
+          ],
+          [HookEventName.PostToolUse]: [
+            {
+              matcher: 'Write',
+              hooks: [{ type: HookType.Command, command: 'echo a2' }],
+            },
+          ],
+        },
+      };
+      registerSkillHooks(manager, 's1', twoEvents);
+      registerSkillHooks(manager, 's1', skillWithRoot('b', '/skills/b'));
+
+      expect(unregisterSkillHooks(manager, 's1', twoEvents)).toBe(2);
+      expect(
+        manager
+          .getHooksForEvent('s1', HookEventName.PreToolUse)
+          .map((entry) => entry.skillRoot),
+      ).toEqual(['/skills/b']);
+      expect(manager.getHooksForEvent('s1', HookEventName.PostToolUse)).toEqual(
+        [],
+      );
+    });
+
+    it('removes hooks by root even when the config no longer lists them', () => {
+      const manager = new SessionHooksManager();
+      const skillA = skillWithRoot('a', '/skills/a');
+      registerSkillHooks(manager, 's1', skillA);
+
+      expect(
+        unregisterSkillHooks(manager, 's1', { ...skillA, hooks: undefined }),
+      ).toBe(1);
+      expect(manager.getHooksForEvent('s1', HookEventName.PreToolUse)).toEqual(
+        [],
+      );
+    });
+
     it('removes nothing for a skill without a root directory', () => {
       const manager = new SessionHooksManager();
       const rootless = skillWithRoot('rootless');

@@ -697,8 +697,9 @@ async function writeJsonFile(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // noFollow: these files carry the supervisor and worker auth tokens;
-  // refuse to write through a pre-placed symlink at the store path, matching
-  // the other credential write site (file-token-storage).
+  // refuse to write through a pre-placed symlink at the store path, like the
+  // other credential writers (the MCP and Qwen token stores and extension git
+  // credentials).
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
     forceMode: true,

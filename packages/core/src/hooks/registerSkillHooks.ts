@@ -160,10 +160,11 @@ function prepareHookConfig(
  * Unregisters the session hooks a skill registered, identified by the skill's
  * root directory, and returns how many were removed.
  *
- * A skill without a root directory returns 0, because its hooks cannot be
- * told apart from another skill's. Folder-trust revocation does not go
- * through this: a project skill's hooks are registered trust-gated and
- * re-checked at fire time.
+ * Removal keys on the root alone, so it still works when the config passed in
+ * no longer lists the hooks it registered earlier. A skill without a root
+ * directory returns 0, because its hooks cannot be told apart from another
+ * skill's. Folder-trust revocation does not go through this: a project
+ * skill's hooks are registered trust-gated and re-checked at fire time.
  *
  * @param sessionHooksManager - The session hooks manager instance
  * @param sessionId - The current session ID
@@ -175,16 +176,18 @@ export function unregisterSkillHooks(
   sessionId: string,
   skill: SkillConfig,
 ): number {
-  if (!skill.hooks || !skill.skillRoot) {
+  if (!skill.skillRoot) {
     return 0;
   }
 
+  // Collect the ids first: removeHook splices the stored per-event arrays.
+  const hookIds = sessionHooksManager
+    .getAllSessionHooks(sessionId)
+    .filter((entry) => entry.skillRoot === skill.skillRoot)
+    .map((entry) => entry.hookId);
   let removed = 0;
-  for (const entry of sessionHooksManager.getAllSessionHooks(sessionId)) {
-    if (
-      entry.skillRoot === skill.skillRoot &&
-      sessionHooksManager.removeHook(sessionId, entry.hookId)
-    ) {
+  for (const hookId of hookIds) {
+    if (sessionHooksManager.removeHook(sessionId, hookId)) {
       removed++;
     }
   }
