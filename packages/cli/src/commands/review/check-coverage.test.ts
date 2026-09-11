@@ -50,6 +50,7 @@ import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import * as coverageModule from './lib/coverage.js';
 import { CHUNK_RE } from './lib/coverage.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
   chunkAssignmentFromLaunchPrompt,
   labelFromLaunchPrompt,
@@ -3488,6 +3489,38 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     const r = coverageFromTranscripts(p, ENV);
     expect(r.rewrittenPrompts.join(' ')).toContain('cannot place');
     expect(r.unopenedAgents).toEqual([]);
+  });
+
+  it('keeps EVERY role this build can launch placeable', () => {
+    // The property that makes the positive vocabulary a vocabulary and not a
+    // hand-listed set: it is `BRIEFS` itself, so a role added on `main`
+    // becomes placeable here without anyone editing coverage. `docs-nav`
+    // arrived that way. Written over the whole key set rather than over a
+    // sample, because the failure it guards — a launch this run cannot place
+    // loses its spanning read — is silent per role and would surface as one
+    // more unexplained gap on whichever review happened to use the new one.
+    const unplaceable: string[] = [];
+    for (const key of Object.keys(BRIEFS)) {
+      const p = plan(2, { maxLineChars: 42 });
+      transcript('a1', good(1), { calls: 2 });
+      transcript('d', good(2).replace('chunk 2 of 2', key), {
+        calls: 1,
+        range: [100, 100],
+      });
+      if (
+        coverageFromTranscripts(p, ENV)
+          .rewrittenPrompts.join(' ')
+          .includes('cannot place')
+      ) {
+        unplaceable.push(key);
+      }
+      rmSync(join(dir, 'subagents', 'S1', 'agent-d.jsonl'));
+      rmSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'));
+    }
+    expect(unplaceable).toEqual([]);
+    // A guard on the guard: an empty vocabulary would pass the loop above
+    // vacuously.
+    expect(Object.keys(BRIEFS).length).toBeGreaterThan(10);
   });
 
   it('keeps a genuine role placeable when its prompt record is lost', () => {
