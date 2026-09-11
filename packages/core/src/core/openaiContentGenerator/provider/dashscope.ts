@@ -732,10 +732,27 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     model: string | undefined,
     userPromptId: string,
   ): Record<string, unknown> {
-    if (!isQwenFamilyWireModel(this.resolveWireModel(model))) {
+    if (!this.shouldSendRequestMetadata(model)) {
       return {};
     }
     return this.buildMetadata(userPromptId) || {};
+  }
+
+  /**
+   * Auto by default: qwen-family wire models only, per the gateway reasoning on
+   * {@link buildRequestMetadata}. The client cannot tell a forwarded request from
+   * one DashScope serves itself, so an explicit `enableRequestMetadata` wins in
+   * both directions: `true` restores the field for a non-qwen model served
+   * first-party whose tracing still matters, `false` suppresses it everywhere.
+   * Mirrors {@link shouldEnableCacheControl}, which reads the same config object.
+   */
+  private shouldSendRequestMetadata(model: string | undefined): boolean {
+    const configured =
+      this.cliConfig.getContentGeneratorConfig?.()?.enableRequestMetadata;
+    if (typeof configured === 'boolean') {
+      return configured;
+    }
+    return isQwenFamilyWireModel(this.resolveWireModel(model));
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
