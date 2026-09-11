@@ -185,4 +185,4 @@ async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
   }
 }
 
-export const __test__ = { isEphemeralSlug };
+export const __test__ = { isEphemeralSlug, hasTrackedChanges };

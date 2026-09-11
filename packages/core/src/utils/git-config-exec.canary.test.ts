@@ -1,0 +1,238 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// One property, asked of every git call a session reaches without the user
+// asking for it: a repository that plants a program-valued key in its own
+// `.git/config` must not get that program run.
+//
+// The fixture is the attack, not a shape — a real repository carrying a real
+// plant, plus a canary the plant writes — and the control cases assert the
+// canary IS written when the same command runs ungated. A fixture that quietly
+// stops being an attack then fails here instead of certifying the guards it
+// walked around.
+
+import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { getRecentGitStatus } from './gitUtils.js';
+import { getGitWorkingTreeStatus } from './gitDiff.js';
+import { isGitIgnored } from './git-ignore.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { __test__ as worktreeCleanupInternals } from '../services/worktreeCleanup.js';
+
+// The plant is a `/bin/sh` script, so the attack itself does not exist on
+// Windows and the question has no answer there.
+const itWherePlantRuns = it.skipIf(process.platform === 'win32');
+
+// Each case builds a repository and spawns a handful of git processes, which
+// blows the package's 15s local ceiling under coverage on a loaded machine.
+const PLANT_TIMEOUT_MS = 30_000;
+
+/** The program-valued keys a tree obtained as files can carry. */
+type Plant = 'core.fsmonitor' | 'diff.external' | 'diff.pwn.textconv';
+
+const DIFF_PLANTS: Plant[] = ['diff.external', 'diff.pwn.textconv'];
+
+describe('a planted git program reaches no automatic git call', () => {
+  const made: string[] = [];
+
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A repository whose own config names a helper that writes `canary`, with one
+   * tracked file dirty so the index refresh actually re-stats and the diff has
+   * content to render.
+   */
+  const planted = (plant: Plant = 'core.fsmonitor') => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-fsmonitor-')));
+    made.push(repo);
+    const canary = join(repo, 'PWNED');
+    // Hermetic setup: a host global `core.hooksPath` would otherwise run the
+    // developer's own hooks on this commit.
+    const env = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+    };
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8', env }).trim();
+    g('init', '-q', '-b', 'main');
+    g('config', 'user.email', 't@t.t');
+    g('config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    writeFileSync(join(repo, '.gitignore'), 'ignored.txt\n');
+    // Committed with the tree, which is how the textconv plant gets bound to a
+    // path — `diff.pwn.textconv` alone does nothing without this.
+    writeFileSync(join(repo, '.gitattributes'), 'a.ts diff=pwn\n');
+    g('add', 'a.ts', '.gitignore', '.gitattributes');
+    g('commit', '-qm', 'init');
+
+    const helper = join(repo, 'plant.sh');
+    // An fsmonitor helper reports "trust nothing" by failing, so the status
+    // stays correct; a textconv or external diff helper is expected to exit
+    // clean and hand git the rendered content on stdout.
+    writeFileSync(
+      helper,
+      plant === 'core.fsmonitor'
+        ? `#!/bin/sh\ntouch '${canary}'\nexit 1\n`
+        : `#!/bin/sh\ntouch '${canary}'\ncat /dev/null\n`,
+    );
+    chmodSync(helper, 0o755);
+    g('config', plant, helper);
+    // A dirty tracked file: the refresh only re-stats what changed.
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+
+    const fired = () => {
+      const hit = existsSync(canary);
+      if (hit) unlinkSync(canary);
+      return hit;
+    };
+    return { repo, fired };
+  };
+
+  itWherePlantRuns(
+    'the fixture is a live attack: an ungated status runs the plant',
+    () => {
+      const { repo, fired } = planted();
+      // The exact command `getRecentGitStatus` used to run. `--no-optional-locks`
+      // is kept to pin that it does NOT suppress the hook.
+      execFileSync(
+        'git',
+        ['--no-optional-locks', 'status', '--short', '--branch'],
+        { cwd: repo, encoding: 'utf8' },
+      );
+      expect(fired()).toBe(true);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'startup context collection does not run it',
+    () => {
+      const { repo, fired } = planted();
+      const snapshot = getRecentGitStatus(repo);
+      expect(fired()).toBe(false);
+      // The guard must not have cost the output it exists to produce.
+      expect(snapshot).toContain('Current branch: main');
+      expect(snapshot).toContain('a.ts');
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'the working-tree status behind the daemon routes does not run it',
+    async () => {
+      const { repo, fired } = planted();
+      // Every git call in `gitDiff` goes through one `runGit`, so guarding it
+      // there covers the index-refreshing ones — `status`, `ls-files`, `diff`,
+      // `diff-tree` — along with any call site added later.
+      const status = await getGitWorkingTreeStatus(repo);
+      expect(fired()).toBe(false);
+      expect(status?.branch).toBe('main');
+      expect(status?.unstaged).toBe(1);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'the ignore probe does not run it',
+    () => {
+      const { repo, fired } = planted();
+      expect(isGitIgnored(repo, 'ignored.txt')).toBe(true);
+      expect(fired()).toBe(false);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'the stale-worktree cleanup probe does not run it',
+    async () => {
+      const { repo, fired } = planted();
+      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(true);
+      expect(fired()).toBe(false);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'the exit-tool dirty probes do not run it',
+    async () => {
+      const { repo, fired } = planted();
+      const service = new GitWorktreeService(repo);
+      expect(await service.hasWorktreeChanges(repo)).toBe(true);
+      expect(fired()).toBe(false);
+      // Both probes swallow git errors into their fail-closed answer, so a
+      // broken guard would look identical here — the counts are what shows the
+      // status was actually read.
+      expect(await service.countWorktreeChanges(repo)).toEqual({
+        tracked: 1,
+        untracked: 1,
+      });
+      expect(fired()).toBe(false);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
+    'staging a worktree to diff it does not run it',
+    async () => {
+      const { repo, fired } = planted();
+      // This path stages everything, diffs against the base and resets — and
+      // `add --all`, `diff` and `reset` were each measured to refresh the
+      // index, so guarding only the read-only commands would leave it open.
+      const diff = await new GitWorktreeService(repo).getWorktreeDiff(
+        repo,
+        'main',
+      );
+      expect(fired()).toBe(false);
+      expect(diff).not.toContain('Error getting diff');
+      expect(diff).toContain('a.ts');
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns.each(DIFF_PLANTS)(
+    'the %s fixture is a live attack: an ungated diff runs it',
+    (plant) => {
+      const { repo, fired } = planted(plant);
+      // The exact pair of commands the worktree diff path runs.
+      execFileSync('git', ['add', '--all'], { cwd: repo });
+      execFileSync('git', ['diff', '--binary', '--cached', 'main'], {
+        cwd: repo,
+      });
+      expect(fired()).toBe(true);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns.each(DIFF_PLANTS)(
+    'a planted %s does not run when a worktree is diffed',
+    async (plant) => {
+      const { repo, fired } = planted(plant);
+      const diff = await new GitWorktreeService(repo).getWorktreeDiff(
+        repo,
+        'main',
+      );
+      expect(fired()).toBe(false);
+      expect(diff).not.toContain('Error getting diff');
+      expect(diff).toContain('a.ts');
+    },
+    PLANT_TIMEOUT_MS,
+  );
+});

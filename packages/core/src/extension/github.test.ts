@@ -211,6 +211,8 @@ describe('git extension helpers', () => {
 
       expect(simpleGit).toHaveBeenCalledWith(destination, {
         abort: controller.signal,
+        config: ['core.fsmonitor='],
+        unsafe: { allowUnsafeFsMonitor: true },
       });
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
         '-c',
@@ -321,10 +323,12 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.env).toHaveBeenCalledWith(
@@ -382,10 +386,12 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.clone).toHaveBeenCalled();
@@ -420,6 +426,7 @@ describe('git extension helpers', () => {
             allowUnsafeConfigPaths: true,
             allowUnsafeProtocolOverride: true,
             allowUnsafeConfigEnvCount: true,
+            allowUnsafeFsMonitor: true,
           },
         }),
       );
@@ -486,6 +493,7 @@ describe('git extension helpers', () => {
             allowUnsafeConfigPaths: true,
             allowUnsafeProtocolOverride: true,
             allowUnsafeConfigEnvCount: true,
+            allowUnsafeFsMonitor: true,
           },
         }),
       );
@@ -1618,6 +1626,7 @@ describe('git extension helpers', () => {
               allowUnsafeConfigPaths: true,
               allowUnsafeProtocolOverride: true,
               allowUnsafeConfigEnvCount: true,
+              allowUnsafeFsMonitor: true,
             },
           }),
         );
@@ -1859,10 +1868,12 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.listRemote).toHaveBeenCalledWith([

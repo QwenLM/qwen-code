@@ -43,6 +43,19 @@ export const WORKTREE_SESSION_FILE = '.qwen-session';
 
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
 
+/**
+ * Diff flags that stop the tree being diffed from choosing the program that
+ * renders it.
+ *
+ * A `.gitattributes` binding a `diff=<name>` driver travels with a tree
+ * obtained as files, and the `diff.<name>.textconv` or `diff.external` that
+ * goes with it was measured running through these very calls. They also keep
+ * the patch appliable, since a converted blob is no longer the pre-image
+ * `git apply` expects. `core.fsmonitor` is handled for every client in
+ * `loadSimpleGit`.
+ */
+const NO_EXEC_DIFF_FLAGS = ['--no-ext-diff', '--no-textconv'] as const;
+
 export type StrictWorktreeSessionMarker =
   | { state: 'missing' }
   | {
@@ -1371,7 +1384,7 @@ export class GitWorktreeService {
         baseBranch ??
         (await this.getCurrentBranch());
       return await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
     } catch (error) {
       return `Error getting diff: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -1409,7 +1422,7 @@ export class GitWorktreeService {
       }
 
       const patch = await this.withStagedChanges(worktreeGit, () =>
-        worktreeGit.diff(['--binary', '--cached', base]),
+        worktreeGit.diff([...NO_EXEC_DIFF_FLAGS, '--binary', '--cached', base]),
       );
 
       if (!patch.trim()) {

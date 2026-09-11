@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import {
   GitWorktreeService,
   gitEnv,
+  NO_EXEC_CONFIG,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
@@ -76,6 +77,7 @@ async function checkoutHasWork(worktreePath: string): Promise<boolean> {
     const { stdout } = await execFileAsync(
       'git',
       [
+        ...NO_EXEC_CONFIG,
         'status',
         '--porcelain',
         '--untracked-files=normal',

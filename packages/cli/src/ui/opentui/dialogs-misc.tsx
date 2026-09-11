@@ -30,6 +30,7 @@ import {
   checkHasEditorType,
   isEditorAvailable,
 } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   EDITOR_DISPLAY_NAMES,
@@ -604,7 +605,13 @@ export function OpenTuiDiffDialog({ onClose }: P) {
       .then(({ execFile }) => {
         execFile(
           'git',
-          ['diff', '--color=never'],
+          [
+            ...NO_EXEC_CONFIG,
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            '--color=never',
+          ],
           { maxBuffer: 1024 * 1024 * 8 },
           (_err, stdout) => {
             if (alive)

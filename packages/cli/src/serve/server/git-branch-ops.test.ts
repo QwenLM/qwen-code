@@ -73,6 +73,30 @@ describe('isDirtyTree', () => {
     fs.writeFileSync(path.join(repo, 'untracked.txt'), 'new\n');
     await expect(isDirtyTree(repo)).resolves.toBe(false);
   });
+
+  // The plant is a `/bin/sh` script, so the attack does not exist on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'does not run a helper the repository names in its own config',
+    async () => {
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'plant.sh');
+      // An fsmonitor helper reports "trust nothing" by failing, which keeps the
+      // status correct either way — so only the canary distinguishes the two.
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'core.fsmonitor', helper);
+      // The refresh only re-stats what changed.
+      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+
+      // Control: the fixture is a live attack when the same command is ungated.
+      git(repo, 'status', '--porcelain', '--untracked-files=no');
+      expect(fs.existsSync(canary)).toBe(true);
+      fs.unlinkSync(canary);
+
+      await expect(isDirtyTree(repo)).resolves.toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+  );
 });
 
 describe('getHeadCommit', () => {
