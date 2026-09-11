@@ -505,10 +505,13 @@ describe('WebTerminalRegistry', () => {
     });
 
     // The release is deferred one tick after onExit so a trailing onData
-    // queued in the same turn still lands in the scrollback first. The fake
-    // detaches the listener on dispose, so with a synchronous release the
-    // tail is lost — this test fails if the defer is removed.
+    // queued in the same turn still lands in the scrollback first. The
+    // assertion between the two calls is what pins the defer: a synchronous
+    // release has already disposed the data listener before the tail arrives.
+    // The fake's detach on dispose models node-pty and loses that tail too,
+    // but no signal in this test depends on it any more.
     onExit({ exitCode: 0 });
+    expect(disposeData).not.toHaveBeenCalled();
     onData('trailing');
     await new Promise<void>((resolve) => setImmediate(resolve));
 
