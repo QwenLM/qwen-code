@@ -24,6 +24,11 @@ import {
   type StreamEvent,
 } from './llm-chat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import {
+  convertResponsesEventToGemini,
+  ResponsesStreamState,
+} from './openaiResponsesContentGenerator/responses-converter.js';
+import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
@@ -10320,6 +10325,324 @@ describe('LlmChat', async () => {
       }
       return { events, caughtError };
     }
+
+    describe('server stream retry', () => {
+      const providerError = {
+        code: 'server_error',
+        message: 'Upstream inference unavailable',
+      };
+
+      function convertedError(event: ResponsesSSEEvent): Error {
+        try {
+          convertResponsesEventToGemini(
+            event,
+            'test-model',
+            new ResponsesStreamState(),
+          );
+        } catch (error) {
+          if (error instanceof Error) return error;
+          throw error;
+        }
+        throw new Error('Expected a Responses stream error');
+      }
+
+      const serverError = () =>
+        convertedError({ event: 'error', data: { error: providerError } });
+
+      async function* failStream(error: Error, parts: Part[] = []) {
+        if (parts.length > 0) {
+          yield {
+            candidates: [{ content: { parts } }],
+          } as GenerateContentResponse;
+        }
+        throw error;
+      }
+
+      beforeEach(() => vi.useFakeTimers());
+      afterEach(() => vi.useRealTimers());
+
+      it.each<{ label: string; event: ResponsesSSEEvent }>([
+        { label: 'flat error', event: { event: 'error', data: providerError } },
+        {
+          label: 'nested error',
+          event: { event: 'error', data: { error: providerError } },
+        },
+        {
+          label: 'response.failed',
+          event: {
+            event: 'response.failed',
+            data: { response: { error: providerError } },
+          },
+        },
+      ])('recovers from Responses $label before output', async ({ event }) => {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failStream(convertedError(event)))
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'server-retry',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+        const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls;
+        expect(calls).toHaveLength(2);
+        expect(calls[1]![0].contents).toEqual(calls[0]![0].contents);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered' }] },
+        ]);
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Server stream retry scheduled',
+          expect.objectContaining({
+            statusCode: 500,
+            providerCode: 'server_error',
+            attempt: 1,
+          }),
+        );
+      });
+
+      it('discards thinking-only output before retrying', async () => {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            failStream(serverError(), [
+              { text: 'Abandoned reasoning', thought: true },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: 'Recovered' }])),
+          );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'server-thinking-retry',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered' }] },
+        ]);
+      });
+
+      it.each([false, true])(
+        'bounds retries and preserves the last error (mixed transport: %s)',
+        async (mixed) => {
+          const finalError = serverError();
+          const errors = [
+            serverError(),
+            mixed ? socketCut() : serverError(),
+            finalError,
+          ];
+          let attempt = 0;
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockImplementation(async () =>
+            failStream(
+              errors[attempt++] ?? new Error('Unexpected extra attempt'),
+            ),
+          );
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'server-exhausted',
+          );
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(10_000);
+          const { events, caughtError } = await collecting;
+          expect(caughtError).toBe(finalError);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(
+            events.filter((event) => event.type === StreamEventType.RETRY),
+          ).toHaveLength(2);
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Server stream retry not taken',
+            expect.objectContaining({
+              retryDecision: 'exhausted',
+              attempts: 2,
+              maxRetries: 2,
+            }),
+          );
+        },
+      );
+
+      it.each<{ label: string; parts: Part[] }>([
+        { label: 'text', parts: [{ text: 'Visible partial answer' }] },
+        {
+          label: 'tool call',
+          parts: [
+            {
+              functionCall: { id: 'call_server', name: 'read_file', args: {} },
+            },
+          ],
+        },
+      ])(
+        'does not replay or continue after delivered $label',
+        async ({ parts }) => {
+          const error = serverError();
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValueOnce(failStream(error, parts));
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'server-after-output',
+          );
+          const { events, caughtError } = await drainCollecting(stream);
+          expect(caughtError).toBe(error);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(1);
+          expect(
+            events.filter((event) => event.type === StreamEventType.RETRY),
+          ).toHaveLength(0);
+        },
+      );
+
+      it('does not replay when an earlier transport attempt already delivered text', async () => {
+        const error = serverError();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            failStream(socketCut(), [{ text: 'Visible partial answer' }]),
+          )
+          .mockResolvedValueOnce(failStream(error));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'server-during-continuation',
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(10_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBe(error);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toEqual([{ type: StreamEventType.RETRY, isContinuation: true }]);
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Server stream retry not taken',
+          expect.objectContaining({ retryDecision: 'skipped_after_content' }),
+        );
+      });
+
+      it.each([400, 401, 403])(
+        'does not retry a stream error with status %s',
+        async (status) => {
+          const error = Object.assign(new Error('Rejected request'), {
+            status,
+          });
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValueOnce(failStream(error));
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'server-client-error',
+          );
+          const { caughtError } = await drainCollecting(stream);
+          expect(caughtError).toBe(error);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it.each([
+        { status: 503, maxRetries: 0, retryErrorCodes: [] },
+        { status: 503, maxRetries: 1, retryErrorCodes: [] },
+        { status: 500, maxRetries: 1, retryErrorCodes: [500] },
+      ])(
+        'does not extend the rate-limit budget for $status (maxRetries: $maxRetries)',
+        async ({ status, maxRetries, retryErrorCodes }) => {
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            authType: AuthType.USE_GEMINI,
+            model: 'test-model',
+            maxRetries,
+            retryErrorCodes,
+            retryInitialDelayMs: 1,
+            retryMaxDelayMs: 1,
+          });
+          const error = Object.assign(
+            new Error('Provider temporarily overloaded'),
+            { status },
+          );
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockImplementation(async () => failStream(error));
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'server-rate-limit-exhausted',
+          );
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(10_000);
+          const { caughtError } = await collecting;
+          expect(caughtError).toBe(error);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(maxRetries + 1);
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Server stream retry scheduled',
+            expect.anything(),
+          );
+        },
+      );
+
+      it('does not add retries to a failed HTTP establishment', async () => {
+        const error = serverError();
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          error,
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'server-connect-error',
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(10_000);
+        const { caughtError } = await collecting;
+        expect(caughtError).toBe(error);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('stops when cancelled during server-error backoff', async () => {
+        const controller = new AbortController();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(failStream(serverError()));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: controller.signal } },
+          'server-aborted',
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(10_000);
+        const { caughtError } = await collecting;
+        expect(caughtError).toMatchObject({ name: 'AbortError' });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      });
+    });
 
     it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
       vi.useFakeTimers();
