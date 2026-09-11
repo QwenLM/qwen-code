@@ -2988,6 +2988,43 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       ]);
       expect(rows.every((row) => row.serverState === 'queued')).toBe(true);
       expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // Both surviving rows are summary-only, so neither can echo: when the
+      // daemon starts each prompt, the transcript copy has to come from the
+      // payload the dropped row's submit body still holds.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'continue',
+            },
+          },
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-2',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-2',
+              text: 'continue',
+            },
+          },
+        ]);
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledTimes(2);
+      expect(
+        harness.store.appendLocalUserMessage.mock.calls.map((call) => call[2]),
+      ).toEqual([{ promptId: 'prompt-1' }, { promptId: 'prompt-2' }]);
+      expect(
+        harness.store.appendLocalUserMessage.mock.calls.every(
+          (call) => call[0] === 'continue',
+        ),
+      ).toBe(true);
     } finally {
       await harness.dispose();
     }
@@ -9393,9 +9430,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       },
     );
     sdkMock.actions.removePendingPrompt.mockClear();
-    sdkMock.actions.removePendingPrompt.mockResolvedValueOnce({
-      removed: false,
-    });
+    // A lost DELETE rather than a not-removed answer: this fixture goes on
+    // to show the prompt starting, which `{ removed: false }` rules out —
+    // that answer means the id is absent, or already removed and hidden.
+    sdkMock.actions.removePendingPrompt.mockRejectedValueOnce(
+      new Error('delete lost'),
+    );
     const harness = createHarness();
     try {
       await harness.render({
@@ -9559,10 +9599,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         { sessionId: 'session-a' },
       );
       // The idle daemon starts the prompt while the DELETE is in flight, so
-      // the started event lands inside the removal window and is parked —
-      // the DELETE can still come back not-removed (the prompt left the
-      // queue when it started, or a peer removed it first), and the replay
-      // is what echoes it.
+      // the started event lands inside the removal window and is parked. The
+      // DELETE can still come back not-removed — a peer removed the id first,
+      // and the doomed prompt runs on to settle — and the replay is what
+      // echoes it.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -9824,9 +9864,11 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       },
     );
     sdkMock.actions.removePendingPrompt.mockClear();
-    sdkMock.actions.removePendingPrompt.mockResolvedValueOnce({
-      removed: false,
-    });
+    // A lost DELETE rather than a not-removed answer: only a request that
+    // never arrived can leave the prompt queued for the re-sync to find.
+    sdkMock.actions.removePendingPrompt.mockRejectedValueOnce(
+      new Error('delete lost'),
+    );
     const harness = createHarness();
     try {
       await harness.render({
@@ -9841,9 +9883,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
                 resolvePending = resolve;
               }),
           )
-          // The removal failed while the prompt was still queued, so the
-          // failure re-sync materializes a summary-only row for it — the
-          // daemon's summary cannot reproduce the image.
+          // The removal never reached the daemon, so the prompt is still
+          // queued and the failure re-sync materializes a summary-only row
+          // for it — the daemon's summary cannot reproduce the image.
           .mockResolvedValue({
             pendingPrompts: [
               {
@@ -13702,6 +13744,79 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         { promptId: 'prompt-1' },
         undefined,
       );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not echo an image placeholder for a cleared submission whose start parked', async () => {
+    let rejectAdmission: ((error: Error) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ promptId: string }>((_resolve, reject) => {
+          rejectAdmission = reject;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('', [{ data: 'aGVsbG8=', media_type: 'image/png' }]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      // The daemon starts the prompt while its admission is still in flight.
+      // The event carries only the placeholder rendering, an attachment row
+      // cannot match a content-less event, and this client's own unbound
+      // submission suppresses the raw-text echo — so the handler parks it.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: '[image]',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // The user clears the queue: the row is dropped locally and the
+      // admission is aborted, so the body returns without stashing a payload
+      // or consuming the park.
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      await act(async () => {
+        rejectAdmission?.(new Error('aborted'));
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      // The turn ends and the settle-time consume finds the parked
+      // placeholder with no payload source left. A literal '[image]' bubble
+      // is not the user's message, and the image is gone with the row: the
+      // consume stays silent, as it does for an empty rendering.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }

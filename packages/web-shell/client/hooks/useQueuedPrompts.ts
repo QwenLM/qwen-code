@@ -389,6 +389,21 @@ function pendingPromptTextsMatch(localText: string, serverText: string) {
 }
 
 /**
+ * Whether a payload carries more than its rendered text: attachments, or the
+ * reference chips a rendering drops. A started event cannot reproduce such a
+ * payload, so every route that owes it a transcript copy keeps it under the
+ * daemon's id — and the mid-turn insert route, which sends text only, refuses
+ * such a row rather than drop what it cannot carry.
+ */
+function eventCannotReproducePayload(prompt: QueuedPrompt): boolean {
+  return (
+    (prompt.images?.length ?? 0) > 0 ||
+    (prompt.files?.length ?? 0) > 0 ||
+    (prompt.inputAnnotations?.length ?? 0) > 0
+  );
+}
+
+/**
  * Whether a local row still in flight is the same message as a server-side
  * prompt. A rendered text is not an identity: the daemon renders every
  * text-less prompt with an image block as the same '[image]' placeholder,
@@ -601,10 +616,11 @@ export function useQueuedPrompts({
   /**
    * Payloads a started event cannot reproduce — attachments, or the
    * reference chips its rendered text drops — keyed by the id the daemon
-   * returned. Written by a resubmission's confirmation head, by the
-   * ordinary discard arm before it issues a removal, and by the claim arm
-   * whose row the sync spliced, so when no payload-complete local row
-   * remains the echo comes from here instead of the event's rendering.
+   * returned. Written by a resubmission's confirmation head, by both claim
+   * arms whose row the sync spliced, by the ordinary discard arm before it
+   * issues a removal, and by the duplicate-drop arm whose row a materialized
+   * copy replaced — so when no payload-complete local row remains, the echo
+   * comes from here instead of the event's rendering.
    */
   const pendingEchoByPromptIdRef = useRef<Map<string, QueuedPrompt>>(new Map());
   /**
@@ -620,8 +636,9 @@ export function useQueuedPrompts({
    * daemon either never dispatched the prompt or aborted the turn the user
    * asked to cancel. The removal can still come back not-removed (the id
    * absent, or already removed by another client while the doomed prompt
-   * runs on to settle), so the failure arm replays from here instead of
-   * dropping the message from the transcript.
+   * runs on to settle), so the submit-body, discard and deferred-clear
+   * failure arms replay from here instead of dropping the message from the
+   * transcript; the two explicit user-action removal arms do not replay yet.
    */
   const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
   /**
@@ -629,11 +646,12 @@ export function useQueuedPrompts({
    * confirmation snapshot ever landed, mapped to that row's id. From that
    * return on, no in-flight admission will echo the message, so the
    * settle-time last-chance echo must not defer to a row that merely renders
-   * the same text; the id also lets the settle drop a still-unbound row: a
-   * payload row that carries text can never bind (the matcher refuses
-   * non-blank text and the started event carries no content), and a
-   * text-less image row that has not bound by settle time has no later
-   * snapshot left to bind from.
+   * the same text; the id also lets the settle drop a still-unbound row. A
+   * row carrying images or files cannot bind once its text is non-blank — the
+   * attachment route refuses it, and the started event carries no content to
+   * compare — and a text-less image row that has not bound by settle time has
+   * no later snapshot left to bind from. An annotation-only row does bind, by
+   * exact text, so it is no longer unbound by then.
    */
   const returnedUnboundPromptIdsRef = useRef<Map<string, number>>(new Map());
 
@@ -980,10 +998,13 @@ export function useQueuedPrompts({
           : undefined;
       if (
         parkedText !== undefined &&
-        // An empty rendering with no payload source carries no message to
-        // show: leave the park (inert once settled) rather than echo a blank
-        // bubble. Both sibling consumers of a parked text refuse it too.
-        (full !== undefined || parkedText !== '') &&
+        // A rendering with no payload source carries no message to show:
+        // leave the park (inert once settled) rather than echo a blank
+        // bubble, or the daemon's placeholder for an attachment this client
+        // no longer holds. Both sibling consumers of a parked text refuse
+        // those two as well.
+        (full !== undefined ||
+          (parkedText !== '' && parkedText !== IMAGE_ONLY_PROMPT_TEXT)) &&
         !settledServerPromptIdsRef.current.has(promptId) &&
         !displayedServerPromptIdsRef.current.has(promptId) &&
         (boundRowExists || !pendingOwnSubmission)
@@ -1015,10 +1036,9 @@ export function useQueuedPrompts({
       const returnedRowId = returnedUnboundPromptIdsRef.current.get(promptId);
       returnedUnboundPromptIdsRef.current.delete(promptId);
       // A settled prompt can never bind its row anymore: for a body that
-      // returned unbound the row has no remaining recovery route (a
-      // payload-bearing row has none at all), so drop a still-unbound copy
-      // rather than leave a phantom submitting row suppressing
-      // materialization.
+      // returned unbound the row has no remaining recovery route, so drop a
+      // still-unbound copy rather than leave a phantom submitting row
+      // suppressing materialization.
       if (returnedRowId !== undefined) {
         const returnedRow = queuedPromptsRef.current.find(
           (item) => item.id === returnedRowId,
@@ -1736,8 +1756,9 @@ export function useQueuedPrompts({
         if (removingServerPromptIdsRef.current.has(promptId)) {
           // Park rather than drop: the removal may still come back
           // not-removed (the id can be absent, or already removed by another
-          // client while the doomed prompt runs on to settle), and the
-          // failure arm replays from here.
+          // client while the doomed prompt runs on to settle). The
+          // submit-body, discard and deferred-clear failure arms replay from
+          // here; the two explicit user-action removal arms do not yet.
           startedDuringRemovalRef.current.set(
             promptId,
             typeof event.data.text === 'string' ? event.data.text : '',
@@ -1998,11 +2019,7 @@ export function useQueuedPrompts({
             // event carries only rendered text — no attachments and no
             // annotation chips — so keep the payload under the id the daemon
             // returned until something echoes it.
-            const eventCannotReproducePayload =
-              (prompt.images?.length ?? 0) > 0 ||
-              (prompt.files?.length ?? 0) > 0 ||
-              (prompt.inputAnnotations?.length ?? 0) > 0;
-            if (eventCannotReproducePayload) {
+            if (eventCannotReproducePayload(prompt)) {
               pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
               while (pendingEchoByPromptIdRef.current.size > 200) {
                 const oldest = pendingEchoByPromptIdRef.current
@@ -2110,7 +2127,7 @@ export function useQueuedPrompts({
                 if (
                   snapshotState === 'running' &&
                   !localMessageAppended &&
-                  eventCannotReproducePayload
+                  eventCannotReproducePayload(prompt)
                 ) {
                   appendLocalQueuedPrompt(prompt, result.promptId);
                 }
@@ -2213,6 +2230,18 @@ export function useQueuedPrompts({
             );
             if (bound?.serverState === 'queued') {
               if (bound.id !== localId) {
+                // The sync materialized its own row for this prompt, so this
+                // body's duplicate has to go. That row is summary-only and
+                // cannot echo, so the started event's source is the payload
+                // this body still holds: stash it under the daemon's id.
+                pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+                while (pendingEchoByPromptIdRef.current.size > 200) {
+                  const oldestDuplicateEcho = pendingEchoByPromptIdRef.current
+                    .keys()
+                    .next().value;
+                  if (typeof oldestDuplicateEcho !== 'string') break;
+                  pendingEchoByPromptIdRef.current.delete(oldestDuplicateEcho);
+                }
                 const next = queuedPromptsRef.current.filter(
                   (item) => item.id !== localId,
                 );
@@ -2401,11 +2430,7 @@ export function useQueuedPrompts({
             // rendered text, so keep the payload under the daemon's id until
             // the outcome: a failed removal replays the echo from here
             // instead of dropping to the placeholder.
-            if (
-              (prompt.images?.length ?? 0) > 0 ||
-              (prompt.files?.length ?? 0) > 0 ||
-              (prompt.inputAnnotations?.length ?? 0) > 0
-            ) {
+            if (eventCannotReproducePayload(prompt)) {
               pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
               while (pendingEchoByPromptIdRef.current.size > 200) {
                 const oldestEcho = pendingEchoByPromptIdRef.current
@@ -3561,9 +3586,7 @@ export function useQueuedPrompts({
         prompt.isEditing ||
         prompt.isRemoving ||
         prompt.isInserting ||
-        (prompt.images?.length ?? 0) > 0 ||
-        (prompt.files?.length ?? 0) > 0 ||
-        (prompt.inputAnnotations?.length ?? 0) > 0 ||
+        eventCannotReproducePayload(prompt) ||
         isCommandPrompt(prompt.text)
       ) {
         return;
