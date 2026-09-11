@@ -2084,6 +2084,280 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('does not resurrect a cleared row from the flight that predates the clear', async () => {
+    let resolveStale:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'queued';
+            originatorClientId: string;
+          }>;
+        }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    let resolveResubmit: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResubmit = resolve;
+        }),
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('cancel me');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveStale = resolve;
+            }),
+        );
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+        connected: false,
+      });
+      await act(async () => {
+        resolveResubmit?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      // The stale flight's snapshot DOES list the prompt as queued, and this
+      // client owns it. Skipping the record is not enough: the same pass goes
+      // on to sync, and with no local row and nothing suppressing the id it
+      // would materialize the row the user just cleared — and stay that way
+      // for as long as the client is disconnected, since every later refresh
+      // is skipped.
+      await act(async () => {
+        resolveStale?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'cancel me',
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      // The record survived the stale pass, so the reconnect still cancels it.
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'cancel me',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+            originatorClientId: CLIENT_ID,
+          },
+        ],
+      });
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'prompt-1',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not re-echo a settled prompt from its confirming snapshot', async () => {
+    let resolveConfirm:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'running';
+          }>;
+        }) => void)
+      | undefined;
+    const fileText = '@docs/notes.txt';
+    const text = `${fileText} explain this`;
+    const annotation = {
+      type: 'reference' as const,
+      start: 0,
+      end: fileText.length,
+      text: fileText,
+      reference: {
+        id: 'file:docs/notes.txt',
+        kind: 'file' as const,
+        value: 'docs/notes.txt',
+      },
+    };
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    let resolveResubmit: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResubmit = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(text, undefined, undefined, undefined, [annotation]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      // While the admission is still in flight, a snapshot binds the row by
+      // its exact rendered text.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValueOnce({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text,
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts[0]?.serverPromptId).toBe(
+        'prompt-1',
+      );
+      // The prompt starts and the bound row echoes it. Because the source is a
+      // bound row, the handler writes no re-read marker for the submit body.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: { sessionId: 'session-a', promptId: 'prompt-1', text },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+      // The user stops the turn: the settle clears the displayed marker,
+      // records the prompt as settled and drops the row.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              stopReason: 'cancelled',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      // The admission lands at last, and its confirming snapshot was served
+      // before the cancel, so it still reports the prompt as running.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveConfirm = resolve;
+            }),
+        );
+        resolveResubmit?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        resolveConfirm?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text,
+              queuedAt: Date.now(),
+              state: 'running' as const,
+            },
+          ],
+        });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      // Neither dedupe marker survives a settle, so the arm that echoes the
+      // body's own payload for a running prompt has to consult the settled
+      // set itself — otherwise the message renders twice above a cancelled
+      // turn.
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        text,
+        undefined,
+        { promptId: 'prompt-1', inputAnnotations: [annotation] },
+        undefined,
+      );
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('does not let a text row claim an attachment prompt that renders alike', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) => {

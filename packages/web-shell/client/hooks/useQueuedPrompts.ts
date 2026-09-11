@@ -1113,8 +1113,13 @@ export function useQueuedPrompts({
               // the evidence the clear is waiting for: its snapshot predates
               // the cancellation, so its silence proves nothing — the same
               // staleness the boundAtSeq fence rejects. Leave the entry for a
-              // pass that can prove something rather than consuming it here.
-              if (requestSeq <= anchorSeq) continue;
+              // pass that can prove something rather than consuming it here,
+              // and keep it out of this pass's sync, which would otherwise
+              // materialize the row the user just cleared.
+              if (requestSeq <= anchorSeq) {
+                overruledClearedIds.add(clearedPromptId);
+                continue;
+              }
               clearedUnconfirmedPromptIdsRef.current.delete(clearedPromptId);
               if (
                 !result.pendingPrompts.some(
@@ -2156,10 +2161,15 @@ export function useQueuedPrompts({
                 // A started event carries only rendered text, which loses
                 // attachments and annotation chips, so echo from the copy this
                 // body still holds when the snapshot says the daemon is
-                // already running it.
+                // already running it. A settle inside this window clears the
+                // displayed marker the echo would otherwise be idempotent
+                // against, and an echo sourced from a bound row writes no
+                // re-read marker for this body — so the settled set is the
+                // only term that can still see it.
                 if (
                   snapshotState === 'running' &&
                   !localMessageAppended &&
+                  !settledServerPromptIdsRef.current.has(result.promptId) &&
                   eventCannotReproducePayload(prompt)
                 ) {
                   appendLocalQueuedPrompt(prompt, result.promptId);
@@ -2179,6 +2189,10 @@ export function useQueuedPrompts({
                     result.promptId,
                     refreshRequestSeqRef.current,
                   );
+                  // Guarantee a later pass exists to apply it: the anchor
+                  // above makes any flight already in flight skip this entry,
+                  // and the `.finally` refresh is what dispatches a newer one.
+                  refreshedInBody = false;
                 }
                 // The confirming sync may already have materialized a row for
                 // the prompt the user cleared — drop it rather than resurrect
