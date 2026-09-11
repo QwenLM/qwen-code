@@ -440,7 +440,9 @@ function getSpanId(span: Span): string {
   return span.spanContext().spanId || '';
 }
 
-const SPAN_TEXT_MAX_CHARS = 1024;
+// Exported for the RUM sink's pre-pass bound (sanitize.ts) so both sinks
+// derive their caps from one constant.
+export const SPAN_TEXT_MAX_CHARS = 1024;
 const TOOL_DESCRIPTION_MAX_CHARS = 4096;
 
 /**

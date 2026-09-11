@@ -155,6 +155,14 @@ function registerProcessSecrets(config: Config | undefined): void {
   for (const server of Object.values(config?.getMcpServers() ?? {})) {
     for (const value of Object.values(server.headers ?? {})) {
       secrets.push(value);
+      // The repo's own MCP docs recommend `"Authorization": "Bearer
+      // <token>"`, so the whole envelope is the registered value; the
+      // credential half must be registered too or the exact-value mask
+      // only fires when the envelope appears verbatim and a bare token
+      // echo ships. `Bearer token`-style short remainders are still
+      // refused by MIN_SECRET_VALUE_LENGTH inside registerKnownSecretValues.
+      const credential = value.replace(/^[A-Za-z][A-Za-z0-9+._-]*\s+/, '');
+      if (credential !== value) secrets.push(credential);
     }
   }
   registerKnownSecretValues(secrets);
@@ -227,6 +235,12 @@ export class QwenLogger {
       return undefined;
     if (!QwenLogger.instance) {
       QwenLogger.instance = new QwenLogger(config);
+    } else {
+      // ACP builds one Config per session; the singleton keeps the FIRST
+      // session's Config, so a later session's credentials would never be
+      // registered by enqueueLogEvent reading this.config. The registry is
+      // add-only, so folding in the caller's config widens masking only.
+      registerProcessSecrets(config);
     }
 
     return QwenLogger.instance;

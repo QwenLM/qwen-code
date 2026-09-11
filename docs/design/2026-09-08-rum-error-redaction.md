@@ -58,13 +58,28 @@ for the secrets the process itself holds, for three reasons:
    capped in length, which bounds how much of a missed shape can leave.
 
 Secrets the process holds at runtime (the content-generator API key, MCP
-server header values) are additionally masked **by exact value** wherever
-they appear in queued error text. Value matching is closed by construction
-— it does not depend on spelling — so a process-held credential reaches
-the RUM payload in no shape at all. The values are re-registered on every
-`enqueueLogEvent` so mid-session credential refreshes are covered, and
-values shorter than a trivial floor are skipped so a placeholder cannot
-censor ordinary text.
+server header values — including the credential half of a scheme-prefixed
+header value such as `Bearer <token>`) are additionally masked **by exact
+value** wherever they appear in queued error text. For the values that are
+registered, value matching is closed by construction — it does not depend
+on spelling. The values are re-registered on every `enqueueLogEvent` (and
+whenever a second session's Config reaches `getInstance`, so a non-primary
+runtime's credentials are folded into the add-only registry), and values
+shorter than a trivial floor are skipped so a placeholder cannot censor
+ordinary text.
+
+**Registered-value coverage is not exhaustive** — this is a recorded
+residual gap, not a closed class: the registry reads only the
+content-generator `apiKey` and MCP `headers` values (plus their scheme
+strippings). NOT registered today: the Qwen OAuth dynamic access/refresh
+tokens (the placeholder `QWEN_OAUTH_DYNAMIC_TOKEN` is, and is itself not a
+credential), `ContentGeneratorConfig.customHeaders`, MCP `env` values, MCP
+`oauth.clientSecret`, and transport-time `Authorization: Bearer` headers
+composed inside `mcp-client`. For those, only the best-effort spelling
+patterns apply. Closing this half structurally — or switching the sink to
+fingerprinting / first-line-only masking — is an open maintainer decision
+(this PR's review thread escalates it); until ruled on, no "no shape at
+all" claim is made here.
 
 The mask set (each proven pattern already has precedent in this repo or is a
 direct generalization of one):
@@ -81,8 +96,10 @@ direct generalization of one):
 "Looks like a secret" is a conservative key-name match (`password`, `token`,
 `secret`, `api_key`/`apikey`, `access_key`, `auth`, `credential`,
 `private_key`, `session_key`) in flag, env, and header positions — not a
-content heuristic. False positives cost a redacted flag value in telemetry
-only; false negatives are bounded by truncation.
+content heuristic. False positives cost a redacted flag value (or, for a closed quoted
+value with spaces, the run between an unclosed quote and a later
+unrelated one) in telemetry only; false negatives are bounded by
+truncation.
 
 ## Where the mask runs: `enqueueLogEvent`
 
@@ -107,12 +124,26 @@ the retry path's re-queue only re-adds events that already passed through
 
 ## Normalisation and the shared truncation bound
 
-ANSI/VT escape sequences are removed first (`stripVTControlCharacters`,
-newlines preserved), then every remaining C0/C1 control character (except
-LF/CR) is replaced with a **space** — not deleted — so a control character
-cannot sit between a secret key and its separator and split the mask's
-match, and cannot fuse a key and value into one token (`--token<TAB>value`)
-or glue a word character onto a key and defeat the mask either. Unlike the
+ANSI/VT escape sequences are neutralised first: a sequence run that is
+the only separator between two non-whitespace characters becomes a
+**space** (deleting it would fuse a flag and its value into one token and
+let the credential slip through); any other run is deleted, so wrapped
+diagnostics keep their spacing. Two-character JSON escapes (`\"`, `\n`, `\t`, `\r`, `\\`) are unescaped before the masks so the widest producer
+(JSON-stringified MCP response parts) is seen in one text shape. Then
+every remaining C0/C1 control character (except LF/CR) is replaced with a
+**space** — not deleted — so a control character cannot sit between a
+secret key and its separator and split the mask's match, and cannot fuse
+a key and value into one token (`--token<TAB>value`) or glue a word
+character onto a key and defeat the mask either. Unicode format
+characters (Cf) and combining marks inside or around a key/separator are
+a recorded residual gap: substituting a space for them does not close the
+position and regresses URL userinfo masking, and the repo's shipped
+technique for this class (collapsing separators inside _matched_
+credential spans, `workspace-remember-errors.ts`) is the shape a follow-up
+would take. The exact-value mask also runs once on the pre-normalisation
+text, so an incomplete escape sequence before a registered secret (which
+would otherwise consume the secret's first character as the sequence's
+final byte) cannot defeat value matching. Unlike the
 OTel path's `stripAnsiAndControl`, newlines survive: the RUM feed's
 diagnostic value is the shape of the multi-line error block, which
 flattening would destroy. A shell line-continuation marker before a value
@@ -121,7 +152,14 @@ binds to the credential on the continuation line.
 
 The truncation bound and its surrogate-pair guard are shared with the OTel
 span path through `truncateErrorText` (exported from `session-tracing.ts`,
-used by both paths) — one definition of the bound, two sinks. The
+used by both paths) — one definition of the bound, two sinks. Work is also
+bounded BEFORE the passes at a working multiple of the output cap
+(`SPAN_TEXT_MAX_CHARS * 64`): every mask runs over the full string, so
+without a pre-bound the output cap bounds the uploaded payload but not the
+CPU, and dash-dense hostile error text (quadratic in the URL pass) could
+freeze the CLI main thread for minutes. A credential straddling the
+working-multiple cut still survives the cut because the cut happens before
+the mask passes. The
 normalisation deliberately differs (newlines survive here), so "parity"
 means the bound and the credential redaction, not byte-identical output
 with the OTel copy.
@@ -143,7 +181,11 @@ source strings.
 
 ## Testing
 
-Unit tests on `redactErrorText` for every shape in the table above, plus
+Unit tests on `redactErrorText` for the mask shapes in the table above
+(the `upload:v1:` row is inherited from `redactUrlCredentials`; its only
+RUM-adjacent carrier, `properties.extension_source`, is not a field the
+sink walks and its producers pre-redact, so the row is covered by the
+helper's own tests plus one sink-level composition case), plus
 idempotence and a no-op check on non-matching text. Unit tests on
 `QwenLogger.enqueueLogEvent` asserting the exact leaked example from the
 issue (`git clone https://x-access-token:ghs_...@...`) arrives masked, and

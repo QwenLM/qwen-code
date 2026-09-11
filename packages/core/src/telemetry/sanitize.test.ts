@@ -197,7 +197,7 @@ describe('redactErrorText', () => {
       redactErrorText(
         'npm ERR! \u001b[1m\u001b[31mhttps://user:ghp_Secret123@registry.example.com/pkg\u001b[0m',
       ),
-    ).toBe('npm ERR! https://***REDACTED***@registry.example.com/pkg');
+    ).toBe('npm ERR!  https://***REDACTED***@registry.example.com/pkg');
     expect(
       redactErrorText('\u001b[31mAWS_SECRET_ACCESS_KEY=xyz\u001b[0m'),
     ).toBe('AWS_SECRET_ACCESS_KEY=***');
@@ -292,17 +292,110 @@ describe('redactErrorText', () => {
     );
   });
 
+  it('should neutralise (not delete) an ANSI sequence separating a flag from its value', () => {
+    // A colourised tool echoing the failing command with the value in its
+    // own colour: the SGR run is the ONLY separator between the flag and
+    // the credential, so deleting it fuses them into one token and the
+    // credential ships. It must become a space.
+    expect(redactErrorText('git push --token\u001b[32mghp_REALTOKEN')).toBe(
+      'git push --token ***',
+    );
+  });
+
+  it('should keep ANSI-wrapped diagnostics spacing intact', () => {
+    // Runs adjacent to existing whitespace or at an edge are deleted, not
+    // replaced, so colourised text keeps its width after neutralisation.
+    expect(
+      redactErrorText('Error: \u001b[32mprovider\u001b[0m unavailable'),
+    ).toBe('Error: provider unavailable');
+    expect(
+      redactErrorText('\u001b[32mError: provider unavailable\u001b[0m'),
+    ).toBe('Error: provider unavailable');
+  });
+
+  it('should mask a credential straddling a JSON-escaped quote or newline', () => {
+    // The widest producer JSON-stringifies response parts, so a quote
+    // arrives as \" and a newline as the two chars \n; the value tokeniser
+    // must see the unescaped shape or it stops at the backslash.
+    expect(
+      redactErrorText('{"error":"curl --token=\\"ghs_SECRET\\" failed"}'),
+    ).not.toContain('ghs_SECRET');
+    expect(redactErrorText('--token\\n=ghs_SECRETvalue')).not.toContain(
+      'ghs_SECRETvalue',
+    );
+    expect(
+      redactErrorText('Authorization:\\nBearer abc123SECRETvalue'),
+    ).not.toContain('abc123SECRETvalue');
+    // Unescaping must not let a quoted run cross the next whitespace.
+    expect(redactErrorText('curl --token "ghp_REALTOKEN')).toBe(
+      'curl --token ***',
+    );
+  });
+
+  it('should mask a fully closed quoted value containing spaces', () => {
+    // A closed quoted run is masked whole; only an *unclosed* quote stays
+    // whitespace-bounded (previous test).
+    expect(redactErrorText('--password "correct horse battery"')).toBe(
+      '--password ***',
+    );
+    expect(
+      redactErrorText('Command: mysqldump --password="my pass phrase" db'),
+    ).toBe('Command: mysqldump --password=*** db');
+    expect(
+      redactErrorText("Command: mysqldump --password='my pass phrase' db"),
+    ).toBe('Command: mysqldump --password=*** db');
+  });
+
+  it('should mask the credential on the folded line after an auth scheme word', () => {
+    // Agent-authored curl wraps the -H argument; the scheme word's value
+    // may sit on the next line, but a following `Name:` header line is the
+    // next key's position, never the value. Both pattern families (the
+    // Authorization header form and the bare bearer label) must fold.
+    expect(
+      redactErrorText('Authorization: Bearer\neyJhbGciOiSECRET999'),
+    ).not.toContain('eyJhbGciOiSECRET999');
+    expect(
+      redactErrorText('Output: Bearer\neyJhbGciOiSECRET999'),
+    ).not.toContain('eyJhbGciOiSECRET999');
+    expect(
+      redactErrorText('invalid bearer\ntoken: eyJhbGciOiSECRET999'),
+    ).not.toContain('eyJhbGciOiSECRET999');
+  });
+
+  it('should mask a registered secret an incomplete escape sequence would eat', () => {
+    // `\u001b[32` + `ghp_...`: the CSI final byte is unbounded, so a
+    // delete-based strip consumes the secret's first char ('g') as the
+    // final byte and the registered value no longer occurs afterwards.
+    // Masking the raw input first closes this; neither the whole secret
+    // nor its eaten-first-char fragment may survive.
+    registerKnownSecretValues(['ghp_SECRETVALUE']);
+    try {
+      const out = redactErrorText('rejected key \u001b[32ghp_SECRETVALUE');
+      expect(out).not.toContain('ghp_SECRETVALUE');
+      expect(out).not.toContain('hp_SECRETVALUE');
+    } finally {
+      clearKnownSecretValuesForTest();
+    }
+  });
+
   it('should stay linear on dash-dense adversarial input', () => {
+    // Two-stage bound: the work is bounded BEFORE the passes (the URL
+    // pass's dash-permissive class is quadratic past the pre-bound; a
+    // ~1MB dash-dense error took ~87s synchronously on the main thread
+    // before it), and the result must equal the capped variant because
+    // everything past the working multiple is discarded by the final cap.
+    const adversarial = '--token'.repeat(200_000);
     const start = performance.now();
-    redactErrorText('--token'.repeat(1000));
+    const masked = redactErrorText(adversarial);
     const elapsed = performance.now() - start;
-    // Unbounded key runs cost ~11.5s (cubic backtracking); the bounded
-    // runs finish in tens of milliseconds. Generous CI budget.
+    // Generous CI budget: measured ~1s for 1.4MB locally, tens of seconds
+    // without the pre-bound.
     expect(elapsed).toBeLessThan(5000);
+    expect(masked).toBe(redactErrorText(adversarial.slice(0, 1024 * 64)));
     // The retained head of a masked, over-long input is still masked.
-    const masked = redactErrorText('--token=ghs_abcdef '.repeat(200));
-    expect(masked.length).toBe(1024 + '…[truncated]'.length);
-    expect(masked).not.toContain('ghs_abcdef');
+    const short = redactErrorText('--token=ghs_abcdef '.repeat(200));
+    expect(short.length).toBe(1024 + '…[truncated]'.length);
+    expect(short).not.toContain('ghs_abcdef');
   });
 
   it('should share the truncation bound and surrogate guard with the OTel span path', () => {

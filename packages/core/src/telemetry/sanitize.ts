@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stripVTControlCharacters } from 'node:util';
 import { redactUrlCredentials } from '../extension/redaction.js';
-import { truncateErrorText } from './session-tracing.js';
+import { SPAN_TEXT_MAX_CHARS, truncateErrorText } from './session-tracing.js';
 
 /**
  * Sanitize hook name to remove potentially sensitive information.
@@ -66,6 +65,31 @@ const CONTROL_CHARS_EXCEPT_NEWLINES_RE =
   // eslint-disable-next-line no-control-regex -- C0/C1 stripping is the point
   /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
+// VT/ANSI escape sequences are neutralised, not blindly deleted (Node's
+// stripVTControlCharacters deletes them): deletion re-creates the key/value
+// fusion the space substitution below exists to prevent — an SGR sequence
+// sitting between a flag and its value fuses them into one token and the
+// credential ships. A run that is the ONLY separator between two
+// non-whitespace chars becomes a space; any other run (adjacent to existing
+// whitespace or at an edge) is deleted, so ANSI-wrapped diagnostics keep
+// their exact spacing. Handling runs here instead of delegating also stops
+// an incomplete CSI sequence from eating the first char of a following
+// secret as its final byte.
+const VT_SEQUENCE_RUN =
+  '(?:\u001b\\[[0-9;?]*[ -/]*[@-~]|\u001b\\][^\u0007\u001b]*(?:\u0007|\u001b\\\\))+';
+const VT_SEPARATOR_RUN_RE = new RegExp(
+  `(?<=\\S)${VT_SEQUENCE_RUN}(?=\\S)`,
+  'g',
+);
+const VT_ANY_RUN_RE = new RegExp(VT_SEQUENCE_RUN, 'g');
+
+// The widest hostile producer (the MCP tool-error builder) JSON-stringifies
+// response parts, so a quote reaches this pass as `\"` and a newline as the
+// two characters `\n`. Unescaping the two-character JSON escapes in
+// normalisation lets every mask pass see one text shape instead of a value
+// tokeniser that stops at the backslash of an escaped quote.
+const JSON_ESCAPE_RE = /\\([nrt"'\\])/g;
+
 const SECRET_KEY_PATTERN =
   '(?:password|passwd|pwd|token|secret|api[_-]?key|apikey|access[_-]?key|auth|credential|private[_-]?key|session[_-]?key)';
 
@@ -77,7 +101,12 @@ const SECRET_KEY_PATTERN =
 // (R1-18). The quoted run is whitespace-bounded so an unclosed quote
 // cannot swallow the rest of the line's diagnostics.
 const CONTINUATION_PREFIX = '(?:[\\\\^`][ \\t]*\\r?\\n[ \\t]*)?';
-const VALUE_ALT = `${CONTINUATION_PREFIX}("[^\\s"]*"?|'[^\\s']*'?|(?!-)[^\\s"']+)`;
+// A fully closed quoted run is preferred over the whitespace-bounded
+// fallbacks so a quoted secret *containing spaces* is masked whole
+// (`--password="my pass phrase"`); an unclosed quote still falls through
+// to the whitespace-bounded branch and cannot swallow the line's
+// diagnostics.
+const VALUE_ALT = `${CONTINUATION_PREFIX}("[^"]*"|'[^']*'|"[^\\s"]*"?|'[^\\s']*'?|(?!-)[^\\s"']+)`;
 
 // `--token=xyz`, `--api-key xyz`, `X-Auth-Token: abc` — a dashed or
 // hyphenated key containing a secret-like word, followed by a value. Key
@@ -109,17 +138,21 @@ const SECRET_ENV_PATTERN = new RegExp(
 // `Authorization: Bearer xyz` / `Authorization=xyz` — the header name alone
 // is the secret-like key, so everything after the separator is masked. The
 // value position skips an optional scheme word (Bearer, Basic, Digest,
-// token, …) rather than swallowing it as the value, and consumes up to one
-// whitespace run so it cannot reach across a newline.
+// token, …) rather than swallowing it as the value; the scheme word may be
+// followed by one folded newline (agent-authored curl commands wrap inside
+// the quoted -H argument), but never into a continuation line that is
+// itself a `Name:` header — that is the next key's position, not a value.
 const AUTHORIZATION_HEADER_PATTERN = new RegExp(
-  `(authorization\\s*[:=]\\s*)(?:(?:bearer|basic|digest|token|negotiate|ntlm|apikey|oauth|sso)[^\\S\\n]*)?${VALUE_ALT}`,
+  `(authorization\\s*[:=]\\s*)(?:(?:bearer|basic|digest|token|negotiate|ntlm|apikey|oauth|sso)[^\\S\\n]*(?:\\r?\\n[ \\t]*(?![a-z0-9_.-]+\\s*:))?)?${VALUE_ALT}`,
   'gi',
 );
 
 // `bearer token: <jwt>` / `bearer <jwt>` — the prose label is kept, the
 // credential after it is masked. No `\b` anchor (see SECRET_ENV_PATTERN).
+// The label may span one folded newline, mirroring the Authorization
+// pattern, so a wrapped `bearer\ntoken: <jwt>` is not left unmasked.
 const BEARER_TOKEN_PATTERN = new RegExp(
-  `(bearer[^\\S\\n]+)(token\\s*[:=]?\\s*)?${VALUE_ALT}`,
+  `(bearer(?:[^\\S\\n]+|\\r?\\n[ \\t]*))(token\\s*[:=]?\\s*)?${VALUE_ALT}`,
   'gi',
 );
 
@@ -176,11 +209,31 @@ function maskKnownSecretValues(text: string): string {
  * the shape of the multi-line error block.
  */
 export function redactErrorText(value: string): string {
-  let text = stripVTControlCharacters(value).replace(
-    CONTROL_CHARS_EXCEPT_NEWLINES_RE,
-    ' ',
-  );
-  text = maskKnownSecretValues(text);
+  // Bound the work before the passes, not after: every mask runs over the
+  // full string, so without a pre-bound the output cap bounds the payload
+  // but not the CPU (the URL pass's dash-permissive class is quadratic on
+  // dash-dense input; a ~140k-char hostile error took ~4s synchronously on
+  // the CLI main thread). 64x the output bound is a generous working
+  // multiple — everything past it is discarded by the final cap anyway —
+  // and a straddling credential survives because the cut happens before,
+  // not after, the mask passes. Truncating to the output bound instead
+  // would leak a credential straddling that tighter cut (the URL pass
+  // needs the `@` the cut removed).
+  const bounded = truncateErrorText(value, SPAN_TEXT_MAX_CHARS * 64);
+  // Exact-value masking runs on the raw (pre-normalised) text first: an
+  // incomplete CSI sequence directly before a registered secret makes the
+  // VT pass consume the secret's first char as the sequence's final byte,
+  // after which the registered value no longer occurs in the normalised
+  // text and both mask halves miss it. Masking before normalisation also
+  // keeps the `***` output stable under the normalisation steps below.
+  let text = maskKnownSecretValues(bounded);
+  text = text
+    .replace(JSON_ESCAPE_RE, (_m, c: string) =>
+      c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c,
+    )
+    .replace(VT_SEPARATOR_RUN_RE, ' ')
+    .replace(VT_ANY_RUN_RE, '')
+    .replace(CONTROL_CHARS_EXCEPT_NEWLINES_RE, ' ');
   text = redactUrlCredentials(text);
   text = text.replace(AUTHORIZATION_HEADER_PATTERN, `$1${MASK}`);
   text = text.replace(BEARER_TOKEN_PATTERN, `$1$2${MASK}`);

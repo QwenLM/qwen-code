@@ -31,6 +31,7 @@ import {
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload, RumResourceEvent } from './event-types.js';
+import { clearKnownSecretValuesForTest } from '../sanitize.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -408,6 +409,77 @@ describe('QwenLogger', () => {
       expect(queued[queued.length - 1]?.message).toBe(
         'Request failed: Authorization *** rejected',
       );
+    });
+
+    it('should register the credential half of a scheme-prefixed MCP header value', () => {
+      // The repo's MCP docs recommend `"Authorization": "Bearer <token>"`;
+      // the envelope alone would only mask whole-envelope echoes while a
+      // bare token echo ships.
+      const config = makeFakeConfig({
+        getMcpServers: () => ({
+          httpServerWithAuth: {
+            headers: { Authorization: 'Bearer sk-live-ABCDEFGH' },
+          },
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message:
+          'tool call failed: {"error":"invalid api key sk-live-ABCDEFGH"}',
+      };
+      try {
+        logger.enqueueLogEvent(event);
+        const queued = logger['events'].toArray() as RumResourceEvent[];
+        expect(queued[queued.length - 1]?.message).not.toContain(
+          'sk-live-ABCDEFGH',
+        );
+      } finally {
+        clearKnownSecretValuesForTest();
+      }
+    });
+
+    it('should register a second session config passed to getInstance', () => {
+      // ACP builds one Config per session; the singleton binds the first
+      // one, so the second session's api key must still reach the registry
+      // or its error text ships verbatim.
+      const configA = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-AAAAAAAAAAAAAAAA',
+        }),
+      });
+      QwenLogger.getInstance(configA);
+      const configB = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-BBBBBBBBBBBBBBBB',
+        }),
+      });
+      const logger = QwenLogger.getInstance(configB)!;
+      // The singleton keeps session A's binding…
+      expect(logger).toBe(QwenLogger.getInstance(configA));
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message: 'Incorrect API key provided: sk-live-BBBBBBBBBBBBBBBB',
+      };
+      try {
+        logger.enqueueLogEvent(event);
+        const queued = logger['events'].toArray() as RumResourceEvent[];
+        expect(queued[queued.length - 1]?.message).not.toContain(
+          'sk-live-BBBBBBBBBBBBBBBB',
+        );
+      } finally {
+        clearKnownSecretValuesForTest();
+      }
     });
 
     it('should handle enqueue errors gracefully', () => {
