@@ -178,6 +178,8 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
   call_id?: string;
+  parent_call_id?: string;
+  source?: 'model' | 'code_mode';
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
@@ -199,6 +201,9 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
+    if (call.request.parentCallId)
+      this.parent_call_id = call.request.parentCallId;
+    if (call.request.source) this.source = call.request.source;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
