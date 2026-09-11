@@ -25,7 +25,7 @@ Adjacent sources[^1][^ticket] [^1][^说明]. Separated sources[^1], text[^ticket
 
 Ordinary explanation[^note].
 
-[^1]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](https://images.example.test/concert.png)
+[^1]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](/e2e/footnote-concert.png)
 [^ticket]: [Official ticket website](https://tickets.example.test/show) Tickets and venue information.
 [^说明]: This is a plain note without a link or image.
 [^note]: This ordinary footnote also has a preview.
@@ -59,13 +59,13 @@ async function openFixture(
       message.type() === 'error' &&
       !(
         options.brokenImage &&
-        message.location().url.startsWith('https://images.example.test/')
+        message.location().url.includes('/e2e/footnote-concert.png')
       )
     ) {
       errors.push(message.text());
     }
   });
-  await page.route('https://images.example.test/**', async (route) => {
+  await page.route('**/e2e/footnote-concert.png', async (route) => {
     if (options.brokenImage) {
       await route.abort('failed');
       return;
