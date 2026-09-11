@@ -469,6 +469,85 @@ describe('applyProviderInstallPlan', () => {
     }
   });
 
+  it.each(['image', 'voice', 'mixed'] as const)(
+    'rejects a conversation preset that would remove an owned service model (%s)',
+    async (purpose) => {
+      const service = {
+        id: purpose === 'voice' ? 'qwen3-asr-flash' : 'image-01',
+        name: '[MiniMax] service',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+        ...(purpose === 'voice'
+          ? { voiceOnly: true }
+          : { imageOnly: true, supportsImageGeneration: true }),
+      };
+      const adapter = createAdapter({ openai: [service] });
+      const plan = buildInstallPlan(minimaxProvider, {
+        baseUrl: service.baseUrl,
+        apiKey: 'must-not-write',
+        modelIds:
+          purpose === 'mixed'
+            ? ['MiniMax-M2.7', 'image-01-live']
+            : ['MiniMax-M2.7'],
+      });
+      const previous = process.env['MINIMAX_API_KEY'];
+      process.env['MINIMAX_API_KEY'] = 'service-secret';
+      const reloadModelProviders = vi.fn();
+      try {
+        expect(plan.modelProviders?.[0]?.ownsModel?.(service)).toBe(true);
+        await expect(
+          applyProviderInstallPlan(plan, {
+            settings: adapter,
+            reloadModelProviders,
+          }),
+        ).rejects.toMatchObject({ step: 'modelPurpose' });
+        expect(adapter.setValue).not.toHaveBeenCalled();
+        expect(adapter.backup).not.toHaveBeenCalled();
+        expect(adapter.persist).not.toHaveBeenCalled();
+        expect(reloadModelProviders).not.toHaveBeenCalled();
+        expect(adapter.getModelProviders()).toEqual({ openai: [service] });
+        expect(process.env['MINIMAX_API_KEY']).toBe('service-secret');
+      } finally {
+        if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
+        else process.env['MINIMAX_API_KEY'] = previous;
+      }
+    },
+  );
+
+  it.each(['append-chat', 'reselect-service', 'reselect-chat'] as const)(
+    'preserves intentional preset merge behavior (%s)',
+    async (scenario) => {
+      const existing = {
+        id: scenario === 'reselect-chat' ? 'MiniMax-M2.7' : 'image-01',
+        name: '[MiniMax] existing',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+        ...(scenario === 'reselect-chat'
+          ? {}
+          : { imageOnly: true, supportsImageGeneration: true }),
+      };
+      const plan = buildInstallPlan(minimaxProvider, {
+        baseUrl: existing.baseUrl,
+        apiKey: 'test-only',
+        modelIds: [
+          scenario === 'reselect-service'
+            ? 'image-01-live'
+            : 'MiniMax-M2.7-highspeed',
+        ],
+      });
+      if (scenario === 'append-chat')
+        plan.modelProviders![0]!.mergeStrategy = 'append';
+      delete plan.env;
+      const result = await applyProviderInstallPlan(plan, {
+        settings: createAdapter({ openai: [existing] }),
+      });
+      expect(result.updatedModelProviders['openai']).toEqual([
+        ...(scenario === 'append-chat' ? [existing] : []),
+        ...plan.modelProviders![0]!.models,
+      ]);
+    },
+  );
+
   it.each(['image', 'voice'] as const)(
     'isolates %s credentials from a conversation model at the same endpoint',
     async (purpose) => {

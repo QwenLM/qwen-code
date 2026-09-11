@@ -21,7 +21,11 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
+  normalizeGoalMaxActiveMinutes,
+  normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
@@ -85,6 +89,7 @@ import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import { AgentType, HookEventName } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -2095,6 +2100,26 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('derived Config ownership', () => {
+    it('keeps session approval independent of nested agent and worktree modes', () => {
+      const parent = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const child = deriveConfig(parent, {
+        getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      });
+      const nested = deriveWorktreeConfig(
+        child,
+        '/tmp/native-permission-worktree',
+      );
+      const wrapper = Object.create(nested) as Config;
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+      expect(wrapper.getSessionApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      vi.spyOn(parent, 'getApprovalMode').mockReturnValue(ApprovalMode.YOLO);
+      expect(wrapper.getSessionApprovalMode()).toBe(ApprovalMode.YOLO);
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
     it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
       const child = deriveConfig(parent, {
@@ -3608,6 +3633,159 @@ describe('Server Config (config.ts)', () => {
       }
       expect(isValidGoalTokenBudget(0)).toBe(true);
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
+    });
+
+    it('arms each new Goal with the configured cadence ceilings', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: 20,
+        goalMaxActiveMinutes: 30,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(20);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(1_800_000);
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    });
+
+    it('runs Goals with no cadence ceiling by default', async () => {
+      // Unlike the token budget, the default is nothing: a cadence is what an
+      // operator asks for, not a guard every Goal needs.
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_TURNS_CAP + 1],
+      ['fractional', 1.5],
+      ['not a number', '20' as unknown as number],
+    ])('runs Goals with no turn ceiling when goalMaxTurns is %s', (_l, v) => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: v,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_ACTIVE_MINUTES_CAP + 1],
+      ['fractional', 0.5],
+    ])(
+      'runs Goals with no time ceiling when goalMaxActiveMinutes is %s',
+      (_l, v) => {
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalMaxActiveMinutes: v,
+        });
+        expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+          Number.POSITIVE_INFINITY,
+        );
+      },
+    );
+
+    it('accepts each cadence cap itself and rejects one past it', () => {
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP)).toBe(
+        GOAL_MAX_TURNS_CAP,
+      );
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP + 1)).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+      expect(normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP)).toBe(
+        GOAL_MAX_ACTIVE_MINUTES_CAP * 60_000,
+      );
+      expect(
+        normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP + 1),
+      ).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it('logs invalid cadence settings and stays silent for accepted values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-cadence-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalMaxTurns: 1.5,
+          goalMaxActiveMinutes: '30' as unknown as number,
+        });
+
+        await vi.waitFor(() => {
+          const warnings = appendFileSpy.mock.calls.map((call) =>
+            String(call[1]),
+          );
+          expect(warnings).toEqual(
+            expect.arrayContaining([
+              expect.stringContaining('Ignoring invalid goalMaxTurns 1.5'),
+              expect.stringContaining(
+                'Ignoring invalid goalMaxActiveMinutes 30',
+              ),
+            ]),
+          );
+        });
+
+        appendFileSpy.mockClear();
+        for (const [goalMaxTurns, goalMaxActiveMinutes] of [
+          [undefined, undefined],
+          [0, 0],
+          [-1, -1],
+          [20, 30],
+        ] as const) {
+          new Config({
+            ...baseParams,
+            sessionId,
+            goalMaxTurns,
+            goalMaxActiveMinutes,
+          });
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes('Ignoring invalid goalMax'),
+          ),
+        ).toHaveLength(0);
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
     });
 
     it('arms the checkpoint verifier with the configured timeout', () => {
@@ -6110,6 +6288,27 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it.each([true, false])(
+      'registers saved-page publishing only for recorded managed sessions (%s)',
+      async (chatRecording) => {
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+          chatRecording,
+        });
+        config.setArtifactSnapshotsEnabled(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.ARTIFACT)).toBe(
+          chatRecording,
+        );
+        if (chatRecording) expect(config.shouldAutoOpenArtifact()).toBe(false);
+      },
+    );
+
     it('registers display_image only for the main interactive TUI', async () => {
       const interactive = new Config({
         ...baseParams,
@@ -6448,6 +6647,16 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.REPORT_FINDINGS);
+    });
+
+    it('enables historical artifact snapshots only when a managed caller opts in', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.isArtifactSnapshotsEnabled()).toBe(false);
+      config.setArtifactSnapshotsEnabled(true);
+      expect(config.isArtifactSnapshotsEnabled()).toBe(true);
+      const unrecorded = new Config({ ...baseParams, chatRecording: false });
+      unrecorded.setArtifactSnapshotsEnabled(true);
+      expect(unrecorded.isArtifactSnapshotsEnabled()).toBe(false);
     });
 
     describe('isArtifactEnabled', () => {
@@ -12937,6 +13146,24 @@ describe('BaseLlmClient Lifecycle', () => {
     );
   });
 
+  it('reads current provider protocols through the reloaded model registry', () => {
+    const providers = { alternate: [{ id: 'test-model' }] };
+    const config = new Config({
+      ...baseParams,
+      modelProvidersConfig: providers,
+      providerProtocolConfig: { alternate: 'openai' },
+    });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'openai' });
+    config.reloadModelProvidersConfig(providers, { alternate: 'gemini' });
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    config.reloadModelProvidersConfig({});
+    expect(config.getProviderProtocolConfig()).toEqual({ alternate: 'gemini' });
+    expect(config.getModelProvidersConfig()).toEqual({});
+    config.reloadModelProvidersConfig(providers, {});
+    expect(config.getProviderProtocolConfig()).toEqual({});
+    expect(config.getModelProvidersConfig()).toEqual(providers);
+  });
+
   it('clears per-model generators when provider config is reloaded', async () => {
     const config = new Config(baseParams);
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -13562,6 +13789,288 @@ describe('Model Switching and Config Updates', () => {
         expected,
       );
       expect(response.success).toBe(true);
+    });
+  });
+
+  describe('every hook event through the hook execution bridge', () => {
+    // The schema side has a drift guard derived from HookEventName; this is
+    // the bus side. `eventName` is an open string on the wire, so the compiler
+    // cannot catch a missing case, and `default:` replies with the same empty
+    // success a real no-op produces.
+    it.each(Object.values(HookEventName))(
+      'routes %s to a hook system method instead of the unknown-event default',
+      async (eventName) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const called: string[] = [];
+        // Every fire method resolves an empty aggregate, which each arm accepts.
+        const hookSystem = new Proxy(
+          {},
+          {
+            get: (_target, prop) => {
+              if (typeof prop !== 'string' || prop === 'then') {
+                return undefined;
+              }
+              return vi.fn(async () => {
+                called.push(prop);
+                return {
+                  success: true,
+                  allOutputs: [],
+                  errors: [],
+                  totalDuration: 0,
+                  finalOutput: undefined,
+                };
+              });
+            },
+          },
+        );
+        // @ts-expect-error - accessing private for testing
+        config['hookSystem'] = hookSystem;
+        const warn = vi.spyOn(config.getDebugLogger(), 'warn');
+
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName,
+              input: {},
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+
+        expect(warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('Unknown hook event'),
+        );
+        expect(called.some((method) => method.startsWith('fire'))).toBe(true);
+        expect(response.success).toBe(true);
+      },
+    );
+  });
+
+  describe('direct-call hook events through the hook execution bridge', () => {
+    const dispatch = async (
+      method: string,
+      fire: ReturnType<typeof vi.fn>,
+      eventName: string,
+      input: Record<string, unknown>,
+      signal: AbortSignal,
+    ) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { [method]: fire };
+      return config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName,
+            input,
+            signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+    };
+
+    // Events whose fire method returns the hook output itself, or undefined
+    // when no hook is configured.
+    const directOutputRows = [
+      {
+        eventName: 'SessionStart',
+        method: 'fireSessionStartEvent',
+        input: {
+          source: 'resume',
+          model: 'qwen-max',
+          permission_mode: 'plan',
+          agent_type: 'Custom',
+        },
+        args: ['resume', 'qwen-max', 'plan', 'Custom'],
+      },
+      {
+        eventName: 'SessionEnd',
+        method: 'fireSessionEndEvent',
+        input: { reason: 'clear' },
+        args: ['clear'],
+      },
+      {
+        eventName: 'SessionDelete',
+        method: 'fireSessionDeleteEvent',
+        input: { deleted_session_id: 'old-session' },
+        args: ['old-session'],
+      },
+      {
+        eventName: 'PreCompact',
+        method: 'firePreCompactEvent',
+        input: { trigger: 'manual', custom_instructions: 'keep todos' },
+        args: ['manual', 'keep todos'],
+      },
+      {
+        eventName: 'PostCompact',
+        method: 'firePostCompactEvent',
+        input: { trigger: 'auto', compact_summary: 'summary' },
+        args: ['auto', 'summary'],
+      },
+      {
+        eventName: 'InstructionsLoaded',
+        method: 'fireInstructionsLoadedEvent',
+        input: {
+          file_path: '/repo/QWEN.md',
+          memory_type: 'project',
+          load_reason: 'session_start',
+          trigger_file_path: '/repo/src/a.ts',
+          parent_file_path: '/repo/QWEN.md',
+        },
+        args: [
+          '/repo/QWEN.md',
+          'project',
+          'session_start',
+          {
+            triggerFilePath: '/repo/src/a.ts',
+            parentFilePath: '/repo/QWEN.md',
+          },
+        ],
+      },
+    ];
+
+    it('uses a declared AgentType in the SessionStart wire example', () => {
+      // The wire carries a raw string and nothing downstream validates it, so
+      // this row is the example an out-of-process producer copies.
+      const row = directOutputRows.find(
+        ({ eventName }) => eventName === 'SessionStart',
+      )!;
+      expect(Object.values(AgentType)).toContain(row.input['agent_type']);
+    });
+
+    it.each(directOutputRows)(
+      'forwards $eventName to $method',
+      async ({ eventName, method, input, args }) => {
+        const output = { systemMessage: `${eventName} ran` };
+        const fire = vi.fn().mockResolvedValue(output);
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(output);
+      },
+    );
+
+    it.each(directOutputRows)(
+      'replies with no output when no $eventName hook is configured',
+      async ({ eventName, method, input, args }) => {
+        const fire = vi.fn().mockResolvedValue(undefined);
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        // The call assertion also tells this arm apart from `default:`, which
+        // publishes the same empty success reply without calling anything.
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toBeUndefined();
+      },
+    );
+
+    it.each([
+      {
+        eventName: 'TodoCreated',
+        method: 'fireTodoCreatedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          todo_status: 'pending',
+          all_todos: [],
+          phase: 'validation',
+        },
+        args: ['1', 'write tests', 'pending', [], 'validation'],
+      },
+      {
+        eventName: 'TodoCompleted',
+        method: 'fireTodoCompletedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          previous_status: 'in_progress',
+          all_todos: [],
+          phase: 'postWrite',
+        },
+        args: ['1', 'write tests', 'in_progress', [], 'postWrite'],
+      },
+    ])(
+      'forwards $eventName to $method and returns its final output',
+      async ({ eventName, method, input, args }) => {
+        // Two distinct outputs whose merge differs from the first, so
+        // replying with one hook's output instead of the merged result fails.
+        const finalOutput = { decision: 'block', reason: 'not yet' };
+        const fire = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [{ decision: 'allow' }, finalOutput],
+          errors: [],
+          totalDuration: 1,
+          finalOutput,
+        });
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(finalOutput);
+      },
+    );
+
+    it('awaits StopFailure hooks but replies with no output', async () => {
+      // The shape HookAggregator returns for StopFailure: fire-and-forget,
+      // outputs and errors dropped, no final output.
+      const fire = vi.fn().mockResolvedValue({
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 3,
+        finalOutput: undefined,
+      });
+      const controller = new AbortController();
+
+      const response = await dispatch(
+        'fireStopFailureEvent',
+        fire,
+        'StopFailure',
+        {
+          error: 'rate_limit',
+          error_details: '429 Too Many Requests',
+          last_assistant_message: 'partial',
+        },
+        controller.signal,
+      );
+
+      expect(fire).toHaveBeenCalledWith(
+        'rate_limit',
+        '429 Too Many Requests',
+        'partial',
+        controller.signal,
+      );
+      expect(response.success).toBe(true);
+      expect(response.output).toBeUndefined();
     });
   });
 

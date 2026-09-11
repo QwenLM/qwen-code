@@ -10,7 +10,10 @@ import {
   listModelConfigurations,
 } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
-import { resolveProviderProtocol } from '@qwen-code/qwen-code-core';
+import {
+  resolveModelId,
+  resolveProviderProtocol,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   getOwnKeyScope,
@@ -399,21 +402,33 @@ export function registerWorkspaceModelsRoutes(
               value: '',
             });
           }
-          for (const key of ['imageModel', 'advisorModel'] as const) {
+          for (const key of [
+            'imageModel',
+            'advisorModel',
+            'visionModel',
+            'fastModel',
+            'compactionModel',
+          ] as const) {
             const value = settings[key];
             if (typeof value !== 'string' || !value) continue;
             const separator = value.indexOf('\0');
-            const selector = separator < 0 ? value : value.slice(0, separator);
+            let selector: ReturnType<typeof resolveModelId>;
+            try {
+              selector = resolveModelId(
+                separator < 0 ? value : value.slice(0, separator),
+              );
+            } catch {
+              continue;
+            }
             const endpoint =
               separator < 0 ? undefined : value.slice(separator + 1);
             if (
-              (selector === removedModelId ||
-                selector === `${parsed.authType}:${removedModelId}`) &&
+              selector?.modelId === removedModelId &&
+              (!selector.authType || selector.authType === parsed.authType) &&
               (endpoint === undefined || endpoint === (removedBaseUrl ?? '')) &&
               !remaining.some(
                 ({ model, authType }) =>
-                  (selector === removedModelId ||
-                    authType === parsed.authType) &&
+                  (!selector.authType || authType === selector.authType) &&
                   (endpoint === undefined ||
                     endpoint === (model.baseUrl ?? '')),
               )
@@ -506,7 +521,11 @@ export function registerWorkspaceModelsRoutes(
           if (providerWrite && deps.syncModelProvidersRuntime) {
             try {
               await deps.syncModelProvidersRuntime(
-                providerWrite.scope,
+                err.committedWrites.some(
+                  (write) => write.scope === SettingScope.User,
+                )
+                  ? SettingScope.User
+                  : providerWrite.scope,
                 'DELETE',
               );
             } catch (syncError) {
@@ -547,7 +566,9 @@ export function registerWorkspaceModelsRoutes(
       if (deps.syncModelProvidersRuntime) {
         try {
           runtimeSync = await deps.syncModelProvidersRuntime(
-            writes[0]!.scope,
+            writes.some((write) => write.scope === SettingScope.User)
+              ? SettingScope.User
+              : writes[0]!.scope,
             'DELETE',
           );
         } catch (err) {

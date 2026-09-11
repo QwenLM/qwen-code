@@ -179,11 +179,22 @@ export async function applyProviderInstallPlan(
           (patch.ownsModel?.(existing) ??
             patch.models.some((model) => isSameModelIdentity(existing, model))),
       );
-    if (changesRole || removesConversation) {
+    const removesService =
+      !preserveSelection &&
+      patch.mergeStrategy !== 'append' &&
+      existingModels.some(
+        (existing) =>
+          (existing.imageOnly || existing.voiceOnly) &&
+          patch.ownsModel?.(existing) &&
+          !patch.models.some((model) => isSameModelIdentity(existing, model)),
+      );
+    if (changesRole || removesConversation || removesService) {
       throw new ProviderInstallError(
         removesConversation
           ? 'This install would remove existing conversation models. Include them in the provider selection, or add the service model with Custom Provider.'
-          : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+          : removesService
+            ? 'This install would remove existing service models. Include them in the provider selection, or add the conversation model with Custom Provider.'
+            : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
         'modelPurpose',
         plan.authType,
       );

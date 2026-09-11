@@ -388,4 +388,8 @@ export class ModelRegistry {
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelProvidersConfig;
   }
+
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.providerProtocolConfig;
+  }
 }

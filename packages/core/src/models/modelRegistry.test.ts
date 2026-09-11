@@ -1305,11 +1305,14 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'openai' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
+
     // Hot reload carrying only modelProviders (the existing reload callers).
     registry.reloadModels({
       idealab: [{ id: 'qwen3.7-max' }, { id: 'qwen3.7-coder' }],
     } as unknown as ModelProvidersConfig);
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'openai' });
     expect(
       registry
         .getModelsForAuthType(AuthType.USE_OPENAI)
@@ -1329,6 +1332,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       { idealab: 'gemini' },
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({ idealab: 'gemini' });
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
     expect(
       registry.getModelsForAuthType(AuthType.USE_GEMINI).map((m) => m.id),
@@ -1362,6 +1366,7 @@ describe('providerProtocol mapping (custom provider ids)', () => {
       {},
     );
 
+    expect(registry.getProviderProtocolConfig()).toEqual({});
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 

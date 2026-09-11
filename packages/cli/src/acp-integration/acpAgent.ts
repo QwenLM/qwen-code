@@ -443,6 +443,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -6161,7 +6162,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -13742,7 +13745,6 @@ class QwenAgent implements Agent {
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
         const providersChanged =
           changed.has('modelProviders') || changed.has('providerProtocol');
-        const imageChanged = changed.has('imageModel');
         if (providersChanged) {
           this.modelProviderReloadRevision += 1;
         }
@@ -13801,11 +13803,17 @@ class QwenAgent implements Agent {
             const config = session.getConfig();
             const authType = config.getAuthType();
 
+            const sessionProvidersChanged =
+              JSON.stringify(config.getModelProvidersConfig()) !==
+                JSON.stringify(newMerged.modelProviders) ||
+              JSON.stringify(config.getProviderProtocolConfig()) !==
+                JSON.stringify(newMerged.providerProtocol ?? {});
+
             // Long-lived ACP sessions never restart, so honor providerProtocol
             // changes here too (its requiresRestart only gates the TUI path) and
             // always pass the current map so a modelProviders-only reload doesn't
             // re-register against a stale protocol mapping.
-            if (providersChanged) {
+            if (sessionProvidersChanged) {
               try {
                 config.reloadModelProvidersConfig(
                   newMerged.modelProviders,
@@ -13818,14 +13826,12 @@ class QwenAgent implements Agent {
               }
             }
 
-            if (imageChanged || providersChanged) {
-              try {
-                await config.setImageModel(newMerged.imageModel);
-              } catch (err) {
-                debugLogger.warn(
-                  `reload: setImageModel failed for session ${id}: ${err}`,
-                );
-              }
+            try {
+              await config.setImageModel(newMerged.imageModel);
+            } catch (err) {
+              debugLogger.warn(
+                `reload: setImageModel failed for session ${id}: ${err}`,
+              );
             }
 
             const newModelName = newMerged.model?.name;
@@ -13843,7 +13849,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if ((providersChanged || envChanged) && authType) {
+            } else if ((sessionProvidersChanged || envChanged) && authType) {
               try {
                 await this.refreshAuthWithPersistedReasoning(
                   config,
@@ -14397,6 +14403,7 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
     if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
       config.setGoalProposalHostSupported(true);
     }

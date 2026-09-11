@@ -183,6 +183,65 @@ describe('ToolRegistry', () => {
     expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
   });
 
+  it.each(['image_gen', 'propose_goal'] as const)(
+    'updates code mode bindings when %s availability changes',
+    async (name) => {
+      const baseUrl = 'https://images.example/v1';
+      const config = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+        experimentalZedIntegration: true,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              imageOnly: true,
+              envKey: 'TEST_IMAGE_API_KEY',
+            },
+          ],
+        },
+      });
+      config.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(config);
+      const tool = new MockTool({ name });
+      registry.registerTool(tool);
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerTool(new MockTool({ name: 'other_tool' }));
+      for (const enabled of [true, false, true]) {
+        if (name === 'image_gen')
+          await config.setImageModel(
+            enabled ? `openai:qwen-image-2.0\0${baseUrl}` : '',
+          );
+        else config.setGoalProposalTurnKey(enabled ? 'user-turn' : undefined);
+        const bindings = registry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name);
+        expect(bindings.includes(name)).toBe(enabled);
+        expect(bindings).toContain('other_tool');
+        for (const declarations of [
+          registry.getFunctionDeclarations(),
+          registry.getFunctionDeclarationsFiltered([name, 'other_tool']),
+        ]) {
+          const exec = declarations.find(
+            (declaration) => declaration.name === 'exec',
+          );
+          expect(exec?.description).toContain('tools.other_tool(args:');
+          expect(exec?.description?.includes(`tools.${name}(args:`)).toBe(
+            enabled,
+          );
+        }
+        if (name === 'image_gen') {
+          expect(config.isImageGenerationEnabled()).toBe(enabled);
+          expect(registry.getTool(name)).toBe(enabled ? tool : undefined);
+          expect(await registry.ensureTool(name)).toBe(
+            enabled ? tool : undefined,
+          );
+        } else expect(config.isGoalProposalAvailable()).toBe(enabled);
+      }
+    },
+  );
+
   describe('registerTool', () => {
     it('should register a new tool', () => {
       const tool = new MockTool({ name: 'mock-tool' });
@@ -807,6 +866,32 @@ describe('ToolRegistry', () => {
           serverName: 'schedule-server',
         },
       ]);
+    });
+
+    it('getDeferredToolSummary is empty in CodeModeOnly', () => {
+      // Both consumers of this summary — the startup deferred-tools reminder
+      // and the added-MCP-tools reminder — tell the model to reach the listed
+      // tools through ToolSearch, which CodeModeOnly hides. The MCP tool below
+      // is the one the previous test proves IS reported in Direct mode.
+      const codeModeConfig = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+      });
+      const registry = new ToolRegistry(codeModeConfig);
+      registry.registerTool(
+        new MockTool({ name: 'deferred', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new DiscoveredMCPTool(
+          {} as CallableTool,
+          'schedule-server',
+          'cron_list',
+          'list scheduled jobs',
+          {},
+        ),
+      );
+
+      expect(registry.getDeferredToolSummary()).toEqual([]);
     });
 
     it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {

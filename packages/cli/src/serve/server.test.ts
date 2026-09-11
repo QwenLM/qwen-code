@@ -42568,6 +42568,7 @@ class FakeLiveHostSocket extends EventEmitter {
           instanceNonce,
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -42723,7 +42724,7 @@ describe('Live Appshot server integration', () => {
         );
         const captureHandler = setup.captureHandler;
         expect(captureHandler).toEqual(expect.any(Function));
-        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const capture = vi.spyOn(setup.coordinator, 'captureVisualContext');
         const discovery = await import('./live/discovery.js');
         const assertPublisher = vi.spyOn(
           discovery,
@@ -43218,7 +43219,7 @@ describe('Live Appshot server integration', () => {
   });
 });
 
-it.each(['patch', 'delete'] as const)(
+it.each(['patch', 'delete', 'delete-workspace'] as const)(
   '%s /workspace/models reloads siblings after a user write beside a workspace bucket',
   async (method) => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-r3-scope-'));
@@ -43242,6 +43243,9 @@ it.each(['patch', 'delete'] as const)(
       userPath,
       JSON.stringify({
         $version: 4,
+        ...(method === 'delete-workspace'
+          ? { voiceModel: 'workspace-model' }
+          : {}),
         modelProviders: {
           openai: [
             { id: 'user-model', generationConfig: { contextWindowSize: 8192 } },
@@ -43305,7 +43309,9 @@ it.each(['patch', 'delete'] as const)(
         .set('Host', '127.0.0.1:4170');
       expect(listed.status).toBe(200);
       const target = listed.body.models.find(
-        (m: { modelId: string }) => m.modelId === 'user-model',
+        (m: { modelId: string }) =>
+          m.modelId ===
+          (method === 'delete-workspace' ? 'workspace-model' : 'user-model'),
       );
       const query =
         method === 'patch'
@@ -43322,12 +43328,22 @@ it.each(['patch', 'delete'] as const)(
       const after = JSON.parse(await fsp.readFile(userPath, 'utf8'));
       expect(res.status).toBe(200);
       expect(res.body.runtimeSync.status).toBe('applied');
-      expect(await fsp.readFile(workspacePath, 'utf8')).toBe(workspaceBefore);
+      if (method === 'delete-workspace') {
+        expect(
+          JSON.parse(await fsp.readFile(workspacePath, 'utf8')).modelProviders,
+        ).toEqual({ gemini: [] });
+        expect(after.voiceModel).toBe('');
+        expect(
+          after.modelProviders.openai.map((m: { id: string }) => m.id),
+        ).toEqual(['user-model', 'user-sibling']);
+      } else {
+        expect(await fsp.readFile(workspacePath, 'utf8')).toBe(workspaceBefore);
+      }
       if (method === 'patch')
         expect(
           after.modelProviders.openai[0].generationConfig.contextWindowSize,
         ).toBe(65536);
-      else
+      else if (method === 'delete')
         expect(
           after.modelProviders.openai.map((m: { id: string }) => m.id),
         ).toEqual(['user-sibling']);

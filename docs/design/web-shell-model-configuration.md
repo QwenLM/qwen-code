@@ -72,7 +72,10 @@ must use the saved raw endpoint so exact role selections remain valid. Saving
 only service models does not complete first-time conversation authentication.
 Reject service-only installs that would overwrite an existing conversation model
 through either identity replacement or preset ownership before any settings or
-environment write. Changing an existing identity to another purpose is rejected.
+environment write. Installs containing conversation models also reject implicit
+removal of owned service models omitted from the selection. Append and service-only
+preset reselection retain their existing behavior. Changing an existing identity
+to another purpose is rejected.
 Image setup describes the existing DashScope/MiniMax-compatible transports.
 
 GET /workspace/models returns a secret-safe list of persisted model configurations,
@@ -105,14 +108,18 @@ labelled as a saved configuration. Ambiguous runtime routes expose
 silently edit a value the runtime does not use. Keyless deletion resolves all
 effective scopes, including read-only entries, and requires one writable target;
 redacted endpoints retain an ID-only fallback only when that ID is unique.
-PATCH and DELETE pass the actual provider write scope to runtime synchronization,
-including partial persistence: user writes refresh registered sibling runtimes,
-while workspace writes stay in the primary runtime.
+PATCH and DELETE synchronize the scopes actually committed, including role
+clears and partial persistence: any user write refreshes registered sibling
+runtimes, while workspace-only writes stay in the primary runtime.
 Voice continues to use the resolved selected runtime without falling
 back to primary. Image configuration must reach live runtime configuration through
 the existing settings/model-provider refresh path. Disabling image generation
 hides its cached tool and refreshes the current conversation’s tool declarations;
-re-enabling restores availability. GET projects only safe fields;
+re-enabling restores availability. A busy session applies missed image and provider
+changes on its next idle reload. Provider comparisons use each session’s actual
+registry; image setup is retried on every idle reload, including after a failure.
+Code mode bindings retain the same tool availability and declaration gates as
+direct tool declarations. GET projects only safe fields;
 settings-change broadcasts invalidate clients without sending model credentials.
 Provider installs that remain hidden by a higher-precedence provider bucket fail
 and roll back before selecting the new model. The CLI adapter snapshots original

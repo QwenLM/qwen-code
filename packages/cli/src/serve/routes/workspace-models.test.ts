@@ -377,7 +377,7 @@ describe('DELETE /workspace/models', () => {
     expect(readUserSettings()['modelProviders']).toEqual({ openai: [] });
   });
 
-  it('clears deleted exact role selections across scopes but preserves another endpoint and bare voice ID', async () => {
+  it('clears deleted exact role selections across scopes but preserves another endpoint and bare IDs', async () => {
     const first = { id: 'shared', baseUrl: 'https://first.example/v1' };
     const second = { id: 'shared', baseUrl: 'https://second.example/v1' };
     writeUserSettings({
@@ -385,10 +385,16 @@ describe('DELETE /workspace/models', () => {
       imageModel: 'openai:shared\0https://first.example/v1',
       advisorModel: 'openai:shared\0https://second.example/v1',
       voiceModel: 'shared',
+      visionModel: 'openai:shared\0https://first.example/v1',
+      fastModel: 'shared',
+      compactionModel: 'openai:shared',
     });
     writeWorkspaceSettings({
       modelProviders: { gemini: [{ id: 'gem' }] },
       advisorModel: 'openai:shared\0https://first.example/v1',
+      visionModel: 'openai:shared\0https://second.example/v1',
+      fastModel: 'shared',
+      compactionModel: 'openai:shared',
     });
     const { app } = makeApp();
     const listed = await request(app).get('/workspace/models');
@@ -402,10 +408,16 @@ describe('DELETE /workspace/models', () => {
       imageModel: '',
       advisorModel: 'openai:shared\0https://second.example/v1',
       voiceModel: 'shared',
+      visionModel: '',
+      fastModel: 'shared',
+      compactionModel: 'openai:shared',
       modelProviders: { openai: [second] },
     });
     expect(readWorkspaceSettings()).toMatchObject({
       advisorModel: '',
+      visionModel: 'openai:shared\0https://second.example/v1',
+      fastModel: 'shared',
+      compactionModel: 'openai:shared',
       modelProviders: { gemini: [{ id: 'gem' }] },
     });
     const remaining = await request(app).get('/workspace/models');
@@ -418,8 +430,72 @@ describe('DELETE /workspace/models', () => {
     expect(readUserSettings()).toMatchObject({
       advisorModel: '',
       voiceModel: '',
+      fastModel: '',
+      compactionModel: '',
+    });
+    expect(readWorkspaceSettings()).toMatchObject({
+      visionModel: '',
+      fastModel: '',
+      compactionModel: '',
     });
   });
+
+  it.each([
+    { selector: 'openai:shared', removed: 'openai:shared', clears: false },
+    { selector: 'openai:shared', removed: 'shared', clears: true },
+    {
+      selector: 'openai:openai:shared',
+      removed: 'openai:shared',
+      clears: true,
+    },
+    { selector: 'openai:openai:shared', removed: 'shared', clears: false },
+    { selector: 'shared:online', removed: 'shared:online', clears: true },
+    { selector: 'openai:', removed: 'shared', clears: false },
+    { selector: 'inherit', removed: 'inherit', clears: false },
+    { selector: 'fast', removed: 'fast', clears: false },
+  ])(
+    'uses runtime selector semantics when deleting $removed with pin $selector',
+    async ({ selector, removed, clears }) => {
+      const roles = [
+        'imageModel',
+        'advisorModel',
+        'visionModel',
+        'fastModel',
+        'compactionModel',
+      ];
+      const pins = Object.fromEntries(roles.map((key) => [key, selector]));
+      writeUserSettings({
+        modelProviders: {
+          openai: [
+            'shared',
+            'openai:shared',
+            'shared:online',
+            'inherit',
+            'fast',
+          ].map((id) => ({ id })),
+        },
+        ...pins,
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const target = listed.body.models.find(
+        (model: { modelId: string }) => model.modelId === removed,
+      );
+      expect(target).toBeDefined();
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(target);
+      expect(deleted.status).toBe(200);
+      expect(readUserSettings()).toMatchObject(
+        Object.fromEntries(roles.map((key) => [key, clears ? '' : selector])),
+      );
+      expect(
+        (await request(app).get('/workspace/models')).body.models.some(
+          (model: { modelId: string }) => model.modelId === removed,
+        ),
+      ).toBe(false);
+    },
+  );
 
   it.each([undefined, 'invalid-protocol', 'qwen-oauth', 'openai'])(
     'only preserves deleted bare references for a routable provider alias (%s)',
@@ -434,6 +510,9 @@ describe('DELETE /workspace/models', () => {
         advisorModel: model.id,
         imageModel: model.id,
         voiceModel: model.id,
+        visionModel: model.id,
+        fastModel: model.id,
+        compactionModel: model.id,
         modelFallbacks: 'shared,other',
       });
       const { app } = makeApp();
@@ -454,6 +533,9 @@ describe('DELETE /workspace/models', () => {
         advisorModel: stillConfigured ? model.id : '',
         imageModel: stillConfigured ? model.id : '',
         voiceModel: stillConfigured ? model.id : '',
+        visionModel: stillConfigured ? model.id : '',
+        fastModel: stillConfigured ? model.id : '',
+        compactionModel: stillConfigured ? model.id : '',
         modelFallbacks: stillConfigured ? 'shared,other' : 'other',
       });
       const remaining = await request(app).get('/workspace/models');
@@ -816,6 +898,55 @@ describe('DELETE /workspace/models', () => {
     );
   });
 
+  it.each(['success', 'user-uncommitted'] as const)(
+    'synchronizes the actual committed scopes after a mixed-scope deletion (%s)',
+    async (scenario) => {
+      writeWorkspaceSettings({
+        modelProviders: { openai: [{ id: 'removed' }] },
+        imageModel: 'removed',
+      });
+      writeUserSettings({ voiceModel: 'removed' });
+      const syncModelProvidersRuntime = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' as const });
+      const { app, persistSettings } = makeApp({ syncModelProvidersRuntime });
+      if (scenario !== 'success') {
+        const persist = persistSettings.getMockImplementation()!;
+        persistSettings.mockImplementationOnce(
+          async (ws, writes, assertOpen) => {
+            const committed = writes.filter(
+              (write) => write.scope === SettingScope.Workspace,
+            );
+            await persist(ws, committed, assertOpen);
+            throw new WorkspaceSettingsPartialPersistError(
+              'partial',
+              committed,
+              new Error('disk full'),
+            );
+          },
+        );
+      }
+      const res = await request(app).delete('/workspace/models').send({
+        authType: 'openai',
+        modelId: 'removed',
+      });
+      expect(res.status).toBe(scenario === 'success' ? 200 : 500);
+      expect(readWorkspaceSettings()).toMatchObject({
+        modelProviders: { openai: [] },
+        imageModel: '',
+      });
+      expect(readUserSettings()['voiceModel']).toBe(
+        scenario === 'user-uncommitted' ? 'removed' : '',
+      );
+      expect(syncModelProvidersRuntime).toHaveBeenCalledExactlyOnceWith(
+        scenario === 'user-uncommitted'
+          ? SettingScope.Workspace
+          : SettingScope.User,
+        'DELETE',
+      );
+    },
+  );
+
   it('trims whitespace-padded fields before matching', async () => {
     writeUserSettings({
       modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
@@ -1035,6 +1166,9 @@ describe('model configuration routes', () => {
     { key: 'imageModel', value: { id: 'model' } },
     { key: 'advisorModel', value: 5 },
     { key: 'advisorModel', value: { id: 'model' } },
+    { key: 'visionModel', value: 5 },
+    { key: 'fastModel', value: { id: 'model' } },
+    { key: 'compactionModel', value: 5 },
   ])(
     'removes a model without rewriting a non-string $key ($value)',
     async ({ key, value }) => {
