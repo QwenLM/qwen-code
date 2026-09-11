@@ -144,10 +144,9 @@ export class HookPlanner {
   }
 
   /**
-   * Check if a hook entry matches the given context.
-   * Uses explicit event-based dispatch to avoid ambiguity between events
-   * that share similar context fields (e.g., SessionStart and SubagentStart
-   * both have agentType, but use different matcher semantics).
+   * Check if a hook entry matches the given context. Every event with a
+   * matcher target uses the shared matchesHookPattern rule; tool events also
+   * match display-name and legacy aliases exactly.
    */
   private matchesContext(
     entry: HookRegistryEntry,
@@ -158,19 +157,13 @@ export class HookPlanner {
       return true; // No matcher means match all
     }
 
-    const matcher = entry.matcher.trim();
-
-    if (matcher === '' || matcher === '*') {
-      return true; // Empty string or wildcard matches all
-    }
-
     const matcherTarget = getHookMatcherTarget(eventName, context);
     if (!matcherTarget || !matcherTarget.target) {
       return true;
     }
 
     return matchesHookPattern(
-      matcher,
+      entry.matcher,
       matcherTarget.target,
       matcherTarget.kind === 'toolName'
         ? { aliases: getToolMatcherTargets(matcherTarget.target) }

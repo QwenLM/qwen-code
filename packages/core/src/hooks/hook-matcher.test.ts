@@ -34,6 +34,27 @@ describe('matchesHookPattern', () => {
     expect(matchesHookPattern('^(write|edit)$', 'write_file')).toBe(false);
   });
 
+  it('decides a pipe-separated list entry by entry', () => {
+    expect(matchesHookPattern('Bash|*', 'write_file')).toBe(true);
+    expect(matchesHookPattern('read_.*|edit', 'read_file')).toBe(true);
+    expect(matchesHookPattern('read_.*|edit', 'write_file')).toBe(false);
+  });
+
+  it('ignores empty list entries instead of matching everything', () => {
+    expect(matchesHookPattern('write_file|edit|', 'run_shell_command')).toBe(
+      false,
+    );
+    expect(matchesHookPattern('write_file||edit', 'run_shell_command')).toBe(
+      false,
+    );
+    expect(matchesHookPattern('|', 'run_shell_command')).toBe(false);
+    expect(matchesHookPattern('write_file|edit|', 'edit')).toBe(true);
+  });
+
+  it('still reads a group that spans the pipe as one regex', () => {
+    expect(matchesHookPattern('a(b|c)', 'ab')).toBe(true);
+  });
+
   it('matches aliases exactly but never through a regex', () => {
     const aliases = ['WriteFile', 'write_file'];
     expect(matchesHookPattern('WriteFile', 'write_file', { aliases })).toBe(

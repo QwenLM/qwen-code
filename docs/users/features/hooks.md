@@ -378,10 +378,10 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 **Matcher Syntax:**
 
 - Empty string `""`, `"*"` or `".*"` matches all events of that type
-- A matcher is first compared exactly, and so is each entry of a `|`-separated list such as `permission_prompt|idle_prompt`
-- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`), so `read` also matches `read_file`; add `^` and `$` to match a whole value
+- A matcher is first compared exactly. A `|`-separated list such as `permission_prompt|idle_prompt` is decided entry by entry with these same rules, and empty entries are ignored, unless the whole matcher starts with `^` or `(`, in which case it is only a regular expression
+- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`), so `read` also matches `read_file` and `edit` also matches `notebook_edit`. Add `^` and `$` to match a whole value, and anchor exclusions as well: `^(?!write_file).*$` excludes `write_file`, while unanchored `(?!write_file).*` still matches it
 - The same rules apply to every event that supports a matcher, and to hooks registered by skills
-- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids.
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names.
 
 **Examples:**
 
