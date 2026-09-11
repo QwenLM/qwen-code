@@ -1860,7 +1860,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       threadId: summary.taskId,
       messageId: `todo-${fingerprint}`,
       text: `Process this DingTalk todo:\n${truncateCodePoints(title, MAX_COMMENT_CHARS)}`,
-      displayText: title,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,

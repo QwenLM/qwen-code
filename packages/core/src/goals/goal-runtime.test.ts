@@ -17,6 +17,8 @@ import {
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
+  goalActiveTimeBudgetReason,
+  goalTurnBudgetReason,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -4938,6 +4940,52 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('does not charge offline time to a restored active Goal', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(43_201_000);
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      runtime.bindHost(host);
+      const record = goalStateRecord({
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored-time-budget',
+          revision: 1,
+          objective: 'resume without charging offline time',
+          status: 'active',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 1,
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+          tokensUsed: 0,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      });
+
+      await runtime.prepareRestore([record]);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+        updatedAt: 43_201_000,
+      });
+
+      await runtime.activateRestoredWork();
+      expect(host.inputs).toHaveLength(1);
+      expect(host.inputs[0]).not.toHaveProperty('windDown');
+      expect(host.inputs[0]?.usage).toMatchObject({
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+      });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not spend the stall streak on a failed checkpoint replay at restore', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
@@ -6491,6 +6539,476 @@ describe('goal runtime', () => {
       expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
         GOAL_PAUSE_REASON_NO_PROGRESS,
       );
+    });
+  });
+  describe('turn and active-time budgets', () => {
+    async function finishDelivered(
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ): Promise<void> {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    }
+
+    it('arms no cadence ceiling unless one is granted', async () => {
+      // The token budget defaults to a number; these default to nothing. A
+      // cadence is what the user asks for, not a guard every Goal needs.
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal!;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('hands off and stops when the turn budget is spent, and resume re-arms it', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const created = runtime.getSnapshot().goal!;
+      expect(created).toMatchObject({ turnBudget: 2, turnCount: 0 });
+
+      // Two turns of real work: the ceiling is checked at the continuation
+      // boundary, so the turn that reaches it still runs to completion.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(host.inputs[1]).not.toHaveProperty('windDown');
+      await finishDelivered(runtime, host.started[1]!);
+
+      // The spent window buys exactly one hand-off.
+      expect(host.started).toHaveLength(3);
+      expect(host.inputs[2]).toMatchObject({ windDown: true });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      await finishDelivered(runtime, host.started[2]!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+        turnBudget: 2,
+        windDownTurnId: host.started[2]!.turnId,
+        lastReason: goalTurnBudgetReason(2),
+      });
+      expect(host.started).toHaveLength(3);
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'turn_finished',
+        'turn_finished',
+        'usage_limited',
+      ]);
+
+      const resumed = await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: created.goalId,
+        expectedRevision: created.revision,
+      });
+      // The ceiling moves ahead of the count the resume never resets.
+      expect(resumed.snapshot.goal).toMatchObject({
+        status: 'active',
+        turnCount: 3,
+        turnBudget: 5,
+      });
+      expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
+      expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      expect(host.started).toHaveLength(4);
+      expect(host.inputs[3]).not.toHaveProperty('windDown');
+    });
+
+    it('still admits a user turn once the ceiling is already spent', async () => {
+      // Three surfaces promise this -- the settings row, the schema
+      // description and the `turnBudget` doc comment -- and nothing held it:
+      // `beginTurn` gates only on the Goal being active, and `spentBudget` sits
+      // in the same closure, so a plausible "stop admitting turns at the
+      // ceiling" edit would silently discard the user's message instead.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // One automatic turn spends the window, and the gate grants the hand-off.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        turnCount: 1,
+        turnBudget: 1,
+      });
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+      // The user types with the ceiling already spent and the hand-off in
+      // flight. The turn is reserved, not refused.
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, host.started[1]!);
+
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      // And the stop still arrives once the user's own turn is done.
+      await runtime.finishTurn(userPermit!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+    });
+
+    it('counts user-driven turns toward the turn ceiling', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const automatic = host.started[0]!;
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, automatic);
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      await runtime.finishTurn(userPermit!);
+
+      expect(runtime.getSnapshot().goal?.turnCount).toBe(2);
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+      });
+    });
+
+    it('hands off and stops when the active-time budget is spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const journal = fakeGoalJournal();
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal,
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          activeTimeBudgetMs: 60_000,
+          activeTimeMs: 0,
+        });
+
+        // A turn that runs past the window: the clock is read at the
+        // continuation boundary, so the turn itself is never cut short.
+        vi.setSystemTime(91_000);
+        await finishDelivered(runtime, host.started[0]!);
+
+        expect(runtime.getSnapshot().goal?.activeTimeMs).toBe(90_000);
+        expect(host.started).toHaveLength(2);
+        expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+        await finishDelivered(runtime, host.started[1]!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          limitKind: 'time_budget',
+          activeTimeBudgetMs: 60_000,
+          lastReason: goalActiveTimeBudgetReason(60_000),
+        });
+        expect(host.started).toHaveLength(2);
+
+        // Resuming grants another window measured from where it stopped.
+        const stopped = runtime.getSnapshot().goal!;
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: stopped.goalId,
+          expectedRevision: stopped.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeBudgetMs: stopped.activeTimeMs + 60_000,
+        });
+        expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not accrue active time while the Goal is stopped', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        vi.setSystemTime(11_000);
+        await finishDelivered(runtime, host.started[0]!);
+        const paused = await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: runtime.getSnapshot().goal!.goalId,
+          expectedRevision: runtime.getSnapshot().goal!.revision,
+        });
+        expect(paused.snapshot.goal?.activeTimeMs).toBe(10_000);
+
+        // An hour of wall clock while paused: the window is untouched, so the
+        // resumed Goal still has the time it had.
+        vi.setSystemTime(3_611_000);
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: paused.snapshot.goal!.goalId,
+          expectedRevision: paused.snapshot.goal!.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+        });
+        // And it is admitted a real continuation rather than a hand-off.
+        expect(host.inputs.at(-1)).not.toHaveProperty('windDown');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports one reason when a turn crosses more than one ceiling', async () => {
+      // Token first: it is the ceiling armed by default, so it is the one a
+      // user is likeliest to be asking about.
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 1_000,
+        turnBudgetGrant: 1,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      spend.set(host.started[0]!.turnId, 5_000);
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('token_budget');
+    });
+
+    it('reports the turn budget before the time budget when both are spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+          turnBudgetGrant: 1,
+          activeTimeBudgetGrantMs: 60_000,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+        await finishDelivered(runtime, host.started.at(-1)!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('carries the cadence figures to the host that renders the prompt', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          turnBudgetGrant: 20,
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        expect(host.inputs[0]?.usage).toMatchObject({
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs[1]?.usage).toMatchObject({
+          turnCount: 1,
+          turnBudget: 20,
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses elapsed active time when a queued continuation waits for a host', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]?.usage).toMatchObject({
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('re-reads the time ceiling when a queued continuation is finally delivered', async () => {
+      // The time ceiling is the only one whose spent state can change between
+      // queueing and delivery: spend and turn count are committed by
+      // `finishTurn` before the gate runs, but elapsed active time keeps
+      // accruing while the continuation sits queued with no host to flush it.
+      // A continuation queued under the ceiling and delivered past it must be
+      // the hand-off, not a full work turn a whole window late.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        // Queued with the ceiling unspent and no host to deliver it.
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(host.inputs).toHaveLength(0);
+
+        // The window runs out while the continuation waits.
+        vi.setSystemTime(121_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]).toMatchObject({ windDown: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('sends no time figures to a Goal with no time ceiling', async () => {
+      // Elapsed active time with nothing to measure it against is a number on
+      // every turn that the model cannot act on.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 20,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(host.inputs[0]?.usage).toMatchObject({ turnBudget: 20 });
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeMs');
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('lets a spent cadence budget outrank the no-progress bound', async () => {
+      // Both bounds are reached on the same turn. The budget owes this Goal a
+      // hand-off and a `usage_limited` stop the user can resume from; pausing
+      // for idleness here would skip both.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: () => 0,
+          takeGoalTurnToolResults: () => 0,
+        },
+        turnBudgetGrant: GOAL_NO_PROGRESS_TURN_LIMIT,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishDelivered(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
+        GOAL_PAUSE_REASON_NO_PROGRESS,
+      );
+    });
+
+    it('shows the cadence stop even when the settle write fails', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal({
+          appendErrors: [
+            undefined,
+            undefined,
+            undefined,
+            new Error('journal unavailable'),
+          ],
+        }),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(host.started).toHaveLength(2);
     });
   });
 });
