@@ -43,8 +43,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
-import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  hasSlashCommandPathSeparator,
+} from '../utils/commandUtils.js';
+import {
+  ApprovalMode,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -68,6 +74,10 @@ const mocks = vi.hoisted(() => {
     toolConfirmProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
+    mcpApprovalProps: null as Record<string, unknown> | null,
+    /** The gated-server queue the shell's approval hook reports. */
+    mcpQueue: [] as Array<Record<string, unknown>>,
+    handleMcpApprovalSelect: vi.fn(),
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     loadingProps: null as Record<string, unknown> | null,
@@ -80,6 +90,8 @@ const mocks = vi.hoisted(() => {
     /** Holds the dispatcher's busy slot on this text until released. */
     holdHandleOn: null as string | null,
     releaseHandle: null as null | (() => void),
+    /** ink's AUTO entry notices, spied so the shell's call is observable. */
+    emitAutoModeEntryNotices: vi.fn(),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -226,12 +238,30 @@ vi.mock('./dialogs-confirm.js', () => ({
     mocks.state.actionConfirmProps = props;
     return 'action-confirm';
   },
+  OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.mcpApprovalProps = props;
+    return 'mcp-approval';
+  },
+}));
+vi.mock('../hooks/useMcpApproval.js', () => ({
+  useMcpApproval: () => ({
+    isMcpApprovalDialogOpen: mocks.state.mcpQueue.length > 0,
+    currentMcpApproval: mocks.state.mcpQueue[0],
+    pendingMcpApprovals: mocks.state.mcpQueue,
+    mcpApprovalRemaining: Math.max(0, mocks.state.mcpQueue.length - 1),
+    handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
+  }),
 }));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
 }));
+vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
+  emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
+}));
 
-const CONFIG = {} as unknown as Config;
+const CONFIG = {
+  getContextFilePaths: () => [],
+} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
@@ -282,6 +312,9 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.toolConfirmProps = null;
     mocks.state.shellConfirmProps = null;
     mocks.state.actionConfirmProps = null;
+    mocks.state.mcpApprovalProps = null;
+    mocks.state.mcpQueue.length = 0;
+    mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -303,9 +336,8 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
-  it('Ctrl+O toggles full details without submitting or editing the composer', async () => {
-    const onToggleFullDetail = vi.fn();
-    renderApp({ onToggleFullDetail });
+  it('leaves Ctrl+O to the entry-level full-detail handler without submitting', async () => {
+    renderApp();
     await settle();
     const preventDefault = vi.fn();
     act(() =>
@@ -315,14 +347,12 @@ describe('OpenTuiApp shell wiring', () => {
         preventDefault,
       }),
     );
-    expect(onToggleFullDetail).toHaveBeenCalledOnce();
-    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(preventDefault).not.toHaveBeenCalled();
     expect(mocks.state.handledTexts).toEqual([]);
   });
 
   it('does not toggle full details while a dialog owns the keyboard', async () => {
-    const onToggleFullDetail = vi.fn();
-    renderApp({ onToggleFullDetail, initialDialog: { dialog: 'settings' } });
+    renderApp({ initialDialog: { dialog: 'settings' } });
     await settle();
     const preventDefault = vi.fn();
     act(() =>
@@ -332,7 +362,6 @@ describe('OpenTuiApp shell wiring', () => {
         preventDefault,
       }),
     );
-    expect(onToggleFullDetail).not.toHaveBeenCalled();
     expect(preventDefault).not.toHaveBeenCalled();
   });
 
@@ -343,6 +372,48 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('footer')).toBeTruthy();
     expect(mocks.state.footerProps?.['streaming']).toBe(true);
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
+  });
+
+  it('hides the footer while the composer’s completion list is open', async () => {
+    renderApp();
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+
+    const onVisibilityChange = mocks.state.inputProps?.[
+      'onSuggestionsVisibilityChange'
+    ] as (visible: boolean) => void;
+    act(() => {
+      onVisibilityChange(true);
+    });
+    await settle();
+    expect(screen.queryByText('footer')).toBeNull();
+
+    act(() => {
+      onVisibilityChange(false);
+    });
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+  });
+
+  it('keeps an armed quit warning mounted while a dialog hides the footer', async () => {
+    // A dialog unmounts the composer, so nothing intercepts Ctrl+C and the
+    // app-level guard still arms. The warning has to survive the footer's
+    // dialog gate, or a second press exits with nothing ever shown.
+    renderApp({ exitHint: 'Press Ctrl+C again to exit.' });
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+    expect(screen.getByText('dialog:help')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    expect(screen.getByText('footer')).toBeTruthy();
+    expect(mocks.state.footerProps?.['exitHint']).toBe(
+      'Press Ctrl+C again to exit.',
+    );
   });
 
   it('builds one host, and one dispatcher, across re-renders', async () => {
@@ -583,6 +654,45 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('announces the context files once per visible transcript', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({
+      config: {
+        getContextFilePaths: () => ['/repo/AGENTS.md'],
+      } as unknown as Config,
+      onTranscriptEvent,
+      onSubmitPrompt: vi.fn(),
+    });
+    await settle();
+    mocks.state.handleResult = false;
+
+    const announced = () =>
+      onTranscriptEvent.mock.calls
+        .map(([event]) => event as { type?: string; text?: string })
+        .filter((event) => event.type === 'info')
+        .map((event) => event.text)
+        .filter((text) => text?.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX));
+
+    await submit('first prompt');
+    expect(announced()).toEqual(['Read context files: /repo/AGENTS.md']);
+
+    // The files stay attached for the whole session, so ink announces them
+    // once rather than on every prompt.
+    await submit('second prompt');
+    expect(announced()).toEqual(['Read context files: /repo/AGENTS.md']);
+
+    // A clear wipes the emitted row, so ink re-arms and announces again.
+    const host = mocks.state.host as { clearItems: () => void };
+    await act(async () => {
+      host.clearItems();
+    });
+    await submit('third prompt');
+    expect(announced()).toEqual([
+      'Read context files: /repo/AGENTS.md',
+      'Read context files: /repo/AGENTS.md',
+    ]);
+  });
+
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
     renderApp();
     await settle();
@@ -738,6 +848,38 @@ describe('OpenTuiApp shell wiring', () => {
       (mocks.state.toolConfirmProps?.['onSettled'] as () => void)();
     });
     expect(onToolCallSettled).toHaveBeenCalledWith('call-1');
+  });
+
+  it('outranks a parked tool call and routes the choice to the approval hook', async () => {
+    // ink's dialog order ranks the gated-server approval above both the shell
+    // and the tool confirmation, so a startup queue takes the slot outright.
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(mocks.state.mcpApprovalProps?.['server']).toEqual({
+      name: 'acceptance-server',
+    });
+    expect(mocks.state.mcpApprovalProps?.['remaining']).toBe(0);
+
+    const onSelect = mocks.state.mcpApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
   });
 
   it('passes streaming state and interrupt through to the composer', async () => {
@@ -1525,5 +1667,263 @@ describe('OpenTuiApp shell wiring', () => {
       screen.getByText('Something went wrong while rendering.'),
     ).toBeTruthy();
     boom.mockRestore();
+  });
+});
+
+describe('OpenTuiApp approval-mode cycling (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.handleResult = { kind: 'handled' };
+    mocks.state.handleResults.length = 0;
+    mocks.state.handledTexts.length = 0;
+    mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
+    mocks.state.inputProps = null;
+    mocks.state.dialogProps = null;
+    mocks.state.footerProps = null;
+    mocks.state.exitInProgress = false;
+    mocks.state.emitAutoModeEntryNotices.mockClear();
+    mocks.state.mcpApprovalProps = null;
+    mocks.state.mcpQueue.length = 0;
+    mocks.state.handleMcpApprovalSelect.mockClear();
+  });
+
+  function fakeConfig(
+    initial: ApprovalMode,
+    options: { refuse?: boolean } = {},
+  ) {
+    let mode = initial;
+    const writes: ApprovalMode[] = [];
+    const config = {
+      getApprovalMode: () => mode,
+      setApprovalMode(next: ApprovalMode) {
+        if (options.refuse) throw new Error('approval mode is pinned');
+        writes.push(next);
+        mode = next;
+      },
+    } as unknown as Config;
+    return { config, writes };
+  }
+
+  /** The Windows bare-Tab fallback is the one cycle route the composer keeps. */
+  async function cycleOnce() {
+    const cycle = mocks.state.inputProps?.['onCycleApprovalMode'] as
+      | (() => void)
+      | undefined;
+    if (typeof cycle !== 'function') {
+      throw new Error('composer was not given a cycle handler');
+    }
+    await act(async () => {
+      cycle();
+    });
+  }
+
+  /** Drives the shell's own useKeyboard registration; the mock pushes a fresh
+   * handler per render, so only the last one is the live subscription. */
+  async function pressKey(key: Record<string, unknown>) {
+    const handler = mocks.state.keyboardHandlers.at(-1);
+    if (!handler) {
+      throw new Error('shell registered no keyboard handler');
+    }
+    const event = { preventDefault: vi.fn(), ...key };
+    await act(async () => {
+      handler(event);
+    });
+    return event;
+  }
+
+  const pressShiftTab = () =>
+    pressKey({ name: 'tab', shift: true, sequence: '\x1b[Z' });
+
+  it('cycles the mode on Shift+Tab', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await pressShiftTab();
+    expect(writes).toEqual([ApprovalMode.AUTO_EDIT]);
+  });
+
+  it('leaves a bare Tab to the composer', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await pressKey({ name: 'tab', sequence: '\t' });
+    expect(writes).toEqual([]);
+  });
+
+  it('still cycles while a dialog has the composer unmounted', async () => {
+    // ink keeps useAutoAcceptIndicator mounted at App level, so Shift+Tab cycles
+    // through /help too. The composer owning the keystroke dropped it: the
+    // ternary unmounts the composer whenever a dialog is open.
+    const { config, writes } = fakeConfig(ApprovalMode.YOLO);
+    renderApp({ config, approvalMode: ApprovalMode.YOLO });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+    expect(screen.getByText('dialog:help')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+
+    await pressShiftTab();
+    // YOLO is the last entry of core's APPROVAL_MODES, so it wraps to PLAN.
+    expect(writes).toEqual([ApprovalMode.PLAN]);
+  });
+
+  it('releases a parked call when the cycle reaches YOLO', async () => {
+    // ink pairs the mode switch with confirming whatever is already parked.
+    // Which calls qualify is selectAutoApprovals' rule, covered in
+    // live-session.test.ts; this pins the wiring, which had no caller.
+    const onToolCallSettled = vi.fn();
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const { config } = fakeConfig(ApprovalMode.AUTO_EDIT);
+    renderApp({
+      config,
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?', onConfirm },
+        } as never,
+      ],
+      onToolCallSettled,
+    });
+    await settle();
+    // AUTO_EDIT → AUTO releases nothing: ink's rule names only AUTO_EDIT and
+    // YOLO, and a shell call is not an edit either way.
+    await pressShiftTab();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onToolCallSettled).not.toHaveBeenCalled();
+    // AUTO → YOLO does.
+    await pressShiftTab();
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
+    expect(onToolCallSettled).toHaveBeenCalledWith('call-1');
+  });
+
+  it('writes the next mode and repaints both chrome rows', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await cycleOnce();
+    expect(writes).toEqual([ApprovalMode.AUTO_EDIT]);
+    // The shell holds the mode locally, so the cycle repaints without waiting
+    // for the entry to re-render with a fresh `approvalMode` prop.
+    expect(mocks.state.inputProps?.['approvalMode']).toBe(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(
+      ApprovalMode.AUTO_EDIT,
+    );
+  });
+
+  it('explains entering AUTO the way ink does', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO_EDIT);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO_EDIT });
+    await settle();
+    await cycleOnce();
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when the cycle does not enter AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await cycleOnce();
+    expect(mocks.state.emitAutoModeEntryNotices).not.toHaveBeenCalled();
+  });
+
+  it('announces a session that starts already in AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO });
+    await settle();
+    // No keystroke: --approval-mode auto and tools.approvalMode both land here
+    // before any handler could run.
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not announce on mount when the session starts outside AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    expect(mocks.state.emitAutoModeEntryNotices).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused change instead of repainting a mode it does not hold', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT, {
+      refuse: true,
+    });
+    const events: unknown[] = [];
+    renderApp({
+      config,
+      approvalMode: ApprovalMode.DEFAULT,
+      onTranscriptEvent: (event) => events.push(event),
+    });
+    await settle();
+    await cycleOnce();
+    expect(writes).toEqual([]);
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(
+      ApprovalMode.DEFAULT,
+    );
+    expect(events).toContainEqual({
+      type: 'info',
+      text: 'approval mode is pinned',
+    });
+  });
+
+  it('takes the dialog’s choice into the same state the composer cycles', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'approval-mode' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/approval-mode');
+
+    const onChanged = mocks.state.dialogProps?.['onApprovalModeChanged'] as
+      | ((mode: ApprovalMode) => void)
+      | undefined;
+    if (typeof onChanged !== 'function') {
+      throw new Error('dialog mount was not given onApprovalModeChanged');
+    }
+    await act(async () => {
+      onChanged(ApprovalMode.YOLO);
+    });
+    // The footer is unmounted while a dialog is open, so close it first: the
+    // staleness this guards against is the chrome the user sees afterwards.
+    await act(async () => {
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
+    expect(mocks.state.inputProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
+  });
+
+  it('does not re-announce when the dialog re-picks the AUTO it already holds', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO });
+    await settle();
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'approval-mode' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/approval-mode');
+
+    const onChanged = mocks.state.dialogProps?.['onApprovalModeChanged'] as
+      | ((mode: ApprovalMode) => void)
+      | undefined;
+    if (typeof onChanged !== 'function') {
+      throw new Error('dialog mount was not given onApprovalModeChanged');
+    }
+    // The dialog opens with the mode it already holds selected, so a bare Enter
+    // re-picks AUTO. The stripped-rules notice is not idempotent, and ink
+    // guards both of its routes against reprinting it.
+    await act(async () => {
+      onChanged(ApprovalMode.AUTO);
+    });
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
   });
 });

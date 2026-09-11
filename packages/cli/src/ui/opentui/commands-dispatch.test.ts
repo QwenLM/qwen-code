@@ -1371,4 +1371,33 @@ describe('extension refresh subscription (ink processor parity)', () => {
     extensionRefreshState.markExtensionsChanged();
     expect(host.items.length).toBe(itemsAfterDispose);
   });
+
+  it('replays a latch set before mount once, not once per dispatcher', () => {
+    const extensionRefreshState = new ExtensionRefreshState();
+    // The watcher latches during startup, before any dispatcher exists.
+    extensionRefreshState.markExtensionsChanged();
+
+    const notice =
+      'Extensions changed on disk. Run /reload-plugins to apply updates.';
+    const count = (host: ReturnType<typeof createFakeHost>) =>
+      host.items.filter((item) => item.text === notice).length;
+
+    // The shell rebuilds the dispatcher whenever its host identity changes,
+    // and the latch survives that rebuild — both must not re-announce it.
+    const first = createFakeHost();
+    new OpenTuiSlashDispatcher(
+      first,
+      { ...services, extensionRefreshState },
+      [],
+    ).dispose();
+    expect(count(first)).toBe(1);
+
+    const second = createFakeHost();
+    new OpenTuiSlashDispatcher(
+      second,
+      { ...services, extensionRefreshState },
+      [],
+    ).dispose();
+    expect(count(second)).toBe(0);
+  });
 });

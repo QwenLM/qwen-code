@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import type { Part } from '@google/genai';
 import { toolResultPresentation } from './tool-result-presentation.js';
 import {
-  extractFileDiff,
+  extractStructuredResult,
   formatToolArgs,
   renderResultDisplay,
   type OpenTuiStreamEvent,
@@ -142,13 +142,13 @@ export function transcribeSession(
         // FileDiff results ride as structured payloads (colored diff lines in
         // the tool card); everything else flattens to display text. Bare
         // `String(obj)` would render "[object Object]".
-        const diff = extractFileDiff(r.resultDisplay);
-        if (diff) {
+        const structured = extractStructuredResult(r.resultDisplay);
+        if (structured) {
           events.push({
             type: 'tool-result',
             id,
             display: '',
-            diff,
+            ...structured,
             ...presentation,
           });
         } else {

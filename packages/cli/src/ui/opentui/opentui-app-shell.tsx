@@ -38,26 +38,46 @@ import {
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type RefObject,
 } from 'react';
-import { Command, matchesCommand } from './key-map.js';
 import { useFocusModeActions } from '../contexts/FocusModeContext.js';
-import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  ToolConfirmationOutcome,
+  type Config,
+  type Logger,
+} from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
-import type { HistoryItem } from '../types.js';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+} from '../types.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
+} from '../utils/commandUtils.js';
 import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
-import type { WaitingCallInfo } from './live-session.js';
+import {
+  nextApprovalMode,
+  selectAutoApprovals,
+  type WaitingCallInfo,
+} from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
+import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import type { KeyEvent } from '@opentui/core';
+import { toOriginalKey } from './key-map.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -75,9 +95,12 @@ import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import {
   OpenTuiActionConfirmation,
+  OpenTuiMcpApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -101,7 +124,6 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
-  onToggleFullDetail?: () => void;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -138,11 +160,21 @@ export interface OpenTuiAppProps {
    * that populates it lands with a later batch, so the layout stays fixed.
    */
   updateNotice?: string | null;
+  /**
+   * Armed two-press quit warning from the entry layer's exit guard. ink paints
+   * it in the footer's own hint slot, so it travels there rather than into the
+   * transcript region.
+   */
+  exitHint?: string | null;
   availableTerminalHeight?: number;
 
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
   streaming?: boolean;
+  /** Live output-character count behind the indicator's token estimate. */
+  streamingCharsRef?: RefObject<number>;
+  /** False while waiting on the API (↑), true once content arrives (↓). */
+  isReceivingContent?: boolean;
   /** Aborts the in-flight turn (Esc while streaming). */
   onInterrupt?: () => void;
   approvalMode?: ApprovalMode;
@@ -204,7 +236,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onStartNewSession,
     onToggleVim,
     updateNotice,
+    exitHint,
     streaming,
+    streamingCharsRef,
+    isReceivingContent,
     onInterrupt,
     approvalMode,
     queueLength,
@@ -239,6 +274,96 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     () => setShellModeActive((active) => !active),
     [],
   );
+  // ink's Composer hides the footer while the completion list is open; the
+  // list lives inside the composer, so its visibility is lifted here.
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const onSuggestionsVisibilityChange = useCallback(
+    (visible: boolean) => setShowSuggestions(visible),
+    [],
+  );
+  // ink's useAutoAcceptIndicator holds the mode locally so a cycle repaints at
+  // once — the `approvalMode` prop is only re-read when the entry re-renders —
+  // and keeps re-syncing from it so a change made elsewhere (`/plan`, the
+  // approval-mode dialog) still lands. Both routes funnel through
+  // adoptApprovalMode so entering AUTO explains itself either way.
+  const [currentApprovalMode, setCurrentApprovalMode] = useState(approvalMode);
+  useEffect(() => {
+    setCurrentApprovalMode(approvalMode);
+  }, [approvalMode]);
+  // emitAutoModeEntryNotices only ever adds INFO rows.
+  const addInfoItem = useCallback(
+    (item: HistoryItemWithoutId) => {
+      if (item.type === MessageType.INFO) {
+        onTranscriptEvent?.({ type: 'info', text: item.text });
+      }
+    },
+    [onTranscriptEvent],
+  );
+  const adoptApprovalMode = useCallback(
+    (next: ApprovalMode) => {
+      setCurrentApprovalMode(next);
+      // Both of ink's routes guard the notices on "was not already AUTO". A
+      // rotation can never re-enter AUTO, but the dialog can — it opens with
+      // the current mode already selected, so Enter re-picks it and would
+      // reprint the stripped-rules notice, the one part of the entry notices
+      // that is not idempotent.
+      if (
+        next === ApprovalMode.AUTO &&
+        currentApprovalMode !== ApprovalMode.AUTO
+      ) {
+        emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+      }
+      // ink's handleApprovalModeChange pairs the switch with releasing what is
+      // already parked: entering an auto-approving mode confirms those calls
+      // instead of leaving a dialog up over a mode that would not have asked.
+      for (const call of selectAutoApprovals(next, waitingToolCalls ?? [])) {
+        void call.confirmationDetails
+          .onConfirm(ToolConfirmationOutcome.ProceedOnce)
+          .catch(() => {});
+        onToolCallSettled?.(call.callId);
+      }
+    },
+    [
+      config,
+      settings,
+      addInfoItem,
+      currentApprovalMode,
+      waitingToolCalls,
+      onToolCallSettled,
+    ],
+  );
+  const cycleApprovalMode = useCallback(() => {
+    const next = nextApprovalMode(config.getApprovalMode());
+    try {
+      config.setApprovalMode(next);
+    } catch (e) {
+      addInfoItem({ type: MessageType.INFO, text: (e as Error).message });
+      return;
+    }
+    adoptApprovalMode(next);
+  }, [config, addInfoItem, adoptApprovalMode]);
+  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
+  // at App level (disabled only for the agent-tab view), so it still cycles
+  // while a dialog or a confirmation has the composer unmounted. The composer
+  // keeps only the Windows bare-Tab fallback — the one route that has to know
+  // whether Tab was already spent on a completion.
+  useKeyboard((key: KeyEvent) => {
+    const { name, shift, ctrl } = toOriginalKey(key);
+    if (name !== 'tab' || !shift || ctrl) return;
+    key.preventDefault();
+    cycleApprovalMode();
+  });
+  // ink announces AUTO on mount too, so `--approval-mode auto` and
+  // `tools.approvalMode: "auto"` do not open a session silently in AUTO. The
+  // keypress and dialog routes above never fire for a mode set before start.
+  useEffect(() => {
+    if (approvalMode === ApprovalMode.AUTO) {
+      emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+    }
+    // Intentionally mount-only, as in ink; later entries go through
+    // adoptApprovalMode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const runShellCommand = useCallback(
     (command: string) => {
       const emit = props.onTranscriptEvent;
@@ -364,29 +489,38 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
 
-  useKeyboard((key) => {
-    if (dialog || activeModal || activeToolCall || !props.onToggleFullDetail)
-      return;
-    if (matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) {
-      key.preventDefault();
-      props.onToggleFullDetail();
-    }
-  });
-
   useEffect(() => {
     syncFocusMode();
   }, [settings.merged.ui?.focusMode, syncFocusMode]);
 
-  const transcript = useMemo(
-    () => ({
-      reset: (events: OpenTuiStreamEvent[]) => onTranscriptReset?.(events),
+  // ink drives the gated-server approval queue from a renderer-agnostic hook at
+  // app level; without it a `.mcp.json` checked into the project is never
+  // offered here and its servers stay silently disconnected.
+  const mcpApproval = useMcpApproval(config);
+
+  // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
+  // announced once per session, on the first submission that reaches a model.
+  const contextFilesAnnouncedRef = useRef(false);
+
+  const transcript = useMemo(() => {
+    // ink re-arms that latch in three places and reconciles its history-
+    // replacement site against the restored rows. One place suffices here:
+    // every route that takes the emitted row off screen — /clear, resume,
+    // branch — funnels through a transcript reset, and the replay a reset
+    // installs carries no info rows, so re-arming unconditionally cannot
+    // announce a second time.
+    const reset = (events: OpenTuiStreamEvent[]) => {
+      contextFilesAnnouncedRef.current = false;
+      onTranscriptReset?.(events);
+    };
+    return {
+      reset,
       // /clear semantics: a fresh transcript — the live turn's reset with an
       // empty batch (it also drops a stray steering queue).
-      clear: () => onTranscriptReset?.([]),
+      clear: () => reset([]),
       append: (event: OpenTuiStreamEvent) => onTranscriptEvent?.(event),
-    }),
-    [onTranscriptReset, onTranscriptEvent],
-  );
+    };
+  }, [onTranscriptReset, onTranscriptEvent]);
 
   const host = useMemo(
     () =>
@@ -614,6 +748,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // ink order (use-llm-stream): slash commands dispatch first; a
         // shell-mode submission runs only when dispatch did not claim it.
         const query = text.trim();
+        // ink AppContainer's one-shot context-files announcement. The latch is
+        // consulted before the shell-mode intercept because the shared helper
+        // is what decides whether the submission reaches the model, and it
+        // needs shellModeActive to decide.
+        if (
+          !contextFilesAnnouncedRef.current &&
+          consumesContextAnnouncementLatch(query, {
+            shellModeActive,
+            slashCommands: commandList,
+          })
+        ) {
+          const contextFilePaths = config.getContextFilePaths();
+          if (contextFilePaths.length > 0) {
+            contextFilesAnnouncedRef.current = true;
+            addInfoItem({
+              type: MessageType.INFO,
+              text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} ${contextFilePaths.join(', ')}`,
+            });
+          }
+        }
         if (shellModeActive && query) {
           void runShellCommand(query);
           return;
@@ -640,6 +794,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       streaming,
       shellModeActive,
       runShellCommand,
+      config,
+      commandList,
+      addInfoItem,
     ],
   );
 
@@ -774,14 +931,30 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <OpenTuiBanner config={config} settings={settings} />
         {renderMain ? renderMain() : null}
-        {!dialog && !activeModal && !activeToolCall && updateNotice ? (
+        {!dialog &&
+        !activeModal &&
+        !activeToolCall &&
+        !mcpApproval.isMcpApprovalDialogOpen &&
+        updateNotice ? (
           <text>{updateNotice}</text>
         ) : null}
         {noticeText ? <text>{noticeText}</text> : null}
-        {activeToolCall ? (
+        {mcpApproval.isMcpApprovalDialogOpen &&
+        mcpApproval.currentMcpApproval ? (
+          // ink ranks the gated-server approval above both the shell and the
+          // tool confirmation, so it takes the slot outright.
+          <OpenTuiMcpApprovalDialog
+            key={`mcp-${mcpApproval.currentMcpApproval.name}`}
+            server={mcpApproval.currentMcpApproval}
+            pendingServers={mcpApproval.pendingMcpApprovals}
+            remaining={mcpApproval.mcpApprovalRemaining}
+            onSelect={mcpApproval.handleMcpApprovalSelect}
+          />
+        ) : activeToolCall ? (
           <OpenTuiToolConfirmation
             key={activeToolCall.callId}
             call={activeToolCall}
+            config={config}
             onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
           />
         ) : activeModal ? (
@@ -803,23 +976,43 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             />
           )
         ) : dialog ? (
-          <OpenTuiDialogMount
-            key={dialog.dialog}
-            request={dialog}
-            host={host}
-            config={config}
-            settings={settings}
-            commands={commandList}
-            onClose={() => setDialog(null)}
-            notify={notify}
-            fillInput={fillComposer}
-            onSelectSetting={handleSelectSetting}
-            onApprovalModeChanged={undefined}
-            availableTerminalHeight={props.availableTerminalHeight}
-          />
+          // ink's layout wraps every popup in a two-column margin and caps its
+          // width, so a dialog's border runs from column 2 to column 97 instead
+          // of spanning the terminal. The confirmations stay outside: their
+          // body reads the terminal width to estimate line wrapping.
+          //
+          // The keys on this branch and the composer's are load-bearing: both
+          // are a `<box>` in the same slot, so without them React reuses one
+          // instance and diffs props — and @opentui's margin/width setters
+          // ignore the `null` its reconciler passes for a removed prop, leaving
+          // the previous branch's layout stuck on the node.
+          <box
+            key="dialog-area"
+            marginLeft={2}
+            width={dialogAreaWidth(terminalWidth)}
+          >
+            <OpenTuiDialogMount
+              key={dialog.dialog}
+              request={dialog}
+              host={host}
+              config={config}
+              settings={settings}
+              commands={commandList}
+              onClose={() => setDialog(null)}
+              notify={notify}
+              fillInput={fillComposer}
+              onSelectSetting={handleSelectSetting}
+              onApprovalModeChanged={adoptApprovalMode}
+              availableTerminalHeight={props.availableTerminalHeight}
+            />
+          </box>
         ) : (
-          <>
-            <OpenTuiLoadingIndicator streaming={Boolean(streaming)} />
+          <box key="composer" flexDirection="column" marginTop={1}>
+            <OpenTuiLoadingIndicator
+              streaming={Boolean(streaming)}
+              streamingCharsRef={streamingCharsRef}
+              isReceivingContent={isReceivingContent}
+            />
             <OpenTuiInputPrompt
               onSubmit={(text, imagePaths) => {
                 void onSubmit(text, imagePaths);
@@ -829,7 +1022,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               focus
               streaming={streaming}
               onInterrupt={onInterrupt}
-              approvalMode={approvalMode}
+              approvalMode={currentApprovalMode}
               queueLength={queueLength}
               onPopQueue={onPopQueue}
               composerHandle={props.composerHandle}
@@ -838,16 +1031,28 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               onPromptSuggestionAbort={onPromptSuggestionAbort}
               shellModeActive={shellModeActive}
               onToggleShellMode={toggleShellMode}
+              onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+              onCycleApprovalMode={cycleApprovalMode}
             />
-          </>
+          </box>
         )}
-        <OpenTuiFooter
-          config={config}
-          streaming={Boolean(streaming)}
-          approvalMode={approvalMode}
-          queueLength={queueLength}
-          sessionName={host.sessionName}
-        />
+        {/* An armed quit warning forces the footer to mount: a dialog unmounts
+            the composer, so nothing intercepts Ctrl+C and the app-level guard
+            still arms — hiding the footer here would drop the only row telling
+            the user that a second press exits. With the warning set the footer
+            returns just that row, so nothing else appears. */}
+        {exitHint ||
+        (!dialog && !activeModal && !activeToolCall && !showSuggestions) ? (
+          <OpenTuiFooter
+            config={config}
+            streaming={Boolean(streaming)}
+            approvalMode={currentApprovalMode}
+            queueLength={queueLength}
+            sessionName={host.sessionName}
+            shellModeActive={shellModeActive}
+            exitHint={exitHint}
+          />
+        ) : null}
       </box>
     </OpenTuiErrorBoundary>
   );

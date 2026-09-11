@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect } from 'vitest';
-import { createEventMapper, renderResultDisplay } from './event-adapter.js';
+import {
+  createEventMapper,
+  renderResultDisplay,
+  toolResultEvent,
+} from './event-adapter.js';
 import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
@@ -836,6 +840,44 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           fallbackText: 'app fallback',
         }),
       ).toBe('app fallback');
+    });
+  });
+
+  describe('toolResultEvent payload precedence', () => {
+    it('keeps a todo list structured instead of flattening it to JSON', () => {
+      const todos = [
+        { id: '1', content: 'write the design', status: 'completed' },
+        { id: '2', content: 'run the matrix', status: 'in_progress' },
+      ];
+      expect(toolResultEvent('c1', { type: 'todo_list', todos })).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        todos,
+      });
+    });
+
+    it('falls back to the flattened text, and to no event at all', () => {
+      expect(toolResultEvent('c1', 'plain')).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: 'plain',
+      });
+      expect(toolResultEvent('c1', { type: 'task_list', message: 'y' })).toBe(
+        null,
+      );
+    });
+
+    it('rides the vision-bridge notice on whichever payload wins', () => {
+      expect(
+        toolResultEvent('c1', { type: 'todo_list', todos: [] }, 'bridged 2'),
+      ).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        todos: [],
+        visionBridgeNotice: 'bridged 2',
+      });
     });
   });
 });

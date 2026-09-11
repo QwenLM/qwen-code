@@ -42,6 +42,7 @@ import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
+  initShellAstParser,
   isDebugLogFileEnabled,
   registerSession,
   SessionEndReason,
@@ -85,6 +86,7 @@ import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { Command, matchesCommand } from './key-map.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import {
   armCapturedInputInjection,
@@ -208,6 +210,17 @@ function OpenTuiEntryApp({
   useEffect(() => {
     waitingCallsRef.current = live.waitingCalls;
   }, [live.waitingCalls]);
+  // ink AppContainer's ctrl+O / alt+T toggle: one app-wide flag that forces
+  // every committed thought open. It lives here rather than in the transcript
+  // so the keystroke still lands while a dialog or a confirmation owns the
+  // screen, the way ink's app-level handler does.
+  const [thoughtsExpanded, setThoughtsExpanded] = useState(false);
+  useKeyboard((key: KeyEvent) => {
+    if (!matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) return;
+    key.preventDefault();
+    setThoughtsExpanded((prev) => !prev);
+    toggleFullDetail();
+  });
   useKeyboard((key: KeyEvent) => {
     if (!key.ctrl || (key.name !== 'c' && key.name !== 'd')) return;
     // ink handleExit cascade parity: a parked confirmation closes first
@@ -237,17 +250,19 @@ function OpenTuiEntryApp({
   const renderMain = useCallback(
     () => (
       <box flexDirection="column" flexGrow={1}>
+        {/* The transcript box carries two columns of margin on each side, so
+            its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           items={live.items}
           focusMode={focusMode}
           fullDetail={fullDetail}
-          availableWidth={width}
+          availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
+          thoughtsExpanded={thoughtsExpanded}
         />
-        {exitHint ? <text>{exitHint}</text> : null}
       </box>
     ),
-    [live.items, width, height, exitHint, focusMode, fullDetail],
+    [live.items, width, height, thoughtsExpanded, focusMode, fullDetail],
   );
 
   const handleRenderError = useCallback(
@@ -292,15 +307,17 @@ function OpenTuiEntryApp({
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
-      onToggleFullDetail={toggleFullDetail}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}
       onTranscriptEvent={applyEvent}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
+      exitHint={exitHint}
       availableTerminalHeight={height}
       streaming={live.streaming}
+      streamingCharsRef={live.streamingCharsRef}
+      isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       approvalMode={config.getApprovalMode()}
       queueLength={live.queueLength}
@@ -329,6 +346,17 @@ export async function startOpenTuiUI(
   initializationResult: InitializationResult,
   options: StartOpenTuiUIOptions = {},
 ): Promise<boolean> {
+  // The renderer's constructor installs a bare `globalThis.window` to hang its
+  // requestAnimationFrame shim on. web-tree-sitter's UMD wrapper probes
+  // `window.document.currentScript` when it is first evaluated, so evaluating
+  // it after that point throws — and the parser latches that failure
+  // permanently, silently downgrading permission rules, read-only detection
+  // and command-safety classification to their fallbacks for the whole
+  // session. Warm it while `window` is still undefined.
+  await initShellAstParser().catch((err) => {
+    debugLogger.warn('Shell AST parser warm-up failed:', err);
+  });
+
   let renderer: CliRenderer;
   try {
     renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true });

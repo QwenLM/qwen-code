@@ -92,7 +92,7 @@ export async function executeUserShell(
   const client = config.getGeminiClient();
   const chatAtStart = client.isInitialized() ? client.getChat() : undefined;
   let cumulative = '';
-  let emittedText = '';
+  let emittedLength = 0;
   let isBinaryStream = false;
   let lastUpdate = Date.now();
 
@@ -100,8 +100,9 @@ export async function executeUserShell(
     switch (event.type) {
       case 'data':
         // A pty delivers full screen states and a binary stream delivers
-        // bytes — neither replays as append deltas, so only child-process
-        // text accumulates; everything else lands once at completion.
+        // bytes — neither is text the card can show as it grows, so only
+        // child-process text accumulates; everything else lands once at
+        // completion.
         if (!isBinaryStream && !usePty && typeof event.chunk === 'string') {
           cumulative += event.chunk;
         }
@@ -118,11 +119,10 @@ export async function executeUserShell(
       !usePty &&
       !isBinaryStream &&
       Date.now() - lastUpdate > OUTPUT_UPDATE_INTERVAL_MS &&
-      cumulative.length > emittedText.length
+      cumulative.length > emittedLength
     ) {
-      const delta = cumulative.slice(emittedText.length);
-      emittedText += delta;
-      emit({ type: 'tool-output', id: callId, delta });
+      emittedLength = cumulative.length;
+      emit({ type: 'tool-output', id: callId, output: cumulative });
       lastUpdate = Date.now();
     }
   };
@@ -182,23 +182,10 @@ export async function executeUserShell(
           ? '[Command produced binary output, which is not shown.]'
           : res.output.trim() || '(Command produced no output)';
 
-        // The streamed head is already on the card; the result event
-        // appends only what was not emitted yet (plus status prefixes).
-        // The stream tail usually carries the final newline the trimmed
-        // result drops, so compare against the trimmed emission.
-        const emittedTrimmed = emittedText.trimEnd();
-        const tail =
-          emittedTrimmed && mainContent.startsWith(emittedTrimmed)
-            ? mainContent.slice(emittedTrimmed.length)
-            : mainContent;
-        // When the output was already streamed as deltas, the card's last
-        // line is on screen and `tail` is empty — the status prefix must
-        // start its own row instead of gluing onto it.
-        const finalOutput = tail
-          ? `${prefixText}${tail}`
-          : prefixText
-            ? `\n${prefixText}`
-            : '';
+        // The result event replaces whatever streamed onto the card, so it
+        // carries the whole display — the same string the LLM history write
+        // below uses.
+        const finalOutput = `${prefixText}${mainContent}`;
 
         emit({ type: 'tool-result', id: callId, display: finalOutput });
         emit({
@@ -211,7 +198,7 @@ export async function executeUserShell(
           addShellCommandToLlmHistory(
             config.getGeminiClient(),
             rawQuery,
-            `${prefixText}${mainContent}`,
+            finalOutput,
           );
         }
       }),

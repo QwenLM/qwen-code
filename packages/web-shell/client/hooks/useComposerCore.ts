@@ -994,7 +994,7 @@ function getFollowupRemainder(
   return remainder.length > 0 ? remainder : null;
 }
 
-function mapRestoredInputAnnotationsAfterTextChange(
+export function mapRestoredInputAnnotationsAfterTextChange(
   annotations: readonly DaemonInputAnnotation[],
   previousText: string,
   nextText: string,

@@ -69,7 +69,7 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
-import type { LiveToolItem } from './live-session-model.js';
+import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
   kind: 'tool',
@@ -121,10 +121,11 @@ describe('OpenTuiTranscriptView', () => {
       },
     ];
     const view = render(<OpenTuiTranscriptView items={items} />);
-    fireEvent.mouseUp(view.getByText(/Thought/));
+    expect(view.container.textContent).not.toContain('PRIVATE_REASONING');
+    fireEvent.mouseUp(view.getByText(/Thinking/));
     expect(view.container.textContent).toContain('PRIVATE_REASONING');
     view.rerender(<OpenTuiTranscriptView items={items} fullDetail />);
-    fireEvent.mouseUp(view.getByText(/Thought/));
+    fireEvent.mouseUp(view.getByText(/Thinking/));
     view.rerender(<OpenTuiTranscriptView items={items} />);
     expect(view.container.textContent).toContain('PRIVATE_REASONING');
   });
@@ -208,7 +209,8 @@ describe('OpenTuiTranscriptView', () => {
     expect(view.container.textContent).toContain('Read');
     expect(view.container.textContent).toContain('main.ts');
     expect(view.container.textContent).not.toContain('FULL_RESULT');
-    expect(view.container.textContent).not.toContain('Thought');
+    expect(view.container.textContent).not.toContain('Thinking');
+    expect(view.container.textContent).not.toContain('PRIVATE_REASONING');
     view.rerender(<OpenTuiTranscriptView items={items} focusMode fullDetail />);
     expect(view.container.textContent).toContain('FULL_RESULT');
     expect(view.container.textContent).toContain('PRIVATE_REASONING');
@@ -463,6 +465,22 @@ describe('OpenTuiTranscriptView', () => {
     expect(container.textContent).toContain('$ git status');
   });
 
+  it('renders an error on one row with ink’s inline parenthesised hint', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={[
+          {
+            kind: 'error',
+            id: 'e1',
+            text: 'Model not found',
+            hint: 'try /model',
+          },
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain('✕ Model not found (try /model)');
+  });
+
   it('strips bidi overrides from arena file lists and group labels (R1-26)', () => {
     const { container } = render(
       <OpenTuiTranscriptView
@@ -495,5 +513,31 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text).not.toContain('\u202e');
     expect(text).toContain('b.ts');
+  });
+
+  it('names a committed thought’s duration and opens it on the global toggle', () => {
+    const items: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'INSPECTING_THE_REPOSITORY',
+        done: true,
+        durationMs: 12_000,
+      },
+    ];
+    const collapsed = render(<OpenTuiTranscriptView items={items} />);
+    expect(collapsed.container.textContent).toContain('Thought for 12s');
+    expect(collapsed.container.textContent).not.toContain(
+      'INSPECTING_THE_REPOSITORY',
+    );
+    collapsed.unmount();
+
+    const expanded = render(
+      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
+    );
+    expect(expanded.container.textContent).toContain(
+      'INSPECTING_THE_REPOSITORY',
+    );
+    expect(expanded.container.textContent).toContain('ctrl+o to collapse');
   });
 });

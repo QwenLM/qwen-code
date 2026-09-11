@@ -28,6 +28,7 @@ import type {
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  APPROVAL_MODES,
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
@@ -53,8 +54,9 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
-  extractFileDiff,
+  extractStructuredResult,
   renderResultDisplay,
+  toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
@@ -128,23 +130,15 @@ export interface LivePromptOptions {
 }
 
 /**
- * Shift+Tab cycle order (core approval-mode.ts order:
- * [plan, default, auto-edit, auto, yolo]).
+ * Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). Cycles
+ * core's own `APPROVAL_MODES`, so the order cannot drift from the enum ink
+ * walks; an unknown mode indexes to -1 and wraps to entry 0, as ink does.
  */
-export const APPROVAL_MODE_CYCLE: readonly ApprovalMode[] = [
-  ApprovalMode.PLAN,
-  ApprovalMode.DEFAULT,
-  ApprovalMode.AUTO_EDIT,
-  ApprovalMode.AUTO,
-  ApprovalMode.YOLO,
-];
-
-/** Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). */
 export function nextApprovalMode(
   current: ApprovalMode | undefined,
 ): ApprovalMode {
-  const idx = APPROVAL_MODE_CYCLE.indexOf(current ?? ApprovalMode.DEFAULT);
-  return APPROVAL_MODE_CYCLE[(idx + 1) % APPROVAL_MODE_CYCLE.length];
+  const idx = APPROVAL_MODES.indexOf(current ?? ApprovalMode.DEFAULT);
+  return APPROVAL_MODES[(idx + 1) % APPROVAL_MODES.length];
 }
 
 /** A scheduler call parked in `awaiting_approval`, tracked by the backend. */
@@ -265,12 +259,11 @@ function atMentionCardEvents(
       description: display.description,
     },
   ];
-  const text = renderResultDisplay(display.resultDisplay);
-  if (text || display.images?.length || display.omittedImageCount)
-    events.push({
-      type: 'tool-result',
-      id: display.callId,
-      display: text,
+  const result = toolResultEvent(
+    display.callId,
+    display.resultDisplay,
+    undefined,
+    {
       ...(display.detailedDisplay
         ? { detailedDisplay: display.detailedDisplay }
         : {}),
@@ -281,7 +274,9 @@ function atMentionCardEvents(
         ? { omittedImageCount: display.omittedImageCount }
         : {}),
       ...(display.isMemoryOp ? { isMemoryOp: display.isMemoryOp } : {}),
-    });
+    },
+  );
+  if (result) events.push(result);
   const failed = display.status === ToolCallStatus.Error;
   events.push({
     type: 'tool-end',
@@ -873,11 +868,15 @@ export async function* livePromptEvents(
         }
         return out;
       }
-      const display = renderResultDisplay(
-        compactToolResultDisplayForHistory(chunk),
-      );
+      const compacted = compactToolResultDisplayForHistory(chunk);
+      const structured = extractStructuredResult(compacted);
+      if (structured)
+        return [
+          { type: 'tool-result', id: callId, display: '', ...structured },
+        ];
+      const display = renderResultDisplay(compacted);
       return display
-        ? [{ type: 'tool-output', id: callId, delta: display }]
+        ? [{ type: 'tool-output', id: callId, output: display }]
         : [];
     };
 
@@ -980,28 +979,13 @@ export async function* livePromptEvents(
         config.getTargetDir(),
         failed,
       );
-      // FileDiff results ride as structured payloads so the tool card renders
-      // colored diff lines (ink DiffResultRenderer parity) instead of the
-      // flattened unified-diff text.
-      const diff = extractFileDiff(resp?.resultDisplay);
-      if (diff) {
-        yield {
-          type: 'tool-result',
-          id: call.request.callId,
-          display: '',
-          diff,
-          ...presentation,
-        };
-      } else {
-        const display = renderResultDisplay(resp?.resultDisplay);
-        if (display || Object.keys(presentation).length)
-          yield {
-            type: 'tool-result',
-            id: call.request.callId,
-            display,
-            ...presentation,
-          };
-      }
+      const result = toolResultEvent(
+        call.request.callId,
+        resp?.resultDisplay,
+        undefined,
+        presentation,
+      );
+      if (result) yield result;
       yield {
         type: 'tool-end',
         id: call.request.callId,

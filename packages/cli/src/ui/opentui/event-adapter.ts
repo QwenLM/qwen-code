@@ -379,6 +379,60 @@ export function renderResultDisplay(display: unknown): string {
 }
 
 /**
+ * The structured payload a result display carries, if any. The tool card has an
+ * ink-parity renderer for each of a file diff, a todo list and an ANSI grid,
+ * and `renderResultDisplay` would reduce any of them to text — a todo list to
+ * its raw JSON. Split out from {@link toolResultEvent} because the live-chunk
+ * and resume paths emit an incremental `tool-output` for the flattened text and
+ * only want the structured half shared.
+ */
+export function extractStructuredResult(
+  display: unknown,
+): Partial<
+  Pick<
+    Extract<OpenTuiStreamEvent, { type: 'tool-result' }>,
+    'diff' | 'todos' | 'ansi'
+  >
+> | null {
+  const diff = extractFileDiff(display);
+  if (diff) return { diff };
+  const todos = extractTodos(display);
+  if (todos) return { todos };
+  const ansi = extractAnsiOutput(display);
+  if (ansi) return { ansi };
+  return null;
+}
+
+/**
+ * The tool-result event one result display expands to, or `null` when it
+ * carries nothing renderable. Every path that turns a completed or replayed
+ * display into events goes through here so the precedence cannot drift between
+ * them.
+ */
+export function toolResultEvent(
+  id: string,
+  display: unknown,
+  visionBridgeNotice?: string,
+  presentation: ReturnType<typeof toolResultPresentation> = {},
+): OpenTuiStreamEvent | null {
+  const notice = visionBridgeNotice ? { visionBridgeNotice } : {};
+  const structured = extractStructuredResult(display);
+  if (structured)
+    return {
+      type: 'tool-result',
+      id,
+      display: '',
+      ...structured,
+      ...notice,
+      ...presentation,
+    };
+  const text = renderResultDisplay(display);
+  return text || Object.keys(presentation).length || visionBridgeNotice
+    ? { type: 'tool-result', id, display: text, ...notice, ...presentation }
+    : null;
+}
+
+/**
  * Non-STOP finish reasons → user-facing notice (ink useGeminiStream
  * handleFinishedEvent parity; FINISH_REASON_UNSPECIFIED and STOP are
  * silent).
@@ -522,51 +576,13 @@ export function createEventMapper(
           typeof v.visionBridgeNotice === 'string' && v.visionBridgeNotice
             ? v.visionBridgeNotice
             : undefined;
-        const diff = extractFileDiff(v.resultDisplay);
-        if (diff) {
-          out.push({
-            type: 'tool-result',
-            id: v.callId,
-            display: '',
-            diff,
-            ...presentation,
-            ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-          });
-        } else {
-          const todos = extractTodos(v.resultDisplay);
-          if (todos) {
-            out.push({
-              type: 'tool-result',
-              id: v.callId,
-              display: '',
-              todos,
-              ...presentation,
-              ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-            });
-          } else {
-            const ansi = extractAnsiOutput(v.resultDisplay);
-            if (ansi) {
-              out.push({
-                type: 'tool-result',
-                id: v.callId,
-                display: '',
-                ansi,
-                ...presentation,
-                ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-              });
-            } else {
-              const display = renderResultDisplay(v.resultDisplay);
-              if (display || Object.keys(presentation).length)
-                out.push({
-                  type: 'tool-result',
-                  id: v.callId,
-                  display,
-                  ...presentation,
-                  ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-                });
-            }
-          }
-        }
+        const result = toolResultEvent(
+          v.callId,
+          v.resultDisplay,
+          visionBridgeNotice,
+          presentation,
+        );
+        if (result) out.push(result);
         const cancelled = v.executionStatus === 'cancelled';
         out.push({
           type: 'tool-end',
