@@ -1136,46 +1136,63 @@ describe('QwenLogger', () => {
 
   describe('error text redaction', () => {
     it('redacts URL credentials from telemetry error text', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'Command: git clone https://x-access-token:ghs_testsecret123@github.com/org/repo.git',
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'Command: git clone https://x-access-token:ghs_testsecret123@github.com/org/repo.git',
+        ),
+      ).toBe(
+        'Command: git clone https://***REDACTED***@github.com/org/repo.git',
       );
-      expect(redacted).not.toContain('ghs_testsecret123');
-      expect(redacted).toContain('***REDACTED***');
     });
 
     it('redacts Authorization headers from telemetry error text', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'curl -H "Authorization: Bearer ghs_testsecret123" https://api.github.com/repos',
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'curl -H "Authorization: Bearer ghs_testsecret123" https://api.github.com/repos',
+        ),
+      ).toBe(
+        'curl -H "Authorization: ***REDACTED*** https://api.github.com/repos',
       );
-      expect(redacted).not.toContain('ghs_testsecret123');
     });
 
     it('redacts secret flags from telemetry error text', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'npm publish --_authToken npm_testsecret123 --registry https://registry.npmjs.org',
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'npm publish --_authToken npm_testsecret123 --registry https://registry.npmjs.org',
+        ),
+      ).toBe(
+        'npm publish --_authToken ***REDACTED*** --registry https://registry.npmjs.org',
       );
-      expect(redacted).not.toContain('npm_testsecret123');
     });
 
     it('redacts KEY=value env-style secrets from telemetry error text', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'env GITHUB_TOKEN=ghs_testsecret123 npm publish',
-      );
-      expect(redacted).not.toContain('ghs_testsecret123');
-      expect(redacted).toContain('***REDACTED***');
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'env GITHUB_TOKEN=ghs_testsecret123 npm publish',
+        ),
+      ).toBe('env GITHUB_TOKEN=***REDACTED*** npm publish');
     });
 
     it('redacts database DSN credentials', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'connect postgres://user:supersecret123@db.internal:5432/app',
-      );
-      expect(redacted).not.toContain('supersecret123');
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'connect postgres://user:supersecret123@db.internal:5432/app',
+        ),
+      ).toBe('connect postgres://***REDACTED***@db.internal:5432/app');
     });
 
     it('preserves non-sensitive error text', () => {
       expect(
         TEST_ONLY.redactTelemetryError('Request failed with status 429'),
       ).toBe('Request failed with status 429');
+    });
+
+    it('preserves non-secret key=value assignments and short counters', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'env USER=alice PATH=/usr/bin max_tokens=8192',
+        ),
+      ).toBe('env USER=alice PATH=/usr/bin max_tokens=8192');
     });
 
     it('redacts error_message on the enqueue boundary', () => {
@@ -1223,20 +1240,20 @@ describe('QwenLogger', () => {
         TEST_ONLY.redactTelemetryError(
           'env OPENAI_API_KEY=sk_testsecret123 npm publish',
         ),
-      ).not.toContain('sk_testsecret123');
+      ).toBe('env OPENAI_API_KEY=***REDACTED*** npm publish');
       expect(
         TEST_ONLY.redactTelemetryError(
           'env AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG npm run',
         ),
-      ).not.toContain('wJalrXUtnFEMI/K7MDENG');
+      ).toBe('env AWS_SECRET_ACCESS_KEY=***REDACTED*** npm run');
     });
 
     it('redacts non-Bearer Authorization schemes', () => {
-      const redacted = TEST_ONLY.redactTelemetryError(
-        'curl -H "Authorization: Basic dXNlcjpwYXNz" https://api.example.com',
-      );
-      expect(redacted).not.toContain('dXNlcjpwYXNz');
-      expect(redacted).toContain('***REDACTED***');
+      expect(
+        TEST_ONLY.redactTelemetryError(
+          'curl -H "Authorization: Basic dXNlcjpwYXNz" https://api.example.com',
+        ),
+      ).toBe('curl -H "Authorization: ***REDACTED*** https://api.example.com');
     });
 
     it('redacts secrets delimited by tabs and newlines', () => {
@@ -1255,10 +1272,10 @@ describe('QwenLogger', () => {
     it('redacts quote-opened secret values', () => {
       expect(
         TEST_ONLY.redactTelemetryError('TOKEN="ghs_testsecret123"'),
-      ).not.toContain('ghs_testsecret123');
+      ).toBe('TOKEN=***REDACTED***');
       expect(
         TEST_ONLY.redactTelemetryError("--token 'ghs_testsecret123'"),
-      ).not.toContain('ghs_testsecret123');
+      ).toBe('--token ***REDACTED***');
     });
 
     it('redacts long flags containing a secret keyword', () => {
@@ -1266,7 +1283,23 @@ describe('QwenLogger', () => {
         TEST_ONLY.redactTelemetryError(
           'aws --aws-access-key AKIA_testsecret123',
         ),
-      ).not.toContain('AKIA_testsecret123');
+      ).toBe('aws --aws-access-key ***REDACTED***');
+    });
+
+    it('does not consume a lone backslash as a complete secret value', () => {
+      const redacted = TEST_ONLY.redactTelemetryError(
+        'npm publish --token=\\' + '\n' + 'greatsecret1234',
+      );
+      // The trailing `\` is a shell line continuation, not a value. The
+      // redactor must not emit a redaction marker while leaving the real
+      // credential in cleartext immediately after it.
+      expect(redacted).not.toContain('***REDACTED***');
+    });
+
+    it('does not swallow the next argument after an empty secret flag value', () => {
+      expect(
+        TEST_ONLY.redactTelemetryError('git push --password= origin main'),
+      ).toBe('git push --password= origin main');
     });
 
     it('redacts the hook error property on the enqueue boundary', () => {

@@ -116,12 +116,15 @@ const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt', 'error'];
 
 /**
  * A secret value in free-form error text: an optional opening quote, a run of
- * non-whitespace/non-quote characters, and an optional closing quote.
- * Accepting the opening quote means `TOKEN="x"`, `--token 'x'` and
+ * non-whitespace/non-quote/non-backslash characters, and an optional closing
+ * quote. Accepting the opening quote means `TOKEN="x"`, `--token 'x'` and
  * `Authorization: Bearer "x"` all redact instead of failing on the quote. It
- * never crosses whitespace, so a following token is left untouched.
+ * never crosses whitespace, so a following token is left untouched. Backslash
+ * is excluded so a lone shell line-continuation `\` (or an escaped nested
+ * quote) is never consumed as a complete value, which would otherwise leave
+ * the real credential cleartext immediately after the redaction marker.
  */
-const SECRET_VALUE = String.raw`["'\`]?[^\s"'\`]+["'\`]?`;
+const SECRET_VALUE = String.raw`["'\`]?[^\s"'\`\\]+["'\`]?`;
 
 /**
  * `Authorization: <scheme> <value>` / `authorization=<scheme> <value>` inside a
@@ -141,7 +144,7 @@ const AUTHORIZATION_PATTERN = new RegExp(
  * spellings `--token` / `--password`.
  */
 const SECRET_FLAG_PATTERN = new RegExp(
-  String.raw`(--[A-Za-z0-9_-]*?(?:token|password|secret|credential|key)[A-Za-z0-9_-]*(?:\s*[=:]\s*|\s+))` +
+  String.raw`(--[A-Za-z0-9_-]*?(?:token|password|secret|credential|key)[A-Za-z0-9_-]*(?:[=:]|\s+))` +
     SECRET_VALUE,
   'gi',
 );
@@ -150,12 +153,13 @@ const SECRET_FLAG_PATTERN = new RegExp(
  * `KEY=value` env-style secrets: `GITHUB_TOKEN=ghs_xxx`,
  * `OPENAI_API_KEY=sk_xxx`, `AWS_SECRET_ACCESS_KEY=…`, `DB_PASSWORD=secret`.
  * The key must name a secret — any of the canonical secret words, including
- * `key` for the `*_API_KEY` / `*_ACCESS_KEY*` LLM credential variables — so
- * ordinary assignments like `USER=alice` pass through untouched.
+ * `key` for the `*_API_KEY` / `*_ACCESS_KEY*` LLM credential variables — and
+ * the value must be at least 10 non-whitespace characters, so short counters
+ * like `tokens_used=8192` and ordinary assignments like `USER=alice` pass
+ * through untouched.
  */
 const ENV_SECRET_PATTERN = new RegExp(
-  String.raw`\b([A-Za-z0-9_]*(?:token|password|secret|credential|key)[A-Za-z0-9_]*\s*=\s*)` +
-    SECRET_VALUE,
+  String.raw`\b([A-Za-z0-9_]*(?:token|password|secret|credential|key)[A-Za-z0-9_]*\s*=\s*)\S{10,}`,
   'gi',
 );
 
