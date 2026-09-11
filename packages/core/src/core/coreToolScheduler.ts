@@ -4959,12 +4959,13 @@ export class CoreToolScheduler {
     let executionSettled = false;
     let execSpan: Span | undefined;
     // Set when the tool actually starts executing, so hook durations exclude
-    // validation and approval time.
+    // validation and approval time. Read from the monotonic clock so a system
+    // clock adjustment during a long tool cannot skew the duration.
     let executionStartedAt: number | undefined;
     const elapsedExecutionMs = (): number | undefined =>
       executionStartedAt === undefined
         ? undefined
-        : Date.now() - executionStartedAt;
+        : Math.round(performance.now() - executionStartedAt);
     let producerToolResult: ToolResult | null | undefined;
     let observeProducerOutput = observeSyntheticProducer;
     try {
@@ -5053,7 +5054,7 @@ export class CoreToolScheduler {
           promptIdContext.run(scheduledCall.request.prompt_id, () => {
             // Keep this transition and execution span at the invocation
             // boundary so setup failures remain not_started.
-            executionStartedAt = Date.now();
+            executionStartedAt = performance.now();
             this.setStatusInternal(callId, 'executing');
             execSpan = startToolExecutionSpan({
               toolName: canonicalName,
@@ -5076,7 +5077,7 @@ export class CoreToolScheduler {
           promptIdContext.run(scheduledCall.request.prompt_id, () => {
             // Keep this transition and execution span at the invocation
             // boundary so setup failures remain not_started.
-            executionStartedAt = Date.now();
+            executionStartedAt = performance.now();
             this.setStatusInternal(callId, 'executing');
             execSpan = startToolExecutionSpan({
               toolName: canonicalName,

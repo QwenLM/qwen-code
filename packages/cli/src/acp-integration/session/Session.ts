@@ -12011,12 +12011,13 @@ export class Session implements SessionContext {
     let executeReturned = false;
     let executeAttempted = false;
     // Set when the tool starts executing, so hook durations exclude
-    // validation and permission time.
+    // validation and permission time. Read from the monotonic clock so a
+    // system clock adjustment during a long tool cannot skew the duration.
     let executionStartedAt: number | undefined;
     const elapsedExecutionMs = (): number | undefined =>
       executionStartedAt === undefined
         ? undefined
-        : Date.now() - executionStartedAt;
+        : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -13677,7 +13678,7 @@ export class Session implements SessionContext {
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
             executeAttempted = true;
-            executionStartedAt = Date.now();
+            executionStartedAt = performance.now();
             try {
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
