@@ -362,6 +362,44 @@ transcript. ink writes all three of the dialog's outcomes — a pick, an
 escape, an auxiliary pick — as transcript rows, so a row outlives the dialog;
 the notify slot is a bare line inside the dialog area and closes with it.
 
+## Decision 16 — transcript items keep ink's per-type top margin
+
+Conversation rows printed back to back here while ink leaves a blank row above
+most of them. The comparison harness had been folding that away: it normalises
+each frame to a sequence of non-blank rows, so a capture could be reported
+byte-identical while the two renderers disagreed on every vertical gap between
+items. Fourteen of the thirty-nine compared captures differ in total blank-row
+count, but that number is not usable on its own — under bottom anchoring this
+renderer parks one large gap above the composer where ink leaves its blanks at
+the foot of the screen. Measuring the transcript region alone, as a run-length
+pattern of blank and content rows, isolates it: ink reads `b1 c5 b1 c1 b1 c1 b1
+c2` across the four scenarios that carry a completed turn, while this renderer
+reads `c7 b22 c2` — one unbroken content run.
+
+ink decides the margin per item type. Its history renderer returns one row for a
+model turn and for a thought, returns zero for an explicit list of statuses,
+tools, notices and user rows, and returns one for everything else by default.
+The user row reaches the same total by a different route: the history renderer
+gives it zero, and its own message component declares the margin internally. A
+shell row and the two arena cards are absent from the explicit-zero list and so
+take the default. There is no first-item or last-item suppression, and the
+static, pending and scrolled regions all render the same component with the same
+margins, so the rule is uniform across the screen.
+
+This renderer now wraps each item in a box carrying that margin, resolved from
+its kind: one for the user row, the assistant row, the thought, the shell row
+and the two arena cards; zero for everything else. Two kinds have no ink
+counterpart at all. A task card is this renderer's own shape — ink renders a
+subagent as the tool that spawned it, which takes the zero branch — and an image
+row is likewise local, since ink draws images inline inside the message that
+carries them. Both are given zero so they stay flush against the tool row they
+render beside; that is a judgement call, not a reading of the reference, and
+follows if either shape ever gains an ink equivalent.
+
+The margin sits on the wrapper and the per-item row cap applies to the item's
+own content, so the two are additive: the cap cannot eat the separator, and the
+separator cannot cause an item to be clipped.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -381,9 +419,26 @@ What was verified, and how far the verification reaches:
   durable queue at all: ink's badge survives only as a single transient of its
   own submit path in the raw stream, and never reaches a captured frame in
   either leg.
-- **The non-shrinkable row prefix is verified by re-capture only.** The
-  unit-test runtime stubs the renderer's graphics surface, so it cannot
-  exercise layout; a test there could only echo the prop back.
+- **The non-shrinkable row prefix and the per-item top margin are verified by
+  re-capture only.** The unit-test runtime stubs the renderer's graphics
+  surface, so it cannot exercise layout; a test there could only echo the prop
+  back.
+- **Vertical spacing was outside the frame evidence until the last run.** The
+  comparison reduces each frame to a sequence of non-blank rows, which made the
+  gap between two items invisible to it, and every earlier capture in this
+  sweep was compared that way. The margin above is therefore the first spacing
+  claim in this document backed by frames, and it is backed by a separate
+  measurement of the transcript region alone — total blank-row counts are not
+  usable while the two renderers anchor differently.
+- **The blank rows around ink's banner are deliberately not reproduced.** Two
+  facts were read directly. ink's captured stream begins with a carriage return
+  and a newline immediately before the banner's first row. And ink appends
+  exactly one newline to every batch of permanent output it writes — its own
+  comment says the newline is there so the next frame does not overwrite the
+  batch's last row. Blank rows therefore land wherever a batch boundary falls,
+  which depends on how items happen to be grouped across renders rather than on
+  any layout rule. Which of the two produces which row was not traced, and
+  matching either would mean hardcoding a write-batching artifact.
 - **Two structural divergences are recorded and deliberately not fixed here.**
   The banner is persistent in this renderer and scrolls out of the viewport in
   ink, which is a product decision inherited from the restore work rather than

@@ -78,6 +78,25 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
 }
 
+/** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
+ * arena cards get a blank row above them, while status, tool and goal rows stay
+ * flush against whatever precedes them. `user` reaches the same total in ink by
+ * declaring the margin inside its own message component. `task` and `image`
+ * have no ink counterpart; both follow the tool rows they render beside. */
+function itemMarginTop(kind: LiveHistoryItem['kind']): number {
+  switch (kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+    case 'user-shell':
+    case 'arena-agent':
+    case 'arena-session':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
@@ -87,13 +106,18 @@ export function OpenTuiTranscriptView({
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
-        <TranscriptItem
+        <box
           key={item.id}
-          item={item}
-          maxRows={maxRows}
-          terminalHeight={availableTerminalHeight}
-          width={availableWidth}
-        />
+          flexDirection="column"
+          marginTop={itemMarginTop(item.kind)}
+        >
+          <TranscriptItem
+            item={item}
+            maxRows={maxRows}
+            terminalHeight={availableTerminalHeight}
+            width={availableWidth}
+          />
+        </box>
       ))}
     </box>
   );
