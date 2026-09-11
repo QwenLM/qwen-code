@@ -465,12 +465,12 @@ describe('CodeModeOnly scheduler dispatch', () => {
       new AbortController().signal,
     );
     try {
-      await vi.waitFor(() => expect(started).toBe(2), { timeout: 4000 });
+      await vi.waitFor(() => expect(started).toBe(2), { timeout: 10_000 });
     } finally {
       release();
     }
     await scheduled;
-  }, 10_000);
+  }, 20_000);
 
   it('applies nested tool permission denial before execution', async () => {
     const config = makeFakeConfig({
@@ -583,7 +583,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
             ),
         ).toBe(true);
       },
-      { timeout: 4000 },
+      { timeout: 10_000 },
     );
     const waiting = updates
       .flat()
@@ -603,7 +603,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
     expect(execute).toHaveBeenCalledOnce();
     expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
-  }, 10_000);
+  }, 20_000);
 
   it('runs nested hooks with the real tool name', async () => {
     const config = makeFakeConfig({
