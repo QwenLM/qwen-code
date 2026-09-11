@@ -37,11 +37,58 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
+
+/**
+ * How long the CLI gets to shut itself down after its stdin is closed, before
+ * the escalation ladder starts.
+ *
+ * This has to outlast the CLI's own wind-down, or the escalation lands in the
+ * middle of a shutdown that is progressing correctly and skips the
+ * `process.on('exit')` cleanup this teardown exists to protect. On the
+ * ide_close path the CLI budgets 8s for the MCP pool drain
+ * (`shutdownMcpPool(8_000)`) plus 30s for the session drain
+ * (`SESSION_DRAIN_TIMEOUT_MS`), both in acpAgent.ts, plus up to 5s for
+ * `runExitCleanup()` (`OVERALL_CLEANUP_TIMEOUT_MS`) in the `finally` wrapping
+ * `runAcpAgent` (llm.tsx) — 43s bounded — so 45s covers all three stages
+ * that always run. SessionEnd hooks are user-configured and can still
+ * exceed it (`DEFAULT_HOOK_TIMEOUT` is 60s each), so the escalation stays as
+ * the backstop rather than being removed; on POSIX it starts with a catchable
+ * SIGTERM so even an over-budget hook run gets the CLI's exit-time reaper
+ * before the SIGKILL rung.
+ */
+const SHUTDOWN_GRACE_MS = 45_000;
+
+/**
+ * How long the POSIX escalation waits between the SIGTERM rung and the
+ * SIGKILL rung. SIGTERM triggers the CLI's `shutdownHandler`, whose remaining
+ * work at that point is bounded by `runExitCleanup()`
+ * (`OVERALL_CLEANUP_TIMEOUT_MS` = 5s) — the SessionEnd hook and MCP pool
+ * drain either already ran or join the in-flight ide_close ones — so 10s
+ * covers the cleanup ceiling plus margin.
+ */
+const SIGTERM_GRACE_MS = 10_000;
+
+// Resolve taskkill by absolute System32 path, never the bare name: on Windows
+// a bare command is resolved through PATH *and* the current directory, so a
+// taskkill.exe planted in the workspace would run with the extension host's
+// environment.
+const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+
+// Drain budget handed to the CLI on a conditional superseded-session close,
+// aligned with the daemon's sessionCloseDrainBudgetMs(10_000) = 8s.
+const SUPERSEDED_CLOSE_DRAIN_MS = 8_000;
+
+// Backoff rungs for refused/failed superseded-session closes, aligned with
+// the daemon's activeWorkCloseRetryDelayMs (bridgeTypes.ts): 60s, doubling,
+// capped at 1h. Duplicated here rather than imported: the extension host
+// cannot reach into the bridge package's internals.
+const CLOSE_RETRY_BASE_MS = 60_000;
+const CLOSE_RETRY_CEILING_MS = 3_600_000;
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -57,6 +104,12 @@ export class AcpConnection {
   private fileHandler = new AcpFileHandler();
   private lastExitCode: number | null = null;
   private lastExitSignal: string | null = null;
+  private supersededCloseRetries = new Map<
+    string,
+    { failures: number; retryAt: number }
+  >();
+  private supersededCloseInFlight = new Set<string>();
+  private supersededCloseTimer: NodeJS.Timeout | null = null;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -130,6 +183,14 @@ export class AcpConnection {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       shell: false,
+      // A detached child becomes a process-group leader on POSIX, so the
+      // disconnect() escalation can signal the whole group and reach the CLI
+      // root and its non-detached MCP stdio children. It does NOT reach
+      // descendants that call setsid() — detached hook supervisors and
+      // monitors, and node-pty sessions — so those survive the escalation.
+      // Windows has no process group to signal — its tree kill goes through
+      // taskkill instead.
+      detached: process.platform !== 'win32',
     };
 
     this.child = spawn(spawnCommand, spawnArgs, options);
@@ -139,13 +200,26 @@ export class AcpConnection {
   private async setupChildProcessHandlers(): Promise<void> {
     let spawnError: Error | null = null;
     const stderrChunks: string[] = [];
+    // Bind the handlers below to THIS child. `disconnect()` now lets the CLI
+    // wind down on its own, so a superseded child can still be exiting while
+    // `connect()` has already installed its replacement — and an exit handler
+    // that only tested `this.child` would then tear down the live connection
+    // and report it as disconnected.
+    const ownChild = this.child!;
 
     let rejectOnExit: ((error: Error) => void) | null = null;
     const processExitPromise = new Promise<never>((_resolve, reject) => {
       rejectOnExit = reject;
     });
+    // The only consumer is the Promise.race in initialize(), which attaches
+    // much later. A child that exits before then — a failed startup, or a
+    // superseded child winding down after disconnect() — would otherwise
+    // reject this with no handler attached, i.e. an unhandled rejection in the
+    // extension host. Marking it handled here changes nothing for the race,
+    // which still receives the original promise and still sees the rejection.
+    void processExitPromise.catch(() => {});
 
-    this.child!.stderr?.on('data', (data: Buffer) => {
+    ownChild.stderr?.on('data', (data: Buffer) => {
       const message = data.toString();
       stderrChunks.push(message);
       if (
@@ -158,11 +232,11 @@ export class AcpConnection {
       }
     });
 
-    this.child!.on('error', (error: Error) => {
+    ownChild.on('error', (error: Error) => {
       spawnError = error;
     });
 
-    this.child!.on('exit', (code: number | null, signal: string | null) => {
+    ownChild.on('exit', (code: number | null, signal: string | null) => {
       logger.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
@@ -179,7 +253,7 @@ export class AcpConnection {
         ),
       );
 
-      if (this.child) {
+      if (this.child === ownChild) {
         this.sdkConnection = null;
         this.sessionId = null;
         this.child = null;
@@ -214,9 +288,21 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    this.sdkConnection = new ClientSideConnection(
+    // Capture the connection in a local so the inbound callbacks below can
+    // detect that THIS connection has been retired. disconnect() nulls both
+    // this.child and this.sdkConnection, then a re-connect() installs a
+    // replacement — but the superseded connection's stdout is still live and
+    // dispatching through the grace window. Comparing against the captured
+    // connection (not this.child, which is nulled before the grace timer and
+    // re-runs on the still-current child) stays correct across that window.
+    const wiredConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
+          if (this.sdkConnection !== wiredConnection) {
+            // A fire-and-forget notifier on a superseded connection must not
+            // re-enter callbacks that read `this.*` at call time.
+            return Promise.resolve();
+          }
           this.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
@@ -224,6 +310,11 @@ export class AcpConnection {
         requestPermission: async (
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -310,6 +401,11 @@ export class AcpConnection {
         readTextFile: async (
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           try {
             const result = await this.fileHandler.handleReadTextFile({
               path: params.path,
@@ -326,6 +422,11 @@ export class AcpConnection {
         writeTextFile: async (
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> => {
+          if (this.sdkConnection !== wiredConnection) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           await this.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
@@ -337,10 +438,18 @@ export class AcpConnection {
         extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => this.handleExtNotification(method, params),
+        ): Promise<void> => {
+          if (this.sdkConnection !== wiredConnection) {
+            // A fire-and-forget notifier on a superseded connection must not
+            // re-enter `this.*` callbacks; drop it instead of erroring.
+            return;
+          }
+          return this.handleExtNotification(method, params);
+        },
       }),
       stream,
     );
+    this.sdkConnection = wiredConnection;
 
     // Race the SDK initialize against process exit so we don't hang forever
     // if the CLI crashes before responding.
@@ -458,15 +567,169 @@ export class AcpConnection {
     return response;
   }
 
+  /**
+   * The agent keeps every session alive until told otherwise, and a retained
+   * session still fires autonomous model turns when its background tasks
+   * complete — each turn can spawn shells, which is what grew conhost.exe
+   * without bound in #11303 while the window stayed open. Replacing the
+   * current session (session/new, session/load) therefore closes the
+   * superseded one.
+   *
+   * The close is conditional (`onlyIfUnheld`): navigation is automatic
+   * cleanup, not explicit destruction, so a session that still holds active
+   * work is refused (`{closed: false, holds}`) and is retried on a backoff
+   * rather than force-closed — dropping in-flight work is exactly what the
+   * condition protects against. Fire-and-forget either way: a refused,
+   * failed or unsupported (older CLI) close must never block the user's new
+   * session, and a later session/load of the closed id simply re-reads the
+   * flushed transcript.
+   */
+  private closeSupersededSession(
+    previousSessionId: string | null,
+    nextSessionId: string | null,
+  ): void {
+    if (nextSessionId) {
+      // A session that is current again must not stay on the retry table.
+      this.supersededCloseRetries.delete(nextSessionId);
+    }
+    if (previousSessionId && previousSessionId !== nextSessionId) {
+      this.sendSupersededClose(previousSessionId);
+    }
+    // A replacement is also the moment to re-drive any close whose backoff
+    // already expired while no timer was due (the daemon equivalent is the
+    // next active-work snapshot).
+    this.driveDueSupersededCloseRetries();
+  }
+
+  private sendSupersededClose(sessionId: string): void {
+    // Always send on the CURRENT connection: by the time a retry fires, the
+    // connection the session was superseded on may have been replaced.
+    const conn = this.sdkConnection;
+    if (
+      !conn ||
+      !this.isConnected ||
+      this.supersededCloseInFlight.has(sessionId)
+    ) {
+      return;
+    }
+    this.supersededCloseInFlight.add(sessionId);
+    conn
+      .extMethod('qwen/control/session/close', {
+        sessionId,
+        requireFlush: true,
+        onlyIfUnheld: true,
+        drainTimeoutMs: SUPERSEDED_CLOSE_DRAIN_MS,
+      })
+      .then((result) => {
+        this.supersededCloseInFlight.delete(sessionId);
+        if (result['closed'] === true) {
+          this.supersededCloseRetries.delete(sessionId);
+          this.armSupersededCloseTimer();
+        } else {
+          // Refused while the session still holds active work; keep it and
+          // probe again on the backoff rungs.
+          logger.warn(
+            '[ACP] Superseded session close was refused:',
+            sessionId,
+            result['holds'],
+          );
+          this.scheduleSupersededCloseRetry(sessionId);
+        }
+      })
+      .catch((error: unknown) => {
+        this.supersededCloseInFlight.delete(sessionId);
+        // Older CLIs have no session/close ext method; count it as a failure
+        // and keep retrying on the same table so the leak stays tracked.
+        logger.warn(
+          '[ACP] Failed to close superseded session:',
+          error instanceof Error ? error.message : String(error),
+        );
+        this.scheduleSupersededCloseRetry(sessionId);
+      });
+  }
+
+  private scheduleSupersededCloseRetry(sessionId: string): void {
+    const failures =
+      (this.supersededCloseRetries.get(sessionId)?.failures ?? 0) + 1;
+    const delay = Math.min(
+      CLOSE_RETRY_BASE_MS * 2 ** (failures - 1),
+      CLOSE_RETRY_CEILING_MS,
+    );
+    this.supersededCloseRetries.set(sessionId, {
+      failures,
+      retryAt: Date.now() + delay,
+    });
+    this.armSupersededCloseTimer();
+  }
+
+  private armSupersededCloseTimer(): void {
+    if (this.supersededCloseTimer) {
+      clearTimeout(this.supersededCloseTimer);
+      this.supersededCloseTimer = null;
+    }
+    let earliest: number | null = null;
+    for (const [sessionId, entry] of this.supersededCloseRetries) {
+      if (this.supersededCloseInFlight.has(sessionId)) {
+        continue;
+      }
+      if (earliest === null || entry.retryAt < earliest) {
+        earliest = entry.retryAt;
+      }
+    }
+    if (earliest === null) {
+      return;
+    }
+    this.supersededCloseTimer = setTimeout(
+      () => {
+        this.supersededCloseTimer = null;
+        this.driveDueSupersededCloseRetries();
+      },
+      Math.max(earliest - Date.now(), 0),
+    );
+  }
+
+  private driveDueSupersededCloseRetries(): void {
+    if (this.supersededCloseRetries.size === 0) {
+      return;
+    }
+    const now = Date.now();
+    for (const [sessionId, entry] of [...this.supersededCloseRetries]) {
+      if (entry.retryAt > now || this.supersededCloseInFlight.has(sessionId)) {
+        continue;
+      }
+      if (!this.isConnected || this.sessionId === sessionId) {
+        // The CLI is gone, or the session was reloaded onto the live
+        // connection and is no longer superseded.
+        this.supersededCloseRetries.delete(sessionId);
+        continue;
+      }
+      this.sendSupersededClose(sessionId);
+    }
+    this.armSupersededCloseTimer();
+  }
+
   async newSession(cwd: string = process.cwd()): Promise<NewSessionResponse> {
     const conn = this.ensureConnection();
+    const previousSessionId = this.sessionId;
     logger.log('[ACP] Sending session/new request with cwd:', cwd);
     const response: NewSessionResponse = await conn.newSession({
       cwd,
       mcpServers: [],
     });
+    // A stale session/new can resolve after disconnect() (or a re-connect)
+    // retired this connection. Handing the payload back would let the caller
+    // apply the retired CLI's model and mode state to the live webview
+    // (`applySessionStateFromResult` in qwenAgentManager.ts), and writing would
+    // stamp the dead session's id onto the replacement connection's field, so
+    // fail instead — the same shape the inbound callback guards use above.
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError({
+        details: 'connection superseded',
+      });
+    }
     this.sessionId = response.sessionId || null;
     logger.log('[ACP] Session created with ID:', this.sessionId);
+    this.closeSupersededSession(previousSessionId, this.sessionId);
     return response;
   }
 
@@ -483,6 +746,12 @@ export class AcpConnection {
       sessionId: this.sessionId,
       prompt: promptBlocks,
     });
+    // A stale prompt can resolve after disconnect() (or a re-connect) retired
+    // this connection. Firing onEndTurn then would clear the replacement
+    // session's streaming state, so bail out before touching onEndTurn.
+    if (this.sdkConnection !== conn) {
+      return response;
+    }
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
       this.onEndTurn(response.stopReason);
@@ -525,17 +794,16 @@ export class AcpConnection {
     cwdOverride?: string,
   ): Promise<LoadSessionResponse> {
     const conn = this.ensureConnection();
+    const previousSessionId = this.sessionId;
     logger.log('[ACP] Sending session/load request for session:', sessionId);
     const cwd = cwdOverride || this.workingDir;
+    let response: LoadSessionResponse;
     try {
-      const response = await conn.loadSession({
+      response = await conn.loadSession({
         sessionId,
         cwd,
         mcpServers: [],
       });
-      logger.log('[ACP] Session load succeeded for session:', sessionId);
-      this.sessionId = sessionId;
-      return response;
     } catch (error) {
       logger.error(
         '[ACP] Session load request failed:',
@@ -543,6 +811,23 @@ export class AcpConnection {
       );
       throw error;
     }
+    // A stale session/load can resolve after disconnect() (or a re-connect)
+    // retired this connection. Handing the payload back would let the caller
+    // apply the retired CLI's model and mode state to the live webview
+    // (`applySessionStateFromResult` and `restoreBaselineSessionStateAfterLoad`
+    // in qwenAgentManager.ts), and writing would stamp the dead session's id
+    // onto the replacement connection's field, so fail instead. Checked outside
+    // the catch above so a supersede is not logged as a request failure, and
+    // before the success log so a discarded load prints no success line.
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError({
+        details: 'connection superseded',
+      });
+    }
+    logger.log('[ACP] Session load succeeded for session:', sessionId);
+    this.sessionId = sessionId;
+    this.closeSupersededSession(previousSessionId, sessionId);
+    return response;
   }
 
   async listSessions(options?: {
@@ -676,12 +961,136 @@ export class AcpConnection {
   }
 
   disconnect(): void {
-    if (this.child) {
-      this.child.kill();
-      this.child = null;
-    }
+    const child = this.child;
+    this.child = null;
     this.sdkConnection = null;
     this.sessionId = null;
+    // The CLI process is going away; any pending conditional-close retry
+    // targets it, so drop the table instead of signalling a dead connection.
+    this.supersededCloseRetries.clear();
+    if (this.supersededCloseTimer) {
+      clearTimeout(this.supersededCloseTimer);
+      this.supersededCloseTimer = null;
+    }
+    if (!child) {
+      return;
+    }
+    if (child.pid === undefined) {
+      return;
+    }
+    const childPid = child.pid;
+
+    // Close the child's stdin instead of killing it. Ending the ndjson stream
+    // is the CLI's own shutdown path: `await connection.closed` returns, it
+    // fires SessionEnd hooks, drains the MCP pool, disposes its sessions and
+    // exits normally — so its `process.on('exit')` cleanup runs and reaps the
+    // PTYs, ConPTY hosts and child processes it is tracking.
+    //
+    // A bare `child.kill()` is `TerminateProcess` on Windows: none of that
+    // runs, and everything the CLI was tracking is orphaned until the VS Code
+    // window itself closes. That is the teardown half of #11303.
+    let graceTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    child.once('exit', () => {
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+        graceTimer = undefined;
+      }
+      if (killTimer) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
+    });
+    const stdin = child.stdin;
+    if (stdin && !stdin.destroyed && !stdin.writableEnded) {
+      // A late write error on a pipe whose reader is gone is reported as an
+      // 'error' event, and an unhandled one on an EventEmitter throws — in the
+      // extension host, not here. Swallow it: we are tearing this down anyway.
+      stdin.once('error', () => {});
+      try {
+        stdin.end();
+      } catch (error) {
+        logger.error(
+          '[ACP] Failed to close CLI stdin during disconnect:',
+          error,
+        );
+      }
+    }
+
+    // Escalate only if the graceful path did not land. POSIX climbs a ladder —
+    // SIGTERM (catchable, runs the CLI's bounded signal cleanup and its
+    // exit-time reaper) and only then SIGKILL — while Windows goes straight
+    // to the tree kill: it has no catchable terminate for console processes.
+    graceTimer = setTimeout(() => {
+      graceTimer = undefined;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      if (process.platform === 'win32' && child.pid) {
+        // A tree kill is right here: at this point the CLI is unresponsive,
+        // so nothing else will reap the shells and ConPTY hosts underneath it.
+        logger.error(
+          `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process tree`,
+        );
+        execFile(
+          WINDOWS_TASKKILL,
+          ['/f', '/t', '/pid', String(child.pid)],
+          { windowsHide: true, timeout: 2_000 },
+          (error) => {
+            if (error) {
+              logger.error('[ACP] taskkill failed for the CLI tree:', error);
+              try {
+                child.kill();
+              } catch {
+                // Already gone.
+              }
+            }
+          },
+        );
+        return;
+      }
+      // The child is detached on POSIX, so it leads its own process group:
+      // signalling the group reaches the CLI root and its non-detached children
+      // (MCP stdio servers). It does NOT reach descendants that call setsid() —
+      // detached hook supervisors and monitors, and node-pty sessions.
+      logger.error(
+        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; sending SIGTERM to its process group`,
+      );
+      try {
+        process.kill(-childPid, 'SIGTERM');
+      } catch {
+        // The process group is already gone (or the child predates the
+        // detached spawn). The root signal is the fallback.
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // Already gone.
+        }
+      }
+      killTimer = setTimeout(() => {
+        killTimer = undefined;
+        // Re-check before signalling: after 45+s the pid may have been
+        // recycled by an unrelated process group.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          return;
+        }
+        // SIGKILL also skips the CLI's own exit-time reaper
+        // (forceKillActivePosixHookProcesses), which is why it is the last
+        // rung and not the first.
+        logger.error(
+          `[ACP] CLI still alive ${SIGTERM_GRACE_MS}ms after SIGTERM; force-killing its process group`,
+        );
+        try {
+          process.kill(-childPid, 'SIGKILL');
+        } catch {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+      }, SIGTERM_GRACE_MS);
+    }, SHUTDOWN_GRACE_MS);
   }
 
   get isConnected(): boolean {

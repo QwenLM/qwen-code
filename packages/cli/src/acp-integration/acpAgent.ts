@@ -2910,18 +2910,42 @@ export async function runAcpAgent(
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
-  // closure keeps the timeout + log labels consistent.
+  // closure keeps the timeout + log labels consistent. The memoized
+  // promise makes it idempotent: a SIGTERM landing mid-ide_close (the
+  // VS Code extension escalates to SIGTERM once its shutdown grace
+  // expires) joins the in-flight drain instead of running
+  // shutdownMcpPool a second time. First call wins; later calls —
+  // including a stricter one — join it.
+  let drainPoolPromise: Promise<void> | undefined;
   const drainPoolBeforeExit = async (
     label: string,
     strict = false,
   ): Promise<void> => {
     if (!agentInstance) return;
-    try {
-      await agentInstance.shutdownMcpPool(8_000);
-    } catch (err) {
-      debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
-      if (strict) throw err;
+    if (drainPoolPromise) return drainPoolPromise;
+    drainPoolPromise = (async () => {
+      try {
+        await agentInstance?.shutdownMcpPool(8_000);
+      } catch (err) {
+        debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
+        if (strict) throw err;
+      }
+    })();
+    return drainPoolPromise;
+  };
+
+  // disposeSessions() is idempotent per call but not under concurrency: two
+  // overlapping calls snapshot the same session entries and each runs
+  // closeStoredSession for them (double beginClose, double abort). SIGTERM
+  // landing mid-ide_close is exactly that overlap, so both shutdown paths
+  // share one in-flight dispose.
+  let disposeSessionsPromise: Promise<void> | undefined;
+  const disposeSessionsOnce = (): Promise<void> => {
+    if (!agentInstance) return Promise.resolve();
+    if (!disposeSessionsPromise) {
+      disposeSessionsPromise = agentInstance.disposeSessions();
     }
+    return disposeSessionsPromise;
   };
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
@@ -3079,7 +3103,7 @@ export async function runAcpAgent(
     try {
       // Fire SessionEnd hook for all active sessions (aligned with core path)
       await fireSessionEndOnce(SessionEndReason.Other);
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
 
       try {
         process.stdin.destroy();
@@ -3131,7 +3155,7 @@ export async function runAcpAgent(
       // Mirror the SIGTERM handler's pool drain on the IDE-initiated
       // normal close path to avoid leaking shared MCP entries.
       await drainPoolBeforeExit('ide_close');
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
     }
   } finally {
     process.off('SIGTERM', shutdownHandler);

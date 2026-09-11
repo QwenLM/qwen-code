@@ -1665,6 +1665,97 @@ describe('runAcpAgent shutdown cleanup', () => {
     await agentPromise;
   });
 
+  it('SIGTERM during ide_close drain runs shutdownMcpPool once', async () => {
+    // The VS Code extension escalates to SIGTERM once its shutdown grace
+    // expires; when that lands mid-ide_close, the signal path must join the
+    // in-flight MCP pool drain instead of running shutdownMcpPool again.
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    expect(agent).toBeDefined();
+
+    let resolveDrain!: () => void;
+    const shutdownMcpPool = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDrain = resolve;
+        }),
+    );
+    const disposeSessions = vi.fn().mockResolvedValue(undefined);
+    Object.assign(agent!, { shutdownMcpPool, disposeSessions });
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    // connection.closed resolving drives the ide_close path, which parks on
+    // the drain held open here.
+    mockConnectionState.resolve();
+    await vi.waitFor(() => {
+      expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+    });
+
+    sigTermListeners[0]('SIGTERM');
+    // The signal path passes disposeSessions and then joins the parked drain;
+    // its runExitCleanup can only run once the shared drain settles.
+    await vi.waitFor(() => {
+      expect(disposeSessions).toHaveBeenCalledTimes(1);
+    });
+    expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+    expect(mockRunExitCleanup).not.toHaveBeenCalled();
+
+    resolveDrain();
+    await agentPromise;
+    await vi.waitFor(() => {
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    expect(mockRunExitCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('SIGTERM during ide_close disposes sessions once', async () => {
+    // Same overlap, one step later: the signal path must join the in-flight
+    // disposeSessions instead of snapshotting the same sessions and running
+    // closeStoredSession (beginClose/abort) for each a second time.
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    expect(agent).toBeDefined();
+
+    const shutdownMcpPool = vi.fn().mockResolvedValue(undefined);
+    let resolveDispose!: () => void;
+    const disposeSessions = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDispose = resolve;
+        }),
+    );
+    Object.assign(agent!, { shutdownMcpPool, disposeSessions });
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    // ide_close drains (the mock resolves immediately) and then parks on the
+    // dispose held open here.
+    mockConnectionState.resolve();
+    await vi.waitFor(() => {
+      expect(disposeSessions).toHaveBeenCalledTimes(1);
+    });
+
+    sigTermListeners[0]('SIGTERM');
+    await flushImmediate();
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    expect(mockRunExitCleanup).not.toHaveBeenCalled();
+
+    resolveDispose();
+    await agentPromise;
+    await vi.waitFor(() => {
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+  });
+
   it('still exits even if runExitCleanup throws', async () => {
     mockRunExitCleanup.mockRejectedValueOnce(new Error('cleanup failed'));
 
