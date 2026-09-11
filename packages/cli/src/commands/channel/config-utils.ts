@@ -282,22 +282,6 @@ function parseSessionRotationConfig(
   };
 }
 
-function optionalPlainStringField(
-  channelName: string,
-  path: string,
-  value: unknown,
-): string | undefined {
-  if (value === undefined || value === null || value === '') {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new Error(
-      `Channel "${channelName}" field "${path}" must be a string.`,
-    );
-  }
-  return value.trim() || undefined;
-}
-
 function requireObjectField(
   channelName: string,
   path: string,
@@ -582,11 +566,6 @@ export async function parseChannelConfig(
     'multiSession',
     rawConfig['multiSession'],
   );
-  const messagePrefix = optionalPlainStringField(
-    name,
-    'messagePrefix',
-    rawConfig['messagePrefix'],
-  );
   const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
   const webhooks = parseWebhookConfig(name, rawConfig);
   const sessionRotation = parseSessionRotationConfig(name, rawConfig);
@@ -617,7 +596,6 @@ export async function parseChannelConfig(
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
-    messagePrefix,
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',
       'displayName',

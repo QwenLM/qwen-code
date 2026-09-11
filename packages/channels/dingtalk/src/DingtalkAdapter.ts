@@ -39,7 +39,6 @@ import {
   readValidatedFile,
   safeFileName,
   uploadDingTalkFile,
-  withFileUnavailableNotice,
   type ValidatedFile,
 } from './outbound-file.js';
 import {
@@ -59,7 +58,14 @@ import {
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
+import {
+  isChinesePresentationLanguage,
+  lifecyclePresentationPhase,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
@@ -69,6 +75,7 @@ import type {
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -590,22 +597,19 @@ function formatChatRecord(
 
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS = 10 * 60 * 1000;
-/**
- * A failed aggregation delivery is retried rather than dropped: aggregating
- * concentrates a whole turn into one send, and the burst that makes a send
- * fail (several agents finishing at once against one chat quota) is exactly
- * when the whole result would be lost.
- */
-const BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS = 30 * 1000;
-const BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES = 3;
 
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
+const STATUS_EMOTION_ID = '34019';
+const STATUS_EMOTION_BG_ID = 'im_bg_6';
+const DONE_EMOTION_ID = '54054';
+const DONE_EMOTION_BG_ID = 'im_bg_5';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
+const EMOTION_FETCH_TIMEOUT_MS = 15_000;
+const EMOTION_FINISH_MAX_ATTEMPTS = 3;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -776,6 +780,58 @@ interface CardRunCorrelation {
   sender?: { senderName: string };
 }
 
+interface DingtalkEmotionTag {
+  name: string;
+  emotionId: string;
+  backgroundId: string;
+}
+
+interface DingtalkReactionState {
+  key: string;
+  messageId: string;
+  chatId: string;
+  sessionId?: string;
+  desiredStatusTag?: DingtalkEmotionTag;
+  statusTag?: DingtalkEmotionTag;
+  terminalTag?: DingtalkEmotionTag;
+  finishing: boolean;
+  drainScheduled: boolean;
+  eyeAttached: boolean;
+  /** Set when a finish attempt could not clear both transient tags; the
+   * state stays registered so a later finish trigger retries the cleanup. */
+  finishBlocked?: boolean;
+  /** Blocked finish attempts so far; at EMOTION_FINISH_MAX_ATTEMPTS the
+   * state is dropped so a permanently failing emotion API does not hold the
+   * entry for the process lifetime. */
+  finishAttempts?: number;
+  /** The last failed drain transition. Identical repeat requests are skipped
+   * so a failing emotion API is not re-hit once per streamed chunk. */
+  failedTransition?: { from: string | undefined; to: string };
+  revision: number;
+  tail: Promise<void>;
+}
+
+function statusEmotionTag(name: string): DingtalkEmotionTag {
+  return {
+    name,
+    emotionId: STATUS_EMOTION_ID,
+    backgroundId: STATUS_EMOTION_BG_ID,
+  };
+}
+
+const EYE_TAG: DingtalkEmotionTag = {
+  name: ACK_REACTION_NAME,
+  emotionId: ACK_EMOTION_ID,
+  backgroundId: ACK_EMOTION_BG_ID,
+};
+const DONE_TAG: DingtalkEmotionTag = {
+  name: '✅ Done',
+  emotionId: DONE_EMOTION_ID,
+  backgroundId: DONE_EMOTION_BG_ID,
+};
+const FAILED_TAG = statusEmotionTag('❌ Failed');
+const STOPPED_TAG = statusEmotionTag('⏹️ Stopped');
+
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
     return [];
@@ -847,70 +903,7 @@ async function withConnectLoggingSuppressed<T>(
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
-  aggregateBackgroundAgentResponses?: unknown;
 };
-
-interface BackgroundResponseAggregation {
-  key: string;
-  sessionId: string;
-  target: SessionTarget;
-  sourceLabel?: string;
-  status: string;
-  label?: string;
-  parts: string[];
-  timeoutTimer?: ReturnType<typeof setTimeout>;
-  retryTimer?: ReturnType<typeof setTimeout>;
-  turnComplete?: boolean;
-  completionPartial?: boolean;
-  retiring?: boolean;
-  flushing?: boolean;
-  delivered?: boolean;
-  /** Whether a card was already delivered after the turn completed. */
-  completionDelivered?: boolean;
-  /** Whether a give-up ever discarded buffered text for this turn. */
-  dropped?: boolean;
-  /** Whether target resolution discarded a segment before aggregation. */
-  resolutionDropped?: boolean;
-  delivery?: BackgroundResponseDelivery;
-}
-
-/** Background response segments waiting for target resolution. */
-interface PendingBackgroundResponseTerminal {
-  sessionId: string;
-  target: SessionTarget;
-  resolvers: number;
-  held: Array<{
-    text: string;
-    context: BackgroundResponseContext;
-  }>;
-  turnComplete?: boolean;
-  status?: string;
-  label?: string;
-  completionPartial?: boolean;
-  resolutionDropped?: boolean;
-  retryAttempts?: number;
-  retryTimer?: ReturnType<typeof setTimeout>;
-  retryInFlight?: boolean;
-  retiring?: boolean;
-  turnEnded?: boolean;
-}
-
-interface BackgroundResponseDelivery {
-  status: string;
-  label?: string;
-  parts: string[];
-  partial: boolean;
-  attempts: number;
-  composedTurnComplete?: boolean;
-  proactivePlan?: ProactiveTextDelivery;
-  replyPlan?: ReplyTextDelivery;
-  /**
-   * Reply-path body whose `[FILE: ...]` markers were already delivered. A
-   * retry must reuse it: `prepareReplyOutput` sends the file messages, so
-   * re-running it would post every file again.
-   */
-  preparedReplyBody?: string;
-}
 
 interface ProactiveTextDelivery {
   title: string;
@@ -925,32 +918,10 @@ interface ReplyTextDelivery {
   atUserId?: string;
 }
 
-class ProactiveTextDeliveryError extends Error {
-  readonly retryable?: boolean;
-
-  constructor(
-    readonly plan: ProactiveTextDelivery,
-    cause: unknown,
-  ) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
-    if (cause instanceof DingtalkCardRequestError) {
-      this.retryable = cause.retryable;
-    }
-  }
-}
-
-class ReplyTextDeliveryError extends Error {
-  constructor(
-    readonly plan: ReplyTextDelivery,
-    cause: unknown,
-  ) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
-  }
-}
-
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
+  private readonly displayLanguage: string | undefined;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
@@ -961,11 +932,14 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private activeReactionKeys = new Set<string>();
+  private reactionStates = new Map<string, DingtalkReactionState>();
   /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
   private sessionReactionKeys = new Map<
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
+  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
    * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
@@ -978,10 +952,10 @@ export class DingtalkChannel extends ChannelBase {
    */
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
-  private readonly aggregateBackgroundAgentResponses: boolean;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private permissionCardController?: PermissionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
@@ -993,29 +967,6 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { sessionId: string; projector: OutboundFileProjector }
   >();
-  private readonly blockFileProjectors = new Map<
-    string,
-    { projector: OutboundFileProjector; reportedMarkers: number }
-  >();
-  // Sessions armed for block projection by onPromptStart and disarmed when
-  // the turn settles (or the session dies). A block send that finds NO
-  // projector state is only legitimate as a turn's FIRST block, which always
-  // lands while armed: late sends from an evicted (/clear) or dead session
-  // must be dropped, because recreating state would post the tail of a
-  // force-split [FILE: ...] marker verbatim.
-  private readonly blockProjectionArmed = new Set<string>();
-  private readonly backgroundResponseAggregations = new Map<
-    string,
-    BackgroundResponseAggregation
-  >();
-  private readonly detachedBackgroundResponseAggregations =
-    new Set<BackgroundResponseAggregation>();
-  private readonly pendingBackgroundResponseTerminals = new Map<
-    string,
-    PendingBackgroundResponseTerminal
-  >();
-  private readonly detachedPendingBackgroundResponseTerminals =
-    new Set<PendingBackgroundResponseTerminal>();
 
   constructor(
     name: string,
@@ -1027,6 +978,7 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    this.displayLanguage = options?.displayLanguage;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## DingTalk Channel',
@@ -1037,28 +989,12 @@ export class DingtalkChannel extends ChannelBase {
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
     }
-    if (
-      config.blockStreaming !== 'on' &&
-      !this.config.instructions.includes('[FILE:')
-    ) {
+    if (!this.config.instructions.includes('[FILE:')) {
       this.config.instructions += FILE_INSTRUCTIONS;
     }
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
     );
-    const rawAggregateBackgroundAgentResponses = (
-      config as DingtalkChannelConfig
-    ).aggregateBackgroundAgentResponses;
-    if (
-      rawAggregateBackgroundAgentResponses !== undefined &&
-      typeof rawAggregateBackgroundAgentResponses !== 'boolean'
-    ) {
-      throw new Error(
-        `Channel "${name}" aggregateBackgroundAgentResponses must be a boolean.`,
-      );
-    }
-    this.aggregateBackgroundAgentResponses =
-      rawAggregateBackgroundAgentResponses === true;
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -1089,15 +1025,15 @@ export class DingtalkChannel extends ChannelBase {
           }
         },
       });
-      if (
-        this.interactiveCardConfig.statusCard.enabled &&
-        config.blockStreaming !== 'on'
-      ) {
+      if (this.interactiveCardConfig.statusCard.enabled) {
         this.statusCardController = new StatusCardController({
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
           ...(config.model ? { model: config.model } : {}),
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
+            : {}),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
@@ -1120,21 +1056,34 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (this.statusCardController || this.questionCardController) {
+      if (this.interactiveCardConfig.permissionCard.enabled) {
+        this.permissionCardController = new PermissionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          locale: this.locale,
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (
+        this.statusCardController ||
+        this.questionCardController ||
+        this.permissionCardController
+      ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
-          ...(config.blockStreaming !== 'on'
-            ? {
-                sendFallback: (
-                  chatId: string,
-                  text: string,
-                  sessionId: string,
-                  sourceLabel?: string,
-                ) =>
-                  this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-              }
+          permissionCards: this.permissionCardController,
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
             : {}),
+          sendFallback: (chatId, text, sessionId, sourceLabel) =>
+            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
         });
       }
     }
@@ -1245,8 +1194,13 @@ export class DingtalkChannel extends ChannelBase {
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
+    const permissionResult = this.permissionCardController?.claim(callback);
+    if (permissionResult && permissionResult.kind !== 'ignored') {
+      return permissionResult;
+    }
     return (
-      this.questionCardController?.claim(callback) ?? {
+      this.questionCardController?.claim(callback) ??
+      permissionResult ?? {
         kind: 'ignored',
         actorId: callback.actorId,
       }
@@ -1540,15 +1494,6 @@ export class DingtalkChannel extends ChannelBase {
       );
     }
 
-    if (
-      this.config.blockStreaming === 'on' &&
-      (projection.markerCount > 0 || streamedMarkers > 0)
-    ) {
-      return this.prepareOutgoingText(
-        withFileUnavailableNotice(projection.text),
-      );
-    }
-
     const notices: string[] = [];
     if (projection.invalidMarkers > 0) {
       notices.push('[File delivery failed: invalid marker]');
@@ -1626,7 +1571,6 @@ export class DingtalkChannel extends ChannelBase {
     atUserId?: string,
     sourceLabel?: string,
     prepared = false,
-    failOnHttpError = false,
   ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook.
     const webhook = this.webhooks.get(chatId);
@@ -1634,9 +1578,6 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] No webhook for chatId ${chatId}, cannot send.\n`,
       );
-      if (failOnHttpError) {
-        throw new Error('DingTalk session webhook unavailable');
-      }
       return;
     }
 
@@ -1649,11 +1590,7 @@ export class DingtalkChannel extends ChannelBase {
       atUserId,
       sourceLabel,
     );
-    try {
-      await this.deliverReplyText(chatId, plan, failOnHttpError);
-    } catch (error) {
-      throw new ReplyTextDeliveryError(plan, error);
-    }
+    await this.deliverReplyText(chatId, plan);
   }
 
   private createReplyTextDelivery(
@@ -1686,13 +1623,9 @@ export class DingtalkChannel extends ChannelBase {
   private async deliverReplyText(
     chatId: string,
     plan: ReplyTextDelivery,
-    failOnHttpError = false,
   ): Promise<void> {
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
-      if (failOnHttpError) {
-        throw new Error('DingTalk session webhook unavailable');
-      }
       return;
     }
     while (plan.nextChunk < plan.chunks.length) {
@@ -1750,31 +1683,6 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
-        if (failOnHttpError) {
-          throw new Error(
-            `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
-          );
-        }
-      } else if (failOnHttpError) {
-        const payload = (await resp
-          .clone()
-          .json()
-          .catch(() => undefined)) as unknown;
-        const response =
-          payload && typeof payload === 'object'
-            ? (payload as Record<string, unknown>)
-            : undefined;
-        const value = response?.['errcode'] ?? response?.['code'];
-        if (value !== undefined && String(value) !== '0') {
-          const detail = sanitizeLogText(
-            String(response?.['errmsg'] ?? response?.['message'] ?? value),
-            300,
-          );
-          process.stderr.write(
-            `[DingTalk:${this.name}] sendMessage failed: ${detail}\n`,
-          );
-          throw new Error(`DingTalk reply send failed: ${detail}`);
-        }
       }
       plan.nextChunk++;
     }
@@ -1844,11 +1752,7 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel,
     );
     if (!plan) return;
-    try {
-      await this.deliverProactiveText(target, plan);
-    } catch (error) {
-      throw new ProactiveTextDeliveryError(plan, error);
-    }
+    await this.deliverProactiveText(target, plan);
   }
 
   private async createProactiveTextDelivery(
@@ -1931,6 +1835,20 @@ export class DingtalkChannel extends ChannelBase {
     actorId: string,
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
+    const copy =
+      this.locale === 'zh'
+        ? {
+            title: '卡片操作',
+            group: '仅任务发起人可以操作这张卡片，本次操作未生效。',
+            direct: '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+          }
+        : {
+            title: 'Card interaction',
+            group:
+              'Only the task initiator can operate this card. This action had no effect.',
+            direct:
+              'You cannot operate this card. Only the task initiator can submit or stop it.',
+          };
     if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
@@ -1939,8 +1857,8 @@ export class DingtalkChannel extends ChannelBase {
           chatId: target.chatId,
           isGroup: true,
         },
-        '卡片操作',
-        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        copy.title,
+        copy.group,
         'card interaction feedback',
       );
     }
@@ -1951,8 +1869,8 @@ export class DingtalkChannel extends ChannelBase {
         chatId: actorId,
         isGroup: false,
       },
-      '卡片操作',
-      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      copy.title,
+      copy.direct,
       'card interaction feedback',
     );
   }
@@ -2122,14 +2040,15 @@ export class DingtalkChannel extends ChannelBase {
     endpoint: 'reply' | 'recall',
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
+    tag: DingtalkEmotionTag,
+  ): Promise<boolean> {
     const robotCode = this.config.clientId;
-    if (!robotCode || !msgId || !conversationId) return;
+    if (!robotCode || !msgId || !conversationId) return false;
     try {
       const token = this.config.clientSecret
         ? await this.getProactiveToken()
         : this.getAccessToken();
-      if (!token) return;
+      if (!token) return false;
       for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
         const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
           method: 'POST',
@@ -2142,16 +2061,17 @@ export class DingtalkChannel extends ChannelBase {
             openMsgId: msgId,
             openConversationId: conversationId,
             emotionType: 2,
-            emotionName: ACK_REACTION_NAME,
+            emotionName: tag.name,
             textEmotion: {
-              emotionId: ACK_EMOTION_ID,
-              emotionName: ACK_REACTION_NAME,
-              text: ACK_REACTION_NAME,
-              backgroundId: ACK_EMOTION_BG_ID,
+              emotionId: tag.emotionId,
+              emotionName: tag.name,
+              text: tag.name,
+              backgroundId: tag.backgroundId,
             },
           }),
+          signal: AbortSignal.timeout(EMOTION_FETCH_TIMEOUT_MS),
         });
-        if (resp.ok) return;
+        if (resp.ok) return true;
 
         const isTransient = resp.status === 429 || resp.status >= 500;
         if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
@@ -2166,41 +2086,55 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
-        return;
+        return false;
       }
     } catch {
       // best-effort, don't break message flow
     }
+    return false;
   }
 
   private async attachReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('reply', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('reply', msgId, conversationId, tag);
   }
 
   private async recallReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('recall', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
   disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    const reactionStates = [...this.reactionStates.values()];
+    for (const state of reactionStates) {
+      this.finishReaction(state.chatId, state.messageId, state.sessionId);
+    }
     this.statusCardController?.dispose();
-    this.drainBackgroundResponseAggregations();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
+    this.reactionStates.clear();
     if (this.connectionManager) {
       this.connectionManager.stop();
     } else {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
+    this.disconnectDrain = Promise.allSettled(
+      reactionStates.map((state) => state.tail),
+    ).then(() => undefined);
+  }
+
+  override waitForDisconnect(): Promise<void> {
+    return this.disconnectDrain ?? Promise.resolve();
   }
 
   /** Stable API targets are conversation or user IDs, never webhook URLs. */
@@ -2210,6 +2144,164 @@ export class DingtalkChannel extends ChannelBase {
 
   private reactionKey(messageId: string, conversationId: string): string {
     return `${conversationId}:${messageId}`;
+  }
+
+  private forgetReactionState(state: DingtalkReactionState): void {
+    this.activeReactionKeys.delete(state.key);
+    if (this.reactionStates.get(state.key) === state) {
+      this.reactionStates.delete(state.key);
+    }
+    if (!state.sessionId) return;
+    const keys = this.sessionReactionKeys.get(state.sessionId);
+    keys?.delete(state.key);
+    if (keys?.size === 0) this.sessionReactionKeys.delete(state.sessionId);
+  }
+
+  private enqueueReaction(
+    state: DingtalkReactionState,
+    operation: () => Promise<void>,
+  ): void {
+    state.tail = state.tail.then(operation).catch((err) => {
+      this.logReactionFailure('lifecycle tag update', err);
+    });
+  }
+
+  private scheduleReactionDrain(state: DingtalkReactionState): void {
+    if (state.drainScheduled) return;
+    state.drainScheduled = true;
+    this.enqueueReaction(state, async () => {
+      try {
+        await this.drainReactionState(state);
+      } finally {
+        state.drainScheduled = false;
+        if (
+          this.reactionStates.get(state.key) === state &&
+          (state.finishing
+            ? !state.finishBlocked
+            : this.activeReactionKeys.has(state.key) &&
+              state.desiredStatusTag &&
+              state.desiredStatusTag.name !== state.statusTag?.name)
+        ) {
+          this.scheduleReactionDrain(state);
+        }
+      }
+    });
+  }
+
+  private async drainReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    while (true) {
+      if (state.finishing) {
+        await this.finishReactionState(state);
+        return;
+      }
+      if (
+        this.reactionStates.get(state.key) !== state ||
+        !this.activeReactionKeys.has(state.key)
+      ) {
+        return;
+      }
+
+      const desired = state.desiredStatusTag;
+      if (!desired || desired.name === state.statusTag?.name) return;
+      const latched = state.failedTransition;
+      if (state.statusTag) {
+        const from = state.statusTag.name;
+        if (latched && latched.from === from && latched.to === desired.name) {
+          // This exact replacement already failed; re-issuing it once per
+          // lifecycle event hammers a failing emotion API on every streamed
+          // chunk. A different desired tag retries the recall.
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        const revision = state.revision;
+        if (
+          (await this.recallReaction(
+            state.messageId,
+            state.chatId,
+            state.statusTag,
+          )) === false
+        ) {
+          state.failedTransition = { from, to: desired.name };
+          if (state.revision !== revision) continue;
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        state.failedTransition = undefined;
+        state.statusTag = undefined;
+        continue;
+      }
+
+      if (
+        latched &&
+        latched.from === undefined &&
+        latched.to === desired.name
+      ) {
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      const revision = state.revision;
+      if (
+        (await this.attachReaction(state.messageId, state.chatId, desired)) ===
+        false
+      ) {
+        state.failedTransition = { from: undefined, to: desired.name };
+        if (state.revision !== revision) continue;
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      state.failedTransition = undefined;
+      state.statusTag = desired;
+    }
+  }
+
+  private async finishReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    let statusCleared = true;
+    if (state.statusTag) {
+      statusCleared =
+        (await this.recallReaction(
+          state.messageId,
+          state.chatId,
+          state.statusTag,
+        )) !== false;
+      if (statusCleared) state.statusTag = undefined;
+    }
+    const eyeCleared =
+      !state.eyeAttached ||
+      (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
+        false;
+    if (eyeCleared) state.eyeAttached = false;
+    let terminalAttached = true;
+    if (state.terminalTag && statusCleared && eyeCleared) {
+      terminalAttached =
+        (await this.attachReaction(
+          state.messageId,
+          state.chatId,
+          state.terminalTag,
+        )) !== false;
+    }
+    if (!statusCleared || !eyeCleared || !terminalAttached) {
+      // Keep the state registered: forgetting it here would leave a stale
+      // phase tag nothing can ever recall. finishReaction re-arms the drain
+      // (disconnect, session death) so the cleanup gets a second chance.
+      state.finishAttempts = (state.finishAttempts ?? 0) + 1;
+      if (state.finishAttempts >= EMOTION_FINISH_MAX_ATTEMPTS) {
+        // A permanently failing emotion API (robot removed, expired token)
+        // would otherwise hold the entry for the process lifetime.
+        this.logReactionFailure(
+          'reaction cleanup',
+          `abandoned after ${state.finishAttempts} attempts`,
+        );
+        this.forgetReactionState(state);
+        return;
+      }
+      state.finishBlocked = true;
+      return;
+    }
+    this.forgetReactionState(state);
   }
 
   private rememberInboundMessageId(msgId: string): void {
@@ -2240,6 +2332,19 @@ export class DingtalkChannel extends ChannelBase {
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
+    const state: DingtalkReactionState = {
+      key,
+      messageId,
+      chatId,
+      ...(sessionId ? { sessionId } : {}),
+      desiredStatusTag: this.phaseReactionTag('thinking'),
+      finishing: false,
+      drainScheduled: false,
+      eyeAttached: false,
+      revision: 0,
+      tail: Promise.resolve(),
+    };
+    this.reactionStates.set(key, state);
     if (sessionId) {
       let keys = this.sessionReactionKeys.get(sessionId);
       if (!keys) {
@@ -2248,18 +2353,83 @@ export class DingtalkChannel extends ChannelBase {
       }
       keys.set(key, { messageId, chatId });
     }
-    this.attachReaction(messageId, chatId)
-      .then(() => {
-        if (!this.activeReactionKeys.has(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('late reaction recall', err);
-          });
+    this.enqueueReaction(state, async () => {
+      try {
+        if ((await this.attachReaction(messageId, chatId, EYE_TAG)) === false) {
+          this.forgetReactionState(state);
+          return;
         }
-      })
-      .catch((err) => {
-        this.activeReactionKeys.delete(key);
+        state.eyeAttached = true;
+        this.scheduleReactionDrain(state);
+      } catch (err) {
+        this.forgetReactionState(state);
         this.logReactionFailure('reaction attach', err);
-      });
+      }
+    });
+  }
+
+  private replaceStatusReaction(
+    chatId: string,
+    messageId: string | undefined,
+    tag: DingtalkEmotionTag,
+  ): void {
+    if (!messageId) return;
+    const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
+    if (!state || !this.activeReactionKeys.has(state.key)) return;
+    state.desiredStatusTag = tag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
+  }
+
+  private phaseReactionTag(
+    phase: DingtalkPresentationPhase,
+  ): DingtalkEmotionTag {
+    return statusEmotionTag(
+      presentationPhaseLabel(phase, this.displayLanguage),
+    );
+  }
+
+  private terminalReactionTag(
+    type: 'completed' | 'failed' | 'cancelled',
+  ): DingtalkEmotionTag {
+    if (!isChinesePresentationLanguage(this.displayLanguage)) {
+      return type === 'completed'
+        ? DONE_TAG
+        : type === 'failed'
+          ? FAILED_TAG
+          : STOPPED_TAG;
+    }
+    if (type === 'completed') {
+      return { ...DONE_TAG, name: '✅ 已完成' };
+    }
+    return statusEmotionTag(type === 'failed' ? '❌ 失败' : '⏹️ 已停止');
+  }
+
+  private finishReaction(
+    chatId: string,
+    messageId: string | undefined,
+    sessionId: string | undefined,
+    terminalTag?: DingtalkEmotionTag,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    const state = this.reactionStates.get(key);
+    if (!state) return;
+    if (state.finishing) {
+      // A finish is either draining or blocked on a failed recall; only the
+      // blocked case needs this trigger to retry the cleanup.
+      if (!state.finishBlocked) return;
+      state.finishBlocked = false;
+      if (terminalTag) state.terminalTag = terminalTag;
+      this.scheduleReactionDrain(state);
+      return;
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    state.finishing = true;
+    state.desiredStatusTag = undefined;
+    state.terminalTag = terminalTag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
   }
 
   private stopReaction(
@@ -2267,25 +2437,11 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isStableTargetId(chatId)) return;
-    const key = this.reactionKey(messageId, chatId);
-    if (sessionId) {
-      const keys = this.sessionReactionKeys.get(sessionId);
-      if (keys) {
-        keys.delete(key);
-        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
-      }
-    }
-    if (!this.activeReactionKeys.delete(key)) return;
-    this.recallReaction(messageId, chatId).catch((err) => {
-      this.logReactionFailure('reaction recall', err);
-    });
+    this.finishReaction(chatId, messageId, sessionId);
   }
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    this.blockFileProjectors.delete(sessionId);
     for (const [runId, state] of this.fileProjectors) {
       if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
     }
@@ -2298,11 +2454,6 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
-    // A session dying after segments arrived but before the terminal signal is
-    // precisely the case the partial-card fallback exists for; dropping the
-    // buffer here would lose text the agent already produced, which the
-    // pre-aggregation code always delivered on arrival.
-    this.drainBackgroundResponseAggregations(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -2312,19 +2463,32 @@ export class DingtalkChannel extends ChannelBase {
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
-      for (const [key, { messageId, chatId }] of keys) {
-        if (this.activeReactionKeys.delete(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('session-death reaction recall', err);
-          });
-        }
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
       }
     }
     super.onSessionDied(sessionId);
   }
 
-  protected override onSessionRetiring(sessionId: string): void {
-    this.drainBackgroundResponseAggregations(sessionId);
+  /**
+   * A crashed standalone bridge never settles its in-flight turns, so their
+   * transient tags and ticking status cards would otherwise assert a live
+   * turn forever. Finish the tags without a terminal result and terminalize
+   * the cards as interrupted. Session state stays: crash recovery restores
+   * the sessions on a fresh bridge.
+   */
+  override onBridgeDisconnected(): void {
+    for (const [sessionId, keys] of this.sessionReactionKeys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
+      }
+    }
+    for (const [sessionId, runId] of this.cardRunBySession) {
+      this.cardRunBySession.delete(sessionId);
+      this.interactionPresenter?.terminalizeRun(runId, 'cancelled');
+      this.cardRuns.delete(runId);
+    }
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -2354,9 +2518,29 @@ export class DingtalkChannel extends ChannelBase {
       }
       return;
     }
+    const presentationPhase = lifecyclePresentationPhase(event);
+    if (event.runId && presentationPhase) {
+      this.interactionPresenter?.updateStatusCardPhase(
+        event.runId,
+        presentationPhase,
+      );
+    }
+    if (presentationPhase) {
+      this.replaceStatusReaction(
+        event.chatId,
+        event.messageId,
+        this.phaseReactionTag(presentationPhase),
+      );
+      return;
+    }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
-      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      this.finishReaction(
+        event.chatId,
+        event.messageId,
+        event.sessionId,
+        this.terminalReactionTag(event.type),
+      );
       if (event.runId) {
         this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
@@ -2429,7 +2613,6 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.blockProjectionArmed.add(sessionId);
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -2504,46 +2687,10 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.settleBlockFileProjector(chatId, sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
   }
 
-  /**
-   * Turn end is the only point where the block projector's held state can be
-   * settled: ChannelBase drains the turn's queued block sends before calling
-   * onPromptEnd, so everything already appended belongs to this turn. Flush
-   * the held candidate bytes (a trailing `[FILE:` prefix the stream never
-   * completed) before deleting the entry — a later delete-without-settle
-   * would silently drop them from the delivered answer. Also disarm the
-   * session: /clear eviction and session death settle WITHOUT draining the
-   * turn's send chain, and any block that lands afterwards must be dropped
-   * rather than recreating projector state.
-   */
-  private settleBlockFileProjector(chatId: string, sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    const state = this.blockFileProjectors.get(sessionId);
-    if (!state) return;
-    this.blockFileProjectors.delete(sessionId);
-    const tail = state.projector.complete();
-    if (!tail.trim()) return;
-    // Deliberately fire-and-forget: complete() can only return a strict
-    // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
-    // is a stray fragment landing out of order with the next turn — not a
-    // leak — and blocking settle on a delivery that may hang is worse.
-    void this.sendReply(
-      chatId,
-      tail,
-      undefined,
-      this.getResponseSourceLabel(sessionId),
-    ).catch((err) => {
-      process.stderr.write(
-        `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    });
-  }
-
-  /** Deliver every Agent segment immediately unless aggregation is enabled. */
   override async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
@@ -2553,807 +2700,16 @@ export class DingtalkChannel extends ChannelBase {
     if (
       !target ||
       target.channelName !== this.name ||
-      (context !== undefined && context.kind !== 'agent')
+      (context !== undefined && context.kind !== 'agent') ||
+      !text.trim()
     ) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
-
-    const canAggregate =
-      this.aggregateBackgroundAgentResponses &&
-      context?.kind === 'agent' &&
-      typeof context.turnComplete === 'boolean';
-    if (!canAggregate) {
-      if (text.trim().length === 0) {
-        return super.dispatchBackgroundResponse(sessionId, text, context);
-      }
-      return super.dispatchBackgroundResponse(
-        sessionId,
-        this.formatBackgroundAgentResponse(text, context?.label),
-        context,
-      );
-    }
-
-    const key = JSON.stringify([sessionId, context.taskId, context.turnId]);
-    let current = this.backgroundResponseAggregations.get(key);
-    let parked = this.pendingBackgroundResponseTerminals.get(key);
-    if (current?.turnComplete === true) {
-      this.detachedBackgroundResponseAggregations.add(current);
-      this.backgroundResponseAggregations.delete(key);
-      current = undefined;
-    }
-    if (
-      !current &&
-      (parked?.turnEnded === true ||
-        (parked?.turnComplete === true &&
-          (parked.retryTimer || parked.retryInFlight || parked.resolvers > 0)))
-    ) {
-      if (!parked.turnEnded) {
-        this.detachedPendingBackgroundResponseTerminals.add(parked);
-      }
-      parked = { sessionId, target, resolvers: 0, held: [] };
-      this.pendingBackgroundResponseTerminals.set(key, parked);
-    }
-    if (!current && text.trim().length === 0) {
-      // The first segment's target resolution can suspend (named-session owner
-      // lock), so a turn's terminal marker may arrive before the aggregation
-      // exists. Park it instead of routing it to the empty-text early return,
-      // or the completed turn only surfaces via the bounded wait, mislabeled.
-      if (
-        !parked ||
-        (parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          !parked.retryInFlight &&
-          !parked.resolutionDropped &&
-          !parked.turnComplete)
-      ) {
-        if (parked) this.pendingBackgroundResponseTerminals.delete(key);
-        return super.dispatchBackgroundResponse(sessionId, text, context);
-      }
-      if (context.turnComplete) {
-        parked.turnComplete = true;
-        parked.status = context.status;
-        parked.label = context.label ?? parked.label;
-        parked.completionPartial = context.partial === true;
-        if (
-          parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          !parked.retryInFlight &&
-          (parked.retryAttempts ?? 0) >=
-            BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES
-        ) {
-          parked.turnEnded = true;
-          this.pendingBackgroundResponseTerminals.delete(key);
-        }
-      }
-      return;
-    }
-    if (!current) {
-      parked ??= { sessionId, target, resolvers: 0, held: [] };
-      this.pendingBackgroundResponseTerminals.set(key, parked);
-      this.holdPendingBackgroundResponse(parked, text, context);
-      parked.resolvers++;
-      try {
-        let delivery: Awaited<
-          ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>
-        >;
-        try {
-          delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-        } catch (error) {
-          if (
-            parked.resolvers === 1 &&
-            !this.backgroundResponseAggregations.has(key)
-          ) {
-            this.scheduleBackgroundResponseResolutionRetry(
-              key,
-              sessionId,
-              parked,
-            );
-          } else {
-            const existing = this.backgroundResponseAggregations.get(key);
-            if (existing) {
-              if (parked.held.length > 0) {
-                this.applyHeldBackgroundResponses(existing, parked);
-              }
-              this.applyPendingBackgroundResponseTerminal(existing, parked);
-              if (parked.resolvers === 1) {
-                if (existing.turnComplete) {
-                  await this.completeBackgroundResponseAggregation(
-                    key,
-                    existing,
-                  );
-                } else {
-                  this.scheduleBackgroundResponseAggregationFlush(
-                    key,
-                    existing,
-                  );
-                }
-              }
-            }
-          }
-          throw error;
-        }
-        if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-          if (
-            parked.resolvers === 1 &&
-            !this.backgroundResponseAggregations.has(key)
-          ) {
-            this.scheduleBackgroundResponseResolutionRetry(
-              key,
-              sessionId,
-              parked,
-            );
-          } else {
-            const existing = this.backgroundResponseAggregations.get(key);
-            if (existing) {
-              if (parked.held.length > 0) {
-                this.applyHeldBackgroundResponses(existing, parked);
-              }
-              this.applyPendingBackgroundResponseTerminal(existing, parked);
-              if (parked.resolvers === 1) {
-                if (existing.turnComplete) {
-                  await this.completeBackgroundResponseAggregation(
-                    key,
-                    existing,
-                  );
-                } else {
-                  this.scheduleBackgroundResponseAggregationFlush(
-                    key,
-                    existing,
-                  );
-                }
-              }
-            }
-          }
-          return;
-        }
-        if (
-          parked.retiring ||
-          this.pendingBackgroundResponseTerminals.get(key) !== parked
-        ) {
-          await this.flushDetachedBackgroundResponse(
-            key,
-            sessionId,
-            parked,
-            delivery,
-          );
-          return;
-        }
-        if (parked.retryTimer) {
-          clearTimeout(parked.retryTimer);
-          parked.retryTimer = undefined;
-        }
-        current =
-          this.backgroundResponseAggregations.get(key) ??
-          this.createBackgroundResponseAggregation(
-            key,
-            sessionId,
-            parked.held[0]?.context ?? context,
-            delivery.target,
-            delivery.sourceLabel,
-          );
-        this.applyHeldBackgroundResponses(current, parked);
-        this.applyPendingBackgroundResponseTerminal(current, parked);
-        if (parked.resolutionDropped) {
-          current.resolutionDropped = true;
-          parked.resolutionDropped = undefined;
-        }
-      } finally {
-        parked.resolvers--;
-        if (
-          this.pendingBackgroundResponseTerminals.get(key) === parked &&
-          parked.resolvers === 0 &&
-          !parked.retryTimer &&
-          parked.held.length === 0 &&
-          (!parked.resolutionDropped || parked.turnEnded)
-        ) {
-          this.pendingBackgroundResponseTerminals.delete(key);
-        }
-      }
-      if (!current) return;
-      if (current.turnComplete && parked.resolvers > 0) return;
-      if (!current.turnComplete) {
-        this.scheduleBackgroundResponseAggregationFlush(key, current);
-      } else {
-        await this.completeBackgroundResponseAggregation(key, current);
-      }
-      return;
-    }
-
-    current.status = context.status;
-    current.label = context.label ?? current.label;
-    if (text.trim().length > 0) current.parts.push(text);
-
-    if (context.turnComplete && parked && parked.resolvers > 0) {
-      parked.turnComplete = true;
-      parked.status = context.status;
-      parked.label = context.label ?? parked.label;
-      parked.completionPartial = context.partial === true;
-    } else if (context.turnComplete) {
-      current.turnComplete = true;
-      current.completionPartial = context.partial === true;
-    } else if (parked?.turnComplete && parked.resolvers === 0) {
-      current.turnComplete = true;
-      current.status = parked.status ?? current.status;
-      current.label = parked.label ?? current.label;
-      current.completionPartial = parked.completionPartial === true;
-    }
-    current.resolutionDropped ||= parked?.resolutionDropped;
-
-    if (!current.turnComplete) {
-      this.scheduleBackgroundResponseAggregationFlush(key, current);
-      return;
-    }
-
-    await this.completeBackgroundResponseAggregation(key, current);
-  }
-
-  private async flushBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): Promise<void> {
-    if (
-      (this.backgroundResponseAggregations.get(key) !== aggregation &&
-        !this.detachedBackgroundResponseAggregations.has(aggregation)) ||
-      aggregation.flushing
-    ) {
-      return;
-    }
-    this.refreshBackgroundResponseDelivery(aggregation);
-    if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
-    aggregation.retryTimer = undefined;
-
-    let delivery = aggregation.delivery;
-    if (!delivery) {
-      if (aggregation.parts.length === 0) {
-        // A turn whose text was already drained by the bounded wait still owes
-        // the user its completion: the last card it saw reads `（部分）`.
-        if (!this.owesTerminalBackgroundResponseCard(aggregation)) {
-          if (aggregation.retiring || aggregation.turnComplete) {
-            this.removeBackgroundResponseAggregation(key, aggregation);
-          } else {
-            this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-          }
-          return;
-        }
-      }
-      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-      aggregation.timeoutTimer = undefined;
-      const parts = aggregation.parts.splice(0);
-      delivery = {
-        status: aggregation.status,
-        label: aggregation.label,
-        parts,
-        partial: this.isPartialBackgroundResponseDelivery(
-          aggregation,
-          parts.length,
-        ),
-        attempts: 0,
-        composedTurnComplete: aggregation.turnComplete === true,
-      };
-      aggregation.delivery = delivery;
-    }
-
-    const body = this.formatBackgroundResponseAggregation(delivery);
-    aggregation.flushing = true;
-    let error: unknown;
-    try {
-      if (delivery.proactivePlan) {
-        await this.deliverProactiveText(
-          aggregation.target,
-          delivery.proactivePlan,
-        );
-      } else if (delivery.replyPlan) {
-        await this.deliverReplyText(
-          aggregation.target.chatId,
-          delivery.replyPlan,
-          true,
-        );
-      } else if (
-        this.supportsProactiveSend() &&
-        this.supportsProactiveTarget(aggregation.target)
-      ) {
-        await this.deliverBackgroundResponseToTarget(
-          aggregation.sessionId,
-          body,
-          {
-            target: aggregation.target,
-            sourceLabel: aggregation.sourceLabel,
-          },
-        );
-      } else {
-        delivery.preparedReplyBody ??= await this.prepareReplyOutput(
-          aggregation.target.chatId,
-          body,
-        );
-        await this.deliverBackgroundReply(
-          aggregation.target.chatId,
-          delivery.preparedReplyBody,
-          aggregation.sessionId,
-          aggregation.sourceLabel,
-          true,
-          true,
-        );
-      }
-    } catch (caught) {
-      error = caught;
-      if (caught instanceof ProactiveTextDeliveryError) {
-        delivery.proactivePlan = caught.plan;
-      } else if (caught instanceof ReplyTextDeliveryError) {
-        delivery.replyPlan = caught.plan;
-      }
-    } finally {
-      aggregation.flushing = false;
-    }
-
-    if (error === undefined) {
-      aggregation.delivery = undefined;
-      aggregation.delivered = true;
-      if (
-        delivery.composedTurnComplete === true &&
-        aggregation.turnComplete &&
-        delivery.partial !== true &&
-        !aggregation.retiring
-      ) {
-        aggregation.completionDelivered = true;
-      }
-      if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
-      } else {
-        // The turn is still open: keep the entry so its later segments re-join
-        // this one (and stay labelled `（部分）`), and re-arm the bounded wait
-        // so a silent turn is still reaped.
-        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-      }
-      return;
-    }
-
-    delivery.attempts++;
-    process.stderr.write(
-      `[DingTalk:${this.name}] background response delivery failed (attempt ${delivery.attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-    );
-    if (
-      delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES ||
-      // A permanently rejected send (an invalid appkey, a missing app) cannot
-      // succeed later; retrying it only spends the chat's send quota.
-      (error instanceof ProactiveTextDeliveryError && error.retryable === false)
-    ) {
-      aggregation.delivery = undefined;
-      aggregation.dropped = true;
-      if (aggregation.parts.length === 0) {
-        if (aggregation.retiring || aggregation.turnComplete) {
-          this.removeBackgroundResponseAggregation(key, aggregation);
-        } else {
-          this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-        }
-      } else if (aggregation.retiring || aggregation.turnComplete) {
-        await this.flushBackgroundResponseAggregation(key, aggregation);
-      } else {
-        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-      }
-      return;
-    }
-
-    aggregation.retryTimer = setTimeout(() => {
-      aggregation.retryTimer = undefined;
-      void this.flushBackgroundResponseAggregation(key, aggregation);
-    }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
-    aggregation.retryTimer.unref?.();
-  }
-
-  /**
-   * A card carries `（部分）` whenever it is not the turn's whole output: the
-   * turn is still open, earlier text already went out (or was given up on),
-   * or the turn itself ended early.
-   */
-  private isPartialBackgroundResponseDelivery(
-    aggregation: BackgroundResponseAggregation,
-    partCount: number,
-  ): boolean {
-    return (
-      partCount > 0 &&
-      (aggregation.delivered === true ||
-        aggregation.dropped === true ||
-        aggregation.resolutionDropped === true ||
-        aggregation.retiring === true ||
-        aggregation.completionPartial === true ||
-        aggregation.turnComplete !== true)
-    );
-  }
-
-  /**
-   * A turn that outran the bounded wait had its text delivered under the
-   * `（部分）` label. When it then completes normally with nothing buffered,
-   * a header-only card is the only way the chat ever learns it finished.
-   */
-  private owesTerminalBackgroundResponseCard(
-    aggregation: BackgroundResponseAggregation,
-  ): boolean {
-    return (
-      aggregation.turnComplete === true &&
-      aggregation.delivered === true &&
-      aggregation.completionDelivered !== true &&
-      aggregation.retiring !== true &&
-      aggregation.completionPartial !== true &&
-      aggregation.dropped !== true &&
-      aggregation.resolutionDropped !== true
-    );
-  }
-
-  private refreshBackgroundResponseDelivery(
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    const delivery = aggregation.delivery;
-    if (!delivery || aggregation.flushing) return;
-    const plan = delivery.proactivePlan ?? delivery.replyPlan;
-    if (plan && plan.nextChunk > 0) return;
-
-    const body = this.formatBackgroundResponseAggregation(delivery);
-    const header = body.split('\n', 1)[0]!;
-    const replaceHeader = (text: string) =>
-      text.replace(/## (?:✅|❌|⏹️) Agent · [^\n]+/, () => header);
-    if (plan) {
-      plan.title = extractTitle(body);
-      plan.chunks[0] = replaceHeader(plan.chunks[0]!);
-    }
-    if (delivery.preparedReplyBody) {
-      delivery.preparedReplyBody = replaceHeader(delivery.preparedReplyBody);
-    }
-    delivery.composedTurnComplete = aggregation.turnComplete === true;
-  }
-
-  private removeBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    if (this.backgroundResponseAggregations.get(key) === aggregation) {
-      this.backgroundResponseAggregations.delete(key);
-    }
-    this.detachedBackgroundResponseAggregations.delete(aggregation);
-  }
-
-  private drainBackgroundResponseAggregations(sessionId?: string): void {
-    for (const [key, pending] of this.pendingBackgroundResponseTerminals) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) continue;
-      if (pending.retryTimer) clearTimeout(pending.retryTimer);
-      pending.retryTimer = undefined;
-      pending.retiring = true;
-      pending.turnComplete = true;
-      pending.completionPartial = true;
-      this.pendingBackgroundResponseTerminals.delete(key);
-      this.detachedPendingBackgroundResponseTerminals.add(pending);
-    }
-    for (const pending of this.detachedPendingBackgroundResponseTerminals) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) continue;
-      if (pending.retryTimer) clearTimeout(pending.retryTimer);
-      pending.retryTimer = undefined;
-      pending.retiring = true;
-      pending.turnComplete = true;
-      pending.completionPartial = true;
-      if (
-        pending.held.length > 0 &&
-        this.router.getTarget(pending.sessionId) === pending.target
-      ) {
-        void this.flushDetachedBackgroundResponse(
-          '',
-          pending.sessionId,
-          pending,
-          { target: pending.target },
-        ).catch((error) => {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response delivery failed during drain: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-          );
-        });
-      } else if (pending.held.length > 0) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] background response target unavailable during drain; ${pending.held.length} buffered segment(s) discarded\n`,
-        );
-        pending.held.length = 0;
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      } else if (pending.held.length === 0) {
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      }
-    }
-    const aggregations = new Set([
-      ...this.backgroundResponseAggregations.values(),
-      ...this.detachedBackgroundResponseAggregations,
-    ]);
-    for (const aggregation of aggregations) {
-      if (sessionId !== undefined && aggregation.sessionId !== sessionId) {
-        continue;
-      }
-      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-      if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
-      aggregation.timeoutTimer = undefined;
-      aggregation.retryTimer = undefined;
-      aggregation.retiring = true;
-      aggregation.turnComplete = true;
-      aggregation.completionPartial = true;
-      if (!aggregation.flushing) {
-        void this.flushBackgroundResponseAggregation(
-          aggregation.key,
-          aggregation,
-        );
-      }
-    }
-  }
-
-  private createBackgroundResponseAggregation(
-    key: string,
-    sessionId: string,
-    context: BackgroundResponseContext,
-    target: SessionTarget,
-    sourceLabel?: string,
-  ): BackgroundResponseAggregation {
-    const aggregation: BackgroundResponseAggregation = {
-      key,
+    return super.dispatchBackgroundResponse(
       sessionId,
-      target,
-      sourceLabel,
-      status: context.status,
-      label: context.label,
-      parts: [],
-    };
-    this.backgroundResponseAggregations.set(key, aggregation);
-    return aggregation;
-  }
-
-  private scheduleBackgroundResponseResolutionRetry(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    if (pending.retiring) return;
-    if (pending.retryTimer) return;
-    pending.retryAttempts = (pending.retryAttempts ?? 0) + 1;
-    if (pending.retryAttempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES) {
-      pending.resolutionDropped = true;
-      pending.turnEnded = pending.turnComplete === true;
-      pending.held.length = 0;
-      pending.turnComplete = undefined;
-      pending.status = undefined;
-      pending.label = undefined;
-      pending.completionPartial = undefined;
-      if (pending.turnEnded) {
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      }
-      return;
-    }
-    pending.retryTimer = setTimeout(() => {
-      pending.retryTimer = undefined;
-      pending.retryInFlight = true;
-      void this.retryBackgroundResponseResolution(key, sessionId, pending)
-        .catch((error: unknown) => {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response target resolution failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-          );
-        })
-        .finally(() => {
-          pending.retryInFlight = false;
-          if (
-            pending.retiring ||
-            (!pending.retryTimer && !pending.resolutionDropped)
-          ) {
-            this.detachedPendingBackgroundResponseTerminals.delete(pending);
-          }
-          if (
-            this.pendingBackgroundResponseTerminals.get(key) === pending &&
-            pending.resolvers === 0 &&
-            !pending.retryTimer &&
-            pending.held.length === 0 &&
-            (!pending.resolutionDropped || pending.turnEnded)
-          ) {
-            this.pendingBackgroundResponseTerminals.delete(key);
-          }
-        });
-    }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
-    pending.retryTimer.unref?.();
-    const active = this.pendingBackgroundResponseTerminals.get(key);
-    if (!active || active === pending) {
-      this.pendingBackgroundResponseTerminals.set(key, pending);
-    }
-  }
-
-  private async retryBackgroundResponseResolution(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-  ): Promise<void> {
-    let delivery: Awaited<
-      ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>
-    >;
-    try {
-      delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-    } catch (error) {
-      if (
-        (this.pendingBackgroundResponseTerminals.get(key) === pending &&
-          !this.backgroundResponseAggregations.has(key)) ||
-        this.detachedPendingBackgroundResponseTerminals.has(pending)
-      ) {
-        this.scheduleBackgroundResponseResolutionRetry(key, sessionId, pending);
-      }
-      throw error;
-    }
-    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-      if (pending.retiring) {
-        if (pending.held.length > 0) {
-          process.stderr.write(
-            `[DingTalk:${this.name}] background response target unavailable during drain; ${pending.held.length} buffered segment(s) discarded\n`,
-          );
-        }
-        pending.held.length = 0;
-        this.detachedPendingBackgroundResponseTerminals.delete(pending);
-        return;
-      }
-      if (
-        (this.pendingBackgroundResponseTerminals.get(key) === pending &&
-          !this.backgroundResponseAggregations.has(key)) ||
-        this.detachedPendingBackgroundResponseTerminals.has(pending)
-      ) {
-        this.scheduleBackgroundResponseResolutionRetry(key, sessionId, pending);
-      }
-      return;
-    }
-    if (
-      pending.retiring ||
-      this.pendingBackgroundResponseTerminals.get(key) !== pending ||
-      pending.turnComplete
-    ) {
-      await this.flushDetachedBackgroundResponse(
-        key,
-        sessionId,
-        pending,
-        delivery,
-      );
-      return;
-    }
-
-    const first = pending.held[0];
-    if (!first) return;
-    const aggregation = this.createBackgroundResponseAggregation(
-      key,
-      sessionId,
-      first.context,
-      delivery.target,
-      delivery.sourceLabel,
+      this.formatBackgroundAgentResponse(text, context?.label),
+      context,
     );
-    this.applyHeldBackgroundResponses(aggregation, pending);
-    if (pending.resolutionDropped) {
-      aggregation.resolutionDropped = true;
-      pending.resolutionDropped = undefined;
-    }
-    if (this.pendingBackgroundResponseTerminals.get(key) === pending) {
-      this.pendingBackgroundResponseTerminals.delete(key);
-    }
-    this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
-  }
-
-  private holdPendingBackgroundResponse(
-    pending: PendingBackgroundResponseTerminal,
-    text: string,
-    context: BackgroundResponseContext,
-  ): void {
-    if (text.trim().length > 0) pending.held.push({ text, context });
-    if (context.turnComplete) {
-      pending.turnComplete = true;
-      pending.status = context.status;
-      pending.label = context.label ?? pending.label;
-      pending.completionPartial = context.partial === true;
-    }
-  }
-
-  private applyHeldBackgroundResponses(
-    aggregation: BackgroundResponseAggregation,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    for (const { text, context } of pending.held.splice(0)) {
-      aggregation.status = context.status;
-      aggregation.label = context.label ?? aggregation.label;
-      aggregation.parts.push(text);
-      if (context.turnComplete) {
-        aggregation.turnComplete = true;
-        aggregation.completionPartial = context.partial === true;
-      }
-    }
-  }
-
-  private applyPendingBackgroundResponseTerminal(
-    aggregation: BackgroundResponseAggregation,
-    pending: PendingBackgroundResponseTerminal,
-  ): void {
-    if (!pending.turnComplete) return;
-    aggregation.turnComplete = true;
-    aggregation.status = pending.status ?? aggregation.status;
-    aggregation.label = pending.label ?? aggregation.label;
-    aggregation.completionPartial = pending.completionPartial === true;
-    pending.turnComplete = undefined;
-    pending.status = undefined;
-    pending.label = undefined;
-    pending.completionPartial = undefined;
-  }
-
-  private async completeBackgroundResponseAggregation(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): Promise<void> {
-    if (aggregation.delivery) {
-      aggregation.delivery.status = aggregation.status;
-      aggregation.delivery.label =
-        aggregation.label ?? aggregation.delivery.label;
-      aggregation.delivery.partial =
-        this.isPartialBackgroundResponseDelivery(
-          aggregation,
-          aggregation.delivery.parts.length,
-        ) || aggregation.parts.length > 0;
-    }
-    if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
-    aggregation.timeoutTimer = undefined;
-    await this.flushBackgroundResponseAggregation(key, aggregation);
-  }
-
-  private async flushDetachedBackgroundResponse(
-    key: string,
-    sessionId: string,
-    pending: PendingBackgroundResponseTerminal,
-    delivery: NonNullable<
-      Awaited<ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>>
-    >,
-  ): Promise<void> {
-    const first = pending.held[0];
-    if (!first) {
-      this.detachedPendingBackgroundResponseTerminals.delete(pending);
-      return;
-    }
-    const aggregation: BackgroundResponseAggregation = {
-      key,
-      sessionId,
-      target: delivery.target,
-      sourceLabel: delivery.sourceLabel,
-      status: first.context.status,
-      label: first.context.label,
-      parts: [],
-      turnComplete: pending.turnComplete,
-      completionPartial: pending.completionPartial,
-      resolutionDropped: pending.resolutionDropped,
-    };
-    this.applyHeldBackgroundResponses(aggregation, pending);
-    aggregation.status = pending.status ?? aggregation.status;
-    aggregation.label = pending.label ?? aggregation.label;
-    if (this.pendingBackgroundResponseTerminals.get(key) === pending) {
-      this.pendingBackgroundResponseTerminals.delete(key);
-    }
-    this.detachedPendingBackgroundResponseTerminals.delete(pending);
-    this.detachedBackgroundResponseAggregations.add(aggregation);
-    await this.flushBackgroundResponseAggregation(key, aggregation);
-  }
-
-  private scheduleBackgroundResponseAggregationFlush(
-    key: string,
-    aggregation: BackgroundResponseAggregation,
-  ): void {
-    if (aggregation.timeoutTimer || aggregation.delivery) return;
-    aggregation.timeoutTimer = setTimeout(() => {
-      aggregation.timeoutTimer = undefined;
-      void this.flushBackgroundResponseAggregation(key, aggregation);
-    }, BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS);
-    aggregation.timeoutTimer.unref?.();
-  }
-
-  private formatBackgroundResponseAggregation(
-    delivery: Pick<
-      BackgroundResponseDelivery,
-      'status' | 'label' | 'parts' | 'partial'
-    >,
-  ): string {
-    const icon =
-      delivery.status === 'completed'
-        ? '✅'
-        : delivery.status === 'failed'
-          ? '❌'
-          : '⏹️';
-    const label = this.formatBackgroundAgentLabel(delivery.label);
-    const header = `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}`;
-    if (delivery.parts.length === 0) return header;
-    return `${header}\n\n${delivery.parts.join('\n\n')}`;
   }
 
   private formatBackgroundAgentResponse(text: string, label?: string): string {
@@ -3368,96 +2724,24 @@ export class DingtalkChannel extends ChannelBase {
     return escapeDingTalkMarkdown(normalized || '后台任务');
   }
 
-  /**
-   * Out-of-turn one-shot sends (background responses) must not flow through
-   * the session's block-streaming projector: a second sender interleaving with
-   * mid-projection state can swallow the send or split a held marker.
-   */
-  protected override async deliverBackgroundReply(
-    chatId: string,
-    text: string,
-    sessionId: string,
-    sourceLabel?: string,
-    prepared = false,
-    failOnHttpError = false,
-  ): Promise<void> {
-    if (this.config.blockStreaming !== 'on') {
-      return this.sendResponseMessage(
-        chatId,
-        text,
-        sessionId,
-        sourceLabel,
-        prepared,
-        failOnHttpError,
-      );
-    }
-    await this.sendReply(
-      chatId,
-      text,
-      undefined,
-      sourceLabel,
-      prepared,
-      failOnHttpError,
-    );
-  }
-
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
     sourceLabel?: string,
     prepared = false,
-    failOnHttpError = false,
   ): Promise<void> {
-    let outgoingText = text;
-    let consumesMention = true;
-    if (this.config.blockStreaming === 'on') {
-      const projected = this.projectBlockStreamChunk(text, sessionId);
-      if (!projected.text.trim()) return;
-      outgoingText = projected.text;
-      // A notice-only block must not consume the prompt's mention target:
-      // the @mention belongs to the block carrying the actual answer.
-      consumesMention = projected.hasContent;
-    }
-    const atUserId =
-      consumesMention && this.atSender
-        ? this.sessionMentionTargets.get(sessionId)
-        : undefined;
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
     await this.sendReply(
       chatId,
-      outgoingText,
+      text,
       atUserId,
       sourceLabel ?? this.getResponseSourceLabel(sessionId),
       prepared,
-      failOnHttpError,
     );
-  }
-
-  private projectBlockStreamChunk(
-    text: string,
-    sessionId: string,
-  ): { text: string; hasContent: boolean } {
-    let state = this.blockFileProjectors.get(sessionId);
-    if (!state) {
-      if (!this.blockProjectionArmed.has(sessionId)) {
-        return { text: '', hasContent: false };
-      }
-      state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
-      this.blockFileProjectors.set(sessionId, state);
-    }
-    const safe = state.projector.append(text);
-    const hasContent = safe.trim().length > 0;
-    const result = state.projector.result(safe);
-    let outgoingText = safe;
-    if (result.markerCount > state.reportedMarkers) {
-      outgoingText = withFileUnavailableNotice(safe);
-      state.reportedMarkers = result.markerCount;
-      process.stderr.write(
-        `[DingTalk:${this.name}] file markers redacted in block stream (session ${sessionId}, markers=${result.markerCount})\n`,
-      );
-    }
-    return { text: outgoingText, hasContent };
   }
 
   private async sendFallbackReply(
@@ -3559,6 +2843,19 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentInput(context);
+  }
+
+  protected override async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.permissionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentPermission(context);
   }
 
   /**

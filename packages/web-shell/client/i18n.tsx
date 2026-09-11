@@ -177,7 +177,6 @@ const EN: Messages = {
   'about.noSandbox': 'no sandbox',
   'about.platform': 'OS',
   'about.proxy': 'Proxy',
-  'about.qwenCode': 'Qwen Code',
   'about.runtime': 'Runtime',
   'about.sandbox': 'Sandbox',
   'about.sessionId': 'Session ID',
@@ -376,6 +375,7 @@ const EN: Messages = {
   'subagent.tools': (v) => `Tools (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} tools`,
   'subagent.toggleStream': 'Toggle agent stream details',
+  'subagent.creating': 'Creating…',
   'subagent.pending': 'pending',
   'subagent.running': 'running',
   'subagent.background': 'background task',
@@ -542,6 +542,12 @@ const EN: Messages = {
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
+  'approval.explain': 'Explain',
+  'approval.explanation': 'Command explanation',
+  'approval.explaining': 'Explaining…',
+  'approval.explanationThinking': 'Thinking…',
+  'approval.explanationFailed': 'Explanation failed',
+  'approval.reExplain': 'Explain again',
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
@@ -649,6 +655,8 @@ const EN: Messages = {
     'Resolve the pending standalone conversation state before continuing.',
   'session.checkStatus': 'Check status',
   'session.retryCreation': 'Start a fresh conversation',
+  'session.writerBlocked':
+    'Another Qwen process or an unresolved writer lock may be blocking this conversation. Close it in other processes and try again. If it still fails, check local daemon diagnostics before recovery.',
   'session.directoryRecreated':
     'The transcript was recovered, but files from the previous private directory were not available.',
   'session.directoryMissing':
@@ -859,6 +867,11 @@ const EN: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
+  'contextUsage.accessibleUsage': (v) =>
+    `${v?.used} of ${v?.total} tokens used`,
+  'contextUsage.viewDetails': 'View details',
+  'contextUsage.viewInConversation':
+    'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
   'daemon.details.loading': 'Loading diagnostics...',
   'daemon.details.failed': 'Failed to load diagnostics.',
@@ -1113,6 +1126,15 @@ const EN: Messages = {
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'history.loadingEarlier': 'Loading earlier messages…',
+  'history.openEarlier': 'Open earlier history',
+  'history.loadEarlier': 'Load earlier',
+  'history.loadNewer': 'Load newer',
+  'history.returnLatest': 'Return to latest',
+  'history.viewUnavailable':
+    'History is temporarily unavailable while the session reconnects or repairs its transcript.',
+  'history.snapshotView': 'Historical snapshot · read-only',
+  'history.viewError':
+    'This section could not be loaded. Move the reading position and retry, or return to latest.',
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
@@ -1296,6 +1318,8 @@ const EN: Messages = {
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
   'scheduledTasks.error.invalidSchedule': 'Invalid schedule',
+  'scheduledTasks.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
@@ -1341,6 +1365,18 @@ const EN: Messages = {
     'Each run gets a clean context and its own conversation.',
   'scheduledTasks.sessionMode.persistent.hint':
     'All runs continue in the same task conversation.',
+  'scheduledTasks.model': 'Model',
+  'scheduledTasks.model.workspaceDefault': 'Workspace default',
+  'scheduledTasks.model.hint':
+    'The selected model is applied when each new run session is created.',
+  'scheduledTasks.group': 'Session group',
+  'scheduledTasks.group.none': 'No group',
+  'scheduledTasks.group.create': 'Create a new group…',
+  'scheduledTasks.group.name': 'New group name',
+  'scheduledTasks.group.color': 'Group color',
+  'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
+  'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
+  'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -1392,6 +1428,31 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'webPreview.title': 'Web preview',
+  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.address': 'Development URL',
+  'webPreview.open': 'Open',
+  'webPreview.refresh': 'Refresh preview',
+  'webPreview.desktop': 'Desktop width',
+  'webPreview.mobile': 'Mobile width (390 px)',
+  'webPreview.external': 'Open externally',
+  'webPreview.frame': 'Web preview frame',
+  'webPreview.saved': 'Saved version',
+  'webPreview.savedFrame': 'Saved webpage version',
+  'webPreview.savedUnavailable':
+    'This saved version is missing or has changed. It cannot be opened.',
+  'webPreview.savedLoadFailed': 'Could not load this saved version. Try again.',
+  'webPreview.page': 'Application preview',
+  'webPreview.empty':
+    'Start your development server, then enter its URL above.',
+  'webPreview.reachable':
+    'Use an address this browser can reach. For a remote server, use its accessible URL or an existing port forward.',
+  'webPreview.fallback':
+    'Blank page? Check the server or open externally. The address and refresh use the entry URL.',
+  'webPreview.live':
+    'Live page. Opening a link from an earlier message shows its current content, not a saved version.',
+  'webPreview.invalidUrl':
+    'Use a separate HTTP/HTTPS development address with a hostname or IPv4 address, without login credentials. Web Shell and daemon addresses cannot be previewed.',
   'terminal.title': 'Terminal',
   'terminal.open': 'Open a terminal',
   'terminal.notice.exited': (v) =>
@@ -1611,7 +1672,7 @@ const EN: Messages = {
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
-    'A running session cannot be archived; archiving would end its turn',
+    'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -1632,6 +1693,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.activeWork': 'Active work',
+  'sidebar.activityUnknown': 'Background activity unknown',
   'sidebar.waitingForApproval': 'Waiting for approval',
   'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
@@ -2348,6 +2411,8 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
   'goals.subtitle':
     'A goal keeps its session working until the condition is met. Only sessions that are currently loaded appear here — a goal advances only while its session is running.',
@@ -2358,10 +2423,10 @@ const EN: Messages = {
   'goals.refresh': 'Refresh',
   'goals.new': 'New goal',
   'goals.newHint':
-    'The goal starts in a new session and runs until its condition holds.',
+    'The goal starts in a new session and runs until its condition holds. For an enforced turn or time ceiling, run /config model.goalMaxTurns=20 or /config model.goalMaxActiveMinutes=30 in the chat; it applies after the daemon restarts, to Goals created afterwards.',
   'goals.condition': 'Condition',
   'goals.conditionPlaceholder':
-    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; as model guidance, stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -2458,21 +2523,21 @@ const EN: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': 'Plan before executing',
+  'plan.toggle.off': (v) =>
+    `Planning; execute with ${v?.mode} after approval. Click to exit planning.`,
+  'approval.option.executePlan': (v) => `Approve and execute · ${v?.mode}`,
   'mode.label.plan': 'Plan',
-  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
-  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
-  'mode.desc.planReview':
-    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2481,6 +2546,8 @@ const EN: Messages = {
     'Evaluate tool risk automatically, run safe actions, and confirm risky ones',
   'mode.desc.yolo': 'Automatically approve all tool calls in trusted contexts',
   'mode.select': 'Approval Mode',
+  'mode.changePending':
+    'A mode change or plan confirmation is pending. Try again when it finishes.',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `Auto-approved: ${v.tool}`
@@ -2695,6 +2762,10 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'contextUsage.refresh': 'Refresh',
+  'contextUsage.retry': 'Retry',
+  'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -2842,6 +2913,27 @@ const EN: Messages = {
   'workflow.empty': 'No subagents in this workflow',
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
+  'sources.title': 'Sources',
+  'sources.add': 'Add source',
+  'sources.empty': 'Add files or links for reference.',
+  'sources.explanation':
+    'Adding a reference does not send its contents to the assistant.',
+  'sources.remove': 'Remove source',
+  'sources.open': 'Open source',
+  'sources.viewAll': 'View all',
+  'sources.type': 'Reference type',
+  'sources.workspaceFile': 'Workspace file',
+  'sources.link': 'Link',
+  'sources.location': 'Path or link',
+  'sources.name': 'Title (optional)',
+  'sources.description': 'Description (optional)',
+  'sources.registrationFailed':
+    'Message sent; some source details could not be saved',
+  'sources.attachmentsLoadFailed': (v) =>
+    `Failed to load uploaded files: ${v?.error ?? 'Unknown error'}`,
+  'sources.openOriginal': 'Open original',
+  'sources.unavailable':
+    'This reference is no longer available in this workspace.',
   'environment.attachments': 'Attachments',
   'environment.artifacts': 'Artifacts',
   'environment.artifactsEmpty':
@@ -2873,6 +2965,10 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
+  'turn.stoppedAfter': (v) => {
+    const seconds = v?.seconds ?? 0;
+    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
+  },
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -3090,11 +3186,8 @@ const EN: Messages = {
   'sessionsOverview.refresh': 'Refresh',
   'sessionsOverview.selectAll': 'Select all',
   'sessionsOverview.titleColumn': 'Title',
-  'sessionsOverview.sessionId': 'Session ID',
   'sessionsOverview.actions': 'Actions',
-  'sessionsOverview.folder': 'Workspace',
   'sessionsOverview.time': 'Time',
-  'sessionsOverview.worktree': 'Worktree',
   'sessionsOverview.selectedRows': (v) =>
     `${v?.count ?? 0} of ${v?.total ?? 0} row(s) selected.`,
   'sessionsOverview.previousPage': 'Previous',
@@ -3104,7 +3197,19 @@ const EN: Messages = {
   'sessionsOverview.rowsPerPage': 'Rows per page',
   'sessionsOverview.workspaceFilter': 'Filter by workspace',
   'sessionsOverview.allWorkspaces': 'All',
-  'sessionsOverview.searchPlaceholder': 'Search sessions…',
+  'sessionsOverview.searchPlaceholder': 'Search title, branch, PR or ID…',
+  'sessionsOverview.workspaceAll': 'All workspaces',
+  'sessionsOverview.workspacesSelected': (v) =>
+    `${v?.count ?? 0}/${v?.total ?? 0} workspaces`,
+  'sessionsOverview.statusColumn': 'Status',
+  'sessionsOverview.statusFilter': 'Filter by session status',
+  'sessionsOverview.filter.all': 'All',
+  'sessionsOverview.filter.attention': 'Needs attention',
+  'sessionsOverview.filter.running': 'Running',
+  'sessionsOverview.filter.idle': 'Idle',
+  'sessionsOverview.status.idle': 'Idle',
+  'sessionsOverview.details': (v) => `Details for ${v?.name ?? ''}`,
+  'sessionsOverview.sessionCount': (v) => `${v?.total ?? 0} session(s)`,
   'sessionsOverview.confirmArchiveTitle': 'Archive session?',
   'sessionsOverview.confirmArchive': (v) =>
     `"${v?.name ?? ''}" will be moved to archived sessions.`,
@@ -3166,6 +3271,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -3376,6 +3483,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -3511,6 +3621,29 @@ const EN: Messages = {
     `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
+  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.description':
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
+  'browserNotifications.completed': 'This turn has completed.',
+  'browserNotifications.failed':
+    'This turn failed. Return to view the details.',
+  'browserNotifications.ended':
+    'This turn has ended. Return to check the result.',
+  'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enabled': 'Enabled.',
+  'browserNotifications.disabled': 'Disabled.',
+  'browserNotifications.waiting': 'Waiting for browser permission.',
+  'browserNotifications.denied':
+    'Notifications are blocked. Allow them in your browser site settings.',
+  'browserNotifications.unavailable':
+    'Notifications are unavailable in this browser or page context.',
+  'browserNotifications.requesting': 'Waiting for your permission…',
+  'browserNotifications.error':
+    'Unable to enable or show notifications. Check your browser and system settings.',
+  'browserNotifications.temporary':
+    'This setting is saved for the current page only.',
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
@@ -3681,6 +3814,7 @@ const ZH: Messages = {
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
+  'toolName.exec': '执行代码',
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
@@ -3730,6 +3864,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.record_source': '记录来源',
   'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
@@ -3754,7 +3889,6 @@ const ZH: Messages = {
   'about.noSandbox': 'no sandbox',
   'about.platform': '操作系统',
   'about.proxy': '代理',
-  'about.qwenCode': 'Qwen Code',
   'about.runtime': '运行环境',
   'about.sandbox': '沙箱',
   'about.sessionId': '会话 ID',
@@ -3941,6 +4075,7 @@ const ZH: Messages = {
   'subagent.tools': (v) => `工具 (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} 个工具`,
   'subagent.toggleStream': '展开/收起子智能体详情',
+  'subagent.creating': '创建中',
   'subagent.pending': '等待中',
   'subagent.running': '运行中',
   'subagent.background': '后台任务',
@@ -4104,6 +4239,12 @@ const ZH: Messages = {
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
+  'approval.explain': '解释',
+  'approval.explanation': '命令解释',
+  'approval.explaining': '正在解释…',
+  'approval.explanationThinking': '思考中…',
+  'approval.explanationFailed': '解释失败',
+  'approval.reExplain': '重新解释',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
   'approval.option.restorePrevious': '是，恢复之前的模式',
@@ -4199,6 +4340,8 @@ const ZH: Messages = {
     '请先处理待确认的 Standalone 会话状态，再继续操作。',
   'session.checkStatus': '检查状态',
   'session.retryCreation': '开始新会话',
+  'session.writerBlocked':
+    '其他 Qwen 进程或未解决的写入锁可能阻止该会话访问。请在其他进程中关闭它后重试；若仍失败，请先查看本地 daemon 诊断日志再进行恢复。',
   'session.directoryRecreated':
     '会话记录已恢复，但之前私有目录中的文件未能恢复。',
   'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
@@ -4389,6 +4532,9 @@ const ZH: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
+  'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
+  'contextUsage.viewDetails': '查看明细',
+  'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
   'daemon.details.loading': '正在加载诊断信息...',
   'daemon.details.failed': '诊断信息加载失败。',
@@ -4633,6 +4779,14 @@ const ZH: Messages = {
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'history.loadingEarlier': '正在加载更早消息…',
+  'history.openEarlier': '打开更早历史',
+  'history.loadEarlier': '加载更早记录',
+  'history.loadNewer': '加载较新记录',
+  'history.returnLatest': '返回最新',
+  'history.viewUnavailable': '会话正在重连或修复记录，历史暂时不可用。',
+  'history.snapshotView': '历史快照 · 只读',
+  'history.viewError':
+    '暂时无法加载此段记录。请移动阅读位置后重试，或返回最新。',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
   'history.retry': '重试',
@@ -4796,6 +4950,7 @@ const ZH: Messages = {
   'scheduledTasks.creating': '创建中…',
   'scheduledTasks.cancel': '取消',
   'scheduledTasks.error.invalidSchedule': '计划无效',
+  'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
@@ -4839,6 +4994,17 @@ const ZH: Messages = {
     '每次运行都创建独立会话，使用干净的上下文。',
   'scheduledTasks.sessionMode.persistent.hint':
     '所有运行都继续使用同一个任务会话。',
+  'scheduledTasks.model': '模型',
+  'scheduledTasks.model.workspaceDefault': '工作区默认模型',
+  'scheduledTasks.model.hint': '创建每次运行的新会话时应用所选模型。',
+  'scheduledTasks.group': '会话分组',
+  'scheduledTasks.group.none': '不分组',
+  'scheduledTasks.group.create': '新建分组…',
+  'scheduledTasks.group.name': '新分组名称',
+  'scheduledTasks.group.color': '分组颜色',
+  'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
+  'scheduledTasks.group.nameRequired': '请输入新分组名称。',
+  'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
@@ -4888,6 +5054,29 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'webPreview.title': '网页预览',
+  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.address': '开发地址',
+  'webPreview.open': '打开',
+  'webPreview.refresh': '刷新预览',
+  'webPreview.desktop': '桌面宽度',
+  'webPreview.mobile': '手机宽度（390 px）',
+  'webPreview.external': '外部打开',
+  'webPreview.frame': '网页预览容器',
+  'webPreview.saved': '当时保存的版本',
+  'webPreview.savedFrame': '历史网页版本',
+  'webPreview.savedUnavailable': '这份历史版本已丢失或被修改，无法打开。',
+  'webPreview.savedLoadFailed': '暂时无法加载这份历史版本，请重试。',
+  'webPreview.page': '应用预览',
+  'webPreview.empty': '启动开发服务器，然后在上方输入地址。',
+  'webPreview.reachable':
+    '使用当前浏览器可访问的地址。远程服务器请使用可访问的 URL 或已有的端口转发。',
+  'webPreview.fallback':
+    '页面空白？请检查服务器或外部打开。地址栏和刷新使用最初打开的地址。',
+  'webPreview.live':
+    '实时页面：从历史消息打开链接，也会显示当前内容，不是当时保存的版本。',
+  'webPreview.invalidUrl':
+    '请使用独立开发服务器的 HTTP/HTTPS 地址，主机名或 IPv4 均可，且不含登录凭据。不能预览 Web Shell 或 daemon 地址。',
   'terminal.title': '终端',
   'terminal.open': '打开终端',
   'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
@@ -5092,7 +5281,7 @@ const ZH: Messages = {
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
-    '不能归档运行中的会话，归档会终止其当前回合',
+    '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -5112,6 +5301,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.activeWork': '有活动任务',
+  'sidebar.activityUnknown': '后台活动状态未知',
   'sidebar.waitingForApproval': '等待批准',
   'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
@@ -5762,6 +5953,9 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) =>
+    `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': '目标',
   'goals.subtitle':
     '目标会让所在会话持续工作，直到条件满足。这里只列出当前已加载的会话——目标只在会话运行时才会推进。',
@@ -5770,10 +5964,11 @@ const ZH: Messages = {
   'goals.empty': '没有进行中的目标。用 /goal <条件> 设置一个。',
   'goals.refresh': '刷新',
   'goals.new': '新建目标',
-  'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
+  'goals.newHint':
+    '目标会在一个新会话中启动，并持续运行直到条件满足。如需强制的轮数或时长上限，请在对话中运行 /config model.goalMaxTurns=20 或 /config model.goalMaxActiveMinutes=30，daemon 重启后生效，且只对之后新建的 Goal 生效。',
   'goals.condition': '条件',
   'goals.conditionPlaceholder':
-    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；模型参考 20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
@@ -5863,25 +6058,26 @@ const ZH: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': '执行前先制定计划',
+  'plan.toggle.off': (v) => `规划中，批准后按${v?.mode}执行。点击退出规划。`,
+  'approval.option.executePlan': (v) => `批准并执行 · ${v?.mode}`,
   'mode.label.plan': '计划',
-  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
-  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
-  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
   'mode.desc.yolo': '自动批准所有工具调用，适合可信任务环境',
   'mode.select': '审批模式',
+  'mode.changePending': '模式切换或计划确认尚未完成，请稍后重试。',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `已自动批准：${v.tool}`
@@ -6084,6 +6280,10 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'contextUsage.refresh': '刷新',
+  'contextUsage.retry': '重试',
+  'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',
@@ -6229,6 +6429,24 @@ const ZH: Messages = {
   'workflow.empty': '此工作流中暂无子智能体',
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
+  'sources.title': '来源',
+  'sources.add': '添加来源',
+  'sources.empty': '添加文件或链接作为参考。',
+  'sources.explanation': '添加引用不会将内容发送给助手。',
+  'sources.remove': '移除来源',
+  'sources.open': '打开来源',
+  'sources.viewAll': '查看全部',
+  'sources.type': '引用类型',
+  'sources.workspaceFile': '工作区文件',
+  'sources.link': '链接',
+  'sources.location': '路径或链接',
+  'sources.name': '标题（可选）',
+  'sources.description': '描述（可选）',
+  'sources.registrationFailed': '消息已发送；部分来源信息未能保存',
+  'sources.attachmentsLoadFailed': (v) =>
+    `上传文件加载失败：${v?.error ?? '未知错误'}`,
+  'sources.openOriginal': '打开原链接',
+  'sources.unavailable': '此引用在当前工作区中不可用。',
   'environment.attachments': '附件',
   'environment.artifacts': '产物',
   'environment.artifactsEmpty': '此会话生成的产物会显示在这里。',
@@ -6249,6 +6467,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
+  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
@@ -6456,11 +6675,8 @@ const ZH: Messages = {
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
   'sessionsOverview.titleColumn': '标题',
-  'sessionsOverview.sessionId': '会话 ID',
   'sessionsOverview.actions': '操作',
-  'sessionsOverview.folder': '工作区',
   'sessionsOverview.time': '时间',
-  'sessionsOverview.worktree': 'Worktree',
   'sessionsOverview.selectedRows': (v) =>
     `${v?.count ?? 0} / ${v?.total ?? 0} 行已选`,
   'sessionsOverview.previousPage': '上一页',
@@ -6470,7 +6686,19 @@ const ZH: Messages = {
   'sessionsOverview.rowsPerPage': '每页行数',
   'sessionsOverview.workspaceFilter': '按工作区筛选',
   'sessionsOverview.allWorkspaces': '全部',
-  'sessionsOverview.searchPlaceholder': '搜索会话…',
+  'sessionsOverview.searchPlaceholder': '搜索标题、分支、PR 或 ID…',
+  'sessionsOverview.workspaceAll': '全部工作区',
+  'sessionsOverview.workspacesSelected': (v) =>
+    `${v?.count ?? 0}/${v?.total ?? 0} 个工作区`,
+  'sessionsOverview.statusColumn': '状态',
+  'sessionsOverview.statusFilter': '按会话状态筛选',
+  'sessionsOverview.filter.all': '全部',
+  'sessionsOverview.filter.attention': '待处理',
+  'sessionsOverview.filter.running': '运行中',
+  'sessionsOverview.filter.idle': '空闲',
+  'sessionsOverview.status.idle': '空闲',
+  'sessionsOverview.details': (v) => `${v?.name ?? ''}的详情`,
+  'sessionsOverview.sessionCount': (v) => `${v?.total ?? 0} 个会话`,
   'sessionsOverview.confirmArchiveTitle': '归档会话？',
   'sessionsOverview.confirmArchive': (v) =>
     `“${v?.name ?? ''}” 将移至已归档会话。`,
@@ -6529,6 +6757,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
@@ -6725,6 +6955,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
@@ -6855,6 +7088,23 @@ const ZH: Messages = {
     `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
+  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.description':
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
+  'browserNotifications.completed': '本轮已完成。',
+  'browserNotifications.failed': '本轮执行失败，请返回查看。',
+  'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.allow': '允许通知',
+  'browserNotifications.enabled': '已开启。',
+  'browserNotifications.disabled': '未开启。',
+  'browserNotifications.waiting': '等待浏览器授权。',
+  'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
+  'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
+  'browserNotifications.requesting': '等待你的授权…',
+  'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
+  'browserNotifications.temporary': '设置仅在当前页面有效。',
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',

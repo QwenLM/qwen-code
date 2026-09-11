@@ -4171,7 +4171,7 @@ describe('WebShellSidebar non-primary archive', () => {
     expect(archiveItem).toBeDefined();
     expect(archiveItem?.getAttribute('data-disabled')).not.toBeNull();
     expect(archiveItem?.title).toBe(
-      'A running session cannot be archived; archiving would end its turn',
+      'A running session cannot be archived; archiving would stop its work',
     );
 
     await act(async () => {
@@ -4743,13 +4743,32 @@ describe('WebShellSidebar session source switch', () => {
       '[data-web-shell-scheduled-task-session]',
     );
     expect(sourceIcon).toBeTruthy();
-    expect(sourceIcon?.getAttribute('title')).toBe('Scheduled Tasks');
+    expect(sourceIcon?.getAttribute('title')).toBeNull();
+    expect(sourceIcon?.querySelector('svg')?.getAttribute('aria-label')).toBe(
+      'Scheduled Tasks',
+    );
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
     expect(row?.textContent).not.toContain('🧵');
     expect(row?.textContent).not.toContain('⏰');
 
     active.sessions = [{ ...scheduledRun, hasActivePrompt: true }];
     renderSidebar();
     await act(async () => Promise.resolve());
+    const runningRow = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    )
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
+      ?.closest('[role="button"]');
+    expect(
+      runningRow?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(
+      runningRow?.querySelector('[data-web-shell-session-running]'),
+    ).toBeTruthy();
+
     active.sessions = [{ ...scheduledRun, hasActivePrompt: false }];
     renderSidebar();
     await act(async () => Promise.resolve());
@@ -4767,6 +4786,97 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
     ).toBeTruthy();
+  });
+
+  it.each([
+    {
+      label: 'active work',
+      activeWorkState: 'active' as const,
+      selector: '[data-web-shell-session-active-work]',
+    },
+    {
+      label: 'unknown activity',
+      activeWorkState: 'unknown' as const,
+      selector: '[aria-label="Background activity unknown"]',
+    },
+  ])('keeps the scheduled-task marker with $label status', async (scenario) => {
+    active.sessions.push({
+      sessionId: `scheduled-${scenario.activeWorkState}`,
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      activeWorkState: scenario.activeWorkState,
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const row = container
+      .querySelector('[data-web-shell-session-title]')
+      ?.closest('[role="button"]');
+    expect(
+      row?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(Boolean(row?.querySelector(scenario.selector))).toBe(
+      scenario.activeWorkState === 'active',
+    );
+  });
+
+  it('keeps the scheduled-task marker when a run is grouped by color', async () => {
+    const organizedCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organizedCapabilities;
+    workspace.capabilities = organizedCapabilities;
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      color: 'blue',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const colorGroup = container.querySelector('section[aria-label="Blue"]');
+    const row = colorGroup
+      ?.querySelector('[data-web-shell-session-title]')
+      ?.closest('[role="button"]');
+    expect(row).toBeTruthy();
+    const sourceIcon = row?.querySelector(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
+  });
+
+  it('keeps the scheduled-task marker in the archived row meta slot', async () => {
+    archived.sessions.push({
+      sessionId: 'archived-scheduled-run',
+      displayName: 'Archived hourly review',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      isArchived: true,
+    });
+
+    renderSidebar();
+    await expandArchived();
+
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((candidate) => candidate.textContent === 'Archived hourly review');
+    const sourceIcon = title
+      ?.closest('[class*="sessionRow"]')
+      ?.querySelector('[data-web-shell-scheduled-task-session]');
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
   });
 
   it('preserves channel completion state while the tasks source is active', async () => {

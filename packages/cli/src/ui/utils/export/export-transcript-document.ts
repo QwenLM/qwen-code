@@ -125,6 +125,7 @@ type ExportToolPreviewV1 =
   | ToolPreviewPick<'generic', 'summary'>;
 type ExportToolResultPreviewV1 =
   | ExportTodoListPreviewV1
+  | Extract<DaemonToolResultPreview, { kind: 'question_answers' }>
   | { kind: 'text'; text: string }
   | { kind: 'generic'; summary: string };
 
@@ -794,6 +795,16 @@ function sanitizeResultPreview(
   }
   if (preview.kind === 'text') {
     return { kind: 'text', text: budget.text(preview.text) };
+  }
+  if (preview.kind === 'question_answers') {
+    return {
+      kind: 'question_answers',
+      text: budget.plainText(preview.text),
+      answers: budget.array(preview.answers).map(({ question, answer }) => ({
+        question: budget.plainText(question),
+        answer: budget.plainText(answer),
+      })),
+    };
   }
   if (!preview.summary?.trim()) return undefined;
   const summary = budget.text(preview.summary);
@@ -1710,7 +1721,10 @@ function isMarkdownExportText(
   path: readonly string[],
 ): boolean {
   if (path.at(-2) === 'resultPreview') {
-    return key === 'text' || key === 'summary';
+    return (
+      parent?.['kind'] !== 'question_answers' &&
+      (key === 'text' || key === 'summary')
+    );
   }
   return (
     key === 'text' &&
@@ -1768,6 +1782,7 @@ const VISIBLE_EXPORT_TEXT_FIELDS = new Set([
   'command',
   'cwd',
   'question',
+  'answer',
   'path',
   'oldText',
   'newText',

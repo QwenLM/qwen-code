@@ -60,8 +60,12 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
@@ -94,6 +98,9 @@ import {
   type LlmClient,
   type GoalTurnHost,
   describeDeliveryStatus,
+  describeDropReason,
+  PEER_ADMISSION_LIMITS,
+  type DropNotice,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
@@ -306,6 +313,25 @@ describe('AppContainer State Management', () => {
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
+  // runners — including the review-address verification gate's clean child —
+  // inherit a HOME the test process cannot write to. Ordinary CI already
+  // overrides HOME, so point it at a scratch directory for this suite, and
+  // leave that directory alone: the mount effect's initialize() is un-awaited,
+  // so store work can still be in flight at afterAll, and deleting the tree
+  // there fails it with ENOENT — an unhandled rejection that fails the run.
+  const savedHome = process.env['HOME'];
+  const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['HOME'] = suiteHome;
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+  });
 
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
@@ -2966,6 +2992,82 @@ describe('AppContainer State Management', () => {
         'one more check',
       );
     });
+
+    // The shell-mode gate is load-bearing only through this call site: a
+    // shell-mode submission goes to bash, where a leading `<system-reminder>`
+    // is a syntax error, and is recorded as the command the user ran. Both arms
+    // go through the real handleFinalSubmit and the real shellModeActive state,
+    // so dropping `shellMode: shellModeActive` from the call turns the shell
+    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    it.each([
+      ['a shell-mode submission', true, false],
+      ['an ordinary prompt', false, true],
+    ])(
+      'adds the workflow keyword reminder only outside shell mode: %s',
+      (_case, shellMode, expectReminder) => {
+        const mockQueueMessage = vi.fn();
+        vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getAllToolNames: () => ['workflow'],
+          getTool: () => undefined,
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: 'idle',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        if (shellMode) {
+          act(() => {
+            capturedUIActions.setShellModeActive(true);
+          });
+        }
+        capturedUIActions.handleFinalSubmit('gh workflow list', {
+          submittedPrompt: 'gh workflow list',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+        const submitted = mockQueueMessage.mock.calls[0][0] as string;
+        expect(submitted).toContain('gh workflow list');
+        // Asserted on the workflow reminder's own text: this call site gates
+        // only that reminder. The other notices the handler can prepend do not
+        // check shell mode yet (#11626).
+        const workflowReminder = 'includes the "workflow" keyword';
+        if (expectReminder) {
+          expect(submitted).toContain(workflowReminder);
+        } else {
+          expect(submitted).not.toContain(workflowReminder);
+        }
+      },
+    );
 
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
@@ -7707,6 +7809,7 @@ describe('AppContainer State Management', () => {
       ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
       emitReceipt: (receipt: PeerReceipt) => void;
+      emitDropped: (notice: DropNotice) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7732,6 +7835,7 @@ describe('AppContainer State Management', () => {
         | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
       let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
+      let dropListener: ((notice: DropNotice) => void) | null = null;
       const value = {
         setSubmitFn: (
           fn: (
@@ -7751,6 +7855,10 @@ describe('AppContainer State Management', () => {
           receiptListener = fn;
           return () => {};
         },
+        onDropped: (fn: (notice: DropNotice) => void) => {
+          dropListener = fn;
+          return () => {};
+        },
         getHeld: () => [],
         decide: vi.fn(),
         reevaluate: vi.fn(),
@@ -7766,6 +7874,10 @@ describe('AppContainer State Management', () => {
         emitReceipt: (receipt) => {
           if (!receiptListener) throw new Error('no receipt listener wired');
           receiptListener(receipt);
+        },
+        emitDropped: (notice) => {
+          if (!dropListener) throw new Error('no drop listener wired');
+          dropListener(notice);
         },
       };
     };
@@ -8223,8 +8335,9 @@ describe('AppContainer State Management', () => {
       expect(notices()).toHaveLength(7);
       expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
 
-      // Expired with no delivery at all: the gate could not queue it
-      // (accept backlog full) — the peer may be alive, so no exit claim.
+      // Expired with no delivery at all now means only that the message
+      // arrived as that session was shutting down: a full queue is a drop
+      // with a reason of its own.
       act(() => {
         peer.emitReceipt({
           status: 'expired',
@@ -8235,7 +8348,179 @@ describe('AppContainer State Management', () => {
       });
       expect(notices()).toHaveLength(8);
       expect(notices()[7]).not.toContain('exited before');
-      expect(notices()[7]).toContain('too busy');
+      // Disjunctive: `previous` records what this sender heard, and a
+      // `held` receipt can be lost to the outbound ceiling under exactly
+      // the flood this feature is about, so a live peer can land here.
+      expect(notices()[7]).toContain('shutting down, or could not keep it');
+      expect(notices()[7]).toContain('Retry once it is idle');
+    });
+
+    it('says what became of messages the far inbox turned away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+          dropReason: 'duplicate',
+          dropped: 1,
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        "Message to docs-cd: it was dropped at that session's inbox — " +
+          `${describeDropReason('duplicate')}. The identical message was ` +
+          `accepted there within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, ` +
+          'so there is nothing to re-send.',
+      );
+      // A repeat means the text is already over there, so advising a fold
+      // would have the model reword it and deliver the instruction twice.
+      expect(notices()[0]).not.toContain('Treat it as unsent');
+
+      // One receipt can stand for a burst, so the line counts rather than
+      // repeating itself.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+          dropReason: 'rate-limited',
+          dropped: 7,
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toBe(
+        "Messages to docs-cd: 7 were dropped at that session's inbox — " +
+          `${describeDropReason('rate-limited')}. Treat them as unsent; fold ` +
+          'what still matters into one later message.',
+      );
+
+      // A receipt from a build that named no reason still says enough.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('it was dropped');
+      expect(notices()[2]).not.toContain('—');
+    });
+
+    it('says when this session is turning a peer away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Dropped a message'));
+
+      const frame = {
+        msgV: 1,
+        msgId: 'm1',
+        type: 'user' as const,
+        from: '/tmp/peer.sock',
+        fromName: 'docs-cd',
+        priority: 'next' as const,
+        message: { role: 'user' as const, content: 'do a thing' },
+      };
+
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[0]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'this session is taking peer messages faster than it accepts them.',
+      );
+      // The trust category leads, as it does on both sibling lines: a
+      // peer-chosen name alone could read as the user's own session.
+      expect(notices()[0]).toContain('another session');
+
+      // The count of what one line stands for, so a flood stays one line.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'duplicate',
+          suppressed: 12,
+        });
+      });
+      expect(notices()[1]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'it repeated its previous message within ' +
+          `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s. ` +
+          '(+12 more dropped during this notice window)',
+      );
+      // The count is a session-wide total once the notice budget is
+      // spent, so it must not be labelled as this sender's own.
+      expect(notices()[1]).not.toContain('similar');
+
+      // A controller is named by the label its user gave it, never by
+      // anything the sender wrote.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: {
+            selfSent: false,
+            controller: { id: 'c_1234abcd', label: 'voice' },
+          },
+          reason: 'queue-full',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[2]).toBe(
+        "Dropped a message from a trusted controller (voice): this session's " +
+          'queue of undelivered peer messages is full.',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[3]).toContain('a process this session started');
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[4]).toContain(
+        'a process this session started (/tmp/peer.sock)',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[5]).toContain('from another session');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
@@ -14,7 +14,11 @@ import {
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
+  GOAL_NO_PROGRESS_TURN_LIMIT,
+  GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
+  goalActiveTimeBudgetReason,
+  goalTurnBudgetReason,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -31,10 +35,47 @@ import {
 import { GoalConflictError } from './goal-reducer.js';
 import type {
   GoalCheckpointVerificationResult,
+  GoalCheckpointVerifier,
   GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
+
+// Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
+// checkpoint check leaves a trace on every arm of its handler. The wrapper
+// delegates to the real logger, so logging behavior itself is unchanged.
+const runtimeDebugCalls = vi.hoisted(() => [] as unknown[][]);
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      return {
+        ...logger,
+        debug: (...args: unknown[]) => {
+          if (tag === 'GOAL_RUNTIME') runtimeDebugCalls.push(args);
+          logger.debug(...args);
+        },
+      };
+    },
+  };
+});
+
+// The recorder is file-global, so every test starts from an empty log
+// instead of inheriting entries from earlier checkpoint failures.
+beforeEach(() => {
+  runtimeDebugCalls.length = 0;
+});
+
+// Selects only the checkpoint-failure lines: an unrelated GOAL_RUNTIME
+// diagnostic must not shift the counts the stall tests pin.
+function failedCheckpointChecks(): unknown[][] {
+  return runtimeDebugCalls.filter(([message]) =>
+    String(message).includes('Checkpoint check failed'),
+  );
+}
 
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
@@ -52,7 +93,7 @@ function fakeGoalJournal(
   options: {
     appendError?: Error;
     appendErrors?: Array<Error | undefined>;
-    beforeAppend?: () => Promise<void>;
+    beforeAppend?: (payload: GoalStateRecordPayloadV2) => Promise<void> | void;
   } = {},
 ): GoalJournal & {
   appended: GoalStateRecordPayloadV2[];
@@ -74,7 +115,7 @@ function fakeGoalJournal(
       recordUuid: string,
       payload: GoalStateRecordPayloadV2,
     ): Promise<RuntimeRecord> {
-      await options.beforeAppend?.();
+      await options.beforeAppend?.(payload);
       const appendError = options.appendErrors?.shift() ?? options.appendError;
       if (appendError) throw appendError;
       appended.push(structuredClone(payload));
@@ -283,7 +324,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => {
           const tokens = spend.get(turnId) ?? 0;
           spend.delete(turnId);
@@ -315,7 +356,7 @@ describe('goal runtime', () => {
     const asked: string[] = [];
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => {
           asked.push(turnId);
           return 0;
@@ -349,7 +390,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => {
           const tokens = spend.get(turnId) ?? 0;
           spend.delete(turnId);
@@ -431,7 +472,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => {
           const tokens = spend.get(turnId) ?? 0;
           spend.delete(turnId);
@@ -478,7 +519,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => {
           const tokens = spend.get(turnId) ?? 0;
           spend.delete(turnId);
@@ -536,7 +577,7 @@ describe('goal runtime', () => {
     };
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
       },
       tokenBudgetGrant: 1_000,
@@ -569,7 +610,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
       },
       tokenBudgetGrant: 1_000,
@@ -599,7 +640,7 @@ describe('goal runtime', () => {
     const spend = new Map<string, number>();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
       },
       tokenBudgetGrant: 1_000,
@@ -638,7 +679,7 @@ describe('goal runtime', () => {
       journal,
       evidenceSource,
       verifier,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
       },
       tokenBudgetGrant: 1_000,
@@ -782,7 +823,7 @@ describe('goal runtime', () => {
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({
       journal,
-      tokenLedger: {
+      ledger: {
         takeGoalTurnTokens: () => {
           throw new Error('recorder is unavailable');
         },
@@ -1571,10 +1612,14 @@ describe('goal runtime', () => {
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0]!;
+    // 101 records overflow the evidence window, so this also pins the
+    // precedence the stall branch relies on: a structurally oversized
+    // request must keep its immediate checkpoint_request stop instead of
+    // being counted as a stall on the truncated window.
     records = verifierEvidenceWindow(
       permit,
       runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
+      101,
     );
 
     await runtime.finishTurn(permit);
@@ -1781,6 +1826,9 @@ describe('goal runtime', () => {
       goal: { status: 'active' },
     });
     expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
+    // The window had room, so the failure proves nothing about compaction
+    // and must not spend a stall.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -2095,7 +2143,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
   });
 
-  it('keeps the stall streak through a transient checkpoint verifier failure', async () => {
+  it('counts a verifier failure on an overflowing window as a stall', async () => {
     const { journal, host, runtime, checkpointVerifier, setRecords } =
       stallHarness();
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -2119,35 +2167,16 @@ describe('goal runtime', () => {
     );
     expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
 
-    // The window still overflows when the verifier fails intermittently, so
-    // the skipped checkpoint proves no room: resetting the streak there would
-    // let transient errors launder the count and the breaker would never fire.
+    // The window still overflows when the verifier fails, and the failed
+    // check folded nothing into claims: that is a compaction without relief
+    // whatever stopped it, so it spends the third stall and stops the Goal
+    // exactly as a full claim list would.
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'c',
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'c');
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
     );
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 2,
-    });
-
-    // The failed turn wrote no checkpoint, so the next window starts from the
-    // same cursor: append the new evidence to the existing chain directly.
-    const permit = host.started.at(-1)!;
-    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = [
-      ...records,
-      ...verifierEvidenceWindow(permit, cursor, 101, 'd').slice(1),
-    ];
-    setRecords(records);
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(4);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
@@ -2158,7 +2187,74 @@ describe('goal runtime', () => {
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it('stops a Goal whose verifier never answers on an overflowing window', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    // The reported loop: one long turn overflowed the window, and every
+    // checkpoint after it timed out. Nothing was ever folded into claims,
+    // the cursor never moved, and each new turn was told to retry.
+    checkpointVerifier.mockRejectedValue(
+      new Error('Goal checkpoint verifier timed out after 30000ms'),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      const permit = host.started.at(-1)!;
+      records = [
+        ...records,
+        ...verifierEvidenceWindow(permit, cursor, 101, `t${turn}`).slice(
+          records.length === 0 ? 0 : 1,
+        ),
+      ];
+      setRecords(records);
+      await runtime.finishTurn(permit);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        checkpointStalls: turn,
+        evidenceCursor: { recordId: cursor },
+      });
+      expect(runtime.getSnapshot().goal).not.toHaveProperty(
+        'evidenceCheckpoint',
+      );
+    }
+
+    const permit = host.started.at(-1)!;
+    records = [
+      ...records,
+      ...verifierEvidenceWindow(permit, cursor, 101, 'last').slice(1),
+    ];
+    setRecords(records);
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
+    );
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+    // No fourth continuation was minted.
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    // Every failed check leaves the same trace, so an investigation reads
+    // why the verifier failed from the first overflow on.
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    for (const [message, windowLabel, loggedError] of failedChecks) {
+      expect(message).toContain('Checkpoint check failed');
+      expect(windowLabel).toBe('windowTruncated=true');
+      expect(loggedError).toBeInstanceOf(Error);
+    }
   });
 
   it('stops a Goal whose verifier keeps returning unusable checkpoint results', async () => {
@@ -2233,6 +2329,47 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     // Every unusable check was settled as bookkeeping and retried.
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+  });
+
+  it('keeps the stall streak through a provider failure on a window with room', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
+
+    // A transient failure on a window with room proves nothing about
+    // compaction: the streak carries through instead of resetting. The
+    // streak must be non-zero here -- a preserved 0 and a reset 0 both
+    // render as an absent field, so only from 1 can this tell them apart.
+    // 60 records keep this window inside the budget once the stalled
+    // checkpoint's full claim list sits in front of it.
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', checkpointStalls: 1 },
+    });
+    // The room arm leaves the same trace the truncated arm does: the
+    // discarded error is diagnosable from the first failure, not only once
+    // the window overflows.
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(1);
+    const [message, windowLabel, loggedError] = failedChecks[0]!;
+    expect(message).toContain('Checkpoint check failed');
+    expect(windowLabel).toBe('windowTruncated=false');
+    expect(loggedError).toBeInstanceOf(Error);
+    expect((loggedError as Error).message).toBe('provider failed');
+    expect(host.started).toHaveLength(3);
   });
 
   it('keeps the stall streak when a turn records no evidence at all', async () => {
@@ -4803,6 +4940,157 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('does not charge offline time to a restored active Goal', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(43_201_000);
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      runtime.bindHost(host);
+      const record = goalStateRecord({
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored-time-budget',
+          revision: 1,
+          objective: 'resume without charging offline time',
+          status: 'active',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 1,
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+          tokensUsed: 0,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      });
+
+      await runtime.prepareRestore([record]);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+        updatedAt: 43_201_000,
+      });
+
+      await runtime.activateRestoredWork();
+      expect(host.inputs).toHaveLength(1);
+      expect(host.inputs[0]).not.toHaveProperty('windDown');
+      expect(host.inputs[0]?.usage).toMatchObject({
+        activeTimeMs: 10_000,
+        activeTimeBudgetMs: 60_000,
+      });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not spend the stall streak on a failed checkpoint replay at restore', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const checkpointVerifier = vi.fn(async (): Promise<never> => {
+      throw new Error('provider failed');
+    });
+    let records: readonly RuntimeRecord[] = [];
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    // The crash-point state the runtime itself persists: a streak one short
+    // of the limit beside a pending checkpoint, journaled before the check
+    // ran.
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+        },
+      },
+      'turn_finished',
+    );
+    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
+      permit: { goalId: 'g-restored', revision: 1, turnId: 'turn-restored' },
+      recordUuid: 'pending-checkpoint-record',
+    };
+    // The same overflowing chain the crashed process faced: the replayed
+    // window still truncates, and the one verifier call at startup fails
+    // for reasons that have nothing to do with compaction.
+    const preparedWindow = {
+      previousClaims: [],
+      evidence: [],
+      truncated: true,
+      shouldCheckpoint: true,
+    };
+
+    await runtime.prepareRestore([record], preparedWindow);
+    await runtime.activateRestoredWork();
+
+    // A restore replay is not the turn loop the stall breaker exists to
+    // stop: the restored Goal keeps the streak it crashed with, and the
+    // continuation the replay mints re-earns any stall as a live turn.
+    expect(checkpointVerifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'checkpoint',
+    ]);
+    expect(host.started).toHaveLength(1);
+    // The trace separates the exempt replay from a live turn that spent a
+    // stall: both overflow the window, only the replay carries the flag.
+    expect(failedCheckpointChecks()).toHaveLength(1);
+    expect(failedCheckpointChecks()[0]![3]).toBe('replay=true');
+
+    // The exemption's bound: the continuation the replay minted is a live
+    // turn, so its own stalled check on a still-overflowing window spends
+    // the last stall the replay preserved and stops the Goal.
+    const permit = host.started.at(-1)!;
+    records = verifierEvidenceWindow(permit, 'create-record', 101, 'resumed');
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'checkpoint',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    // No further continuation was minted for the stopped Goal.
+    expect(host.started).toHaveLength(1);
+    // The live turn's failed check logs the same rule without the
+    // exemption flag: the two arms are distinguishable in the trace.
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(2);
+    expect(failedChecks[1]![3]).toBe('replay=false');
+  });
+
   it('coalesces preparation and activation and rejects activation before preparation', async () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     await expect(runtime.activateRestoredWork()).rejects.toThrow(
@@ -5595,6 +5883,1132 @@ describe('goal runtime', () => {
       await runtime.dispatch({ action: 'create', objective: 'next goal' });
 
       expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+    });
+  });
+
+  describe('continuation usage figures', () => {
+    it('hands the host the spend the record held when the turn was scheduled', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal,
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 30_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // The first continuation is scheduled before anything has been billed.
+      expect(host.inputs[0]?.usage).toEqual({
+        tokensUsed: 0,
+        tokenBudget: 30_000,
+        turnCount: 0,
+      });
+
+      spend.set(host.started[0]!.turnId, 2_500);
+      await runtime.finishTurn(host.started[0]!);
+
+      expect(host.inputs[1]?.usage).toEqual({
+        tokensUsed: 2_500,
+        tokenBudget: 30_000,
+        turnCount: 1,
+      });
+    });
+
+    it('omits the ceiling for a Goal that has none', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(host.inputs[0]?.usage).toEqual({
+        tokensUsed: 0,
+        turnCount: 0,
+      });
+    });
+
+    it('carries the figures into the wind-down hand-off', async () => {
+      // The hand-off reports where the Goal stopped, so it needs the numbers
+      // even though it is told not to start new work.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal,
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 1_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      spend.set(host.started[0]!.turnId, 1_500);
+      await runtime.finishTurn(host.started[0]!);
+
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+      expect(host.inputs[1]?.usage).toEqual({
+        tokensUsed: 1_500,
+        tokenBudget: 1_000,
+        turnCount: 1,
+      });
+    });
+  });
+
+  describe('no-progress bound', () => {
+    function noProgressHarness(
+      options: {
+        appendErrors?: Array<Error | undefined>;
+        beforeAppend?: (payload: GoalStateRecordPayloadV2) => void;
+        tokenBudgetGrant?: number;
+        countToolResults?: boolean;
+        throwOnCount?: boolean;
+        countsNotANumber?: boolean;
+        checkpointVerifier?: GoalCheckpointVerifier;
+      } = {},
+    ) {
+      const journal = fakeGoalJournal({
+        ...(options.appendErrors ? { appendErrors: options.appendErrors } : {}),
+        ...(options.beforeAppend ? { beforeAppend: options.beforeAppend } : {}),
+      });
+      const host = fakeGoalTurnHost();
+      const toolResults = new Map<string, number>();
+      const spend = new Map<string, number>();
+      let records: readonly RuntimeRecord[] = [];
+      const runtime = createGoalRuntime({
+        journal,
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+          ...(options.countToolResults === false
+            ? {}
+            : {
+                takeGoalTurnToolResults: (turnId: string) => {
+                  if (options.throwOnCount) {
+                    throw new Error('ledger unavailable');
+                  }
+                  if (options.countsNotANumber) return Number.NaN;
+                  const count = toolResults.get(turnId) ?? 0;
+                  toolResults.delete(turnId);
+                  return count;
+                },
+              }),
+        },
+        ...(options.checkpointVerifier
+          ? {
+              evidenceSource: fakeEvidenceSource(() => records),
+              verifier: vi.fn(),
+              checkpointVerifier: options.checkpointVerifier,
+            }
+          : {}),
+        ...(options.tokenBudgetGrant === undefined
+          ? {}
+          : { tokenBudgetGrant: options.tokenBudgetGrant }),
+      });
+      runtime.bindHost(host);
+      const setEvidence = (next: readonly RuntimeRecord[]) => {
+        records = next;
+      };
+      return { journal, host, runtime, toolResults, spend, setEvidence };
+    }
+
+    async function finishAutonomousTurn(
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ): Promise<void> {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    }
+
+    it('pauses a Goal whose autonomous turns record nothing to judge', async () => {
+      const { journal, host, runtime } = noProgressHarness();
+      const causes: Array<GoalStateCause | undefined> = [];
+      runtime.subscribe((_snapshot, cause) => causes.push(cause));
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
+      // The bound stops the Goal instead of minting a fourth continuation.
+      expect(host.started).toHaveLength(GOAL_NO_PROGRESS_TURN_LIMIT);
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'turn_finished',
+        'turn_finished',
+        'pause',
+      ]);
+      expect(journal.appended.at(-1)?.snapshot.goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
+      expect(causes.at(-1)).toBe('pause');
+    });
+
+    it('restarts the streak on a turn that records a tool result', async () => {
+      const { host, runtime, toolResults } = noProgressHarness();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishAutonomousTurn(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBe(1);
+
+      toolResults.set(host.started[1]!.turnId, 1);
+      await finishAutonomousTurn(runtime, host.started[1]!);
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+
+      await finishAutonomousTurn(runtime, host.started[2]!);
+      await finishAutonomousTurn(runtime, host.started[3]!);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        noProgressTurns: 2,
+      });
+    });
+
+    it('restarts the streak on a turn that proposes a terminal state', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishAutonomousTurn(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBe(1);
+
+      // A first repeated blocker is recorded but not yet ready for the
+      // verifier, so the turn stays a working turn -- and it worked.
+      runtime.recordTerminalProposal(host.started[1]!, {
+        status: 'blocked',
+        reason: 'The upstream service is down',
+        evidenceRefs: [],
+        blockerKind: 'repeated',
+      });
+      await finishAutonomousTurn(runtime, host.started[1]!);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('restarts the streak on a turn the user drove', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // No delivery mark: the permit carried the user's own text, so the
+      // Goal was being steered rather than idling.
+      for (let turn = 0; turn <= GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await runtime.finishTurn(host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('exempts the wind-down hand-off from the streak', async () => {
+      const { host, runtime, spend } = noProgressHarness({
+        tokenBudgetGrant: 1_000,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishAutonomousTurn(runtime, host.started[0]!);
+      spend.set(host.started[1]!.turnId, 1_500);
+      await finishAutonomousTurn(runtime, host.started[1]!);
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBe(2);
+
+      const windDown = host.started[2]!;
+      expect(host.inputs[2]).toMatchObject({ windDown: true });
+      await finishAutonomousTurn(runtime, windDown);
+
+      // The hand-off turn is asked to hand off, not to work, so it neither
+      // counts against the streak nor clears it.
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBe(2);
+    });
+
+    it('leaves the bound off when the ledger cannot count tool results', async () => {
+      const { host, runtime } = noProgressHarness({ countToolResults: false });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn <= GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('leaves the bound off when the ledger throws', async () => {
+      const { host, runtime } = noProgressHarness({ throwOnCount: true });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn <= GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('leaves the bound off when the ledger answers with something that is not a count', async () => {
+      const { host, runtime } = noProgressHarness({ countsNotANumber: true });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn <= GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('does not checkpoint the turn that spends the streak', async () => {
+      // A checkpoint is work done for the next turn. On the turn that stops
+      // the Goal there is no next turn, and the verifier call would be spent
+      // for nothing.
+      const checkpointVerifier = vi.fn(async () => ({
+        claims: [
+          {
+            proofKind: 'delivered_output' as const,
+            claim: 'The implementation result was delivered.',
+            sourceRefs: ['assistant-evidence-79'],
+          },
+        ],
+      }));
+      const { journal, host, runtime, setEvidence } = noProgressHarness({
+        checkpointVerifier,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        const permit = host.started[turn]!;
+        setEvidence(
+          verifierEvidenceWindow(
+            permit,
+            runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+            80,
+          ),
+        );
+        await finishAutonomousTurn(runtime, permit);
+      }
+
+      expect(checkpointVerifier).toHaveBeenCalledTimes(
+        GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+      );
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'checkpoint',
+        'turn_finished',
+        'checkpoint',
+        'turn_finished',
+        'pause',
+      ]);
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'idle',
+        goal: { status: 'paused' },
+      });
+    });
+
+    it('carries a restored streak into the turn that spends it', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship',
+              status: 'active',
+              evidenceCursor: { recordId: null },
+              turnCount: 2,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            activity: 'idle',
+          },
+          'turn_finished',
+        ),
+      ]);
+      await vi.waitFor(() => expect(host.started).toHaveLength(1));
+
+      await finishAutonomousTurn(runtime, host.started[0]!);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
+    });
+
+    it('clears the streak when the user resumes the Goal', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+      const paused = runtime.getSnapshot().goal!;
+
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: paused.goalId,
+        expectedRevision: paused.revision,
+      });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+      expect(runtime.getSnapshot().goal?.lastReason).toBeUndefined();
+
+      // A resumed Goal gets the whole allowance again, not the last turn of
+      // the one it just spent.
+      await finishAutonomousTurn(
+        runtime,
+        host.started[GOAL_NO_PROGRESS_TURN_LIMIT]!,
+      );
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        noProgressTurns: 1,
+      });
+    });
+
+    it('shows the no-progress stop even when the settle write fails', async () => {
+      const { host, runtime } = noProgressHarness({
+        appendErrors: [
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          new Error('journal unavailable'),
+        ],
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
+      expect(host.started).toHaveLength(GOAL_NO_PROGRESS_TURN_LIMIT);
+    });
+
+    it('lets a waiting user turn outrank the bound and keeps its checkpoint', async () => {
+      const checkpointVerifier = vi.fn(async () => ({
+        claims: [
+          {
+            proofKind: 'delivered_output' as const,
+            claim: 'The implementation result was delivered.',
+            sourceRefs: ['assistant-evidence-79'],
+          },
+        ],
+      }));
+      const { host, runtime, setEvidence } = noProgressHarness({
+        checkpointVerifier,
+      });
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship',
+              status: 'active',
+              evidenceCursor: { recordId: 'record-0' },
+              turnCount: 2,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            activity: 'idle',
+          },
+          'turn_finished',
+        ),
+      ]);
+      await vi.waitFor(() => expect(host.started).toHaveLength(1));
+
+      // The user typed while the third turn was still running.
+      const last = host.started[0]!;
+      setEvidence(
+        verifierEvidenceWindow(
+          last,
+          runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+          80,
+        ),
+      );
+      expect(runtime.beginTurn('user-turn')).toBeUndefined();
+      await finishAutonomousTurn(runtime, last);
+
+      // The reservation is served rather than stopped in front of, and the
+      // streak that reached the bound is still on the record for the turn
+      // after it to spend.
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+      });
+      expect(runtime.permitForTurn('user-turn')).toBeDefined();
+      expect(checkpointVerifier).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toHaveProperty('evidenceCheckpoint');
+    });
+
+    it('serves a user turn reserved while the pause was being written', async () => {
+      // `beginTurn` is synchronous and does not queue, so the reservation
+      // can land in the middle of the pause record's append. The guard
+      // reads the reservation once before that await; if it did not re-read
+      // afterwards, the pause would commit over a caller already waiting in
+      // `claimGoalTurn`, whose message would then run as an ordinary turn.
+      const race: { reserve?: () => void } = {};
+      const { journal, host, runtime } = noProgressHarness({
+        beforeAppend: (payload) => {
+          if (payload.cause === 'pause') race.reserve?.();
+        },
+      });
+      race.reserve = () => {
+        expect(runtime.getSnapshot().goal?.status).toBe('active');
+        expect(runtime.beginTurn('user-turn')).toBeUndefined();
+      };
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'running',
+        goal: {
+          status: 'active',
+          noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+        },
+      });
+      expect(runtime.permitForTurn('user-turn')).toBeDefined();
+      expect(host.started).toHaveLength(GOAL_NO_PROGRESS_TURN_LIMIT);
+      // The record that lost the race stays in the journal: a restart
+      // recovers a paused Goal with its reason, which resume undoes.
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'turn_finished',
+        'turn_finished',
+        'pause',
+      ]);
+    });
+
+    it('does not spend a restored streak on a turn the ledger could not measure', async () => {
+      // The record can say the streak is at the limit -- a `turn_finished`
+      // written before a pause append that then failed leaves exactly that
+      // -- but the bound fires on the count measured this turn. A ledger
+      // that cannot see the turn proves nothing about it, so the Goal runs
+      // on and the streak stays on the record for a measured turn to spend.
+      const { host, runtime } = noProgressHarness({ countToolResults: false });
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship',
+              status: 'active',
+              evidenceCursor: { recordId: null },
+              turnCount: 3,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            activity: 'idle',
+          },
+          'turn_finished',
+        ),
+      ]);
+      await vi.waitFor(() => expect(host.started).toHaveLength(1));
+
+      await finishAutonomousTurn(runtime, host.started[0]!);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+      });
+      expect(runtime.getSnapshot().goal?.lastReason).toBeUndefined();
+      expect(host.started).toHaveLength(2);
+    });
+
+    it('lets the checkpoint stall breaker outrank the bound on an overflowing window', async () => {
+      // A talkative model fills the evidence window with prose and calls no
+      // tool: every turn is quiet by this bound's measure, and every turn
+      // overflows the window by the checkpoint's. The Goal is drowning in
+      // evidence, not idling, so the checkpoint runs and the stall breaker
+      // stops it with the reason that fits -- a pause would send the user
+      // to resume straight back into the same overflowing window.
+      const checkpointVerifier = vi.fn(
+        async (input: GoalCheckpointVerifierInput) => fullClaims(input),
+      );
+      const { journal, host, runtime, setEvidence } = noProgressHarness({
+        checkpointVerifier,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      let records: RuntimeRecord[] = [];
+      for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+        runtime.markTurnDelivered(
+          `goal-runtime:${host.started.at(-1)!.turnId}`,
+        );
+        records = await runCheckpointTurn(
+          runtime,
+          host,
+          setEvidence,
+          records,
+          101,
+          `window-${turn}`,
+        );
+        if (turn < GOAL_CHECKPOINT_STALL_LIMIT) {
+          expect(runtime.getSnapshot().goal).toMatchObject({
+            status: 'active',
+            checkpointStalls: turn,
+            noProgressTurns: turn,
+          });
+        }
+      }
+
+      expect(checkpointVerifier).toHaveBeenCalledTimes(
+        GOAL_CHECKPOINT_STALL_LIMIT,
+      );
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'idle',
+        goal: {
+          status: 'usage_limited',
+          limitKind: 'evidence_catalog',
+          lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+          checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        },
+      });
+      expect(journal.appended.map((payload) => payload.cause)).not.toContain(
+        'pause',
+      );
+      expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    });
+
+    it('lets a spent token budget outrank the bound on the turn that crosses it', async () => {
+      // The budget stop lives in the continuation gate, and so does the
+      // wind-down hand-off it grants first. When the third quiet turn is
+      // also the one that spends the budget, the Goal must reach that gate:
+      // an allowance was used up, and the surfaces that tell a budget stop
+      // from an idle pause need the `limitKind` only that stop writes.
+      const { host, runtime, spend } = noProgressHarness({
+        tokenBudgetGrant: 1_000,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT - 1; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+      const crossing = host.started[GOAL_NO_PROGRESS_TURN_LIMIT - 1]!;
+      spend.set(crossing.turnId, 1_500);
+      await finishAutonomousTurn(runtime, crossing);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+      });
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+
+      await finishAutonomousTurn(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'token_budget',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
+      });
+      expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
+        GOAL_PAUSE_REASON_NO_PROGRESS,
+      );
+    });
+  });
+  describe('turn and active-time budgets', () => {
+    async function finishDelivered(
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ): Promise<void> {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    }
+
+    it('arms no cadence ceiling unless one is granted', async () => {
+      // The token budget defaults to a number; these default to nothing. A
+      // cadence is what the user asks for, not a guard every Goal needs.
+      const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal!;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('hands off and stops when the turn budget is spent, and resume re-arms it', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const created = runtime.getSnapshot().goal!;
+      expect(created).toMatchObject({ turnBudget: 2, turnCount: 0 });
+
+      // Two turns of real work: the ceiling is checked at the continuation
+      // boundary, so the turn that reaches it still runs to completion.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(host.inputs[1]).not.toHaveProperty('windDown');
+      await finishDelivered(runtime, host.started[1]!);
+
+      // The spent window buys exactly one hand-off.
+      expect(host.started).toHaveLength(3);
+      expect(host.inputs[2]).toMatchObject({ windDown: true });
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      await finishDelivered(runtime, host.started[2]!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+        turnBudget: 2,
+        windDownTurnId: host.started[2]!.turnId,
+        lastReason: goalTurnBudgetReason(2),
+      });
+      expect(host.started).toHaveLength(3);
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'turn_finished',
+        'turn_finished',
+        'usage_limited',
+      ]);
+
+      const resumed = await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: created.goalId,
+        expectedRevision: created.revision,
+      });
+      // The ceiling moves ahead of the count the resume never resets.
+      expect(resumed.snapshot.goal).toMatchObject({
+        status: 'active',
+        turnCount: 3,
+        turnBudget: 5,
+      });
+      expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
+      expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      expect(host.started).toHaveLength(4);
+      expect(host.inputs[3]).not.toHaveProperty('windDown');
+    });
+
+    it('still admits a user turn once the ceiling is already spent', async () => {
+      // Three surfaces promise this -- the settings row, the schema
+      // description and the `turnBudget` doc comment -- and nothing held it:
+      // `beginTurn` gates only on the Goal being active, and `spentBudget` sits
+      // in the same closure, so a plausible "stop admitting turns at the
+      // ceiling" edit would silently discard the user's message instead.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // One automatic turn spends the window, and the gate grants the hand-off.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        turnCount: 1,
+        turnBudget: 1,
+      });
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+      // The user types with the ceiling already spent and the hand-off in
+      // flight. The turn is reserved, not refused.
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, host.started[1]!);
+
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      // And the stop still arrives once the user's own turn is done.
+      await runtime.finishTurn(userPermit!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+    });
+
+    it('counts user-driven turns toward the turn ceiling', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 2,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const automatic = host.started[0]!;
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, automatic);
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      await runtime.finishTurn(userPermit!);
+
+      expect(runtime.getSnapshot().goal?.turnCount).toBe(2);
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+        turnCount: 3,
+      });
+    });
+
+    it('hands off and stops when the active-time budget is spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const journal = fakeGoalJournal();
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal,
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          activeTimeBudgetMs: 60_000,
+          activeTimeMs: 0,
+        });
+
+        // A turn that runs past the window: the clock is read at the
+        // continuation boundary, so the turn itself is never cut short.
+        vi.setSystemTime(91_000);
+        await finishDelivered(runtime, host.started[0]!);
+
+        expect(runtime.getSnapshot().goal?.activeTimeMs).toBe(90_000);
+        expect(host.started).toHaveLength(2);
+        expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+        await finishDelivered(runtime, host.started[1]!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          limitKind: 'time_budget',
+          activeTimeBudgetMs: 60_000,
+          lastReason: goalActiveTimeBudgetReason(60_000),
+        });
+        expect(host.started).toHaveLength(2);
+
+        // Resuming grants another window measured from where it stopped.
+        const stopped = runtime.getSnapshot().goal!;
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: stopped.goalId,
+          expectedRevision: stopped.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeBudgetMs: stopped.activeTimeMs + 60_000,
+        });
+        expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not accrue active time while the Goal is stopped', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        vi.setSystemTime(11_000);
+        await finishDelivered(runtime, host.started[0]!);
+        const paused = await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: runtime.getSnapshot().goal!.goalId,
+          expectedRevision: runtime.getSnapshot().goal!.revision,
+        });
+        expect(paused.snapshot.goal?.activeTimeMs).toBe(10_000);
+
+        // An hour of wall clock while paused: the window is untouched, so the
+        // resumed Goal still has the time it had.
+        vi.setSystemTime(3_611_000);
+        const resumed = await runtime.dispatch({
+          action: 'resume',
+          expectedGoalId: paused.snapshot.goal!.goalId,
+          expectedRevision: paused.snapshot.goal!.revision,
+        });
+        expect(resumed.snapshot.goal).toMatchObject({
+          status: 'active',
+          activeTimeMs: 10_000,
+          activeTimeBudgetMs: 60_000,
+        });
+        // And it is admitted a real continuation rather than a hand-off.
+        expect(host.inputs.at(-1)).not.toHaveProperty('windDown');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports one reason when a turn crosses more than one ceiling', async () => {
+      // Token first: it is the ceiling armed by default, so it is the one a
+      // user is likeliest to be asking about.
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 1_000,
+        turnBudgetGrant: 1,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      spend.set(host.started[0]!.turnId, 5_000);
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('token_budget');
+    });
+
+    it('reports the turn budget before the time budget when both are spent', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+          turnBudgetGrant: 1,
+          activeTimeBudgetGrantMs: 60_000,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+        await finishDelivered(runtime, host.started.at(-1)!);
+        await vi.waitFor(() => {
+          expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+        });
+        expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('carries the cadence figures to the host that renders the prompt', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          turnBudgetGrant: 20,
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        runtime.bindHost(host);
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        expect(host.inputs[0]?.usage).toMatchObject({
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        });
+
+        vi.setSystemTime(61_000);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(host.inputs[1]?.usage).toMatchObject({
+          turnCount: 1,
+          turnBudget: 20,
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses elapsed active time when a queued continuation waits for a host', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 1_800_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+        vi.setSystemTime(61_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]?.usage).toMatchObject({
+          activeTimeMs: 60_000,
+          activeTimeBudgetMs: 1_800_000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('re-reads the time ceiling when a queued continuation is finally delivered', async () => {
+      // The time ceiling is the only one whose spent state can change between
+      // queueing and delivery: spend and turn count are committed by
+      // `finishTurn` before the gate runs, but elapsed active time keeps
+      // accruing while the continuation sits queued with no host to flush it.
+      // A continuation queued under the ceiling and delivered past it must be
+      // the hand-off, not a full work turn a whole window late.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        // Queued with the ceiling unspent and no host to deliver it.
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(host.inputs).toHaveLength(0);
+
+        // The window runs out while the continuation waits.
+        vi.setSystemTime(121_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]).toMatchObject({ windDown: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('sends no time figures to a Goal with no time ceiling', async () => {
+      // Elapsed active time with nothing to measure it against is a number on
+      // every turn that the model cannot act on.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 20,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(host.inputs[0]?.usage).toMatchObject({ turnBudget: 20 });
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeMs');
+      expect(host.inputs[0]?.usage).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it('lets a spent cadence budget outrank the no-progress bound', async () => {
+      // Both bounds are reached on the same turn. The budget owes this Goal a
+      // hand-off and a `usage_limited` stop the user can resume from; pausing
+      // for idleness here would skip both.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        ledger: {
+          takeGoalTurnTokens: () => 0,
+          takeGoalTurnToolResults: () => 0,
+        },
+        turnBudgetGrant: GOAL_NO_PROGRESS_TURN_LIMIT,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishDelivered(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+      expect(host.inputs.at(-1)).toMatchObject({ windDown: true });
+      await finishDelivered(runtime, host.started.at(-1)!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(runtime.getSnapshot().goal?.lastReason).not.toBe(
+        GOAL_PAUSE_REASON_NO_PROGRESS,
+      );
+    });
+
+    it('shows the cadence stop even when the settle write fails', async () => {
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal({
+          appendErrors: [
+            undefined,
+            undefined,
+            undefined,
+            new Error('journal unavailable'),
+          ],
+        }),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        limitKind: 'turn_budget',
+      });
+      expect(host.started).toHaveLength(2);
     });
   });
 });

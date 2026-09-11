@@ -48,6 +48,7 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   useProviderSetupFlow,
   type ProviderSetupFlow,
@@ -112,6 +113,12 @@ const PROTOCOL_ITEMS: RadioItem[] = [
     label: t('OpenAI-compatible'),
     description: t('Standard OpenAI API format (most common)'),
     value: AuthType.USE_OPENAI,
+  },
+  {
+    key: AuthType.USE_OPENAI_RESPONSES,
+    label: t('OpenAI Responses'),
+    description: t('OpenAI Responses API — streaming reasoning + tool use'),
+    value: AuthType.USE_OPENAI_RESPONSES,
   },
   {
     key: AuthType.USE_ANTHROPIC,
@@ -185,7 +192,7 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
           >
             <box flexDirection="row">
               <text fg={selected ? C.accent : C.dim}>
-                {selected ? '● ' : '○ '}
+                {selected ? '› ' : '  '}
               </text>
               <text
                 fg={selected ? C.text : C.dim}
@@ -551,7 +558,9 @@ function ModelsStep({
                     {focused ? '› ' : '  '}
                   </text>
                   <text fg={focused ? C.accent : C.dim}>
-                    {isChecked ? '◉ ' : '○ '}
+                    {isChecked
+                      ? `${ICON.RADIO_FILLED} `
+                      : `${ICON.CIRCLE_EMPTY} `}
                   </text>
                   <text fg={focused ? C.text : C.dim}>{id}</text>
                 </box>
@@ -630,7 +639,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     event.preventDefault();
     flow.changeContextWindowSize(contextWindowSize + text);
   });
-  const checkmark = (v: boolean) => (v ? '◉' : '○');
+  const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
   const rowFg = (index: number) =>
     focusedConfigIndex === index ? C.green : undefined;
@@ -763,6 +772,9 @@ type AuthDialogProps = {
   onClose: () => void;
   /** Append a command-style message to the chat history (success feedback). */
   notify?: (text: string) => void;
+  /** Startup auth failure surfaced by the auto-open (U-6); null when the
+   * dialog opened because no auth type is configured. */
+  initialError?: string;
 };
 
 export function OpenTuiAuthDialog(props: AuthDialogProps) {
@@ -787,8 +799,11 @@ function AuthDialogFlow({
   settings,
   onClose,
   notify,
+  initialError,
 }: AuthDialogProps & { config: Config }) {
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(
+    initialError ?? null,
+  );
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -992,6 +1007,16 @@ function AuthDialogFlow({
         goBack();
         return true;
       }
+      // The swallow is for an error the dialog armed itself; a boot-seeded
+      // initialError must fall through, or the auto-opened dialog could never
+      // be dismissed with Esc.
+      if (initialError && errorMessage === initialError) {
+        // ...and falling through means reaching the unauthenticated arm when
+        // no auth type exists yet, which would overwrite the boot diagnostic
+        // with the must-connect message and wedge the dialog shut (R2-1).
+        onClose();
+        return true;
+      }
       if (errorMessage) return true;
       if (config.getAuthType() === undefined) {
         setErrorMessage(
@@ -1006,7 +1031,15 @@ function AuthDialogFlow({
     };
     renderer.addInputHandler(onRaw);
     return () => renderer.removeInputHandler(onRaw);
-  }, [renderer, viewLevel, goBack, errorMessage, config, onClose]);
+  }, [
+    renderer,
+    viewLevel,
+    goBack,
+    errorMessage,
+    initialError,
+    config,
+    onClose,
+  ]);
 
   // -- View title -------------------------------------------------------------
 

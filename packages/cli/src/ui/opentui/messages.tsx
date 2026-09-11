@@ -27,34 +27,17 @@
 
 import { C } from './theme.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
-import { ICON } from '../constants.js';
+import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
   sanitizeMultilineForDisplay,
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { formatDuration } from '../utils/displayUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-
-/** The original TOOL_STATUS glyphs (ui/constants.ts). */
-export const TOOL_STATUS = {
-  SUCCESS: '✓',
-  PENDING: 'o',
-  EXECUTING: '⊷',
-  CONFIRMING: '?',
-  CANCELED: '-',
-  ERROR: 'x',
-} as const;
-
-/** The original narrow-presentation icons (ui/constants.ts). */
-export const MESSAGE_ICON = {
-  DIAMOND: '◆',
-  THEREFORE: '∴',
-  BECAUSE: '∵',
-  CIRCLE_FILLED: '●',
-} as const;
 
 /** Width the ink ToolStatusIndicator reserves for the glyph column. */
 export const STATUS_INDICATOR_WIDTH = 2;
@@ -120,6 +103,204 @@ export function tailWindow<T>(
 /** ink MaxSizedBox hidden-lines indicator text. */
 export function hiddenLinesLabel(hiddenCount: number): string {
   return `... first ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
+}
+
+/** Physical rows a logical row occupies when soft-wrapped to `cols` columns. */
+function physicalRowCount(row: string, cols: number): number {
+  return Math.max(1, Math.ceil(getCachedStringWidth(row) / cols));
+}
+
+/** Cuts a row to `maxCols` display columns without splitting a surrogate pair. */
+function sliceRowToWidth(
+  row: string,
+  maxCols: number,
+  side: 'head' | 'tail',
+): string {
+  const points = toCodePoints(row);
+  const ordered = side === 'head' ? points : [...points].reverse();
+  let used = 0;
+  let taken = 0;
+  for (const cp of ordered) {
+    const cpWidth = getCachedStringWidth(cp);
+    if (used + cpWidth > maxCols) break;
+    used += cpWidth;
+    taken += 1;
+  }
+  const kept = ordered.slice(0, taken);
+  return (side === 'tail' ? kept.reverse() : kept).join('');
+}
+
+/**
+ * Physical-height head window (ink MaxSizedBox overflowDirection 'bottom'
+ * parity): the cap counts WRAPPED rows at width - 2 display columns (not
+ * UTF-16 code units — wide-character bodies would otherwise be undercounted
+ * ~2x and silently never engage the cap), because a
+ * single logical row — e.g. a JSON.stringify'd confirmation payload — can
+ * wrap to dozens of physical rows that a logical-row window never bounds.
+ * An over-budget tail logical row is sliced to its head display columns; the
+ * hidden tail is summarized by hiddenTailLinesLabel.
+ */
+export function headWindowPhysical(
+  rows: readonly string[],
+  width: number,
+  maxRows: number,
+): { visible: string[]; hiddenRows: number } {
+  const cols = Math.max(width - 2, 10);
+  const height = (row: string) => physicalRowCount(row, cols);
+  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
+  const budget = Math.max(maxRows - 1, 1);
+  const visible: string[] = [];
+  let used = 0;
+  for (const row of rows) {
+    const h = height(row);
+    if (used + h <= budget) {
+      visible.push(row);
+      used += h;
+      continue;
+    }
+    const remaining = budget - used;
+    if (remaining > 0) {
+      visible.push(sliceRowToWidth(row, remaining * cols, 'head'));
+      used = budget;
+    }
+    break;
+  }
+  return { visible, hiddenRows: Math.max(total - used, 1) };
+}
+
+/** ink MaxSizedBox bottom-overflow hidden-tail indicator text. */
+export function hiddenTailLinesLabel(hiddenCount: number): string {
+  return `... last ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
+}
+
+/**
+ * Physical-height tail window — the expand-side mirror of headWindowPhysical:
+ * keeps the LAST rows whose wrapped height fits the budget, slicing an
+ * over-budget head logical row to its tail characters. OpenTUI paints a
+ * fixed alt-screen viewport, so an expanded dialog body taller than the
+ * screen must surface its tail (where the content ends) instead of letting
+ * the screen clip it away.
+ */
+export function tailWindowPhysical(
+  rows: readonly string[],
+  width: number,
+  maxRows: number,
+): { visible: string[]; hiddenRows: number } {
+  const cols = Math.max(width - 2, 10);
+  const height = (row: string) => physicalRowCount(row, cols);
+  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
+  const budget = Math.max(maxRows, 1);
+  const visible: string[] = [];
+  let used = 0;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    const h = height(row);
+    if (used + h <= budget) {
+      visible.unshift(row);
+      used += h;
+      continue;
+    }
+    const remaining = budget - used;
+    if (remaining > 0) {
+      visible.unshift(sliceRowToWidth(row, remaining * cols, 'tail'));
+      used = budget;
+    }
+    break;
+  }
+  return { visible, hiddenRows: Math.max(total - used, 1) };
+}
+
+/**
+ * Row budget for a tool card's inline description. Ink bounds an over-tall
+ * card through the static-area height distribution (MaxSizedBox); OpenTUI
+ * caps the description head here until that distribution exists — without it
+ * an MCP tool's whole args JSON (one logical row wrapping to dozens of
+ * physical rows) floods the transcript column.
+ */
+export const TOOL_CARD_DESCRIPTION_ROWS = 5;
+
+/**
+ * Rows reserved below a pending tool card so the confirmation dialog's
+ * COLLAPSED body (frame + title/question + 20-row body + outcome list +
+ * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
+ * the dialog only reveals on ctrl-s expansion — that bound lives in
+ * pendingCardMaxRows.
+ */
+export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
+
+/**
+ * Rows above a pending card's expanded confirmation dialog: the transcript
+ * rows that stay on screen above it (prompt echo plus the card's own
+ * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
+ * title, body margins, outcome list, footer ≈ 11).
+ */
+export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+
+/**
+ * Measured at a 110-column terminal the card's flex row gives the
+ * description ~79 of the 108 columns capToolCardDescription budgets with
+ * (the name column takes the rest), so a budget of B rows renders about
+ * B / 0.73 rows. Budgeting at 0.7 keeps the estimate on the safe side of
+ * that inflation across plausible name lengths.
+ */
+const CARD_DESC_WRAP_RATIO = 0.7;
+
+/**
+ * Description budget for a pending tool card, bounded three ways: never
+ * past the ink-parity history cap, never so tall that the confirmation
+ * dialog's collapsed body overflows the viewport, and — when the payload
+ * is wide enough that the dialog will render it expanded (hook-forced
+ * confirmations duplicate the card's description) — shrunk so the expanded
+ * body plus chrome still fits. `descriptionWidth` is the display width of
+ * the text the card would print; short terminals fall back to the settled
+ * cap.
+ */
+export function pendingCardMaxRows(
+  terminalHeight: number,
+  descriptionWidth: number,
+  width: number,
+): number {
+  const h = Math.floor(terminalHeight);
+  const payloadRows = Math.ceil(
+    descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
+  );
+  return Math.max(
+    TOOL_CARD_DESCRIPTION_ROWS,
+    Math.min(
+      maxHistoryItemRows(terminalHeight),
+      h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+      Math.floor(
+        (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) * CARD_DESC_WRAP_RATIO,
+      ),
+    ),
+  );
+}
+
+/**
+ * Keeps the head of a description that would wrap past `maxRows` at the
+ * given width; the hidden tail is summarized by hiddenTailLinesLabel. Rows
+ * are measured in terminal display columns (not UTF-16 code units) so
+ * wide-character payloads engage the cap (name + description wrap inside
+ * width - STATUS_INDICATOR_WIDTH columns).
+ */
+export function capToolCardDescription(
+  description: string,
+  name: string,
+  width: number,
+  maxRows: number,
+): { description: string; hiddenRows: number } {
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const nameCols = getCachedStringWidth(name) + 1;
+  const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
+  if (rows <= maxRows) return { description, hiddenRows: 0 };
+  const descRows = Math.max(maxRows - 1, 1);
+  const visibleCols = Math.max(descRows * cols - nameCols, 0);
+  return {
+    description: sliceRowToWidth(description, visibleCols, 'head'),
+    hiddenRows: Math.max(rows - descRows, 1),
+  };
 }
 
 /**
@@ -216,8 +397,11 @@ export function userMessageMeta(): { glyph: string; color: string } {
 
 export function assistantMessageMeta(): { glyph: string; color: string } {
   // AssistantMessage → ICON.DIAMOND prefix, theme.text.accent.
-  return { glyph: MESSAGE_ICON.DIAMOND, color: C.purple };
+  return { glyph: ICON.DIAMOND, color: C.purple };
 }
+
+/** ink ConversationMessages: under this a committed thought reads "briefly". */
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
 export interface ThinkingMeta {
   icon: string;
@@ -237,13 +421,20 @@ export function thinkingMeta(
   done: boolean,
   expanded: boolean,
   clickable: boolean,
+  durationMs?: number,
 ): ThinkingMeta {
   const expandHint = clickable
     ? '(click or ctrl+o to expand)'
     : '(ctrl+o to expand)';
+  const completedLabel =
+    durationMs === undefined
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? 'Thought briefly'
+        : `Thought for ${formatDuration(durationMs)}`;
   if (!done) {
     return {
-      icon: MESSAGE_ICON.BECAUSE,
+      icon: ICON.BECAUSE,
       label: 'Thinking…',
       hint: '',
       color: C.dim,
@@ -252,16 +443,16 @@ export function thinkingMeta(
   }
   if (!expanded) {
     return {
-      icon: MESSAGE_ICON.THEREFORE,
-      label: 'Thought',
+      icon: ICON.THEREFORE,
+      label: completedLabel ?? 'Thinking',
       hint: expandHint,
       color: C.dim,
       collapsed: true,
     };
   }
   return {
-    icon: MESSAGE_ICON.THEREFORE,
-    label: 'Thought',
+    icon: ICON.THEREFORE,
+    label: completedLabel ?? 'Thinking…',
     hint: '(ctrl+o to collapse)',
     color: C.dim,
     collapsed: false,

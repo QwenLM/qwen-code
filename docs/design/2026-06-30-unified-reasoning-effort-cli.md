@@ -6,6 +6,10 @@ status: 'implemented'
 
 # Unified Reasoning Effort (/effort)
 
+> **GPT update:** [GPT-5 and GPT-6 reasoning effort](gpt-5-reasoning-effort.md)
+> supersedes this document's GPT wire mapping and OpenAI tier ceiling. GPT Chat
+> Completions uses flat `reasoning_effort`, with model-specific tier support.
+
 > **Implementation status.** Landed: the 5-tier ladder + `core/reasoning-effort.ts`
 > (rank clamp/normalize), the global `model.reasoningEffort` setting + runtime
 > `Config.setReasoningEffort`/`getReasoningEffort` (re-applied across model
