@@ -201,6 +201,7 @@ describe('QWEN_HOME environment variable', () => {
       const homeDir = join(rig.testDir!, 'home');
       mkdirSync(homeDir, { recursive: true });
       vi.stubEnv('HOME', homeDir);
+      vi.stubEnv('USERPROFILE', homeDir);
       vi.stubEnv('NO_PROXY', NO_PROXY);
       vi.stubEnv('no_proxy', NO_PROXY);
 
