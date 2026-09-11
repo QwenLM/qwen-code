@@ -308,13 +308,17 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     return null;
   }
 
-  const memorySummary =
+  const memoryLabel =
     item.type === 'tool_group' &&
     ((item.memoryReadCount ?? 0) > 0 || (item.memoryWriteCount ?? 0) > 0)
       ? ` · ${t('Memory: {{read}} read, {{written}} written', {
           read: String(item.memoryReadCount ?? 0),
           written: String(item.memoryWriteCount ?? 0),
         })}`
+      : '';
+  const memorySummary =
+    contentWidth - 2 - getCachedStringWidth(memoryLabel) >= 20
+      ? memoryLabel
       : '';
   const focusSummary =
     focusActive && item.type === 'tool_group'
@@ -333,6 +337,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
                     : 'pending',
             isSubagent: isSubagentToolEntry(tool),
             hasImages: hasInlineImageOutput(tool),
+            hasNotice: Boolean(tool.visionBridgeNotice),
           })),
           {
             isPending,

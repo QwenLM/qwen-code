@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import stringWidth from 'string-width';
+import { setLanguageAsync } from '../../i18n/index.js';
 import {
   getFocusToolSummary,
   type FocusToolSummaryInput,
@@ -19,6 +20,132 @@ const tool: FocusToolSummaryInput = {
 };
 
 describe('getFocusToolSummary', () => {
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'renders inherited object key %s as a tool name',
+    (name) => {
+      expect(getFocusToolSummary([{ ...tool, name, status: 'error' }])).toEqual(
+        {
+          text: `${name} failed (Ctrl+O for details)`,
+          status: 'error',
+        },
+      );
+    },
+  );
+
+  it('strips invisible controls in short names and paths', () => {
+    for (const control of [
+      '\u200b',
+      '\u200e',
+      '\u200f',
+      '\u061c',
+      '\u2028',
+      '\u2029',
+      '\ufeff',
+    ]) {
+      for (const input of [
+        { ...tool, name: `a${control}b` },
+        {
+          ...tool,
+          name: 'read_file',
+          args: { file_path: `src/a${control}b.ts` },
+        },
+      ]) {
+        expect(getFocusToolSummary([input])?.text).not.toContain(control);
+      }
+    }
+  });
+
+  it('preserves real notebook arguments and legacy edit aliases', () => {
+    expect(
+      getFocusToolSummary([
+        {
+          ...tool,
+          name: 'notebook_edit',
+          args: { notebook_path: 'src/example.ipynb' },
+        },
+      ])?.text,
+    ).toContain('src/example.ipynb');
+    expect(
+      getFocusToolSummary([
+        { ...tool, name: 'replace', args: { file_path: 'src/example.ts' } },
+      ])?.text,
+    ).toBe('Edit src/example.ts (Ctrl+O for details)');
+  });
+
+  it('keeps mention identities without repeating labels or error descriptions', () => {
+    expect(
+      getFocusToolSummary([
+        {
+          name: 'Read File',
+          status: 'success',
+          description: 'Read file example.ts',
+        },
+      ])?.text,
+    ).toBe('Read File example.ts (Ctrl+O for details)');
+    expect(
+      getFocusToolSummary([
+        {
+          name: 'Read File(s)',
+          status: 'error',
+          description: 'Error attempting to read files',
+        },
+      ])?.text,
+    ).toBe('Read File(s) failed (Ctrl+O for details)');
+    expect(
+      getFocusToolSummary([
+        { name: 'Read Directory', status: 'success', description: '@src' },
+      ])?.text,
+    ).toContain('@src');
+  });
+
+  it('localizes tool labels without losing file identity', async () => {
+    await setLanguageAsync('zh');
+    try {
+      expect(getFocusToolSummary([tool])?.text).toContain('运行命令');
+      expect(getFocusToolSummary([tool])?.text).not.toContain('Shell');
+      expect(
+        getFocusToolSummary([
+          { ...tool, name: 'read_file', args: { file_path: 'src/example.ts' } },
+        ])?.text,
+      ).toContain('src/example.ts');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('preserves the basename of paths ending in a separator', () => {
+    expect(
+      getFocusToolSummary([
+        {
+          ...tool,
+          name: 'read_file',
+          args: { file_path: '/long-directory/'.repeat(20) },
+        },
+      ])?.text,
+    ).toContain('long-directory');
+  });
+
+  it('reserves the detail shortcut within the caller width', () => {
+    for (const inputs of [
+      [
+        {
+          ...tool,
+          name: 'edit',
+          status: 'error' as const,
+          args: { file_path: '/long-directory/'.repeat(20) + 'focus.ts' },
+        },
+      ],
+      ['edit', 'write_file', 'run_shell_command'].map((name) => ({
+        ...tool,
+        name,
+        status: 'error' as const,
+      })),
+    ]) {
+      const summary = getFocusToolSummary(inputs, { maxWidth: 60 });
+      expect(summary?.text).toContain('Ctrl+O for details');
+      expect(stringWidth(summary!.text)).toBeLessThanOrEqual(60);
+    }
+  });
   it('keeps the tool identity but never shell arguments or descriptions', () => {
     expect(getFocusToolSummary([tool])).toEqual({
       text: 'Shell (Ctrl+O for details)',
@@ -81,6 +208,7 @@ describe('getFocusToolSummary', () => {
     { isUserInitiated: true },
     { isSubagent: true },
     { hasImages: true },
+    { hasNotice: true },
     { status: 'pending' as const },
   ])('preserves visible exceptions: %j', (exception) => {
     expect(

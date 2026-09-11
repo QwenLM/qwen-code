@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { t } from '../../i18n/index.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { localizeToolDisplayName, t } from '../../i18n/index.js';
 import { TOOL_DISPLAY_BY_NAME } from './tool-display-map.js';
 import {
   getCachedStringWidth,
@@ -20,6 +21,7 @@ export interface FocusToolSummaryInput {
   isUserInitiated?: boolean;
   isSubagent?: boolean;
   hasImages?: boolean;
+  hasNotice?: boolean;
 }
 
 const FILE_TOOLS = new Set([
@@ -29,21 +31,29 @@ const FILE_TOOLS = new Set([
   'NotebookEdit',
   'Read File',
   'Read File(s)',
+  'Read Directory',
 ]);
 
 function singleLine(text: string): string {
   return stripUnsafeCharacters(text)
-    .replace(/[\r\n\t\x7f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
     .trim();
 }
 
 function toolName(tool: FocusToolSummaryInput): string {
-  return singleLine(TOOL_DISPLAY_BY_NAME[tool.name] ?? tool.name);
+  const canonical = canonicalToolName(tool.name);
+  const name = typeof canonical === 'string' ? canonical : tool.name;
+  return singleLine(
+    Object.hasOwn(TOOL_DISPLAY_BY_NAME, name)
+      ? TOOL_DISPLAY_BY_NAME[name]
+      : name,
+  );
 }
 
-function toolIdentity(tool: FocusToolSummaryInput): string {
-  const name = toolName(tool);
-  if (!FILE_TOOLS.has(name)) return truncateToWidth(name, 40);
+function toolIdentity(tool: FocusToolSummaryInput, maxWidth: number): string {
+  const rawName = toolName(tool);
+  const name = localizeToolDisplayName(rawName);
+  if (!FILE_TOOLS.has(rawName)) return truncateToWidth(name, maxWidth);
 
   const path = [
     'file_path',
@@ -57,6 +67,14 @@ function toolIdentity(tool: FocusToolSummaryInput): string {
       (value): value is string => typeof value === 'string' && value.length > 0,
     );
   let identity = singleLine(path ?? tool.description ?? '');
+  if (
+    !path &&
+    ['Read File', 'Read File(s)', 'Read Directory'].includes(rawName)
+  ) {
+    if (/^Error attempting to read files$/i.test(identity)) identity = '';
+    else
+      identity = identity.replace(/^Read (?:file(?:\(s\))?|directory)\s*/i, '');
+  }
   if (!path && /^[{[]/.test(identity)) {
     try {
       if (typeof JSON.parse(identity) === 'object') identity = '';
@@ -64,11 +82,14 @@ function toolIdentity(tool: FocusToolSummaryInput): string {
       // Bracketed filenames are not JSON argument fallbacks.
     }
   }
-  const width = Math.max(0, 40 - getCachedStringWidth(name) - 1);
+  const width = Math.max(0, maxWidth - getCachedStringWidth(name) - 1);
   if (getCachedStringWidth(identity) > width && /[/\\]/.test(identity)) {
-    identity = `…/${identity.split(/[/\\]/).at(-1)}`;
+    identity = `…/${identity.split(/[/\\]/).filter(Boolean).at(-1) ?? ''}`;
   }
-  return identity ? `${name} ${truncateToWidth(identity, width)}` : name;
+  return truncateToWidth(
+    identity ? `${name} ${truncateToWidth(identity, width)}` : name,
+    maxWidth,
+  );
 }
 
 export function getFocusToolSummary(
@@ -88,7 +109,8 @@ export function getFocusToolSummary(
         tool.status === 'pending' ||
         tool.isUserInitiated ||
         tool.isSubagent ||
-        tool.hasImages,
+        tool.hasImages ||
+        tool.hasNotice,
     )
   )
     return undefined;
@@ -97,19 +119,34 @@ export function getFocusToolSummary(
   const cancelled = tools.filter((tool) => tool.status === 'cancelled').length;
   const status =
     failed.length > 0 ? 'error' : cancelled > 0 ? 'cancelled' : 'success';
+  const maxWidth = options.maxWidth ?? 80;
   let text: string;
   if (tools.length === 1) {
-    const identity = toolIdentity(tools[0]);
-    text =
+    const template =
       status === 'error'
-        ? t('{{tool}} failed (Ctrl+O for details)', { tool: identity })
+        ? '{{tool}} failed (Ctrl+O for details)'
         : status === 'cancelled'
-          ? t('{{tool}} cancelled (Ctrl+O for details)', { tool: identity })
-          : t('{{tool}} (Ctrl+O for details)', { tool: identity });
+          ? '{{tool}} cancelled (Ctrl+O for details)'
+          : '{{tool}} (Ctrl+O for details)';
+    const suffixWidth = getCachedStringWidth(t(template, { tool: '' }));
+    const nameWidth = getCachedStringWidth(
+      localizeToolDisplayName(toolName(tools[0])),
+    );
+    const identity = toolIdentity(
+      tools[0],
+      maxWidth >= suffixWidth + nameWidth
+        ? Math.min(40, maxWidth - suffixWidth)
+        : 40,
+    );
+    text = t(template, { tool: identity });
   } else {
     const parts = [t('Tools: {{count}}', { count: String(tools.length) })];
     if (failed.length > 0) {
-      const names = [...new Set(failed.map(toolName))];
+      const names = [
+        ...new Set(
+          failed.map((tool) => localizeToolDisplayName(toolName(tool))),
+        ),
+      ];
       const labels = names.slice(0, 2).map((name) => truncateToWidth(name, 16));
       if (names.length > 2) labels.push('…');
       parts.push(
@@ -123,7 +160,16 @@ export function getFocusToolSummary(
       parts.push(
         t('cancelled: {{cancelled}}', { cancelled: String(cancelled) }),
       );
-    text = t('{{summary}} (Ctrl+O for details)', { summary: parts.join(', ') });
+    const suffixWidth = getCachedStringWidth(
+      t('{{summary}} (Ctrl+O for details)', { summary: '' }),
+    );
+    const summary = parts.join(', ');
+    text = t('{{summary}} (Ctrl+O for details)', {
+      summary:
+        maxWidth > suffixWidth
+          ? truncateToWidth(summary, maxWidth - suffixWidth)
+          : summary,
+    });
   }
-  return { text: truncateToWidth(text, options.maxWidth ?? 80), status };
+  return { text: truncateToWidth(text, maxWidth), status };
 }

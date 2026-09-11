@@ -793,6 +793,7 @@ describe('<HistoryItemDisplay />', () => {
     it.each([
       { images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }] },
       { omittedImageCount: 1 },
+      { visionBridgeNotice: 'Image sent to the configured vision provider' },
     ])('preserves image-bearing tool groups: %j', (imageOutput) => {
       vi.mocked(ToolGroupMessage).mockClear();
       renderInFocusMode(
@@ -868,6 +869,24 @@ describe('<HistoryItemDisplay />', () => {
       expect(output).toContain('Shell');
       expect(output.split('\n')).toHaveLength(1);
       expect(output.length).toBeLessThanOrEqual(30);
+    });
+
+    it('omits the whole memory label when it cannot fit beside the summary', () => {
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [successTool('memory')],
+            memoryReadCount: 20,
+            memoryWriteCount: 10,
+          }}
+          terminalWidth={50}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).toContain('Shell (Ctrl+O for details)');
+      expect(lastFrame()).not.toContain('Memory');
     });
 
     it('does NOT collapse a user-initiated tool_group', () => {

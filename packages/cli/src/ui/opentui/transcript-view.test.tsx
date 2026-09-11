@@ -163,7 +163,20 @@ describe('OpenTuiTranscriptView', () => {
         items={[
           toolItem({
             ansi: {
-              grid: [[{ text: 'A'.repeat(40) + 'OVERFLOW_MARKER' }]],
+              grid: [
+                [
+                  {
+                    text: 'A'.repeat(40) + 'OVERFLOW_MARKER',
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    dim: false,
+                    inverse: false,
+                    fg: '',
+                    bg: '',
+                  },
+                ],
+              ],
               totalLines: 1,
               totalBytes: 55,
             },
