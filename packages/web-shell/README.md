@@ -16,17 +16,38 @@ Tailwind 或额外引入全局 CSS。
 ## 浏览器任务通知
 
 通过 `qwen serve` 打开的独立 Web Shell 可在 **Settings → UI → 浏览器任务通知**
-开启提醒。默认关闭，仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
+管理提醒。内置 `main.tsx` 显式设置默认开启；用户已保存的关闭选择优先。仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
 不写入 daemon 或 workspace 设置，同源标签页之间同步。
 
 页面在后台或窗口失焦时，当前聊天及 Split View 中仍挂载的聊天在回合结束或失败后
-可以发送系统通知。取消回合、初次加载历史和前台已处理的回合保持静默。通知只显示
-通用状态，不含聊天正文、错误详情或工作目录；点击通知尝试聚焦原窗口。
+可以发送系统通知。取消回合、初次加载历史和前台已处理的回合保持静默。通知显示会话标题（最多 60 个 Unicode 码点）、回合状态，以及带“提问 / 回复”标签的本轮提问（最多 80 个码点）和回复（最多 120 个码点）纯文本摘录。
+标题显示 QwenCode · 会话名，尚未生成时使用本轮问题首行，两者均缺失时显示 QwenCode；业务文案不额外添加地址。通知携带 Qwen Code 图标，实际显示位置由浏览器和操作系统决定，不能替换 macOS 上 Chrome 自身的标志。摘要直接截取文本，不额外调用模型；提问或回复缺失时省略对应行，两者均缺失时只显示状态。失败时可显示本轮提问，不展示错误详情或部分回复。系统可能进一步截短通知正文。
+通知内容可能显示在系统通知中心或锁屏上，遵循系统的预览设置；点击通知尝试聚焦原窗口并在主聊天中打开对应会话，退出设置页或分屏；已在目标会话时不会重新加载。
 
 需要支持 Notifications API 的桌面浏览器以及 HTTPS 或可信的 localhost 环境。
 支持 Web Locks 且存储可用时，同源标签页协调去重；否则退化为页面内去重及相同 tag
 的通知替换。关闭网页、页面冻结或离开未挂载的聊天后不保证提醒。嵌入式组件不自动
 启用此能力；Channel 推送不在首版范围内。
+
+`WebShellWithProviders`（及别名 `StandaloneWebShell`）支持通过 `browserNotifications` 接入通知并配置名称和图标：
+
+```tsx
+<WebShellWithProviders
+  baseUrl="https://daemon.example.com"
+  sidebar
+  browserNotifications={{
+    defaultEnabled: true,
+    appName: 'DataAgent',
+    iconUrl: 'https://cdn.example.com/assets/dataagent.png',
+  }}
+/>
+```
+
+传入 `{}` 时使用默认 `QwenCode` 名称和随包图标；名称和图标均可单独省略，空白值也回退默认。标题显示“应用名称 · 会话标题”。图片 URL 由浏览器直接加载，可使用 HTTPS CDN 地址；加载失败不保证自动回退到默认图标。
+
+`defaultEnabled` 默认 `false`；设为 `true` 时仅对没有保存通知偏好的浏览器站点默认开启。用户明确开启或关闭的选择优先，刷新后也保留；挂载后修改默认值不会覆盖当前选择。不传 `browserNotifications` 时保持嵌入入口原有行为，不接入通知。即使默认开启，也不会自动申请权限，用户仍需在 Settings → UI 中允许浏览器通知。修改品牌值不会重新加载当前会话。通知点击只导航所属实例，并遵守其当前锁定工作区。
+
+低层 `WebShell` 的 daemon providers 由宿主管理，不支持这个配置属性；qwen serve 内置页面继续使用默认品牌。本配置仅影响通知，不改变侧边栏品牌、Chrome 来源地址或浏览器标志。
 
 ## Tailwind 与 shadcn/ui
 
@@ -275,16 +296,17 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性                 | 类型                          | 说明                                                                                                    |
-| -------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `baseUrl`            | `string`                      | daemon API 地址，未传时使用 `window.location.origin`                                                    |
-| `token`              | `string`                      | daemon API Bearer token                                                                                 |
-| `sessionId`          | `string`                      | 要连接的 session id；未传或 `undefined` 时保持空页面                                                    |
-| `workspaceId`        | `string`                      | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                         |
-| `workspaceCwd`       | `string`                      | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                    |
-| `sessionContext`     | `DaemonProductSessionContext` | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd` |
-| `lockWorkspaceCwd`   | `string`                      | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                      |
-| `restartSseOnPrompt` | `boolean`                     | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭 |
+| 属性                   | 类型                                  | 说明                                                                                                                                           |
+| ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
+| `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
+| `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
+| `sessionId`            | `string`                              | 要连接的 session id；未传或 `undefined` 时保持空页面                                                                                           |
+| `workspaceId`          | `string`                              | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                                                                |
+| `workspaceCwd`         | `string`                              | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                                                           |
+| `sessionContext`       | `DaemonProductSessionContext`         | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd`                                        |
+| `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
+| `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 
 ### WebShell
 

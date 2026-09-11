@@ -135,9 +135,19 @@ export const SystemMessage = memo(function SystemMessage({
   // The user ESC-cancelled a live stream. Render it right-aligned and subtle —
   // a user-initiated stop reads as belonging to the user side of the transcript.
   if (source === 'prompt_cancelled') {
+    const elapsedMs =
+      data && typeof data === 'object' && 'elapsedMs' in data
+        ? data.elapsedMs
+        : undefined;
     return (
       <div className={styles.cancelled} role="status">
-        <span>{t('turn.stopped')}</span>
+        <span>
+          {typeof elapsedMs === 'number' &&
+          Number.isFinite(elapsedMs) &&
+          elapsedMs >= 0
+            ? t('turn.stoppedAfter', { seconds: Math.ceil(elapsedMs / 1000) })
+            : t('turn.stopped')}
+        </span>
       </div>
     );
   }
