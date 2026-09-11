@@ -701,6 +701,64 @@ describe('Settings Loading and Merging', () => {
       expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
+    it('should warn about command hook timeouts still written in milliseconds', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'check.sh',
+                  name: 'legacy-check',
+                  timeout: 30000,
+                },
+                {
+                  type: 'command',
+                  command: 'fresh.sh',
+                  name: 'fresh-check',
+                  timeout: 30,
+                },
+                {
+                  type: 'http',
+                  url: 'https://hooks.example.com/audit',
+                  timeout: 5000,
+                },
+              ],
+            },
+          ],
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          return '{}';
+        },
+      );
+
+      const warnings = getSettingsWarnings(loadSettings(MOCK_WORKSPACE_DIR));
+
+      expect(warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'Hook "legacy-check" sets timeout 30000, which is read as 30000ms',
+          ),
+        ]),
+      );
+      expect(
+        warnings.some(
+          (warning) =>
+            warning.includes('fresh-check') ||
+            warning.includes('hooks.example.com'),
+        ),
+      ).toBe(false);
+    });
+
     it('should warn when trusted workspace empty modelProviders overrides user modelProviders', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) =>

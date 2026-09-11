@@ -57,7 +57,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
 | `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
 | `statusMessage` | `string`                 | No       | Status message displayed during execution   |
 
-`timeout` is in seconds for every hook type. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. Rewrite such values in seconds, for example `10000` as `10`; a debug-log warning names each hook that still uses the old form.
+`timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. Qwen Code warns at startup about each such hook in your user or workspace settings; rewrite the value in seconds, for example `10000` as `10`. Command hooks on `MessageDisplay`, `StopFailure` and `SessionDelete` keep running after Qwen Code exits, so without a `timeout` they stop after 60 seconds instead of 600.
 
 **Example:**
 
@@ -1360,6 +1360,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 - Cannot return decision control (operation has already occurred)
 - Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
+- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (600 seconds by default)
 
 **Example:**
 

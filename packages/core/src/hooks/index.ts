@@ -38,6 +38,10 @@ export {
   extractEnvVarNames,
 } from './envInterpolator.js';
 export { UrlValidator, createUrlValidator } from './urlValidator.js';
+export {
+  formatLegacyHookTimeoutWarning,
+  isLegacyMillisecondHookTimeout,
+} from './hook-timeout.js';
 
 // Export interfaces and enums
 export type { HookRegistryEntry } from './hookRegistry.js';

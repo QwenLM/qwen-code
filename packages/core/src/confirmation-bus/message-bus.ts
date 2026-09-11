@@ -10,6 +10,8 @@ import { MessageBusType, type Message } from './types.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 export class MessageBus extends EventEmitter {
@@ -89,10 +91,18 @@ export class MessageBus extends EventEmitter {
   async request<TRequest extends Message, TResponse extends Message>(
     request: Omit<TRequest, 'correlationId'>,
     responseType: TResponse['type'],
-    timeoutMs: number = 60000,
+    timeoutMs?: number,
     signal?: AbortSignal,
   ): Promise<TResponse> {
     const correlationId = randomUUID();
+    // Hook execution requests have no bus deadline unless the caller sets
+    // one: every hook is already bounded by its own timeout, and a shorter
+    // bus deadline would give up on a hook that is still allowed to run.
+    const effectiveTimeoutMs =
+      timeoutMs ??
+      (request.type === MessageBusType.HOOK_EXECUTION_REQUEST
+        ? undefined
+        : DEFAULT_REQUEST_TIMEOUT_MS);
 
     return new Promise<TResponse>((resolve, reject) => {
       // Check if already aborted
@@ -101,13 +111,20 @@ export class MessageBus extends EventEmitter {
         return;
       }
 
-      const timeoutId = setTimeout(() => {
-        cleanup();
-        reject(new Error(`Request timed out waiting for ${responseType}`));
-      }, timeoutMs);
+      const timeoutId =
+        effectiveTimeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              cleanup();
+              reject(
+                new Error(`Request timed out waiting for ${responseType}`),
+              );
+            }, effectiveTimeoutMs);
 
       const cleanup = () => {
-        clearTimeout(timeoutId);
+        if (timeoutId !== undefined) {
+          clearTimeout(timeoutId);
+        }
         this.unsubscribe(responseType, responseHandler);
         if (signal) {
           signal.removeEventListener('abort', abortHandler);

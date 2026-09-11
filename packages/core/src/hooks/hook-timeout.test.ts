@@ -8,6 +8,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
   LEGACY_MILLISECOND_TIMEOUT_THRESHOLD,
+  SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
+  formatLegacyHookTimeoutWarning,
+  resetLegacyTimeoutWarnings,
   resolveCommandHookTimeoutMs,
 } from './hook-timeout.js';
 
@@ -20,6 +23,7 @@ vi.mock('../utils/debugLogger.js', () => ({
 describe('resolveCommandHookTimeoutMs', () => {
   beforeEach(() => {
     warn.mockClear();
+    resetLegacyTimeoutWarnings();
   });
 
   it('defaults to 600 seconds', () => {
@@ -27,6 +31,23 @@ describe('resolveCommandHookTimeoutMs', () => {
     expect(resolveCommandHookTimeoutMs(undefined, 'default-hook')).toBe(
       600_000,
     );
+  });
+
+  it('uses the caller-provided default when no timeout is configured', () => {
+    expect(
+      resolveCommandHookTimeoutMs(
+        undefined,
+        'surviving-hook',
+        SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
+      ),
+    ).toBe(60_000);
+    expect(
+      resolveCommandHookTimeoutMs(
+        10,
+        'surviving-hook',
+        SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
+      ),
+    ).toBe(10_000);
   });
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
@@ -70,5 +91,29 @@ describe('resolveCommandHookTimeoutMs', () => {
     expect(warn).toHaveBeenCalledTimes(2);
     expect(warn.mock.calls[0]?.[0]).toContain('timeout 30000');
     expect(warn.mock.calls[0]?.[0]).toContain('Set it to 30');
+  });
+
+  it('warns in the first test that resolves a legacy value', () => {
+    resolveCommandHookTimeoutMs(45_000, 'shared-label');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns again in a later test that resolves the same legacy value', () => {
+    resolveCommandHookTimeoutMs(45_000, 'shared-label');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('formatLegacyHookTimeoutWarning', () => {
+  it('suggests the equivalent value in seconds', () => {
+    expect(formatLegacyHookTimeoutWarning(30_000, 'build')).toContain(
+      'Set it to 30 to keep this timeout.',
+    );
+  });
+
+  it('does not suggest a seconds value that would itself be read as milliseconds', () => {
+    const warning = formatLegacyHookTimeoutWarning(1_800_000, 'build');
+    expect(warning).not.toContain('Set it to 1800');
+    expect(warning).toContain('leave it as 1800000');
   });
 });

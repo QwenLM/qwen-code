@@ -255,6 +255,72 @@ describe('MessageBus', () => {
       ).rejects.toThrow('Request timed out');
     });
 
+    it('waits past the default deadline for a hook execution response', async () => {
+      vi.useFakeTimers();
+      try {
+        let correlationId = '';
+        bus.subscribe<HookExecutionRequest>(
+          MessageBusType.HOOK_EXECUTION_REQUEST,
+          (msg) => {
+            correlationId = msg.correlationId;
+          },
+        );
+        let settled = false;
+        const response = bus
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'PreToolUse',
+              input: {},
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          )
+          .finally(() => {
+            settled = true;
+          });
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(settled).toBe(false);
+
+        void bus.publish({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId,
+          success: true,
+        });
+        await expect(response).resolves.toMatchObject({ success: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still times out other requests after 60 seconds by default', async () => {
+      vi.useFakeTimers();
+      try {
+        let error: unknown;
+        const response = bus
+          .request<ToolExecutionSuccess, ToolConfirmationResponse>(
+            {
+              type: MessageBusType.TOOL_EXECUTION_SUCCESS,
+              toolCall: { name: 'noop', args: {} },
+              result: undefined,
+            },
+            MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+          )
+          .catch((caught: unknown) => {
+            error = caught;
+          });
+
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(error).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        await response;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('Request timed out');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should reject immediately when signal is already aborted', async () => {
       const controller = new AbortController();
       controller.abort();

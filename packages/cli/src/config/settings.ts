@@ -14,6 +14,8 @@ import {
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
+  formatLegacyHookTimeoutWarning,
+  isLegacyMillisecondHookTimeout,
 } from '@qwen-code/qwen-code-core';
 import type {
   MCPServerConfig,
@@ -336,6 +338,52 @@ function getModelProvidersOverrideWarnings(
 }
 
 /**
+ * Warns about command hooks whose `timeout` is still read as legacy
+ * milliseconds, so users can find and rewrite them in seconds.
+ */
+function getLegacyHookTimeoutWarnings(
+  settings: Record<string, unknown>,
+  settingsPath: string,
+): string[] {
+  const hooks = settings['hooks'];
+  if (!hooks || typeof hooks !== 'object') {
+    return [];
+  }
+  const warnings: string[] = [];
+  for (const definitions of Object.values(hooks as Record<string, unknown>)) {
+    if (!Array.isArray(definitions)) continue;
+    for (const definition of definitions) {
+      const entries = (definition as { hooks?: unknown } | null)?.hooks;
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue;
+        const { type, timeout, name, command } = entry as Record<
+          string,
+          unknown
+        >;
+        if (
+          type !== 'command' ||
+          typeof timeout !== 'number' ||
+          !isLegacyMillisecondHookTimeout(timeout)
+        ) {
+          continue;
+        }
+        const label =
+          typeof name === 'string' && name
+            ? name
+            : typeof command === 'string'
+              ? command
+              : 'command hook';
+        warnings.push(
+          `Warning: ${formatLegacyHookTimeoutWarning(timeout, label)} (${settingsPath})`,
+        );
+      }
+    }
+  }
+  return warnings;
+}
+
+/**
  * Collects warnings for ignored legacy and unknown settings keys,
  * as well as migration warnings.
  *
@@ -362,6 +410,12 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     >;
 
     for (const warning of getSettingsFileKeyWarnings(
+      settingsObject,
+      settingsFile.path,
+    )) {
+      warningSet.add(warning);
+    }
+    for (const warning of getLegacyHookTimeoutWarnings(
       settingsObject,
       settingsFile.path,
     )) {
