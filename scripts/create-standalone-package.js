@@ -72,6 +72,7 @@ const TARGET_OPENTUI_PACKAGES = new Map([
 const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
+  'codeModeHost.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
@@ -84,6 +85,7 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
+  'codeModeHost.js',
   'chunks',
   'vendor',
   'bundled',
@@ -114,7 +116,12 @@ const DIST_ALLOWED_ENTRY_PATTERNS = [
 ];
 // Emitted into dist/ by prepare-package.js for npm publishing only;
 // standalone archives must not copy them into lib/.
-const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set(['postinstall.js', 'patches']);
+const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set([
+  'export-transcript-document.js',
+  'export-transcript-document.css',
+  'postinstall.js',
+  'patches',
+]);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
 if (isMainModule()) {

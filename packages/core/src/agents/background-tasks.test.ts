@@ -96,6 +96,24 @@ function makeWaitingEvent(
 }
 
 describe('notification emission and agent context (#7156)', () => {
+  it('omits the internal agent type from the notification card label', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(
+      makeRegistration('bg-1', {
+        description: 'Explore: Check Node.js requirements',
+        subagentType: 'Explore',
+      }),
+    );
+
+    registry.complete('bg-1', 'done');
+
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      label: 'Check Node.js requirements',
+    });
+  });
+
   it('captures the Todo work-chain owner at registration', () => {
     const registry = new BackgroundTaskRegistry();
     const entry = todoWorkChainContext.run('work-chain-1', () =>
@@ -2080,6 +2098,21 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.drainMessages('test-1')).toEqual([]);
     });
 
+    it('refuses messages to running one-shot agents', () => {
+      registry.register({
+        agentId: 'one-shot',
+        description: 'Codex task',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/one-shot.jsonl',
+        resumeBlockedReason: 'Start a new task.',
+      });
+      expect(registry.queueExternalInput('one-shot', 'continue')).toBe(false);
+      expect(registry.drainMessages('one-shot')).toEqual([]);
+    });
+
     it('resolves empty when the wait signal is aborted', async () => {
       registry.register({
         agentId: 'test-1',
@@ -2234,6 +2267,9 @@ describe('BackgroundTaskRegistry', () => {
       expect(callback.mock.calls[0]![1]).toContain(
         '<all-terminal>false</all-terminal>',
       );
+      expect(callback.mock.calls[0]![2]).toMatchObject({
+        label: 'spawned',
+      });
     });
 
     it('counts a top-level reserved background launch as remaining', () => {

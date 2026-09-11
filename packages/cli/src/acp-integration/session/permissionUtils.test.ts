@@ -130,6 +130,51 @@ describe('permissionUtils', () => {
       ]);
     });
 
+    it('offers switch-to-Default after consecutive classifier failures', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'consecutive_unavailable',
+          message: 'Auto Mode could not classify consecutive actions.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toContainEqual({
+        optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        name: 'Switch to Default Mode and allow once (recommended)',
+        kind: 'allow_once',
+      });
+    });
+
+    it('keeps blocked retries in Auto Mode and hides persistent choices', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
+
     it('can hide project persistence while keeping user persistence', () => {
       const options = toPermissionOptions(
         {
@@ -226,6 +271,30 @@ describe('permissionUtils', () => {
         }),
       ).toEqual({});
     });
+  });
+
+  it('forwards the complete plain-text Goal approval prompt', () => {
+    const prompt = 'Replace the paused Goal?\n\nOutcome: fix **all** tests.';
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Set this as the session Goal?',
+        prompt,
+        renderPromptAsPlainText: true,
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([{ type: 'content', content: { type: 'text', text: prompt } }]);
+  });
+
+  it('preserves the existing content contract for other info approvals', () => {
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Confirm',
+        prompt: 'Existing informational prompt',
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([]);
   });
 
   it('places warnings before edit diff content', () => {

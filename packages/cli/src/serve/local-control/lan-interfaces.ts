@@ -35,7 +35,7 @@ function isLanIpv4(address: string): boolean {
   return false;
 }
 
-function isSoftwareNetwork(interfaceName: string): boolean {
+export function isSoftwareNetwork(interfaceName: string): boolean {
   // `vpn` matches as a substring, deliberately looser than the bounded
   // tokens below: consumer VPN adapter names almost always END in "VPN"
   // (OpenVPN Wintun, NordVPN, ExpressVPN…) or embed it mid-word (vpnkit),

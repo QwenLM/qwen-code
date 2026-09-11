@@ -1113,14 +1113,12 @@ describe('GithubChannel', () => {
       expect(config.allowedUsers).toEqual(['alice']);
     });
 
-    it('forces final-only delivery and appends the publication policy', () => {
+    it('appends the publication policy', () => {
       const config = makeConfig({
-        blockStreaming: 'on',
         instructions: 'Respond in Chinese.',
       });
       new TestableGithubChannel('test-github', config, makeBridge());
 
-      expect(config.blockStreaming).toBe('off');
       expect(config.instructions).toContain('GitHub publication policy:');
       expect(config.instructions).toContain('<no-reply/>');
       expect(config.instructions).toContain('Respond in Chinese.');
@@ -1483,7 +1481,7 @@ describe('GithubChannel', () => {
           makeComment({
             id: 1002,
             node_id: 'C_1002',
-            body: '@test-bot check this review note',
+            body: '@test-bot /review check this review note',
             created_at: '2026-07-04T09:30:00.000Z',
             user: { login: 'bob' },
           }),
@@ -1511,7 +1509,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: ' check this review note',
+        text: ' /review check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1718,6 +1716,35 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it('aggregates ordinary comments and preserves literal slash-prefixed text', async () => {
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ignore this' }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            body: '/review inspect this',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        displayText: '- @alice: ignore this\n- @bob: /review inspect this',
+      });
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
+    });
 
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({

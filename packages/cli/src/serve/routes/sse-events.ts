@@ -214,6 +214,8 @@ export function registerSseEventsRoutes(
     };
     let slowWarningCount = 0;
     let eventBusEvictionReason: string | undefined;
+    let closeReason: SseCloseReason | undefined;
+    let terminalEventType: string | undefined;
     const onSubscriberDiagnostic = (
       diagnostic: EventBusSubscriberDiagnostic,
     ): boolean => {
@@ -322,6 +324,23 @@ export function registerSseEventsRoutes(
               : {}),
           },
         );
+        closeReason = 'event_bus_evicted';
+        terminalEventType = 'client_evicted';
+        const evictionData = { ...diagnostic.data };
+        Reflect.deleteProperty(evictionData, 'triggerEventType');
+        Reflect.deleteProperty(evictionData, 'triggerEventBytes');
+        try {
+          res.write(
+            formatSseFrame({
+              v: 1,
+              type: 'client_evicted',
+              data: evictionData,
+            }),
+          );
+        } catch {
+          /* socket already destroyed; reconnect still proceeds. */
+        }
+        res.destroy();
       }
       return handled;
     };
@@ -449,9 +468,7 @@ export function registerSseEventsRoutes(
     }
 
     const openedAt = performance.now();
-    let closeReason: SseCloseReason | undefined;
     let terminalCandidate: SseCloseReason | undefined;
-    let terminalEventType: string | undefined;
     let eventFramesWriteSettled = 0;
     let lastEventIdWritten: number | undefined;
     let backpressureCount = 0;
@@ -1050,7 +1067,7 @@ export function registerSseEventsRoutes(
         }
       } finally {
         cleanup();
-        if (!res.writableEnded) res.end();
+        if (!res.destroyed && !res.writableEnded) res.end();
       }
     })();
   });

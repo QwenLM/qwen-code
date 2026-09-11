@@ -18,13 +18,15 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
-  mkdirSync,
-  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -32,8 +34,10 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { isSubpath } from '@qwen-code/qwen-code-core';
+import { REVIEW_TMP_DIR } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -75,6 +79,14 @@ const GIT_ENV_CONFIG = [
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_PARAMETERS',
+  // The one config key with an environment spelling of its own:
+  // `GIT_DEFAULT_HASH` is `init.defaultObjectFormat`, and it changes what a
+  // bare `git init` creates — a sha256 store beside a sha1 source cannot
+  // read the source's objects through an alternates pointer, so the
+  // standalone scratch tree would stand up unable to check out the reviewed
+  // head. The tree names the source's format explicitly as well; this
+  // closes the class the way the numbered keys above are closed.
+  'GIT_DEFAULT_HASH',
 ];
 
 /**
@@ -110,6 +122,799 @@ const GIT_ENV_EXEC = [
 ];
 
 /**
+ * The directory to mount for a command running in `cwd`, or null when `cwd` is
+ * not one of the pipeline's trees.
+ *
+ * Not the tree: the dependency farm links out of every tree into the review
+ * worktree's `node_modules`, so a per-tree mount leaves every link dangling.
+ * Every tree the pipeline builds is a sibling under the review temp dir, so
+ * that directory covers both ends of every link while `<repo>/.git` stays
+ * outside it.
+ *
+ * `lastIndexOf`, because a review run from inside another review's worktree —
+ * this pipeline's own dogfood geometry — nests one `.qwen/tmp` inside another,
+ * and the FIRST occurrence would widen the mount to the outer temp dir,
+ * pulling `<repo>/.git` and every sibling checkout in with it. Tree names
+ * cannot contain a separator (scratch labels flatten to `[A-Za-z0-9._-]`), so
+ * the deepest occurrence is always the tree's own parent.
+ *
+ * The MOUNT is the deepest one; the DISTRUST judgement is not. Which directory
+ * may be handed to a container read-write and which directories reviewed code
+ * may already have written are two different questions, and in the nested
+ * geometry above they have two different answers — see
+ * `adminEntryInsideReviewTmp`, which widens only the second.
+ *
+ * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
+ * the tree under test IS the user's working copy and there is no sibling
+ * layout to mount. Null for two more reasons besides, and they are NOT the
+ * same answer: an unmountable spelling (containment cannot exist there, so
+ * the mount is no trust boundary) and a REFUSAL (a redirect, a root that
+ * vanished mid-check). The mount side needs only the null; the gates need the
+ * split, and `mountNullKind` answers it from the same single implementation —
+ * a second arithmetic to keep in lockstep is how the two drifts this function
+ * already shipped happened.
+ */
+export function mountRootFor(cwd: string): string | null {
+  return mountRootVerdict(cwd).root;
+}
+
+/**
+ * Which kind of nothing a null mount root is, for the gates that consume one.
+ *
+ * - `outside`: the spelling carries no review-temp marker at all. Nothing to
+ *   police; silent.
+ * - `unmountable`: the root's spelling is one the container's mount grammar
+ *   cannot write (`unmountableRootSpelling` — every absolute Windows path, a
+ *   colon-bearing POSIX checkout, a UNC share). Containment cannot exist
+ *   there, so the mount was never a trust boundary: the review's phases ran
+ *   as the host user all along, and a planted pointer buys its writer nothing
+ *   it could not already do. Silent — exactly what the gates' docstrings
+ *   promise ("nothing at all where containment cannot exist"). Reading this
+ *   null as a refusal made every location gate refuse unconditionally on
+ *   Windows — measured as 43 red tests in the scratch-tree and revert-hunk
+ *   suites under the declared Windows model.
+ * - `refused`: inside the spelling, mountable, and STILL no root — the walk
+ *   caught a symlink redirect, or the root vanished between the spelling and
+ *   the realpath (the rename attack). Those are exactly the shapes a
+ *   host-side command must not resolve through. Fail closed.
+ */
+export type MountNullKind = 'outside' | 'unmountable' | 'refused';
+
+/**
+ * The kind of a null `mountRootFor` just answered — the gates' half of the
+ * split `mountRootFor`'s docstring describes.
+ *
+ * Recomputed, never derived from the null alone: the gates' mount provider is
+ * injectable (the suites drive the judgement with fixture roots), so the null
+ * carries no reason with it, and re-asking the real question keeps an
+ * injected null over a real fixture honest. Asked only after a null; a root
+ * that mounts fine by the time this re-ask lands means the two observations
+ * raced, and the fail-closed reading of a flipped answer is the refusal.
+ */
+export function mountNullKind(cwd: string): MountNullKind {
+  return mountRootVerdict(cwd).nullKind ?? 'refused';
+}
+
+/** `mountRootFor` and `mountNullKind`'s shared answer — see them. */
+function mountRootVerdict(cwd: string): {
+  root: string | null;
+  nullKind: MountNullKind | null;
+} {
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  // `+ sep` so a process standing AT the review temp dir is judged inside it.
+  // The marker ends in a separator, so the root itself matched no temp dir:
+  // the launch-directory question went unpolicied there, and the negative was
+  // memoized as trusted.
+  const at = (resolved + sep).lastIndexOf(marker);
+  if (at < 0) return { root: null, nullKind: 'outside' };
+  const root = resolved.slice(0, at + marker.length - 1);
+  // A LEXICAL root is not a safe mount target. `resolve` never touches the
+  // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
+  // 120000 and materialised by a fresh clone — silently widens a read-write
+  // bind mount to wherever it points. Every other creating or destroying path
+  // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
+  // `resetScratchTree`); the mount is the one place a redirect would hand the
+  // reviewed code a directory nobody chose.
+  //
+  // The walk's bound is geometry-aware. `outermostReviewTmpRoot(root) ===
+  // root` is the flat case — one review temp dir on the path — and the bound
+  // is the `.qwen` directory: `.qwen/tmp` and `.qwen` stay inside the walk (a
+  // link at either redirects the whole path), but the walk does not reach the
+  // CHECKOUT itself. `redirectedAncestor` lstats the stop directory before
+  // the stop test fires, so a bound at the repository root policed the
+  // checkout's own directory — and a checkout whose own name is a link (a
+  // `--tree` argument typed through a `current -> release-N` link, a shell's
+  // logical $PWD) refused at every gate even though the answer handed back
+  // here is canonicalised by `realpathSync` below, so that link redirects
+  // nothing the mount trusts. A bound one component higher still lstats the
+  // checkout's DIRECT parent before the stop test fires, so a link there —
+  // a checkout one hop below a linked directory, the everyday macOS shape —
+  // was read as a redirect in a path the pipeline owns, and `--sandbox=auto`
+  // silently degraded to unsandboxed execution of the reviewed code over a
+  // false refusal. The sibling walks (scratch-tree's, `worktreeResidue`'s)
+  // bound at the repository root for exactly this reason.
+  //
+  // The nested case — one review's worktree inside another's, the dogfood
+  // geometry — bounds at the OUTERMOST enclosing review temp root instead:
+  // the outer review's containerized phase held that directory read-write, so
+  // a link planted there sits inside a writable surface and must stay inside
+  // the walk, exactly as `adminEntryInsideReviewTmp` judges distrust against
+  // the outermost root rather than the one the mount was cut at.
+  const outermost = outermostReviewTmpRoot(root);
+  const bound = outermost === root ? resolve(root, '..') : outermost;
+  try {
+    if (redirectedAncestor(root, bound) !== null) {
+      return { root: null, nullKind: 'refused' };
+    }
+    const real = realpathSync(root);
+    // `-v src:dst` separates its fields with `:`, so a root that contains one
+    // cannot be spelled in that grammar at all: docker answers `invalid spec
+    // ... too many colons` and every command in the phase hard-fails with a
+    // raw mount error. Under `auto` those land as build/test failures the
+    // report attributes to the PR; under `required` the gate passes and the
+    // refusal that should have explained it never happens. Both designed
+    // degradations are bypassed because this said "mountable" about a root
+    // that is not. `unmountableRootSpelling` owns the refusal class; saying
+    // so here gives `auto` its direct fallback and `required` its refusal
+    // instead of the runtime's parse error on every single command.
+    if (unmountableRootSpelling(real)) {
+      return { root: null, nullKind: 'unmountable' };
+    }
+    return { root: real, nullKind: null };
+  } catch {
+    // A root that vanished between the spelling and the realpath is the
+    // rename attack's shape — an ancestor moved out from under the path —
+    // not a mountable answer that failed to materialise.
+    return { root: null, nullKind: 'refused' };
+  }
+}
+
+/**
+ * Whether a mount root's SPELLING is one the container's mount grammar cannot
+ * write. Pure, so both arms of the refusal class are pinnable on every host —
+ * a UNC path cannot be constructed off Windows, and a colon in a repository
+ * path is legal but rare.
+ *
+ * `-v src:dst` has exactly one separator. The colon arm covers a `:` anywhere
+ * in the root — which on Windows is EVERY absolute path, and that is the
+ * right answer rather than a casualty of it: a drive letter is a colon, and
+ * the mount this builds uses one path as both source and target, which a
+ * Windows path cannot be — the container side has no `C:`. So containment is
+ * not available there.
+ *
+ * The UNC arm is the same class with no colon in it: `\\server\share\...` is
+ * an absolute Windows path a colon-only check declares mountable, and the
+ * mount grammar cannot spell it either. Refusing it keeps the "on Windows
+ * this refuses EVERY absolute path" claim true as written, instead of sending
+ * a UNC checkout's every sandboxed command into a raw mount error the report
+ * attributes to the PR.
+ */
+export function unmountableRootSpelling(root: string): boolean {
+  return root.includes(':') || root.startsWith('\\\\');
+}
+
+/**
+ * Whether `cwd`'s spelling places it inside a review temp dir — the same
+ * deepest-marker arithmetic `mountRootFor` cuts with, and NOTHING else: no
+ * realpath, no lstat, no filesystem question of any kind.
+ *
+ * The gates consume this beside `mountRootFor`, not instead of it, because
+ * that function's null is overloaded: "outside any temp dir, nothing to
+ * police" and "inside one, but REFUSED — a symlink redirects it, or the root
+ * vanished mid-check" were the same value, and every gate read a refusal as
+ * "nothing to police". That is the fail-open direction inverted: the shapes
+ * `mountRootFor` refuses are exactly the ones a host-side command must not
+ * resolve through. So where this lexical scan says INSIDE and
+ * `mountRootFor` says null, the gate splits the null with `mountNullKind` —
+ * a REFUSAL fails closed, an unmountable spelling stays silent (containment
+ * cannot exist there, so the mount is no trust boundary) — and where the
+ * spelling carries no marker at all, the answer costs no syscall, which is
+ * what keeps an ordinary checkout off this machinery. The launch-dir memo in
+ * `lib/git.ts` uses this scan as the cheap pre-filter that decides what may
+ * never be memoized.
+ */
+export function insideReviewTmpLexically(cwd: string): boolean {
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  return (resolved + sep).lastIndexOf(marker) >= 0;
+}
+
+/**
+ * A `rev-parse` answer, and which kind of no-answer a null was.
+ *
+ * `notARepository` separates the one null a gate may pass through — git ran
+ * and said this is not a repository, which is the caller's own error path to
+ * own — from every other null: a timeout, a spawn failure, any other fatal.
+ * Reading the second as the first made two of the three gates below answer
+ * "no objection" to a question git was never asked, and `revParse`'s budget
+ * is a quarter of the protected commands' (or, in `worktreeResidue`, of
+ * nothing at all), so a config sized to parse between the two reached the
+ * command the gate had just declined to judge.
+ */
+type RevParse = { value: string | null; notARepository: boolean };
+
+/**
+ * git's own answer to "which repository does this path resolve to".
+ *
+ * ASK GIT, rather than parsing the pointer here. The first cut read the
+ * gitfile and resolved it in Node, and the two resolvers disagree in ways
+ * that are individually small and collectively unbounded: JS `trim()` strips
+ * U+00A0 (and U+FEFF, the U+2000 block, …) while git's `read_gitfile` trims
+ * only C-locale space, so `gitdir: <NBSP><real entry>` resolves to the real
+ * entry here — outside the mount, admitted — and to a planted one inside it
+ * there; and `resolve()` is lexical while a spawned git resolves a relative
+ * target against the tree's PHYSICAL path after chdir. Every such divergence
+ * admits a pointer whose real referent only git sees, and the list of them
+ * has no last entry.
+ *
+ * So the resolver that decides is the resolver that acts. This asks git for
+ * the same answer the gated command will use, and the callers then make the
+ * only judgment that is theirs to make: WHERE that answer lives. Reading is safe —
+ * no checkout, no index refresh — and hooks and fsmonitor are inert arguments
+ * anyway, so a planted config cannot turn the question into an execution.
+ *
+ * The terminator `rev-parse` adds is stripped, and NOTHING else. `.trim()`
+ * here re-opened the very divergence the paragraph above closes: it also
+ * removes U+00A0, U+FEFF and the U+2000 block, so an admin entry whose
+ * directory name ENDS in one of those is resolved by git with the character
+ * kept and judged by the caller with it gone — and a twin of that name without
+ * it, symlinked outside the mount, is what the judgment then lands on. The
+ * resolver that decides has to receive git's answer unedited.
+ */
+function resolvedGitDir(cwd: string): RevParse {
+  return revParse(cwd, '--absolute-git-dir');
+}
+
+/**
+ * The common dir of the repository `cwd` resolves to, WITH the kind of
+ * no-answer a null was.
+ *
+ * One value per invocation, like every other `rev-parse` in this file: a
+ * combined answer would have to be split on a newline, and a POSIX path may
+ * carry one.
+ *
+ * The taxonomy is carried rather than flattened, for the reason `RevParse`'s
+ * own docstring gives: dropping it made question 2 read a timeout, an
+ * EMFILE/ENOMEM spawn failure or a git too old for `--path-format` as "no
+ * objection" — and question 2 is the ONLY one that sees `gitdir: <repo>/.git`
+ * (question 1 passes, the entry being outside the mount; question 3 passes,
+ * a main repository having no `gitdir` backpointer to read). So a silent
+ * question 2 certified the shape it exists to refuse.
+ */
+function resolvedCommonDir(cwd: string): RevParse {
+  return revParse(cwd, '--path-format=absolute', '--git-common-dir');
+}
+
+/**
+ * The sanitized single-value `rev-parse` both location questions share.
+ *
+ * Strips git's terminal record delimiter and NOTHING else — never `.trim()`,
+ * for the reason `resolvedGitDir` gives.
+ */
+function revParse(cwd: string, ...flags: string[]): RevParse {
+  const resolved = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+      'rev-parse',
+      ...flags,
+    ],
+    {
+      cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+      // `LC_ALL`, because `notARepository` below reads git's own sentence: a
+      // localized one classifies a launch directory that genuinely is no
+      // repository as "could not be run" and refuses it. The pin
+      // `core/utils/git-branches.ts` sets for the same reason.
+      env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
+    },
+  );
+  const value =
+    resolved.error || resolved.status !== 0 || !resolved.stdout
+      ? null
+      : resolved.stdout.replace(/\n$/, '');
+  return {
+    // `\n` only, not `\r?\n`: git plumbing terminates with `\n` on every
+    // platform, so a `\r` in that regex is a `\r` that was the LAST BYTE OF
+    // THE PATH — and the judgment then landed on the twin of a plant named
+    // `evil\r`, symlinked outside the mount, while every gated command
+    // resolved through the plant.
+    //
+    // U+FFFD is the lossy-decode class, failed closed the same way:
+    // `encoding: 'utf8'` maps an undecodable byte in git's byte-exact answer
+    // to U+FFFD, so a path holding an invalid UTF-8 byte is judged at the
+    // U+FFFD spelling while git acts on the original bytes — a plant under
+    // the raw-byte name and a decoy under the U+FFFD one, symlinked outside
+    // the mount, is exactly what the location question is for. No gate may
+    // judge a spelling git never printed, so the answer counts as not given.
+    value: value !== null && value.includes('�') ? null : value,
+    notARepository:
+      resolved.status === 128 &&
+      resolved.stderr.includes('not a git repository'),
+  };
+}
+
+/**
+ * Why a `.git` pointer is not one a host-side command may act through, or null
+ * when it is.
+ *
+ * Two questions, because a rewritten gitfile has two shapes and the first
+ * cannot see the second:
+ *
+ * - WHERE the admin entry lives — `adminEntryInsideReviewTmp`, the surface the
+ *   reviewed code can write;
+ * - WHETHER it is an admin entry at all. `gitdir: <repo>/.git` names the
+ *   repository's OWN common dir, which resolves outside the mount and so
+ *   passes the location question, while every command through it acts on the
+ *   MAIN repository: measured, `status` rewrote the main index and `rev-parse
+ *   HEAD` answered the main head, so the reads a review treats as fact came
+ *   from a tree nobody verified. No `worktree add` writes that pointer — a
+ *   linked worktree's admin entry is always `<common>/worktrees/<id>` — which
+ *   is why `resetScratchTree` already refuses the same equality.
+ *
+ * git not answering the second question IS a refusal — the one exception
+ * being git's own "not a git repository", which is the caller's error path to
+ * own. Reading every other no-answer as "no objection" was measured to admit
+ * `gitdir: <repo>/.git` outright, because question 2 is the only one of the
+ * three that can see that shape; a host whose git is too old for
+ * `--path-format` has no working review inside a mount either way, so
+ * refusing there costs nothing that was working.
+ *
+ * `expectedOwner` is the tree the entry must OWN: the tree root itself from
+ * `untrustedGitfile`, git's own `--show-toplevel` answer from
+ * `untrustedRepositoryFrom` (whose `dir` may be any subdirectory of the
+ * checkout). `root` is the mount root the caller already observed, threaded
+ * rather than re-asked: a second ask can answer differently than the first —
+ * the outer mount's writer flips it mid-gate — and a re-asked null used to
+ * read as "nothing to police" here, admitting a location the entrance had
+ * just refused (measured: the same state refused when steady, admitted when
+ * the change landed between the two asks).
+ */
+function untrustedPointer(
+  dir: string,
+  gitDir: string,
+  expectedOwner: string,
+  root: string,
+): string | null {
+  if (adminEntryInsideReviewTmp(gitDir, root, dir)) {
+    return 'resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it';
+  }
+  const common = resolvedCommonDir(dir);
+  if (common.value === null && !common.notARepository) {
+    // git was ASKED and did not answer — a timeout, a spawn failure, a git
+    // too old for `--path-format`. Not the same as "git ran and said this is
+    // no repository", which is the caller's own error path and passes here.
+    // Failing open on the first was the mis-classification `RevParse` exists
+    // to prevent: it is the arm that lets `gitdir: <repo>/.git` through, and
+    // one `rev-parse` losing a race with a 30 s timeout is not evidence.
+    return (
+      'git could not resolve its own common dir from this tree, so whether ' +
+      "the pointer names the main repository instead of a linked worktree's " +
+      'admin entry is unknown'
+    );
+  }
+  if (common.value !== null && common.value === gitDir) {
+    return (
+      "resolves to the repository's own common dir rather than a linked " +
+      "worktree's admin entry, so every command through it acts on the main " +
+      'repository instead of this tree'
+    );
+  }
+  // The backpointer round-trip the write paths already carry
+  // (scratch-tree.ts), because a rewritten gitfile has a THIRD shape the two
+  // questions above cannot see: ANOTHER tree's legitimate admin entry. That
+  // entry is outside the mount (question 1 passes) and is not the common dir
+  // (question 2 passes — a linked worktree's common dir differs from its git
+  // dir), while every host-side command through it measures and mutates the
+  // tree it actually belongs to. The entry's `gitdir` file names the `.git`
+  // of the tree it belongs to; a borrowed entry names that tree's.
+  //
+  // The comparison is EXACT — the owner IS the expected tree, not an ancestor
+  // of it: `dir` may be a subdirectory of its checkout, so the callers name
+  // the tree rather than `dir`, and the older ancestor-tolerant comparison
+  // admitted a gitfile borrowing the ENCLOSING review worktree's entry in the
+  // nested geometry (the outer tree IS an ancestor of the inner one), after
+  // which every read answered out of the outer tree's index — measured, a
+  // `status` through the borrowed entry reported the outer tree's staged
+  // file. And it cannot be canonicalised blind: the owner path lives inside
+  // the read-write mount for every tree this pipeline builds, so a link
+  // planted at the owner's spelling makes a naive realpath comparison agree
+  // with whatever the link points at — measured, a sibling's spelling
+  // replaced by a link to THIS tree round-tripped clean while commands
+  // through the entry wrote the sibling's index. So a redirect between the
+  // mount root and the owner is refused BEFORE anything resolves through it,
+  // and an owner that cannot be resolved at all — the borrowed sibling's
+  // tree deleted, a symlink loop; git keeps answering through the entry
+  // regardless (measured) — does not point back at this tree, the same
+  // decision `worktreeResidue` makes for the same shape.
+  let backpointer: string;
+  try {
+    // `\n` only, never `.trim()`: the same divergence `resolvedGitDir`
+    // documents — a path ending in U+00A0 or U+FEFF is resolved by git with
+    // the character kept and would be judged here with it gone.
+    backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').replace(
+      /\n$/,
+      '',
+    );
+  } catch {
+    return null;
+  }
+  const ownerSpelled = dirname(resolve(gitDir, backpointer));
+  let ownerTree: string | null;
+  try {
+    ownerTree = realpathSync(ownerSpelled);
+  } catch {
+    ownerTree = null;
+  }
+  // The containment question is asked of the owner AS SPELLED, and the mount
+  // root is the boundary, because that spelling is what makes the link
+  // plantable: reviewed code holds the mount read-write, so a symlink on the
+  // owner's path is its to plant exactly when the owner's path runs through
+  // the root. A link anywhere else is the user's own layout — a backpointer
+  // spelled through one that RESOLVES at this tree names the right tree, and
+  // refusing it failed closed on a shape that redirects nothing (the alias
+  // case the residue probe pins). Under the root, the link is the plant:
+  // replacing the borrowed sibling's tree with a link to THIS one makes a
+  // canonicalising comparison agree with itself — measured, the admitted
+  // pointer then wrote the sibling's index — so the redirect is refused
+  // before anything resolves through it.
+  //
+  // The boundary is the OUTERMOST review temp root on `root`'s own path, the
+  // same widening `adminEntryInsideReviewTmp` applies two questions above and
+  // for the same reason: `mountRootFor` cuts at the DEEPEST `.qwen/tmp`, but
+  // in the nested geometry the OUTER review's containerized phase held the
+  // enclosing `.qwen/tmp` read-write. Bounded at the deepest root, an owner
+  // spelling one layer up — a sibling of the outer worktree, relinked at this
+  // tree — sat outside the containment test, `redirectedAncestor` was never
+  // called, and the realpath round trip then agreed with the link and
+  // admitted the borrowed entry (measured: commands through it moved the
+  // sibling's index, not this tree's). Widening costs the honest layouts
+  // nothing for the reason given there — git writes a linked worktree's admin
+  // entry under the MAIN repository, outside every layer.
+  const writableRoot = outermostReviewTmpRoot(root);
+  if (ownerSpelled === writableRoot || isSubpath(writableRoot, ownerSpelled)) {
+    const redirect = redirectedAncestor(ownerSpelled, writableRoot);
+    if (redirect !== null) {
+      return (
+        "resolves to a different tree's admin entry — the owner its gitdir " +
+        `backpointer names resolves through a symlink inside the review ` +
+        `temp dir (${redirect}), so the round trip would agree with ` +
+        'whatever the link points at'
+      );
+    }
+  }
+  let expectedReal: string;
+  try {
+    expectedReal = realpathSync(expectedOwner);
+  } catch {
+    // The expected tree not resolving is the caller's own absent-path case,
+    // answered before the pointer question was ever asked; reaching it here
+    // means the ground moved mid-gate, which is the refusal direction.
+    return 'could not resolve the tree the entry must belong to';
+  }
+  if (ownerTree === null) {
+    // An owner that cannot be resolved — the borrowed sibling's tree
+    // deleted, a symlink loop — does not point back at this tree: git keeps
+    // answering through the entry regardless (its index, its HEAD), so a
+    // swallow here admitted the borrow with the owner gone (measured). The
+    // same shape the residue probe's round trip refuses with the same
+    // words; failing open was the outlier.
+    return (
+      'resolves to an admin entry that does not point back at this tree — ' +
+      'the owner its backpointer names cannot be resolved, so the commands ' +
+      'this gates would measure whichever repository it does name'
+    );
+  }
+  if (ownerTree !== expectedReal) {
+    return (
+      "resolves to a different tree's admin entry — its gitdir " +
+      'backpointer names that tree, not this one, so every command ' +
+      'through it would measure and mutate the tree it actually belongs to'
+    );
+  }
+  return null;
+}
+
+/**
+ * The same location question, asked from a directory that need not be a
+ * worktree ROOT.
+ *
+ * `untrustedGitfile` demands `<tree>/.git`, which is right for the trees this
+ * pipeline builds and wrong for the directory a command was launched from: any
+ * subdirectory of a checkout has no `.git` of its own, and git finds the
+ * repository by walking up. Requiring one there refused every worktree
+ * creation whose cwd sat inside a review temp dir without being its root — the
+ * nested/dogfood geometry this pipeline runs in, and 77 tests in one suite.
+ *
+ * So this asks git the same question `worktree add` will ask, from the same
+ * place, and judges only WHERE the answer lives. No shape check: the shape
+ * belongs to the tree, and this is not one.
+ */
+export function untrustedRepositoryFrom(
+  cwd: string,
+  mountRoot: (dir: string) => string | null = mountRootFor,
+): string | null {
+  // INSIDE-by-spelling and mount-null together need the null's KIND (see
+  // `mountNullKind`): an UNMOUNTABLE spelling stays silent — where
+  // containment cannot exist the mount is no trust boundary — while a
+  // REFUSAL (a symlinked `.qwen/tmp`, a root that vanished mid-check) names
+  // precisely a directory no host-side command may resolve through. Reading
+  // the refusal as "outside any temp dir" inverted the gate's fail
+  // direction, measured end-to-end with a symlinked `.qwen/tmp`.
+  const root = mountRoot(cwd);
+  if (root === null) {
+    if (mountNullKind(cwd) !== 'refused') return null;
+    return (
+      `${cwd}: the path is inside the review temp dir by spelling, but no ` +
+      `mount root answered for it — a redirect or a root that vanished ` +
+      `mid-check refused it, so where a command run from here would land ` +
+      `is unmeasured`
+    );
+  }
+  if (!existsSync(cwd)) {
+    // Inside the same spelling, a launch directory that is not there is the
+    // rename attack, not "no objection": `mv .qwen .qwen-real` from inside
+    // the outer mount leaves the stale spelling matching lexically while
+    // `mountRootFor` stops answering, and the next call at the re-stood-up
+    // spelling must be judged fresh, never inherited. Outside the spelling
+    // nothing changed: absence stays the caller's own error path.
+    if (!insideReviewTmpLexically(cwd)) return null;
+    return (
+      `${cwd}: no directory exists at this spelling inside the review temp ` +
+      `dir — an ancestor was renamed out from under it, so where a command ` +
+      `run from here would land is unmeasured`
+    );
+  }
+  const target = resolvedGitDir(cwd);
+  if (target.value === null) {
+    // Not a repository from here at all — the caller's own error path owns
+    // that, and refusing would answer a question nobody asked. Any OTHER null
+    // is git not answering, and "could not be run" is not "no objection": the
+    // command this gates resolves through a pointer nobody judged.
+    return target.notARepository
+      ? null
+      : `${cwd}: git could not resolve its own git dir, so where a command run from here would land is unmeasured`;
+  }
+  // The tree the resolved entry must OWN, as git itself answers it. `cwd`
+  // may be any subdirectory of the checkout, so the owner cannot be compared
+  // against `cwd` — and comparing loosely (the owner an ANCESTOR of `cwd`)
+  // admitted a gitfile borrowing the ENCLOSING review worktree's admin entry
+  // in the nested geometry, after which every command here measured the
+  // outer tree's index. `--show-toplevel` prints the tree the gitfile sits
+  // in even through a borrowed entry (measured), which is the one answer the
+  // borrow cannot bring into agreement with the entry's own backpointer.
+  const toplevel = revParse(cwd, '--show-toplevel');
+  if (toplevel.value === null) {
+    // The repository answered --absolute-git-dir but not this — a bare repo,
+    // a cwd inside `.git`. No tree owns those, so no tree's pointer is
+    // certified either: fail closed, as with the git-dir question above.
+    return `${cwd}: git could not resolve its own top-level directory, so where a command run from here would land is unmeasured`;
+  }
+  const why = untrustedPointer(cwd, target.value, toplevel.value, root);
+  return why === null ? null : `${cwd} ${why}`;
+}
+
+/**
+ * Why a tree's own gitfile cannot be trusted to resolve a host-side git command.
+ *
+ * Returns a refusal, or null when there is nothing to police. Every host-side
+ * git command resolves the repository through the `.git` of the tree it runs
+ * in, and for every tree this pipeline builds that `.git` sits inside the
+ * directory the sandbox mounts read-write. Two shapes reach a planted
+ * repository from there, and both end in a `filter.<x>` command running on the
+ * host:
+ *
+ * - the gitfile rewritten to an admin entry planted under the same mount, and
+ * - the gitfile REPLACED by a `.git` directory, which is a repository of the
+ *   writer's own and skips every identity gate written for the gitfile shape.
+ *
+ * Neither is a shape the pipeline creates under the mount — its trees come
+ * from `git worktree add`, which writes a gitfile pointing at
+ * `<repo>/.git/worktrees/` — so refusing both costs nothing. Outside a mount
+ * this says nothing at all: a plain checkout's `.git` IS a directory, and
+ * refusing that would refuse every ordinary repository.
+ *
+ * WHERE IT IS ASKED — kept as a list because this gate was first added one
+ * call site at a time, and a class closed call site by call site re-opens at
+ * the next call site somebody adds:
+ *
+ * - writes: `scratch-tree`'s reuse, rebuild and standalone build (the last
+ *   certifies the head it read through the review worktree's own gitfile),
+ *   `base-tree`, `test-efficacy`'s probe-tree restore and worktree creation;
+ * - reads that the pipeline later TREATS as fact: `worktreeResidue` (below,
+ *   inline, because `status` refreshes the index and a refresh runs the clean
+ *   filter), `comment-status`'s code probes, `repo-context`'s merge-base
+ *   identity reads, and `--resume`'s pre-flight;
+ * - launch directories rather than trees, via `untrustedRepositoryFrom`:
+ *   `fetch-pr` before its stale sweep, `captureLocalDiff` before its first
+ *   `rev-parse`.
+ *
+ * What it does NOT close: the TOCTOU window between this answer and the
+ * command that uses it (`scratch-tree` documents the same residual), and
+ * nothing at all where containment cannot exist — Windows, where
+ * `mountRootFor` refuses every absolute path because a drive letter is a
+ * colon. `host-execution.canary.test.ts` holds the property for the routes
+ * above as one test, with a live plant as its oracle.
+ */
+export function untrustedGitfile(
+  tree: string,
+  // Defaulted, but still injectable: the tests drive the judgement with a
+  // fixture's own root, and `sandboxed-exec` — which used to own
+  // `mountRootFor` — reaches it from here now, so no import cycle stands in
+  // the way of a default any more.
+  mountRoot: (cwd: string) => string | null = mountRootFor,
+): string | null {
+  // No tree, no pointer, nothing to resolve through — and callers reach this
+  // with a path that may not exist yet (`--resume` asks about a worktree
+  // before deciding whether to build one). Absence is their question, not
+  // this one's; answering it here refused every ordinary resume.
+  if (!existsSync(tree)) return null;
+  const root = mountRoot(tree);
+  if (root === null) {
+    // The tree IS there and its spelling is inside the review temp dir, yet
+    // no mount root answered: which null that is decides the answer (see
+    // `mountNullKind`). An UNMOUNTABLE spelling — Windows, a colon-bearing
+    // checkout — stays silent: containment cannot exist there, so the mount
+    // is no trust boundary and there is nothing to police. A REFUSAL — a
+    // redirect, a root that vanished mid-check — is not "nothing to police":
+    // those are exactly the shapes a host-side command must not resolve
+    // through. Outside the spelling, null really does mean there is no
+    // writable surface for this question to be about.
+    if (mountNullKind(tree) !== 'refused') return null;
+    return (
+      `${tree}: the path is inside the review temp dir by spelling, but no ` +
+      `mount root answered for it — a redirect or a root that vanished ` +
+      `mid-check refused it, so where a command through its .git would land ` +
+      `is unmeasured`
+    );
+  }
+  const dotGit = join(tree, '.git');
+  let stat;
+  try {
+    stat = lstatSync(dotGit);
+  } catch {
+    return `${tree} has no .git to resolve`;
+  }
+  if (!stat.isFile()) {
+    return `${tree}'s .git is not the gitfile the pipeline created, and the tree is inside the review temp dir`;
+  }
+  // The repository git itself would use — see `resolvedGitDir` for why the
+  // pointer is not parsed here.
+  const target = resolvedGitDir(tree);
+  if (target.value === null) {
+    return `${tree}: git could not resolve its own git dir`;
+  }
+  const why = untrustedPointer(tree, target.value, tree, root);
+  return why === null ? null : `${tree} ${why}`;
+}
+
+/**
+ * Whether a linked worktree's admin entry sits where reviewed code can write it.
+ *
+ * The gitfile inside a pipeline tree cannot move — git requires `<tree>/.git` —
+ * and that tree is inside the directory the sandbox bind-mounts read-write, so
+ * containerized code (and, before the sandbox, any code the review ran) can
+ * rewrite it to `gitdir: <a directory it planted under the same mount>`. Put a
+ * `config` carrying `filter.<x>.smudge` in that directory and the next
+ * HOST-side `git checkout` executes it — out of the container, as the review
+ * user, on CI with the runner's tokens.
+ *
+ * The identity gates that already exist do not catch this, and cannot: the
+ * planted directory's own backpointer round-trips because the same writer
+ * chose it, `--show-toplevel` still prints the tree the gitfile sits in, and
+ * no symlink is involved anywhere. Asking git for the common dir does not help
+ * either — that answer is resolved THROUGH the rewritten gitfile, so it comes
+ * from the same hand.
+ *
+ * The question that does have an honest answer is about location, not
+ * content: a real linked worktree's admin entry lives under
+ * `<repo>/.git/worktrees/`, which is outside the mounted directory; a planted
+ * one has to be inside it, because that is the only place the writer can
+ * reach. So refuse an admin entry that resolves inside the review temp dir,
+ * and let every other check stand as it is.
+ *
+ * `root` is the caller's ONE observation of the mount root, threaded through
+ * rather than re-asked: a re-ask can answer differently than the entrance's
+ * ask — the outer mount's writer flips it mid-gate — and a re-asked null read
+ * as "nothing to police" here admitted a location the entrance had just
+ * refused. A null threaded in means the entrance saw no root: outside any
+ * temp dir, or where containment cannot exist, there is nothing to police —
+ * but a REFUSED root (`mountNullKind`) is the redirect the entrance failed
+ * closed on, and this question fails closed with it.
+ */
+export function adminEntryInsideReviewTmp(
+  gitDir: string,
+  root: string | null,
+  tree: string,
+): boolean {
+  if (root === null) return mountNullKind(tree) === 'refused';
+  let real: string;
+  let realRoot: string;
+  try {
+    // `.native`, because the comparison below is a string comparison and this
+    // is what decides which strings it gets. Node's JS `realpathSync` resolves
+    // links in userspace and hands back the spelling it was ASKED for whenever
+    // the lookup succeeded — on a case-insensitive filesystem (default macOS
+    // APFS, a host this pipeline supports) a planted entry spelled with
+    // different case resolves INSIDE the mount and compares OUTSIDE it. The
+    // native call asks the operating system for the stored name, so both sides
+    // arrive spelled the way the filesystem actually holds them.
+    // `.native` when it is there, plain otherwise. The native call is what
+    // makes the comparison below case-correct (see above), but a suite that
+    // mocks `node:fs.realpathSync` as a bare `vi.fn` has no `.native` on it,
+    // and reaching through it threw a TypeError straight into the fail-closed
+    // catch — refusing every worktree creation in any checkout that happens to
+    // sit under `.qwen/tmp`.
+    const canonical = realpathSync.native ?? realpathSync;
+    real = canonical(resolve(gitDir));
+    realRoot = canonical(root);
+  } catch {
+    // Unresolvable is not a licence to proceed: the caller's other gates
+    // report it, and answering "not inside" here would be a guess.
+    return true;
+  }
+  // `isSubpath`, not a hand-rolled prefix test. The first cut was hand-rolled
+  // and failed open at both boundaries of the question it was asking: an entry
+  // whose realpath IS the mount root produced an empty relative path and was
+  // read as "outside" — while the root is exactly as writable as anything
+  // under it — and a direct child legitimately named `..evil-git` produced a
+  // relative path starting with `..`, which the prefix test read as an escape.
+  // Both are places a planted entry can sit, and both are why path containment
+  // belongs in one tested helper rather than in each caller's arithmetic.
+  //
+  // And judged against the OUTERMOST review temp root on that path, not the
+  // one the mount was cut at. `mountRootFor` takes the deepest `.qwen/tmp`
+  // deliberately — the first occurrence would widen the MOUNT to the outer
+  // temp dir and pull `<repo>/.git` and every sibling checkout into the
+  // container — but "which directory may a container have been given
+  // read-write" and "where may reviewed code already have written" are not the
+  // same question. In the nested geometry `mountRootFor` documents, the OUTER
+  // review's containerized phase held the outer `.qwen/tmp` read-write, so an
+  // admin entry planted one layer up sits outside the inner root and inside a
+  // writable surface all the same — and judging only against the inner root
+  // admitted it, after which the very `worktree add` this gate protects ran
+  // the planted filter.
+  //
+  // Widening costs the honest layouts nothing, because git does not put a
+  // linked worktree's admin entry beside its tree: `worktree add` run from
+  // INSIDE a linked worktree still writes its entry under the MAIN
+  // repository's `.git/worktrees/`, which is outside every layer's
+  // `.qwen/tmp` rather than merely outside the deepest. What it does refuse is
+  // a repository whose own `.git` lives under a review temp dir — a checkout
+  // cloned into one. Nothing this pipeline builds has that shape (every tree
+  // it makes is a linked worktree), and a repository sitting inside the
+  // directory reviewed code is handed read-write is not one a host-side write
+  // should resolve through anyway.
+  return isSubpath(outermostReviewTmpRoot(realRoot), real);
+}
+
+/**
+ * The shallowest review temp root on a canonical review temp root's own path.
+ *
+ * `mountRootFor` already cut at the DEEPEST `.qwen/tmp`, so the string handed
+ * in ends at one; any earlier occurrence in it is an enclosing review's temp
+ * dir, and the shallowest is the widest writable surface this tree sits in.
+ * Because the layers nest, the outermost alone answers for all of them — an
+ * entry inside any inner layer is inside this one too.
+ *
+ * Lexical on purpose: the input is already canonical (`adminEntryInsideReviewTmp`
+ * realpaths it before asking), so there is no link left to resolve, and a
+ * separator-delimited marker cannot match half a path component. A root with
+ * no `.qwen/tmp` inside it — an injected mount in a fixture — comes back
+ * unchanged, so the judgement is never widened past what was handed in.
+ */
+function outermostReviewTmpRoot(root: string): string {
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = root.indexOf(marker);
+  return at < 0 ? root : root.slice(0, at + marker.length - 1);
+}
+
+/**
  * The first symlink at or above `dir`, or null when every component is real.
  *
  * The walk STOPS at `stopAt` — the checkout — and does not climb through it.
@@ -140,7 +945,19 @@ export function redirectedAncestor(
       // Unresolvable: the literal comparison below is the whole stop test.
     }
     for (let cur = resolve(dir); ; cur = dirname(cur)) {
-      if (lstatSync(cur).isSymbolicLink()) return cur;
+      let isLink: boolean;
+      try {
+        isLink = lstatSync(cur).isSymbolicLink();
+      } catch {
+        // A component that does not EXIST — an ancestor's link target lacks
+        // the rest of the path — throws here, and swallowing that at the
+        // outer catch used to end the walk with the link itself un-lstat'd:
+        // `.qwen` pointing at a directory with no `tmp` inside read as
+        // "nothing redirects this" while every path built under it lands in
+        // the link's target. Keep walking: the link is what this looks for.
+        isLink = false;
+      }
+      if (isLink) return cur;
       if (cur === stop) return null;
       try {
         if (realpathSync(cur) === stopReal) return null;
@@ -185,6 +1002,439 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   // reader the pipeline points at `git show HEAD:` does not either.
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
   return env;
+}
+
+/** git's own ceiling on nested includes (`MAX_INCLUDE_DEPTH` in config.c). */
+const MAX_INCLUDE_DEPTH = 10;
+
+/**
+ * How many config files the include walk reads before it refuses. The
+ * fan-out is the planter's to write — N `include.path` lines are N spawns,
+ * and 2 000 of them held the walk for 29 seconds (measured) — and the walk
+ * runs before every launch wave. A repository whose repo-local config
+ * genuinely fans out past this is a repository this screen reports rather
+ * than reads.
+ */
+const MAX_INCLUDE_FILES = 64;
+
+/** How many screen hits a refusal message names before it counts the rest. */
+const FILTER_SCREEN_NAMED = 12;
+
+/**
+ * One read per file: the filter commands it defines and the includes it
+ * carries, in file order. `--get-regexp` matches canonical key names, so
+ * `includeIf` arrives as `includeif.<cond>.path`.
+ */
+const SCREEN_KEYS =
+  '^filter\\..*\\.(smudge|clean|process)$|^include\\.path$|^includeif\\..*\\.path$';
+
+/** What `filterCommandsIn` found, and what it could not read. */
+export interface FilterScreen {
+  /**
+   * Every `filter.<name>.smudge|clean|process` key the repo-local config
+   * files define, canonical, in discovery order — the names a caller can
+   * blank on its own git invocation (`filterBlankEnv`) or refuse on.
+   */
+  filters: string[];
+  /**
+   * Every file the walk could NOT read to the bottom, each with its reason:
+   * another user's `~user/`, a target that is not a regular file, a parse
+   * failure, a nesting past git's limit, a fan-out past this screen's. A
+   * filter behind one of these is a filter the caller cannot see and therefore
+   * cannot blank — so each is a refusal.
+   */
+  unread: string[];
+  /**
+   * Every include directive whose target DOES NOT EXIST, each named with the
+   * directive that reached it. Apart from `unread` because the two answer
+   * different questions and one caller needs them apart: git ignores a
+   * dangling include, so a checkout reads nothing from it and executes nothing
+   * from it, while a file that could not be read is a file that may hold a
+   * filter. A caller refusing on `unread` alone still refuses everything it
+   * cannot certify, and stops refusing over a config git itself skips.
+   *
+   * No capability is given up. Whoever can write `include.path` into
+   * repo-local config can write `filter.<name>.smudge` into the same file at
+   * the same moment, and `filters` sees that; what a dangling-include refusal
+   * bought was a race every other gate here already accepts as unclosable.
+   * What it cost was every standard CI checkout — `actions/checkout` with
+   * persisted credentials writes `includeIf "gitdir:…"` directives whose
+   * per-job target file is gone afterwards, and on a persistent runner the
+   * directives accumulate in a reused `.git/config`. Measured: two hits, and
+   * `filters` empty, on a repository defining no content filter at all.
+   *
+   * A TOP-LEVEL candidate that does not exist is not recorded here. That is
+   * the ordinary "no per-worktree config, no linked worktrees registered" and
+   * stays silent, as before.
+   */
+  dangling: string[];
+}
+
+/**
+ * The repo-local `filter.<name>.smudge|clean|process` commands defined in the
+ * config files git reads for a tree whose common dir is `commonDir` and whose
+ * admin dir is `gitDir` — followed through every `include.path` and
+ * `includeIf.<cond>.path` those files carry — and the files it could not
+ * read. Empty on both counts means: every candidate was read to the bottom
+ * and none defines a filter command.
+ *
+ * Two git invocations in this pipeline EXECUTE these — hooks and fsmonitor
+ * are blanked by key name, filters cannot be blanked BLIND, because their
+ * key carries a name of the planter's choosing. The scratch-tree checkouts
+ * run the smudge side of an attributed file; the residue `status` runs the
+ * clean side (or the `process` filter that serves both) when a stat-stale
+ * attributed file refreshes the index — measured live through the exact
+ * residue invocation on git 2.43 and 2.47, and the tree still reported
+ * clean. The planting surface is two plain writes into the common dir the
+ * scratch-tree report calls shared: `git config filter.evil.clean CMD` and
+ * one line appended to `$(git rev-parse --git-path info/attributes)`.
+ * discard and cleanup never wipe the common dir, so a filter planted while
+ * reviewing one PR fires on every later matching checkout of the user's OWN
+ * repository — persistence planted by reviewing a malicious PR, measured
+ * live. The local config files are read with `--file` rather than merged
+ * config because filters in the user's global config (git-lfs is the common
+ * one) are the user's own contract, exactly like any git command they run —
+ * while a probe's planting surface is the repo-local files. The state cannot
+ * be told apart from a filter the user set deliberately, and cannot be
+ * safely wiped, so what the caller does with a hit is the caller's: the
+ * scratch-tree checkouts refuse, the residue measurement blanks the names
+ * it was handed. And it is a one-shot read of same-user-writable state, like
+ * every gate in this file: cost, not closure.
+ *
+ * Includes are followed by hand because `--file` does not expand them, and
+ * an include is the one indirection that delivers every other key: a
+ * planter commits `[filter "evil"] clean = …` in an innocuous file and adds
+ * one `include.path` line to the repo-local config, and a `--file` read
+ * lists the directive while the `status` refresh runs the command
+ * (measured). Each target is resolved the way git resolves it — `~/`
+ * against `$HOME`, a relative path against the directory of the path git
+ * OPENED for the including file (its spelled path, not its realpath: a
+ * symlinked `.git/config` includes beside the link, measured), and
+ * CONCATENATED rather than normalized, so a `..` in the value is resolved by
+ * the kernel through whatever symlink precedes it exactly as git's own open
+ * resolves it — a lexical collapse lands on a different file, and because
+ * `dangling` is the one answer a checkout caller may drop, filing that other
+ * file as missing certifies clean over a payload git really reads (measured)
+ * — and read with the same single spawn, recursively, under a visited set
+ * keyed by realpath, git's own nesting limit, and this screen's file cap. An
+ * `includeIf` is followed whether or not its condition holds today: the
+ * screen answers what the file can deliver, not what it delivers this
+ * minute. Every spawn runs with the common dir as cwd, so a target that
+ * lives outside the repository never makes git discover a repository in a
+ * foreign directory (a dangling gitfile there exits 128 — measured — and
+ * would read as a file this screen could not read).
+ *
+ * Bounded like the other planter-sized reads here: the listing's size is
+ * the config file's, which is the planter's to write, and past Node's 1 MiB
+ * default `spawnSync` answers ENOBUFS with no stdout — a `continue` on that
+ * read the file as filter-free while the refresh ran the planted command
+ * (measured at 1.01 MiB). So the spawn carries the house `maxBuffer`, and a
+ * read that fails for ANY reason lands in `unread`, never in "no filters".
+ *
+ * Every linked worktree's per-worktree config is a candidate too, not only
+ * the two files git reads for THIS tree: the scratch-tree screen runs
+ * against the review worktree while the checkout it authorises runs in the
+ * SCRATCH tree, whose own `<common>/worktrees/<label>/config.worktree` is
+ * honored once `extensions.worktreeConfig` is on — a filter planted there
+ * executed during the reset while a narrower screen reported the repository
+ * clean. The admin directory is one `readdir`, and a filter in any of these
+ * is a plant whichever tree carries it.
+ */
+export function filterCommandsIn(
+  commonDir: string,
+  gitDir: string,
+): FilterScreen {
+  const candidates = [
+    join(commonDir, 'config'),
+    join(gitDir, 'config.worktree'),
+  ];
+  try {
+    for (const entry of readdirSync(join(commonDir, 'worktrees'))) {
+      candidates.push(join(commonDir, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const filters = new Set<string>();
+  const unread = new Set<string>();
+  const dangling = new Set<string>();
+  const visited = new Set<string>();
+  // `-z`: one `key\nvalue\0` record per hit, so a value holding a newline
+  // (a path can) still parses — the key never holds one. Exit 1 is "no key
+  // matched"; any other failure, ENOBUFS included, is a file not read.
+  const read = (
+    file: string,
+  ): { records: Array<[string, string]> } | { unreadable: string } => {
+    const r = spawnSync(
+      'git',
+      ['config', '--file', file, '-z', '--get-regexp', SCREEN_KEYS],
+      {
+        cwd: commonDir,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+      },
+    );
+    if (r.error) {
+      return {
+        unreadable: (r.error as NodeJS.ErrnoException).code ?? r.error.message,
+      };
+    }
+    if ((r.status !== 0 && r.status !== 1) || typeof r.stdout !== 'string') {
+      return { unreadable: `git config exited ${r.status}` };
+    }
+    const records: Array<[string, string]> = [];
+    for (const rec of r.stdout.split('\0')) {
+      if (!rec) continue;
+      const nl = rec.indexOf('\n');
+      records.push(
+        nl === -1 ? [rec, ''] : [rec.slice(0, nl), rec.slice(nl + 1)],
+      );
+    }
+    return { records };
+  };
+  const visit = (file: string, depth: number, via: string | null): void => {
+    let real: string;
+    try {
+      // `.native`, on the spelled path. The JS resolver normalizes `..`
+      // lexically before consulting a symlink, so on a raw spelling it throws
+      // ENOENT over a file the kernel — and therefore git — resolves fine;
+      // measured, `realpathSync` throws where `realpathSync.native` answers the
+      // payload. The key still has to be a realpath, so that one file reached
+      // by two spellings is read once under `MAX_INCLUDE_FILES`.
+      real = realpathSync.native(file);
+    } catch (e) {
+      // A candidate that is not there is the normal case (no per-worktree
+      // config, no linked worktrees) and stays silent. An include target that
+      // is not there is recorded apart from `unread`, because git ignores it
+      // and so does the checkout a caller is about to authorise — see
+      // `FilterScreen.dangling` for what refusing on it cost.
+      //
+      // ENOENT is the ONLY route into that bucket, and the errno is the whole
+      // gate: `dangling` is the one answer a caller may drop, so every other
+      // failure to resolve has to stay a refusal. `ENAMETOOLONG` is the shape
+      // that decides it — a short spelled path whose RESOLVED path exceeds
+      // PATH_MAX, where this throws and git still reads the file. `EACCES` and
+      // `ELOOP` are not entrances either way, because git fatals 128 on them
+      // and the read below refuses too, but they are filed as refusals rather
+      // than left to that second gate.
+      if (via !== null) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT') {
+          dangling.add(`${via} -> ${file} (missing — git ignores it)`);
+        } else {
+          unread.add(
+            `${via} -> ${file} (could not be resolved: ${code ?? 'unknown'} — not screened)`,
+          );
+        }
+      }
+      return;
+    }
+    if (visited.has(real)) return;
+    if (visited.size >= MAX_INCLUDE_FILES) {
+      unread.add(
+        `${via ?? file} -> ${file} (include fan-out past ${MAX_INCLUDE_FILES} files — not screened)`,
+      );
+      return;
+    }
+    visited.add(real);
+    // What git would open: a regular file this process can read. Anything
+    // else git answers with exit 1 and a `warning: unable to access` —
+    // the status of an empty match (measured on a directory target) — so
+    // the check is made here, before the read, and refuses.
+    try {
+      if (!statSync(real).isFile()) {
+        unread.add(
+          `${via ?? file} -> ${file} (not a regular file — not screened)`,
+        );
+        return;
+      }
+      accessSync(real, constants.R_OK);
+    } catch {
+      unread.add(`${via ?? file} -> ${file} (could not be read)`);
+      return;
+    }
+    if (depth > MAX_INCLUDE_DEPTH) {
+      unread.add(
+        `${via} -> ${file} (nested past git's include limit — not screened)`,
+      );
+      return;
+    }
+    // Read by the path git would open, and resolve includes against ITS
+    // directory: git resolves a relative include against the path it opened,
+    // so a symlinked `.git/config` includes beside the link, not beside the
+    // link's target (measured). The realpath is the visited-set key only.
+    const r = read(file);
+    if ('unreadable' in r) {
+      unread.add(`${file} (could not be read: ${r.unreadable})`);
+      return;
+    }
+    for (const [key, value] of r.records) {
+      if (key.startsWith('filter.')) {
+        filters.add(key);
+        continue;
+      }
+      let target: string;
+      if (value.startsWith('~/')) {
+        // git expands `~` from $HOME (expand_user_path), not from passwd;
+        // the fallback is for an environment with no HOME at all. Concatenated
+        // rather than `join`ed, for the reason the relative branch gives.
+        target = `${process.env['HOME'] || homedir()}${sep}${value.slice(2)}`;
+      } else if (value.startsWith('~')) {
+        unread.add(
+          `${key} -> ${value} (another user's home — not resolved here)`,
+        );
+        continue;
+      } else {
+        // CONCATENATED, not `resolve()`d and not `join()`d: both collapse `..`
+        // lexically, before any symlink is consulted, and git does not. With
+        // `<gitdir>/link` a symlink, `include.path = link/../evil.config`
+        // reaches a payload ONE LEVEL ABOVE the link's target — the kernel
+        // resolves `..` against that target's parent — while a lexical collapse
+        // looks for `<gitdir>/evil.config`, finds nothing, and files a file git
+        // really reads as missing. Measured against this screen: git's own
+        // merged read lists the payload's `filter.evil.smudge` while the
+        // collapsed walk answered `filters: []`, and a restore-shaped checkout
+        // then executed it on the host. Absolute values pass through
+        // unnormalized for the same reason: `resolve()` collapses `..` inside
+        // them too.
+        target = isAbsolute(value) ? value : `${dirname(file)}${sep}${value}`;
+      }
+      visit(target, depth + 1, `${key} (in ${file})`);
+    }
+  };
+  for (const candidate of candidates) visit(candidate, 0, null);
+  return {
+    filters: [...filters],
+    unread: [...unread],
+    dangling: [...dangling],
+  };
+}
+
+/**
+ * The screen's hits as a refusal message names them: the first few
+ * verbatim, the rest counted. A planter can pad the config with thousands
+ * of keys, and a message that joined every one of them is its own overflow.
+ */
+export function describeFilterScreen(hits: string[]): string {
+  const named = hits.slice(0, FILTER_SCREEN_NAMED);
+  const rest = hits.length - named.length;
+  return rest > 0 ? `${named.join(', ')}, and ${rest} more` : named.join(', ');
+}
+
+/**
+ * The environment that blanks, for ONE git invocation, every content filter
+ * the screen named: `filter.<name>.clean|smudge|process` emptied and
+ * `filter.<name>.required` false, so the invocation neither runs the
+ * command nor fails for want of it (git-lfs marks its filter required, and
+ * an emptied required filter fails the command instead of skipping it —
+ * measured). git's convert code skips a filter whose command is empty, so
+ * the file's bytes are compared as they are; that is the measurement the
+ * residue probe wants — a stat-stale attributed file that differs from its
+ * index blob only by the filter is reported, and the note already tells a
+ * reader to check a surprising path against `git show HEAD:` first.
+ *
+ * Through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, not
+ * `-c`: `-c` splits its argument at the FIRST `=`, so a filter a planter
+ * named `a=b` cannot be blanked by it, while the env pair carries any name
+ * the config parser accepts. Applied over `sanitizedGitEnv()`, which has
+ * already dropped whatever pairs the caller's shell exported.
+ */
+export function filterBlankEnv(filterKeys: string[]): NodeJS.ProcessEnv {
+  const names = new Set<string>();
+  for (const key of filterKeys) {
+    const m = /^filter\.(.+)\.(?:smudge|clean|process)$/.exec(key);
+    if (m) names.add(m[1]);
+  }
+  const env: NodeJS.ProcessEnv = {};
+  let n = 0;
+  for (const name of names) {
+    for (const [key, value] of [
+      ['clean', ''],
+      ['smudge', ''],
+      ['process', ''],
+      ['required', 'false'],
+    ]) {
+      env[`GIT_CONFIG_KEY_${n}`] = `filter.${name}.${key}`;
+      env[`GIT_CONFIG_VALUE_${n}`] = value;
+      n++;
+    }
+  }
+  if (n > 0) env['GIT_CONFIG_COUNT'] = String(n);
+  return env;
+}
+
+/**
+ * A discovery that failed is itself a hit, for every caller: a repository
+ * whose git dirs cannot be resolved is not one this screen can call
+ * filter-free.
+ */
+const UNRESOLVED_REPO =
+  "the repository's git directories could not be resolved (git rev-parse failed) — not screened";
+
+/**
+ * `filterCommandsIn` for a tree path. Discovery is per flag and absolute, as
+ * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs under
+ * a directory whose name holds a newline. `null` is the unresolved repository
+ * above, which every caller reports rather than reads as clean.
+ */
+function screenForTree(worktree: string): FilterScreen | null {
+  const discover = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      return null;
+    }
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
+  const commonDir = discover('--git-common-dir');
+  const gitDir = discover('--git-dir');
+  if (commonDir === null || gitDir === null) return null;
+  return filterCommandsIn(commonDir, gitDir);
+}
+
+/**
+ * The screen flattened for a caller that refuses on ANY hit, a dangling
+ * include among them: the scratch-tree command screens the review worktree
+ * this way before any checkout.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const screen = screenForTree(worktree);
+  if (screen === null) return [UNRESOLVED_REPO];
+  return [...screen.filters, ...screen.unread, ...screen.dangling];
+}
+
+/**
+ * The screen for a caller about to AUTHORISE a checkout, which asks a narrower
+ * question than "is this repository certifiably filter-free": it asks "will
+ * this rewrite execute a command". A dangling include delivers nothing to that
+ * checkout, because git skips it, so it is not part of the answer — and
+ * refusing on it darkened the whole efficacy phase on every standard CI
+ * checkout, where `actions/checkout`'s persisted credentials leave `includeIf`
+ * directives whose per-job target is already gone. See `FilterScreen.dangling`
+ * for the measurement and for why no capability is given up.
+ *
+ * Everything else is unchanged: a filter key is a refusal, and so is any file
+ * the walk could not read to the bottom, because that is a file that may hold
+ * one.
+ *
+ * Deliberately NOT reached by dropping `includeIf` from `SCREEN_KEYS`, and not
+ * by evaluating its condition either. A matching `includeIf.gitdir:` IS
+ * honoured by the checkouts this screen authorises, and at the site that
+ * creates a probe tree the screen is asked about one worktree while `git
+ * worktree add` registers a NEW admin entry under `<common>/worktrees/` — the
+ * wildcard form git writes for exactly that case. A condition test matching
+ * only the screened tree's own gitdir would therefore re-open the creation
+ * path the screen exists to cover. Only the target's existence is asked here;
+ * origin-resolution of what a hit came from is #10441.
+ */
+export function checkoutFilterCommands(worktree: string): string[] {
+  const screen = screenForTree(worktree);
+  if (screen === null) return [UNRESOLVED_REPO];
+  return [...screen.filters, ...screen.unread];
 }
 
 /**
@@ -268,6 +1518,18 @@ export function discardWorktree(
   // volume that happens to be unmounted. So the entry is found by its own
   // `gitdir` file and removed alone.
   dropWorktreeRegistration(cwd, tree, ownAdminDir);
+  if (sweep !== undefined && sweep.status !== 0) {
+    // `worktree remove` FAILED — the shape that makes `ownAdminDir` a lie:
+    // the tree's gitfile was rewritten to a coherent planted entry (both
+    // ends attacker-written, so `adminDirOf`'s round-trip passes), and the
+    // removal above then cleared the PLANT's directory while the real
+    // registration — which git refused to remove because its `gitdir` no
+    // longer points back through the plant — survives. The reverse scan is
+    // what sees the real one: it matches entries by the path they name, and
+    // skips any whose tree is still on disk, so a live sibling is never its
+    // business and only this path's leftover goes.
+    dropWorktreeRegistration(cwd, tree, null);
+  }
   return sweep;
 }
 
@@ -321,6 +1583,13 @@ function dropWorktreeRegistration(
   // `add` then calls "already registered". Fall back to the reverse scan, and
   // only for entries whose named tree is GONE: a live worktree's registration
   // is never this cleanup's business, whatever its `gitdir` file claims.
+  //
+  // Narrowed TWICE, because the scan reads files any same-user process can
+  // rewrite: the entry's id must be the tree's own basename — the name git
+  // gave it at `worktree add` — so a tampered entry that points AT this path
+  // from a sibling's directory is never deleted (the sibling's tree may be
+  // gone, which is exactly what a repo-wide prune would eat), and the named
+  // tree must be gone, so a live worktree is never this cleanup's business.
   const common = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
@@ -335,7 +1604,24 @@ function dropWorktreeRegistration(
     return; // No linked worktrees at all.
   }
   const wanted = samePath(tree);
+  // git's own id grammar, not the bare basename. `get_preferred_worktree_name`
+  // appends a counter whenever `<common>/worktrees/<basename>` is already
+  // taken — verified on git 2.43, three adds of a tree named `wt` produce
+  // `wt`, `wt1`, `wt2` — and the trees this pipeline's nested geometry builds
+  // collide by basename exactly that way (an inner review's `review-pr-N`
+  // beside the outer one). Matching `id !== ownId` alone skipped the entry
+  // this tree actually owns and left the registration standing after `rmSync`
+  // had taken the tree, which is the "missing but already registered" wedge
+  // this function exists to prevent — and the counter suffix is MORE likely
+  // in the leftover-from-a-crashed-run state the scan is for, not less. The
+  // `gitdir`-names-this-path and named-tree-is-gone narrowings below still
+  // carry the "never somebody else's worktree" half on their own.
+  const ownId = basename(resolve(tree));
+  const ownIdPattern = new RegExp(
+    `^${ownId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\d*$`,
+  );
   for (const id of ids) {
+    if (!ownIdPattern.test(id)) continue;
     try {
       const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
       const named = dirname(gitdir);
@@ -696,6 +1982,73 @@ export function worktreeResidue(
     // No `.git` at all: the walk-up check below fails closed with its own
     // reason.
   }
+  // WHERE the repository lives, asked BEFORE the first spawn that can execute.
+  // `status` refreshes the index, and an index refresh runs the repository's
+  // configured content filters — so a gitfile rewritten to an admin entry
+  // planted under the same read-write mount, whose common dir carries
+  // `filter.<x>.process`, turns this tripwire into host-side code execution.
+  // The measurement is the attack.
+  //
+  // Every identity check below is honest about WHICH repository answers and
+  // blind to where that repository lives, and it cannot be otherwise: a
+  // coherent plant writes both halves of the round trip, so the entry points
+  // back; `--show-toplevel` prints the tree the gitfile sits in; no symlink is
+  // involved; and the sha pin can only compare against a record the same
+  // writer can rewrite. Location is the question that has an honest answer —
+  // `worktree add` puts a real admin entry under the MAIN repository's
+  // `.git/worktrees/`, outside the mount, and a planted one has to be inside
+  // it. See `untrustedGitfile`, which asks the same question for the writes.
+  //
+  // Unmeasured-with-reason, not a throw: this is a tripwire, and a tree whose
+  // pointer cannot be trusted is precisely what the `unmeasured` channel
+  // exists to report — every caller already treats it as "not clean".
+  //
+  // The mount's null is three answers wearing one value (see
+  // `mountNullKind`): outside any review temp dir the question does not arise
+  // and an ordinary checkout never pays for the extra spawn, and an
+  // UNMOUNTABLE spelling stays silent — where containment cannot exist the
+  // mount is no trust boundary — but a REFUSAL (a redirect, a root that
+  // vanished mid-check) read as "nothing to police" ran the measurement
+  // through exactly the redirect `mountRootFor` had just declined to mount.
+  // One observation, threaded through: re-asking below could answer
+  // differently than the ask above, mid-gate.
+  const root = mountRootFor(cwd);
+  if (root === null) {
+    if (mountNullKind(cwd) === 'refused') {
+      return {
+        paths: [],
+        total: 0,
+        unmeasured:
+          'the path is inside the review temp dir by spelling, but no mount ' +
+          'root answered for it — a redirect or a root that vanished ' +
+          'mid-check refused it, and the status below would measure ' +
+          'whichever repository the pointer here names',
+      };
+    }
+  } else {
+    const target = resolvedGitDir(cwd);
+    // git not answering is not "no objection", and widening this gate's budget
+    // cannot make it so: the spawns below carry none at all, so a config sized
+    // past it used to reach a `status` that refreshes the planted index and
+    // runs its clean filter on the host. A genuine not-a-repository still
+    // falls through — the walk-up check below fails closed on it with its own
+    // reason.
+    let why: string | null;
+    if (target.value !== null) {
+      why = untrustedPointer(cwd, target.value, cwd, root);
+    } else {
+      why = target.notARepository
+        ? null
+        : 'git could not resolve its own git dir';
+    }
+    if (why !== null) {
+      return {
+        paths: [],
+        total: 0,
+        unmeasured: `the .git gitfile ${why} — the status below would measure whichever repository it names, and refresh that index through whatever filters it configures`,
+      };
+    }
+  }
   // git's discovery WALKS UP: with the `.git` file gone — a crash mid-`worktree
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
@@ -724,6 +2077,7 @@ export function worktreeResidue(
   const commonDir = discover('--git-common-dir');
   let isWorktree = false;
   let anchor: string[] = [];
+  let filterBlanks: NodeJS.ProcessEnv = {};
   try {
     if (
       toplevel !== null &&
@@ -899,6 +2253,43 @@ export function worktreeResidue(
           };
         }
       }
+      // The `status` below REFRESHES the index, and a stat-stale tracked
+      // file whose attributes select a content filter runs that filter's
+      // `clean` (or `process`) command as part of the refresh — a repo-local
+      // `filter.evil.clean` executed under the exact invocation below and
+      // the tree still measured clean (git 2.43 and 2.47, live). The `-c`
+      // blanks on that invocation close the two channels a fixed key names;
+      // a filter's key carries a name of the planter's choosing, so the
+      // names are READ first — from the repo-local config files of the
+      // identity pinned above, includes followed — and every name found is
+      // blanked on the measurement itself (`filterBlankEnv`), the way the
+      // fixed keys are: a repository whose own config defines a filter
+      // (git-lfs `--local`, git-crypt) keeps its residue measurement, where
+      // a refusal would have left it unmeasured for good. What is refused is
+      // a config the screen could not read to the bottom: a filter it cannot
+      // see it cannot blank.
+      const screen = filterCommandsIn(commonDir, realpathSync(gitDir));
+      // BOTH halves here, where `checkoutFilterCommands` takes only the first.
+      // This consumer does not authorise one rewrite and then stop: it hands
+      // back a measurement the rest of the review acts on, and a dangling
+      // include is a payload file that can land one step later, before the
+      // `status` refresh that would execute it. Refusing keeps it unmeasured
+      // rather than measured against a config nobody read.
+      const notReadToTheBottom = [...screen.unread, ...screen.dangling];
+      if (notReadToTheBottom.length > 0) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the residue measurement would run under repo-local config ' +
+            'this screen could not read to the bottom: ' +
+            `${describeFilterScreen(notReadToTheBottom)} — a content filter ` +
+            'reached that way would execute on the index refresh, and a ' +
+            'filter the screen cannot see it cannot blank; remove the ' +
+            'include, or the file it names, if it is not yours',
+        };
+      }
+      filterBlanks = filterBlankEnv(screen.filters);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.
@@ -922,9 +2313,20 @@ export function worktreeResidue(
       // runs a command on `status`, and this tree's config is writable by
       // anything running as the user. Emptying it here is the same discipline
       // as the checkouts' `core.hooksPath` — the tripwire is the one command
-      // that must not be steerable by the tree it is measuring.
+      // that must not be steerable by the tree it is measuring. `status`
+      // WRITES the index too — a stat-stale tracked file refreshes it — and
+      // the write fires `post-index-change` from a repo-local `core.hooksPath`
+      // (measured live on git 2.43), so the hook directory is blanked here the
+      // way the checkouts blank it. Those are the two channels a FIXED key
+      // names; the refresh's third channel, a content filter's `clean` or
+      // `process` command, lives under a key of the planter's naming, so its
+      // names come from the `filterCommandsIn` read above and are blanked
+      // through `filterBlanks` in this spawn's environment — and when that
+      // read could not finish, the measurement was refused above instead.
       '-c',
       'core.fsmonitor=',
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
       'status',
       '--porcelain',
       '--untracked-files=all',
@@ -934,7 +2336,7 @@ export function worktreeResidue(
       cwd,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
-      env: sanitizedGitEnv(),
+      env: { ...sanitizedGitEnv(), ...filterBlanks },
     },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {

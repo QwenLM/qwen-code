@@ -66,6 +66,25 @@ export const plugin: ChannelPlugin = {
               },
             ],
           },
+          {
+            key: 'permissionCard',
+            label: 'Permission Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+              {
+                key: 'timeoutMs',
+                label: 'Timeout (ms)',
+                kind: 'number',
+                exclusiveMinimum:
+                  DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+              },
+            ],
+          },
         ],
       },
     ],

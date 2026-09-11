@@ -523,7 +523,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,
@@ -1461,7 +1460,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
@@ -1469,18 +1468,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.gate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const comments = newComments
+      .map((comment) => ({ comment, body: (comment.body || '').trim() }))
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1499,7 +1499,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });

@@ -1230,6 +1230,47 @@ describe('BridgeClient — A2UI session update publishing', () => {
   });
 });
 
+describe('BridgeClient — mode promotion fallback', () => {
+  it.each(['plan', 'auto-edit'])(
+    'publishes %s policy metadata without an onModePromoted callback',
+    async (currentModeId) => {
+      const publish = vi.fn();
+      const entry = { sessionId: 'sess:mode', events: { publish } };
+      const client = new BridgeClient(
+        (() => entry) as never,
+        vi.fn(),
+        { request: vi.fn() },
+        0,
+        Infinity,
+      );
+
+      await client.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: entry.sessionId,
+        currentModeId,
+        planExecutionMode: 'yolo',
+      });
+
+      const promoted = publish.mock.calls.find(
+        ([event]) => event.type === 'approval_mode_changed',
+      )?.[0];
+      expect(promoted).toMatchObject({
+        data: {
+          sessionId: entry.sessionId,
+          previous: 'default',
+          next: currentModeId,
+          persisted: false,
+        },
+      });
+      if (currentModeId === 'plan') {
+        expect(promoted.data.planExecutionMode).toBe('yolo');
+      } else {
+        expect(promoted.data).not.toHaveProperty('planExecutionMode');
+      }
+    },
+  );
+});
+
 describe('BridgeClient — original timestamp preservation', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');
@@ -1499,6 +1540,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           prompt: string;
           completion: 'sent' | 'first-turn';
           model?: string;
+          groupId?: string;
           name?: string;
           sourceType?: string;
           sourceId?: string;
@@ -1544,6 +1586,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       name: 'digest',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
       callerSessionId: 'caller-1',
     });
 
@@ -1554,6 +1597,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       name: 'digest',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
       callerSessionId: 'caller-1',
     });
     expect(res).toEqual({
@@ -1624,6 +1668,71 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
         callerSessionId: 'caller-1',
       }),
     ).rejects.toThrow(/sourceType/);
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects group routing outside a valid scheduled-task run', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-group' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const scheduledSource = {
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: 'group-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/groupId/);
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: '',
+        callerSessionId: 'caller-1',
+        ...scheduledSource,
+      }),
+    ).rejects.toThrow(/groupId/);
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: 'g'.repeat(257),
+        callerSessionId: 'caller-1',
+        ...scheduledSource,
+      }),
+    ).rejects.toThrow(/groupId/);
+
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsafe model and group routing values', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-routing' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const scheduledSource = {
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+
+    for (const params of [
+      { model: 'm'.repeat(257) },
+      { model: 'model\nqwen serve: forged' },
+      { groupId: 'group\nqwen serve: forged' },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'x',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...scheduledSource,
+          ...params,
+        }),
+      ).rejects.toThrow(/control characters|at most 256/i);
+    }
+
     expect(onCreate).not.toHaveBeenCalled();
   });
 

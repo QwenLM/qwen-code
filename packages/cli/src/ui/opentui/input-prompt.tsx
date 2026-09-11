@@ -25,7 +25,8 @@
  *    original accept rules (Tab/Enter, trailing space, directory drill-in);
  *  - Esc: double-Esc clears the buffer (footer-style "Press Esc again to
  *    clear." hint surfaced via onEscapeArmedChange); while streaming Esc
- *    interrupts instead;
+ *    interrupts instead (in shell mode it exits the mode first, and also
+ *    interrupts a live turn);
  *  - Enter submits to the parent (real client wiring), `\`+Enter continues
  *    the line, Shift+Enter inserts a newline.
  */
@@ -68,6 +69,7 @@ import type { Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints } from '../utils/textUtils.js';
 import { t } from '../../i18n/index.js';
 import { C } from './theme.js';
+import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
@@ -88,7 +90,7 @@ import {
   historyDownDecision,
   historyUpDecision,
   isLargePaste,
-  isPerfectSlashMatch,
+  isPerfectMatchForTarget,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -199,6 +201,19 @@ export interface InputPromptProps {
   onPopQueue?: () => string | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
+  /** U-7: finished follow-up suggestion published by the entry layer. */
+  promptSuggestion?: string | null;
+  /** U-7: clears the published suggestion (accept/typing/submit). */
+  onPromptSuggestionDismiss?: () => void;
+  /**
+   * U-7/R2-2: aborts the suggestion without clearing it — typing over the
+   * ghost keeps it restorable after type-then-delete (ink parity).
+   */
+  onPromptSuggestionAbort?: () => void;
+  /** U-33: `!` shell mode is active (ink shellModeActive chrome parity). */
+  shellModeActive?: boolean;
+  /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
+  onToggleShellMode?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -215,6 +230,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     queueLength = 0,
     onPopQueue,
     recentSlashCommands,
+    promptSuggestion,
+    onPromptSuggestionDismiss,
+    onPromptSuggestionAbort,
+    shellModeActive = false,
+    onToggleShellMode,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -265,13 +285,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const fileSearchReadyRef = useRef<Promise<void> | null>(null);
   const atSearchSeqRef = useRef(0);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
-  // SLASH-completion state for the current buffer: the query-relative
-  // replacement range and whether the input already names a runnable command
-  // exactly (Enter then submits instead of accepting a suggestion).
-  const slashStateRef = useRef<{
-    range: { start: number; end: number };
-    perfect: boolean;
-  } | null>(null);
+  // Query-relative replacement range for the current buffer's SLASH target.
+  // The perfect-match verdict is deliberately not cached alongside it: Enter
+  // recomputes that one from the buffer (see the Enter branch below).
+  const slashRangeRef = useRef<{ start: number; end: number } | null>(null);
   // Sequence guard for async argument completion (drops stale results).
   const slashSearchSeqRef = useRef(0);
   // The user navigated the dropdown with ↑/↓ (reset on recompute/accept):
@@ -283,7 +300,42 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
 
-  const chrome = promptChrome(approvalMode);
+  // U-7: follow-up suggestion lifecycle, shared with ink via the
+  // renderer-neutral controller hook. Acceptance inserts into the composer
+  // buffer (never submits — /clear must not fire on Enter).
+  const {
+    state: followupState,
+    accept: acceptFollowup,
+    dismiss: dismissFollowup,
+    recordKeystroke: recordFollowupKeystroke,
+    setSuggestion: setFollowupSuggestion,
+  } = useFollowupSuggestionsCLI({
+    config,
+    isFocused: focus,
+    onAccept: (suggestion) => {
+      const el = editorRef.current;
+      if (!el) return;
+      el.insertText(suggestion);
+      setTextVersion((v) => v + 1);
+    },
+  });
+  useEffect(() => {
+    setFollowupSuggestion(promptSuggestion ?? null);
+  }, [setFollowupSuggestion, promptSuggestion]);
+  // Single source of truth for "is there a suggestion the user can accept
+  // right now" (ink availableSuggestion): the live controller suggestion if
+  // visible, otherwise the persisted prop (pre-show delay / type-then-delete).
+  const availableSuggestion: string | null =
+    followupState.isVisible || promptSuggestion
+      ? (followupState.suggestion ?? promptSuggestion ?? null)
+      : null;
+
+  // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
+  // wins over the approval-mode prefix and replaces its status text with
+  // "Shell mode" — the only signal that Enter now executes shell commands).
+  const chrome = shellModeActive
+    ? { prefix: '!', color: C.accent, statusText: t('Shell mode') }
+    : promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
 
   // ── real command registry feeding /-completion ──────────────────────────
@@ -335,14 +387,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     [],
   );
 
-  // ── completion recomputation on every buffer/cursor change ──────────────
-  const refreshCompletion = useCallback(() => {
+  // The completion target for the buffer as it stands right now. Read from the
+  // editor, never from published state, so a key that lands before the
+  // completion effect flushes still sees the text the user typed.
+  const currentCompletionTarget = useCallback(() => {
     const el = editorRef.current;
-    if (!el) return;
+    if (!el) return null;
     const text = el.plainText;
     const cursor = el.logicalCursor;
     const lines = text.split('\n');
-    const target = detectCompletionTarget(
+    return detectCompletionTarget(
       lines,
       cursor.row,
       displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
@@ -350,6 +404,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       displayOffsetToCodePointIndex(text, cursor.offset),
       commandsRef.current,
     );
+  }, []);
+
+  // ── completion recomputation on every buffer/cursor change ──────────────
+  const refreshCompletion = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const text = el.plainText;
+    const target = currentCompletionTarget();
 
     const restored = historyRestoredTextRef.current;
     const suppressedByHistory = restored !== null && text === restored;
@@ -359,7 +421,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (!target || suppressedByHistory || dismissed) {
       completionModeRef.current = CompletionMode.IDLE;
-      slashStateRef.current = null;
+      slashRangeRef.current = null;
       suggestionNavigatedRef.current = false;
       setSuggestions([]);
       setActiveIndex(0);
@@ -378,10 +440,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // full registry.
       const pool = slashCommandPool(target, commandsRef.current);
       const parsed = parseSlashCommandQuery(target.query, pool);
-      slashStateRef.current = {
-        range: slashCompletionPositions(target.query, parsed),
-        perfect: isPerfectSlashMatch(parsed),
-      };
+      slashRangeRef.current = slashCompletionPositions(target.query, parsed);
 
       // Argument completion: the leaf command's async completion() supplies
       // the candidates (ink useCommandSuggestions), e.g. `/cd <path>`,
@@ -445,7 +504,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         if (atSearchSeqRef.current === seq) setLoadingSuggestions(false);
       }
     });
-  }, [ensureFileSearch, config]);
+  }, [ensureFileSearch, config, currentCompletionTarget]);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -487,18 +546,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const el = editorRef.current;
       const suggestion = suggestions[index];
       if (!el || !suggestion) return;
-      const text = el.plainText;
-      const cursor = el.logicalCursor;
-      const lines = text.split('\n');
-      const target = detectCompletionTarget(
-        lines,
-        cursor.row,
-        displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
-        text,
-        displayOffsetToCodePointIndex(text, cursor.offset),
-        commandsRef.current,
-      );
+      const target = currentCompletionTarget();
       if (!target) return;
+      const cursor = el.logicalCursor;
+      const lines = el.plainText.split('\n');
       suggestionNavigatedRef.current = false;
       const applied = applyCompletion(
         lines[cursor.row] ?? '',
@@ -506,13 +557,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         suggestion,
         viaEnter,
         target.mode === CompletionMode.SLASH
-          ? (slashStateRef.current?.range ?? undefined)
+          ? (slashRangeRef.current ?? undefined)
           : undefined,
       );
       if (applied.submitNow) {
-        // Same cleanup as the real submit path (handleSubmit): expand pending
-        // paste placeholders, collect attachments, then clear everything —
-        // an accepted completion must not leave placeholders or chips behind.
+        // Same cleanup as the submit path (the global Enter handler): expand
+        // pending paste placeholders, collect attachments, then clear
+        // everything — an accepted completion must not leave placeholders or
+        // chips behind.
         let finalText = applied.submitNow;
         if (pendingPastesRef.current.size > 0) {
           finalText = expandPendingPastePlaceholders(
@@ -530,6 +582,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         setSuggestions([]);
         setAttachments([]);
         onSubmit(finalText, images.length > 0 ? images : undefined);
+        // Same dismissal as the real submit path below: a submitOnAccept
+        // command that only opens a dialog never flips streaming, so without
+        // this the consumed suggestion survives as the ghost placeholder
+        // (R6-1).
+        dismissFollowup();
+        onPromptSuggestionDismiss?.();
         return;
       }
       // Directory accepts keep the dropdown closed until the query changes
@@ -543,7 +601,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       apply();
     },
-    [suggestions, applyTextToEditor, onSubmit, attachments],
+    [
+      suggestions,
+      applyTextToEditor,
+      onSubmit,
+      attachments,
+      currentCompletionTarget,
+      dismissFollowup,
+      onPromptSuggestionDismiss,
+    ],
   );
 
   // ── Ctrl+V / Cmd+V: clipboard image → temp file → attachment chip ──────
@@ -642,6 +708,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const el = editorRef.current;
       if (!el) return;
       const pasted = normalizePastedText(decodePasteBytes(event.bytes));
+      // Ink dismisses the follow-up ghost on paste too (key.paste, no
+      // keystroke record): a paste into an empty buffer must not leave the
+      // suggestion acceptable behind the inserted content.
+      if (el.plainText.length === 0 && availableSuggestion) {
+        dismissFollowup();
+        onPromptSuggestionDismiss?.();
+      }
       if (!isLargePaste(pasted)) return; // small pastes insert verbatim
       event.preventDefault();
       const charCount = [...pasted].length;
@@ -657,7 +730,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     return () => {
       renderer.keyInput.off('paste', onPaste);
     };
-  }, [renderer, focus]);
+  }, [
+    renderer,
+    focus,
+    // availableSuggestion/dismissFollowup/onPromptSuggestionDismiss are read
+    // in the handler: resubscribe when they change or the closure goes stale.
+    availableSuggestion,
+    dismissFollowup,
+    onPromptSuggestionDismiss,
+  ]);
 
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
@@ -696,13 +777,34 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // prevents submitting half-typed commands like `/he`). Only a perfect
       // command match submits directly; if the user navigated away from the
       // highlighted default, Enter fills the navigated suggestion instead.
+      //
+      // The verdict is read from the buffer, never from the published
+      // completion state: that state arrives from an effect one render behind
+      // the keystrokes, and a streaming turn keeps the render loop busy enough
+      // for Enter to land in the gap. Read stale, the accept path splices the
+      // earlier prefix's highlighted row into the live buffer — `/quit` typed
+      // mid-turn came out as `/model quit` and never quit. ink resolves the
+      // same race in its InputPrompt; this is the OpenTUI half.
       const showing = suggestions.length > 0;
+      const liveTarget = currentCompletionTarget();
       const isPerfectMatch =
-        completionModeRef.current === CompletionMode.SLASH &&
-        (slashStateRef.current?.perfect ?? false);
+        liveTarget !== null &&
+        isPerfectMatchForTarget(liveTarget, commandsRef.current);
       if (showing && (!isPerfectMatch || suggestionNavigatedRef.current)) {
         key.preventDefault();
         acceptSuggestion(activeIndex, true);
+        return;
+      }
+
+      // Ghost follow-up: an empty buffer with an available suggestion fills
+      // the composer instead of submitting — Enter on "/clear" must fill,
+      // not execute (ink SUBMIT parity).
+      if (el.plainText.length === 0 && availableSuggestion) {
+        key.preventDefault();
+        acceptFollowup('enter', {
+          fallbackText: promptSuggestion ?? undefined,
+        });
+        onPromptSuggestionDismiss?.();
         return;
       }
 
@@ -743,6 +845,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setSuggestions([]);
       setLoadingSuggestions(false);
       onSubmit(finalText, images.length > 0 ? images : undefined);
+      // Ink dismisses on submit so a synchronous command (/clear, /help)
+      // can't leave the stale suggestion as the ghost placeholder.
+      dismissFollowup();
+      onPromptSuggestionDismiss?.();
       key.preventDefault();
       return;
     }
@@ -765,7 +871,32 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.preventDefault();
       return;
     }
+    // U-33: an empty-buffer `!` toggles shell mode instead of inserting
+    // (ink InputPrompt parity — the character still inserts in a non-empty
+    // buffer, so `echo hi!` is unaffected). The `suggestions.length === 0`
+    // clause is ink's `!showCompletionSuggestions`: `!` must not flip the
+    // mode while a stale completion dropdown is open and would consume the
+    // next Enter/Tab.
+    if (
+      key.sequence === '!' &&
+      key.eventType !== 'release' &&
+      el.plainText.length === 0 &&
+      suggestions.length === 0 &&
+      onToggleShellMode
+    ) {
+      onToggleShellMode();
+      key.preventDefault();
+      return;
+    }
     if (isPrintableKeyInput(key)) {
+      // Typing over a ghost suggestion aborts it (kills the in-flight publish,
+      // keeps the suggestion restorable) but still inserts the character —
+      // ink deliberately does NOT clear the persisted suggestion here.
+      if (el.plainText.length === 0 && availableSuggestion) {
+        recordFollowupKeystroke();
+        dismissFollowup();
+        onPromptSuggestionAbort?.();
+      }
       el.insertText(key.sequence);
       setTextVersion((v) => v + 1);
       key.preventDefault();
@@ -785,6 +916,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (key.name === 'escape') {
       key.preventDefault();
+      // Ink parity (InputPrompt exits the mode with no streaming gate;
+      // AppContainer's broadcast handler cancels the request on the same
+      // keypress): Esc in shell mode leaves the mode first, and when a turn
+      // is streaming it interrupts too — one keypress does both.
+      if (shellModeActive) {
+        onToggleShellMode?.();
+        if (streaming) onInterrupt?.();
+        return;
+      }
       if (streaming) {
         onInterrupt?.();
         return;
@@ -832,6 +972,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       (key.name === 'down' && !key.shift && !key.ctrl) ||
       (key.name === 'n' && !!key.ctrl);
 
+    // Ink parity: shell mode owns Up/Down for shell-history recall, so the
+    // prompt queue and chat history must stay untouched there — popping or
+    // recalling would drop prompt context into a shell command line.
+    const historyNavActive = !shellModeActive;
+
     const showing = suggestions.length > 0;
 
     if (showing && (navigationUp || navigationDown)) {
@@ -855,11 +1000,39 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
+    // Ghost follow-up accepts: Tab / Right fill an empty buffer without
+    // submitting (ink parity — acceptance needs an explicit action, and
+    // /clear or /quit must never execute by accident).
+    if (
+      !showing &&
+      key.name === 'tab' &&
+      !key.shift &&
+      el.plainText.length === 0 &&
+      availableSuggestion
+    ) {
+      key.preventDefault();
+      acceptFollowup('tab', { fallbackText: promptSuggestion ?? undefined });
+      onPromptSuggestionDismiss?.();
+      return;
+    }
+    if (
+      key.name === 'right' &&
+      !key.ctrl &&
+      !key.meta &&
+      el.plainText.length === 0 &&
+      availableSuggestion
+    ) {
+      key.preventDefault();
+      acceptFollowup('right', { fallbackText: promptSuggestion ?? undefined });
+      onPromptSuggestionDismiss?.();
+      return;
+    }
+
     // Enter with the dropdown open is owned by the force-captured Enter
     // branch above (accept-unless-perfect-match); there is no separate path.
 
     // Up at the top edge pops queued prompts into the composer (original).
-    if (navigationUp && queueLength > 0) {
+    if (historyNavActive && navigationUp && queueLength > 0) {
       const topCursor = el.logicalCursor;
       if (topCursor.row === 0 && topCursor.col === 0) {
         const popped = onPopQueue?.();
@@ -873,7 +1046,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
     }
 
-    if (navigationUp) {
+    if (historyNavActive && navigationUp) {
       const cursor = el.logicalCursor;
       const decision = historyUpDecision(
         historyRef.current!,
@@ -898,7 +1071,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (navigationDown) {
+    if (historyNavActive && navigationDown) {
       const cursor = el.logicalCursor;
       const lastLine = el.plainText.split('\n').pop() ?? '';
       const decision = historyDownDecision(
@@ -923,41 +1096,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
   });
-
-  const handleSubmit = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const text = el.plainText;
-    const decision = decideSubmit(
-      text,
-      displayOffsetToCodePointIndex(text, el.cursorOffset),
-    );
-    if (decision.kind === 'noop') return;
-    if (decision.kind === 'newline-continuation') {
-      el.deleteCharBackward();
-      el.newLine();
-      setTextVersion((v) => v + 1);
-      return;
-    }
-    let finalText = decision.text.trim();
-    if (pendingPastesRef.current.size > 0) {
-      finalText = expandPendingPastePlaceholders(
-        finalText,
-        pendingPastesRef.current,
-      );
-      pendingPastesRef.current.clear();
-      activePlaceholderIdsRef.current.clear();
-    }
-    const images = attachments.map((a) => a.path);
-    el.clear();
-    setTextVersion((v) => v + 1);
-    historyRef.current?.reset();
-    historyRestoredTextRef.current = null;
-    setSuggestions([]);
-    setLoadingSuggestions(false);
-    setAttachments([]);
-    onSubmit(finalText, images.length > 0 ? images : undefined);
-  }, [onSubmit, attachments]);
 
   // Force the editor text color after mount (prop may not forward), max contrast.
   useEffect(() => {
@@ -1031,14 +1169,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           flexGrow={1}
           minHeight={1}
           maxHeight={8}
-          placeholder={placeholder}
+          placeholder={availableSuggestion ?? placeholder}
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}
           selectionBg={C.selectionBg}
           selectionFg={C.selectionFg}
           wrapMode="char"
-          onSubmit={handleSubmit}
           onContentChange={() => setTextVersion((v) => v + 1)}
           onCursorChange={() => setTextVersion((v) => v + 1)}
           keyBindings={[

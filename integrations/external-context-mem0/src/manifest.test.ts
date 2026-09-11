@@ -23,10 +23,13 @@ describe('Mem0 Extension package', () => {
       includeTools: ['context_search'],
     });
     expect(manifest.settings).toBeUndefined();
+    expect(manifest.hooks).toBeUndefined();
     expect(server?.['env']).toBeUndefined();
     expect(server?.['trust']).toBeUndefined();
     expect(packageJson.scripts?.['build']).toContain('--bundle');
     expect(packageJson.files).toContain('dist/main.js');
+    expect(packageJson.files).toContain('dist/auto-recall.js');
+    expect(packageJson.files).toContain('dist/write-main.js');
     expect(packageJson.dependencies).toBeUndefined();
     expect(packageJson.private).not.toBe(true);
     expect(packageJson.name).toBe('@qwen-code/external-context-mem0');
@@ -38,20 +41,73 @@ describe('Mem0 Extension package', () => {
     });
   });
 
-  it('ships only the runtime, schemas, manifest, and documentation', async () => {
+  it('ships only the runtime, schemas, examples, manifest, and documentation', async () => {
     const packageJson = await readJson('../package.json');
 
     expect(packageJson.files).toEqual([
       'dist/main.js',
+      'dist/auto-recall.js',
+      'dist/write-main.js',
+      'dist/delete-main.js',
       'schemas',
+      'examples',
       'qwen-extension.json',
       'README.md',
     ]);
   });
+
+  it.each([
+    {
+      platform: 'posix',
+      command:
+        "exec '/absolute/path/to/node' '/administrator/path/to/external-context-mem0/dist/auto-recall.js'",
+      shell: undefined,
+    },
+    {
+      platform: 'windows',
+      command:
+        "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\external-context-mem0\\dist\\auto-recall.js'",
+      shell: 'powershell',
+    },
+  ])(
+    'keeps the managed Auto Recall $platform profile Hook-only',
+    async ({ platform, command, shell }) => {
+      const settings = await readJson(
+        `../examples/managed-auto-recall-user-settings-${platform}.json`,
+      );
+      const groups = settings.hooks?.['UserPromptSubmit'] ?? [];
+      const group = groups[0];
+      const hooks = group?.hooks ?? [];
+
+      expect(settings.$version).toBe(4);
+      expect(settings.mcpServers).toBeUndefined();
+      expect(Object.keys(settings.hooks ?? {})).toEqual(['UserPromptSubmit']);
+      expect(groups).toHaveLength(1);
+      expect(group?.matcher).toBe('*');
+      expect(hooks).toEqual([
+        {
+          type: 'command',
+          command,
+          ...(shell === undefined ? {} : { shell }),
+          timeout: 8000,
+          name: 'external-context-mem0-auto-recall',
+          statusMessage: 'Retrieving external context',
+        },
+      ]);
+    },
+  );
 });
 
 interface Manifest {
+  $version?: number;
   version?: string;
+  hooks?: Record<
+    string,
+    Array<{
+      matcher?: string;
+      hooks?: Array<Record<string, unknown>>;
+    }>
+  >;
   mcpServers?: Record<string, Record<string, unknown>>;
   settings?: unknown;
 }

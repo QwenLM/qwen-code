@@ -24,6 +24,7 @@ export interface TranscriptRecordInput {
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
+  readonly daemonPromptId?: string;
   readonly timestamp?: string;
   readonly type: TranscriptRecordType;
   readonly subtype?: string;
@@ -124,9 +125,11 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_bootstrap',
   'agent_launch_prompt',
   'agent_retry',
+  'agent_session_ready',
   'file_history_snapshot',
   'session_source',
   'session_model',
+  'session_sources_snapshot',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
@@ -136,6 +139,32 @@ const KNOWN_RECORD_SUBTYPES = new Set([
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function stripGeneratedAttachmentTokens(
+  displayText: string,
+  systemPayload: unknown,
+): string {
+  const payload = isObjectRecord(systemPayload) ? systemPayload : undefined;
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
 }
 
 export function wrapUserPromptSubmitContext(context: string): string {
@@ -229,7 +258,10 @@ function diagnostic(
 export function isTranscriptConversationRecord(
   record: Pick<TranscriptRecordInput, 'type' | 'subtype'>,
 ): boolean {
-  return !isTranscriptArtifactRecord(record);
+  return (
+    !isTranscriptArtifactRecord(record) &&
+    !(record.type === 'system' && record.subtype === 'session_sources_snapshot')
+  );
 }
 
 export function isTranscriptArtifactRecord(record: {
@@ -369,6 +401,11 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
+      daemonPromptId:
+        typeof value['daemonPromptId'] === 'string' &&
+        value['daemonPromptId'].trim().length > 0
+          ? value['daemonPromptId']
+          : undefined,
       type: type as TranscriptRecordType,
       ...(typeof subtype === 'string' ? { subtype } : { subtype: undefined }),
       ...(typeof timestamp === 'string' &&

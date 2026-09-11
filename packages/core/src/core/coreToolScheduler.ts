@@ -10,6 +10,7 @@ import type {
   ToolExecutionStatus,
 } from './turn.js';
 import type {
+  AutoModeFallbackConfirmation,
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
@@ -63,6 +64,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './llm-chat.js';
@@ -116,9 +118,11 @@ import {
 } from './plan-mode-entry-policy.js';
 import {
   applyAutoModeDecision,
-  decorateClassifierUnavailableConfirmation,
+  decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
+  getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
+  prepareAutoModeFallback,
   shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
@@ -131,7 +135,6 @@ import {
   isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
-  shouldFallback,
 } from '../permissions/denialTracking.js';
 import {
   getResponseTextFromParts,
@@ -206,6 +209,14 @@ import {
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import {
+  extractCodeModeImageContent,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  runWithToolCallSource,
+  type CodeModeToolResult,
+} from '../code-mode/tool-call-runtime.js';
+import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -248,10 +259,92 @@ const GATE_HEADROOM = 3000;
 // returns lifecycle policy that must remain inline. This gate runs before
 // per-tool limits, so each requires an explicit exemption here.
 const GATE_EXEMPT_TOOLS = new Set<string>([
+  ToolNames.EXEC,
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
 ]);
+
+const OPT_IN_TOOL_MESSAGES: Record<
+  string,
+  { setting: string; defaultUnavailableMessage: string }
+> = {
+  [ToolNames.LS]: {
+    setting: 'tools.listDirectory.enabled',
+    defaultUnavailableMessage:
+      'is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.',
+  },
+  [ToolNames.TODO_WRITE]: {
+    setting: 'tools.todoWrite.enabled',
+    defaultUnavailableMessage:
+      'is a built-in tool that is disabled by default. Enable it with the tools.todoWrite.enabled setting and restart Qwen Code.',
+  },
+};
+
+type OptInToolMessageConfig = Pick<
+  Config,
+  'getDisabledTools' | 'getPermissionManager' | 'isTodoWriteEnabled'
+>;
+
+export async function getOptInToolNotFoundMessage(
+  config: OptInToolMessageConfig,
+  unknownToolName: string,
+  isCanonicalToolRegistered: (
+    canonicalName: string,
+  ) => boolean | Promise<boolean>,
+): Promise<string | undefined> {
+  const canonicalName = resolveToolName(unknownToolName);
+  const definition = Object.hasOwn(OPT_IN_TOOL_MESSAGES, canonicalName)
+    ? OPT_IN_TOOL_MESSAGES[canonicalName]
+    : undefined;
+  if (!definition || (await isCanonicalToolRegistered(canonicalName))) {
+    return undefined;
+  }
+
+  const workspaceDisabled = config.getDisabledTools().has(canonicalName);
+  if (canonicalName === ToolNames.LS) {
+    if (workspaceDisabled) {
+      return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the ${definition.setting} setting only controls whether the tool is registered by default.`;
+    }
+    return `Tool "${unknownToolName}" ${definition.defaultUnavailableMessage}`;
+  }
+
+  const settingEnabled = config.isTodoWriteEnabled();
+  const permissionManager = config.getPermissionManager();
+  const denyRule = permissionManager?.findMatchingDenyRule({
+    toolName: canonicalName,
+  });
+  const omittedFromCoreTools =
+    permissionManager?.isToolDisabledByCoreToolsAllowList(canonicalName) ===
+    true;
+
+  if (workspaceDisabled) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Also enable ${definition.setting}.`;
+    return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there.${settingAction} Restart Qwen Code after updating these controls.`;
+  }
+
+  if (denyRule) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Enable ${definition.setting} as well.`;
+    return `Tool "${unknownToolName}" is blocked by the permissions.deny or --exclude-tools rule "${denyRule}".${settingAction} Remove the deny rule and restart Qwen Code.`;
+  }
+
+  if (omittedFromCoreTools) {
+    const settingAction = settingEnabled
+      ? ''
+      : ` Enable ${definition.setting} as well.`;
+    return `Tool "${unknownToolName}" is not listed in the active core tools allowlist (--core-tools or settings tools.core).${settingAction} Add it to the allowlist and restart Qwen Code.`;
+  }
+
+  if (!settingEnabled) {
+    return `Tool "${unknownToolName}" ${definition.defaultUnavailableMessage}`;
+  }
+
+  return `Tool "${unknownToolName}" is enabled by ${definition.setting} but is blocked by active tool registration rules. Check permissions.deny, --exclude-tools, and tools.core or --core-tools, then restart Qwen Code.`;
+}
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -281,6 +374,22 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
   return '';
 }
 
+function extractCodeModeToolOutput(parts: Part[]): string {
+  return parts
+    .map((part) => {
+      if (typeof part.text === 'string') return part.text;
+      const response = part.functionResponse?.response;
+      if (!response) return '';
+      const value =
+        response['output'] ?? response['error'] ?? response['content'] ?? '';
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+const CODE_MODE_BATCH_WINDOW_MS = 5;
+
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 const TOOL_SPAN_STATUS_INVOCATION_GUARD_DENIED =
   'Tool execution blocked by host policy';
@@ -306,10 +415,13 @@ const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 // interrupted mid-flight makes the model skip work that never happened; the
 // converse makes it redo work whose side effects already landed. Both sites
 // that can cancel after `execute()` was entered must pick the right one.
+//
+// Both messages include an explicit stop directive so the model does not
+// misattribute the cancellation as a transient fault and retry (#10170).
 const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
-  'User cancelled tool execution.';
+  'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
 const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
-  'The tool had already completed; its output was discarded.';
+  'The tool had already completed; its output was discarded. User intentionally cancelled. Stop and await further instructions; do not retry.';
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -1404,6 +1516,7 @@ function producerContentEqual(
 }
 
 export class CoreToolScheduler {
+  private readonly schedulerOptions: CoreToolSchedulerOptions;
   private toolRegistry: ToolRegistry;
   private toolCalls: ToolCall[] = [];
   private outputUpdateHandler?: OutputUpdateHandler;
@@ -1463,6 +1576,7 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  private readonly askUserQuestionResponseClaims = new Set<string>();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
     RuntimeContentGeneratorView
@@ -1474,8 +1588,28 @@ export class CoreToolScheduler {
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
+  private nestedToolScheduler?: CoreToolScheduler;
+  private nestedToolCalls: ToolCall[] = [];
+  private nestedSequence = 0;
+  private nestedFlushScheduled = false;
+  private nestedQueue: Array<{
+    request: ToolCallRequestInfo;
+    signal: AbortSignal;
+    resolve: (result: CodeModeToolResult) => void;
+    reject: (reason: unknown) => void;
+    onResult?: (response: ToolCallResponseInfo) => void;
+  }> = [];
+  private nestedResolvers = new Map<
+    string,
+    {
+      resolve: (result: CodeModeToolResult) => void;
+      reject: (reason: unknown) => void;
+      onResult?: (response: ToolCallResponseInfo) => void;
+    }
+  >();
 
   constructor(options: CoreToolSchedulerOptions) {
+    this.schedulerOptions = options;
     this.config = options.config;
     this.toolRegistry = options.config.getToolRegistry();
     this.outputUpdateHandler = options.outputUpdateHandler;
@@ -1487,6 +1621,128 @@ export class CoreToolScheduler {
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
     this.hasSkillToolOverride = options.hasSkillTool;
+  }
+
+  private getOrCreateNestedToolScheduler(): CoreToolScheduler {
+    if (this.nestedToolScheduler) return this.nestedToolScheduler;
+    this.nestedToolScheduler = new CoreToolScheduler({
+      ...this.schedulerOptions,
+      onAllToolCallsComplete: async (calls) => {
+        for (const call of calls) {
+          const resolver = this.nestedResolvers.get(call.request.callId);
+          if (!resolver) continue;
+          this.nestedResolvers.delete(call.request.callId);
+          try {
+            resolver.onResult?.(call.response);
+          } catch (error) {
+            resolver.reject(error);
+            continue;
+          }
+          if (call.status === 'success') {
+            const content = extractCodeModeImageContent(
+              call.response.responseParts,
+            );
+            resolver.resolve({
+              callId: call.request.callId,
+              name: call.request.name,
+              status: 'success',
+              output: extractCodeModeToolOutput(call.response.responseParts),
+              ...(content ? { content } : {}),
+            });
+          } else {
+            resolver.reject(
+              call.response.error ??
+                new Error(
+                  extractCodeModeToolOutput(call.response.responseParts) ||
+                    `Tool ${call.request.name} failed.`,
+                ),
+            );
+          }
+        }
+      },
+      onToolCallsUpdate: (calls) => {
+        this.nestedToolCalls = calls;
+        this.notifyToolCallsUpdate();
+      },
+    });
+    return this.nestedToolScheduler;
+  }
+
+  private dispatchCodeModeTool(
+    name: string,
+    args: Record<string, unknown>,
+    parent: ToolCallRequestInfo,
+    signal: AbortSignal,
+    onResult?: (response: ToolCallResponseInfo) => void,
+  ): Promise<CodeModeToolResult> {
+    const allowedNames = parent.codeModeAllowedToolNames
+      ? new Set(parent.codeModeAllowedToolNames)
+      : undefined;
+    if (!isCodeModeToolCallAllowed(name, 'code_mode', allowedNames)) {
+      return Promise.reject(
+        new Error(`Tool "${name}" is not callable from exec.`),
+      );
+    }
+    const callId = `${parent.callId}:code:${++this.nestedSequence}`;
+    const request: ToolCallRequestInfo = {
+      callId,
+      name,
+      args,
+      isClientInitiated: true,
+      prompt_id: parent.prompt_id,
+      response_id: parent.response_id,
+      parentCallId: parent.callId,
+      source: 'code_mode',
+      goalContext: parent.goalContext,
+    };
+    return new Promise<CodeModeToolResult>((resolve, reject) => {
+      this.nestedQueue.push({ request, signal, resolve, reject, onResult });
+      if (this.nestedFlushScheduled) return;
+      this.nestedFlushScheduled = true;
+      setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
+    });
+  }
+
+  private flushNestedQueue(): void {
+    this.nestedFlushScheduled = false;
+    const entries = this.nestedQueue.splice(0);
+    if (entries.length === 0) return;
+    const active = entries.filter((entry) => !entry.signal.aborted);
+    for (const entry of entries) {
+      if (entry.signal.aborted) entry.reject(entry.signal.reason);
+    }
+    if (active.length === 0) return;
+
+    const batchController = new AbortController();
+    const abortBatch = (event: Event) => {
+      const aborted = event.currentTarget as AbortSignal;
+      batchController.abort(aborted.reason);
+    };
+    for (const entry of active) {
+      entry.signal.addEventListener('abort', abortBatch, { once: true });
+      this.nestedResolvers.set(entry.request.callId, {
+        resolve: entry.resolve,
+        reject: entry.reject,
+        onResult: entry.onResult,
+      });
+    }
+    void runWithoutToolCallRuntime(() =>
+      this.getOrCreateNestedToolScheduler().schedule(
+        active.map((entry) => entry.request),
+        batchController.signal,
+      ),
+    )
+      .catch((error) => {
+        for (const entry of active) {
+          this.nestedResolvers.delete(entry.request.callId);
+          entry.reject(error);
+        }
+      })
+      .finally(() => {
+        for (const entry of active) {
+          entry.signal.removeEventListener('abort', abortBatch);
+        }
+      });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1646,6 +1902,7 @@ export class CoreToolScheduler {
               resultDisplay = {
                 fileDiff: waitingCall.confirmationDetails.fileDiff,
                 fileName: waitingCall.confirmationDetails.fileName,
+                filePath: waitingCall.confirmationDetails.filePath,
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
@@ -2135,23 +2392,16 @@ export class CoreToolScheduler {
       return mcpMessage;
     }
 
-    // `list_directory` is an opt-in built-in: when it is genuinely unregistered,
-    // say how to turn it on instead of suggesting unrelated tools by edit
-    // distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...) so an aliased
-    // call gets the same explanation — but only once the canonical name is
-    // confirmed absent. The registry is keyed by canonical names while the
-    // lookup that lands here resolves legacy migrations only, so an alias call
-    // misses even when the tool IS enabled; that case must keep the generic
-    // path's "Did you mean list_directory" self-correction.
-    const canonicalName = resolveToolName(unknownToolName);
-    if (
-      canonicalName === ToolNames.LS &&
-      !(await this.toolRegistry.ensureTool(canonicalName))
-    ) {
-      if (this.config.getDisabledTools().has(canonicalName)) {
-        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
-      }
-      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
+    // Resolve aliases before checking registration so enabled canonical tools
+    // keep the generic "Did you mean" correction for an alias-only miss.
+    const optInToolMessage = await getOptInToolNotFoundMessage(
+      this.config,
+      unknownToolName,
+      async (canonicalName) =>
+        Boolean(await this.toolRegistry.ensureTool(canonicalName)),
+    );
+    if (optInToolMessage) {
+      return optInToolMessage;
     }
 
     // Standard "not found" message with Levenshtein suggestions
@@ -2225,7 +2475,9 @@ export class CoreToolScheduler {
 
   /** Suggests similar tool names using Levenshtein distance. */
   private getToolSuggestion(unknownToolName: string, topN = 3): string {
-    const allToolNames = this.toolRegistry.getAllToolNames();
+    const allToolNames = this.toolRegistry
+      .getAllToolNames()
+      .filter((name) => this.toolRegistry.isToolDeclared?.(name) ?? true);
 
     const matches = allToolNames.map((toolName) => ({
       name: toolName,
@@ -2257,6 +2509,9 @@ export class CoreToolScheduler {
     runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     if (this.isRunning() || this.isScheduling) {
+      if (signal.aborted) {
+        return Promise.reject(new Error('Tool call cancelled while in queue.'));
+      }
       return new Promise((resolve, reject) => {
         const abortHandler = () => {
           // Find and remove the request from the queue
@@ -2459,6 +2714,25 @@ export class CoreToolScheduler {
           }
 
           const canonicalName = canonicalToolName(reqInfo.name);
+          if (
+            this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+            !isCodeModeToolCallAllowed(canonicalName, reqInfo.source ?? 'model')
+          ) {
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(
+                  `Tool "${reqInfo.name}" is unavailable on this CodeModeOnly call surface.`,
+                ),
+                ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
 
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
@@ -2739,6 +3013,10 @@ export class CoreToolScheduler {
             'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
             call_id: reqInfo.callId,
             tool_name: canonicalName,
+            ...(reqInfo.parentCallId
+              ? { 'tool.parent_call_id': reqInfo.parentCallId }
+              : {}),
+            ...(reqInfo.source ? { 'tool.source': reqInfo.source } : {}),
           },
           toolCall.tool.description,
           reqInfo.prompt_id,
@@ -2976,8 +3254,16 @@ export class CoreToolScheduler {
             // manual approval — confusing UX given the previous allow-rule
             // call just worked silently.
             if (approvalMode === ApprovalMode.AUTO) {
+              const actionFingerprint = getAutoModeActionFingerprint(
+                canonicalName,
+                toolParams,
+                this.config.getCwd(),
+              );
               this.config.setAutoModeDenialState(
-                recordAllow(this.config.getAutoModeDenialState()),
+                recordAllow(
+                  this.config.getAutoModeDenialState(),
+                  actionFingerprint,
+                ),
               );
             }
             this.setToolCallOutcome(
@@ -2993,28 +3279,37 @@ export class CoreToolScheduler {
           // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
-          let autoModeFallbackMessage: string | undefined;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
           if (
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, canonicalName)
           ) {
-            const denialState = this.config.getAutoModeDenialState();
-            const fallback = shouldFallback(denialState);
+            const actionFingerprint = getAutoModeActionFingerprint(
+              canonicalName,
+              toolParams,
+              this.config.getCwd(),
+            );
+            const { denialState, fallback } = prepareAutoModeFallback(
+              this.config,
+              actionFingerprint,
+            );
             // `buildClassifierContents` retains only the most recent
             // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
             // exactly that tail rather than triggering a
             // `structuredClone` of the whole session on every non-
             // fast-path AUTO call.
+            const llmClient = this.config.getLlmClient?.();
             const messages =
-              this.config
-                .getLlmClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const trustedUserAnswers =
+              llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
                 ctx: pmCtx,
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback
@@ -3032,6 +3327,7 @@ export class CoreToolScheduler {
               decision,
               this.config,
               denialState,
+              actionFingerprint,
             );
             if (
               !this.config.getDisableAllHooks() &&
@@ -3097,18 +3393,28 @@ export class CoreToolScheduler {
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
                 if (
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable'
+                  outcome.message &&
+                  (isDenialFallbackReason(outcome.reason) ||
+                    outcome.reason === 'classifier_unavailable')
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
                   );
-                } else if (outcome.reason === 'external_write') {
+                } else if (
+                  outcome.reason === 'external_write' &&
+                  outcome.message
+                ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
                   );
@@ -3152,10 +3458,11 @@ export class CoreToolScheduler {
               continue;
             }
 
-            if (autoModeFallbackMessage) {
-              confirmationDetails = decorateClassifierUnavailableConfirmation(
+            if (autoModeFallback) {
+              confirmationDetails = decorateAutoModeFallbackConfirmation(
                 confirmationDetails,
-                autoModeFallbackMessage,
+                autoModeFallback.reason,
+                autoModeFallback.message,
               );
             }
 
@@ -3775,7 +4082,22 @@ export class CoreToolScheduler {
     // Guard: if the tool is no longer awaiting approval (already handled by
     // another confirmation path, e.g. IDE vs CLI race), skip to avoid double
     // processing and potential re-execution.
-    if (!toolCall) return;
+    if (!toolCall) {
+      if (
+        this.nestedToolScheduler?.toolCalls.some(
+          (call) => call.request.callId === callId,
+        )
+      ) {
+        return this.nestedToolScheduler.handleConfirmationResponse(
+          callId,
+          originalOnConfirm,
+          outcome,
+          signal,
+          payload,
+        );
+      }
+      return;
+    }
 
     if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
       return runInRequestGoalContext(toolCall.request, () =>
@@ -3787,6 +4109,20 @@ export class CoreToolScheduler {
           payload,
         ),
       );
+    }
+
+    const claimsAskUserQuestionResponse =
+      toolCall.tool instanceof AskUserQuestionTool &&
+      (toolCall as WaitingToolCall).confirmationDetails.type ===
+        'ask_user_question';
+    if (
+      claimsAskUserQuestionResponse &&
+      this.askUserQuestionResponseClaims.has(callId)
+    ) {
+      return;
+    }
+    if (claimsAskUserQuestionResponse) {
+      this.askUserQuestionResponseClaims.add(callId);
     }
 
     try {
@@ -3859,6 +4195,10 @@ export class CoreToolScheduler {
         `handleConfirmationResponse failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
+    } finally {
+      if (claimsAskUserQuestionResponse) {
+        this.askUserQuestionResponseClaims.delete(callId);
+      }
     }
 
     // Execution runs outside the confirmation catch so each sister tool's
@@ -4009,6 +4349,20 @@ export class CoreToolScheduler {
         } as ToolCallConfirmationDetails);
       }
     } else {
+      const waitingToolCall = toolCall as WaitingToolCall;
+      if (
+        isApproveOutcome(outcome) &&
+        waitingToolCall.tool instanceof AskUserQuestionTool &&
+        waitingToolCall.confirmationDetails.type === 'ask_user_question'
+      ) {
+        this.config
+          .getLlmClient?.()
+          ?.recordTrustedUserAnswers(
+            callId,
+            waitingToolCall.confirmationDetails.questions,
+            payload?.answers,
+          );
+      }
       // If the client provided new content, apply it before scheduling.
       if (payload?.newContent && toolCall) {
         if (
@@ -4324,6 +4678,14 @@ export class CoreToolScheduler {
           'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
           call_id: callId, // legacy alias — see _schedule for context
           tool_name: canonical, // legacy alias — see _schedule for context
+          ...(scheduledCall.request.parentCallId
+            ? {
+                'tool.parent_call_id': scheduledCall.request.parentCallId,
+              }
+            : {}),
+          ...(scheduledCall.request.source
+            ? { 'tool.source': scheduledCall.request.source }
+            : {}),
         },
         scheduledCall.tool.description,
         scheduledCall.request.prompt_id,
@@ -4902,14 +5264,35 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            return invocation.execute(
-              execSignal,
-              liveOutputCallback,
-              shellExecutionConfig,
-              setPidCallback,
-              setPromoteAbortControllerCallback,
-              canPromoteForegroundShell,
-            );
+            const execute = () =>
+              invocation.execute(
+                execSignal,
+                liveOutputCallback,
+                shellExecutionConfig,
+                setPidCallback,
+                setPromoteAbortControllerCallback,
+                canPromoteForegroundShell,
+              );
+            return scheduledCall.request.name === ToolNames.EXEC
+              ? runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    allowedToolNames:
+                      scheduledCall.request.codeModeAllowedToolNames,
+                    dispatch: (name, args, nestedSignal, onResult) =>
+                      this.dispatchCodeModeTool(
+                        name,
+                        args,
+                        scheduledCall.request,
+                        nestedSignal,
+                        onResult,
+                      ),
+                  },
+                  execute,
+                )
+              : scheduledCall.request.source === 'code_mode'
+                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                : execute();
           }),
         );
       } else {
@@ -4924,11 +5307,32 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            return invocation.execute(
-              execSignal,
-              liveOutputCallback,
-              shellExecutionConfig,
-            );
+            const execute = () =>
+              invocation.execute(
+                execSignal,
+                liveOutputCallback,
+                shellExecutionConfig,
+              );
+            return scheduledCall.request.name === ToolNames.EXEC
+              ? runWithToolCallRuntime(
+                  {
+                    parentCallId: callId,
+                    allowedToolNames:
+                      scheduledCall.request.codeModeAllowedToolNames,
+                    dispatch: (name, args, nestedSignal, onResult) =>
+                      this.dispatchCodeModeTool(
+                        name,
+                        args,
+                        scheduledCall.request,
+                        nestedSignal,
+                        onResult,
+                      ),
+                  },
+                  execute,
+                )
+              : scheduledCall.request.source === 'code_mode'
+                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                : execute();
           }),
         );
       }
@@ -5768,6 +6172,7 @@ export class CoreToolScheduler {
         const errorGateThreshold =
           this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
         if (
+          canonicalName !== ToolNames.EXEC &&
           errorMessage.length > errorGateThreshold &&
           !isAlreadyTruncated(errorMessage)
         ) {
@@ -5850,6 +6255,15 @@ export class CoreToolScheduler {
                 ? { visionBridgeNotice: processedImages.visionBridgeNotice }
                 : {}),
             };
+          }
+        }
+        if (canonicalName === ToolNames.EXEC) {
+          const audioParts = normalizeParts(toolResult.llmContent).filter(
+            (part) => part.inlineData?.mimeType?.startsWith('audio/'),
+          );
+          const response = errorResponse.responseParts[0]?.functionResponse;
+          if (response && audioParts.length > 0) {
+            response.parts = [...(response.parts ?? []), ...audioParts];
           }
         }
         if (
@@ -6329,7 +6743,7 @@ export class CoreToolScheduler {
       return;
     }
     try {
-      this.onToolCallsUpdate([...this.toolCalls]);
+      this.onToolCallsUpdate([...this.toolCalls, ...this.nestedToolCalls]);
     } catch (error) {
       debugLogger.error(
         `Tool call update observer failed: ${
@@ -6413,12 +6827,19 @@ export class CoreToolScheduler {
           debugLogger.info(
             `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
-          const denialState = this.config.getAutoModeDenialState();
-          const fallback = shouldFallback(denialState);
+          const actionFingerprint = getAutoModeActionFingerprint(
+            pendingTool.request.name,
+            toolParams,
+            this.config.getCwd(),
+          );
+          const { denialState, fallback } = prepareAutoModeFallback(
+            this.config,
+            actionFingerprint,
+          );
+          const llmClient = this.config.getLlmClient?.();
           const messages =
-            this.config
-              .getLlmClient?.()
-              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            llmClient?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const trustedUserAnswers = llmClient?.getTrustedUserAnswers?.() ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,
             () =>
@@ -6427,6 +6848,7 @@ export class CoreToolScheduler {
                 pmForcedAsk,
                 toolParams,
                 messages,
+                trustedUserAnswers,
                 config: this.config,
                 signal,
                 skipClassifierReason: fallback.fallback
@@ -6444,6 +6866,7 @@ export class CoreToolScheduler {
             decision,
             this.config,
             denialState,
+            actionFingerprint,
           );
           if (
             !this.config.getDisableAllHooks() &&
@@ -6528,13 +6951,23 @@ export class CoreToolScheduler {
                 );
               }
 
-              if (outcome.message) {
+              if (
+                outcome.message &&
+                (isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write')
+              ) {
+                const autoModeFallback: AutoModeFallbackConfirmation = {
+                  reason: outcome.reason,
+                  message: outcome.message,
+                };
                 this.setStatusInternal(
                   pendingTool.request.callId,
                   'awaiting_approval',
-                  decorateClassifierUnavailableConfirmation(
+                  decorateAutoModeFallbackConfirmation(
                     pendingTool.confirmationDetails,
-                    outcome.message,
+                    autoModeFallback.reason,
+                    autoModeFallback.message,
                   ),
                 );
               }

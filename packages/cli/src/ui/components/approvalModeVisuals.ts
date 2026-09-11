@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { theme } from '../semantic-colors.js';
 
 export function getApprovalModeIndicatorColor(

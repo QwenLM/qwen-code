@@ -393,15 +393,27 @@ Verify both flags when wiring an ARMS+DashScope correlation setup:
 }
 ```
 
-### Other outbound correlation headers
+### Routify session affinity
 
-`X-Qwen-Code-Session-Id` and `X-Qwen-Code-Request-Id` are **not part of
-this PR**. They will be designed and proposed in their own follow-up
-PR(s) under the same `outboundCorrelation.*` namespace, each with its
-own threat model and operator-consent flow. PR #4390 review (LaZzyMan)
-established the principle: "telemetry's scope of work doesn't include
-sending identifiers to LLM providers"; correlation-header work moves to
-its own design discussion rather than landing under telemetry.
+Qwen Code's LLM requests through the OpenAI-compatible, DashScope, Anthropic,
+Gemini, and Vertex provider paths include the current Qwen Code session ID in
+the `session_id` header when addressed over HTTPS directly to `routify.alibaba-inc.com`,
+`routify-online.alibaba-inc.com`, or `routify-pub.alibaba-inc.com`. Routify's
+ModelRouter uses this value for session affinity and traffic marking. This
+behavior is not controlled by `telemetry.enabled` or
+`outboundCorrelation.*`.
+
+The initial destination match is deliberately narrow: Qwen Code does not
+attach the header to subdomains, other `alibaba-inc.com` hosts, or other LLM
+endpoints. The standard fetch redirect behavior still applies after that
+match, so a Routify response can forward the header by redirecting the request.
+
+The session ID is read for every request, so a new session created by
+`/clear` gets a new affinity value without rebuilding the SDK client. Gemini
+requires an explicit Routify `baseUrl` so Qwen Code can verify the
+destination.
+
+`X-Qwen-Code-Request-Id` is not implemented.
 
 ## Inbound correlation (daemon HTTP API)
 
@@ -719,7 +731,7 @@ The following events are logged:
 - `qwen-code.workflow_keyword`: Workflow keyword trigger fired.
 
 - `qwen-code.workflow_run`: Workflow run reached terminal state.
-  - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int)
+  - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int, all settled dispatches), `agents_failed` (int, settled dispatches with failed status), `agents_cached` (int, settled dispatches served from a prior run), `agents_respawned` (int, dispatched calls re-run after a prior failed or interrupted attempt), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int). `agents_failed` and `agents_cached` are subsets of `agents_completed`, while `agents_respawned` describes provenance and is not an additional outcome count.
 
 #### Auto-Memory Events
 

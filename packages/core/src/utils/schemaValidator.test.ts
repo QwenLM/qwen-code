@@ -9,6 +9,20 @@ import { SchemaValidator } from './schemaValidator.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('SchemaValidator', () => {
+  it('strictly validates without coercing application data', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['count'],
+      properties: { count: { type: 'integer' } },
+    };
+    const value = { count: '3' };
+
+    expect(SchemaValidator.validateStrict(schema, value)).not.toBeNull();
+    expect(value).toEqual({ count: '3' });
+    expect(SchemaValidator.validateStrict(schema, { count: 3 })).toBeNull();
+  });
+
   it('should allow any params if schema is undefined', () => {
     const params = {
       foo: 'bar',

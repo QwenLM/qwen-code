@@ -201,6 +201,7 @@ describe('Session.pendingWorktreeNotice', () => {
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
       // The Session constructor and Session.prompt both reach for the
       // canonical Goal runtime. A real Config throws this exact error when
       // Goal persistence is off, and both call sites are written to fall

@@ -5,7 +5,11 @@
  */
 
 import type { AuthType, InputModalities } from '../core/contentGenerator.js';
-import type { ModelConfig, ModelProvidersConfig } from '../models/types.js';
+import type {
+  ModelCapabilities,
+  ModelConfig,
+  ModelProvidersConfig,
+} from '../models/types.js';
 
 // Re-export for convenience
 export type ProviderModelConfig = ModelConfig;
@@ -18,6 +22,7 @@ export type ProviderId = string;
 
 export interface ModelSpec {
   id: string;
+  capabilities?: ModelCapabilities;
   contextWindowSize?: number;
   enableThinking?: boolean;
   thinkingMandatory?: boolean;
@@ -113,6 +118,18 @@ export interface ProviderConfig {
    * model IDs can coexist under one provider config.
    */
   mergeModelsByIdentity?: boolean;
+
+  /**
+   * Built-in `web_search` backend this provider can serve with the same
+   * credentials as the main model, letting the tool register without any
+   * `tools.webSearch` configuration.
+   *
+   * For a preset that pins its base URL, absence vetoes automatic activation.
+   * Custom and unmatched endpoints carry no preset-level knowledge and still
+   * pass through the automatic DashScope host check. Explicit configuration
+   * requires a search model; an env-declared backend also requires that model.
+   */
+  webSearch?: { backend: 'dashscope' };
 
   /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.

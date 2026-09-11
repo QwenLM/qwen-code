@@ -116,6 +116,7 @@ vi.mock('@qwen-code/channel-base', () => ({
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
+type Envelope = import('@qwen-code/channel-base').Envelope;
 import type {
   QQMessageEvent,
   QQGroupMessageEvent,
@@ -344,6 +345,17 @@ describe('handleC2C', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
+  it('runs a C2C slash command without the wrapper', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](makeC2CEvent({ content: '/status' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toBe('/status');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
   it('drops bot C2C messages', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -413,7 +425,7 @@ describe('handleGroup', () => {
     expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true
     expect(env['text']).toBe(
-      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: <@OPENID_BOT> 你好',
+      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: 你好',
     );
     expect(env['displayText']).toBe('你好');
   });
@@ -522,6 +534,58 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toBe('/status');
+  });
+
+  it('keeps the sender wrapper and member mentions when the body repeats the name', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_OTHER> <@OPENID_BOT> please review hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          user_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          username: '<@OPENID_OTHER>  please review hello',
+        },
+        mentions: [
+          { member_openid: 'other-openid', is_you: false },
+          { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.displayText).toBe('<@OPENID_OTHER>  please review hello');
+    expect(env.text.split(env.displayText!)).toHaveLength(3);
+    expect(env.text).toContain('[atMention=');
+    expect(env.text).toContain('[<@OPENID_OTHER>  please review hello(');
+    expect(env.text).toContain(
+      '机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
+    );
+    expect(
+      env.text.endsWith(
+        'hello\n机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps a member mention in the message body', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> ask <@OPENID_OTHER> about the deploy',
+        mentions: [
+          { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
+          { member_openid: 'other-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('ask <@OPENID_OTHER> about the deploy');
   });
 
   it('其他成员 mention 后的斜杠命令仍被识别', async () => {

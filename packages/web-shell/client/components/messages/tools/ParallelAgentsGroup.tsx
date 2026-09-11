@@ -5,12 +5,14 @@ import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
+import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
 import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
   isDefaultAgentType,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentCurrentToolHint,
   formatTokenCount,
   getAgentCancellationReason,
@@ -116,6 +118,8 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const subagentDetails = useSubagentDetails();
   const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const [groupExpanded, setGroupExpanded] = useState(false);
@@ -359,7 +363,7 @@ export function ParallelAgentsGroup({
   ).length;
   const total = agents.length;
 
-  const showGroup = groupExpanded || !!approvalAgent;
+  const showGroup = documentMode || groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
@@ -368,9 +372,12 @@ export function ParallelAgentsGroup({
     <div className={styles.wrap} ref={wrapRef}>
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         ref={summaryRef}
         className={styles.summary}
         onClick={() => {
+          if (documentMode) return;
           if (automaticCollapseClosing) return;
           clearTimeout(autoCollapseTimerRef.current);
           autoCollapseTimerRef.current = undefined;
@@ -386,8 +393,14 @@ export function ParallelAgentsGroup({
           setGroupExpanded((value) => !value);
         }}
         aria-disabled={automaticCollapseClosing || undefined}
-        aria-expanded={showGroup}
-        title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
+        aria-expanded={documentMode ? undefined : showGroup}
+        title={
+          documentMode
+            ? undefined
+            : showGroup
+              ? t('tool.collapseHint')
+              : t('tool.expand')
+        }
       >
         <span className={styles.summaryIcon} aria-hidden="true">
           <ToolGroupIcon />
@@ -436,6 +449,8 @@ export function ParallelAgentsGroup({
                 {agents.map((agent) => {
                   const agentType = getAgentType(agent);
                   const desc = getAgentDescription(agent);
+                  const unavailableReason =
+                    getSubagentDetailsUnavailableReason(agent);
                   const toolHint = getAgentCurrentToolHint(agent, t);
                   const stats = getAgentStats(agent, now);
                   const activity = toolHint || stats.cancellationReason;
@@ -452,7 +467,8 @@ export function ParallelAgentsGroup({
                       : rowStatus === 'failed'
                         ? t('subagent.failed')
                         : t('subagent.completed');
-                  const isExpanded = expandedId === agent.callId;
+                  const isExpanded =
+                    documentMode || expandedId === agent.callId;
                   // While the agent's own launch approval is unanswered there
                   // is nothing to show yet — keep the row compact and
                   // non-interactive, mirroring ToolLine's pending guard.
@@ -511,12 +527,16 @@ export function ParallelAgentsGroup({
                     </>
                   );
                   return (
-                    <div key={agent.callId}>
-                      {approvalPending ? (
+                    <div
+                      key={agent.callId}
+                      data-transcript-tool-call-id={agent.callId}
+                    >
+                      {approvalPending || documentMode ? (
                         <div
                           className={styles.row}
                           data-agent-status={rowStatus}
-                          aria-disabled="true"
+                          data-detail-mode={documentMode ? 'inline' : undefined}
+                          aria-disabled={approvalPending || undefined}
                         >
                           {rowContent}
                         </div>
@@ -532,15 +552,19 @@ export function ParallelAgentsGroup({
                           data-detail-mode={
                             subagentDetails ? 'panel' : 'inline'
                           }
+                          aria-disabled={!!unavailableReason || undefined}
                           aria-expanded={
                             subagentDetails ? undefined : isExpanded
                           }
                           title={
-                            subagentDetails
-                              ? t('planExecution.openDetails')
-                              : t('subagent.toggleStream')
+                            unavailableReason
+                              ? t(unavailableReason)
+                              : subagentDetails
+                                ? t('planExecution.openDetails')
+                                : t('subagent.toggleStream')
                           }
                           onClick={() => {
+                            if (unavailableReason) return;
                             if (subagentDetails) subagentDetails.onOpen(agent);
                             else
                               setExpandedId(isExpanded ? null : agent.callId);
@@ -553,20 +577,23 @@ export function ParallelAgentsGroup({
                           />
                         </button>
                       )}
-                      {!subagentDetails && isExpanded && (
-                        <div className={styles.detail}>
-                          <SubAgentPanel
-                            tool={agent}
-                            approval={
-                              hostOwnsEditDiffPreview &&
-                              approvalAgent?.callId === agent.callId
-                                ? pendingApproval
-                                : undefined
-                            }
-                            hideHeader
-                          />
-                        </div>
-                      )}
+                      {!approvalPending &&
+                        (!subagentDetails || documentMode) &&
+                        isExpanded && (
+                          <div className={styles.detail}>
+                            <SubAgentPanel
+                              tool={agent}
+                              approval={
+                                hostOwnsEditDiffPreview &&
+                                approvalAgent?.callId === agent.callId
+                                  ? pendingApproval
+                                  : undefined
+                              }
+                              hideHeader
+                              defaultExpanded={documentMode}
+                            />
+                          </div>
+                        )}
                     </div>
                   );
                 })}

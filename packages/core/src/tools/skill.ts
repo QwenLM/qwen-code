@@ -22,7 +22,6 @@ import {
 } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 const debugLogger = createDebugLogger('SKILL');
@@ -36,8 +35,8 @@ export interface SkillParams {
 export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
-  applySkillAllowedTools,
-  canApplySkillSideEffects,
+  applySkillSideEffects,
+  ReviewWorkflowActivationError,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -363,10 +362,28 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
     }
 
+    const restoreSkill = (requestedName: unknown, output: unknown) => {
+      if (typeof requestedName !== 'string' || typeof output !== 'string')
+        return;
+      const skill = skillByName.get(requestedName.toLowerCase());
+      if (
+        !skill ||
+        (output !== skill.output && !output.startsWith(`${skill.output}\n`))
+      ) {
+        return;
+      }
+      this.loadedSkillContents.add(skill.output);
+      this.loadedSkillNames.add(skill.name);
+    };
+
     const pendingSkillCalls = new Map<string, string>();
+    const pendingExecCalls = new Set<string>();
     for (const content of history) {
       for (const part of content.parts ?? []) {
         const call = part.functionCall;
+        if (call?.name === ToolNames.EXEC && typeof call.id === 'string') {
+          pendingExecCalls.add(call.id);
+        }
         const requestedSkill = call?.args?.['skill'];
         if (
           call?.name === ToolNames.SKILL &&
@@ -380,6 +397,44 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const response = part.functionResponse;
         const output = response?.response?.['output'];
         if (
+          response?.name === ToolNames.EXEC &&
+          typeof response.id === 'string' &&
+          pendingExecCalls.delete(response.id) &&
+          typeof output === 'string'
+        ) {
+          let payload: unknown;
+          try {
+            payload = JSON.parse(output.split('\n', 1)[0]);
+          } catch {
+            continue;
+          }
+          if (
+            !payload ||
+            typeof payload !== 'object' ||
+            !('toolResults' in payload) ||
+            !Array.isArray(payload.toolResults)
+          ) {
+            continue;
+          }
+          const results: unknown[] = payload.toolResults;
+          for (const result of results) {
+            if (
+              result &&
+              typeof result === 'object' &&
+              'name' in result &&
+              result.name === ToolNames.SKILL &&
+              'args' in result &&
+              result.args &&
+              typeof result.args === 'object' &&
+              'skill' in result.args &&
+              'output' in result
+            ) {
+              restoreSkill(result.args.skill, result.output);
+            }
+          }
+          continue;
+        }
+        if (
           response?.name !== ToolNames.SKILL ||
           typeof response.id !== 'string' ||
           typeof output !== 'string'
@@ -390,16 +445,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        const skill = skillByName.get(requestedName.toLowerCase());
-        if (
-          !skill ||
-          (output !== skill.output && !output.startsWith(`${skill.output}\n`))
-        ) {
-          continue;
-        }
-
-        this.loadedSkillContents.add(skill.output);
-        this.loadedSkillNames.add(skill.name);
+        restoreSkill(requestedName, output);
       }
     }
   }
@@ -486,61 +532,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * live) suspends the already-applied hooks and allow rules without a
    * restart, and a trust granted again restores them.
    */
-  private applySideEffects(skill: SkillConfig): void {
-    if (!canApplySkillSideEffects(skill, this.config)) {
-      debugLogger.warn(
-        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
-      );
-      return;
-    }
-    // Auto-approve the skill's declared allowedTools for the rest of the session.
-    applySkillAllowedTools(
-      this.config.getPermissionManager(),
-      skill.allowedTools,
-      { trustGated: skill.level === 'project' },
-    );
-    this.registerHooks(skill);
-  }
-
-  private registerHooks(skill: SkillConfig): void {
-    debugLogger.debug('Skill hooks check:', {
-      hasHooks: !!skill.hooks,
-      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-      skillName: skill.name,
-    });
-    if (!skill.hooks) {
-      // Re-run on every invocation (the gate is re-evaluated each time), so
-      // a hookless skill would otherwise WARN on every use of it.
-      debugLogger.debug(
-        `Skill "${this.params.skill}" has no hooks to register`,
-      );
-      return;
-    }
-    const hookSystem = this.config.getHookSystem();
-    const sessionId = this.config.getSessionId();
-    debugLogger.debug('Hook system and session:', {
-      hasHookSystem: !!hookSystem,
-      sessionId,
-    });
-    if (!hookSystem || !sessionId) {
-      return;
-    }
-    const sessionHooksManager = hookSystem.getSessionHooksManager();
-    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
-    if (hookCount > 0) {
-      debugLogger.info(
-        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-      );
-    } else {
-      // Zero is the expected outcome of every re-invocation: the hooks are
-      // already registered and `registerSkillHooks` dedups them (it logs
-      // each skip at debug level). Not a warning — a steady-state WARN
-      // claiming "no hooks registered" over hooks that are firing sends
-      // whoever reads the log after a phantom failure.
-      debugLogger.debug(
-        `No new hooks registered from skill "${this.params.skill}" (already registered or none registrable)`,
-      );
-    }
+  private async applySideEffects(skill: SkillConfig): Promise<void> {
+    await applySkillSideEffects(this.config, skill);
   }
 
   private async recordAutoSkillUsageBestEffort(
@@ -756,6 +749,24 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
 
+      // Re-evaluated on every invocation, not just the first load: folder
+      // trust can be granted mid-session (IDE trust notifications flip it
+      // live), and a project skill first invoked while untrusted must not
+      // stay side-effect-less for the rest of the session. Both grants
+      // dedup, so re-applying is idempotent.
+      let activationWarning = '';
+      try {
+        await this.applySideEffects(skill);
+      } catch (error) {
+        if (
+          !(error instanceof ReviewWorkflowActivationError) ||
+          !this.isSkillLoaded(this.params.skill)
+        ) {
+          throw error;
+        }
+        activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
+      }
+
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
       // returns the full skill body; subsequent invocations return a
@@ -764,14 +775,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
-        // Re-evaluated on every invocation, not just the first load: folder
-        // trust can be granted mid-session (IDE trust notifications flip it
-        // live), and a project skill first invoked while untrusted must not
-        // stay side-effect-less for the rest of the session. Both grants
-        // dedup, so re-applying is idempotent.
-        this.applySideEffects(skill);
         void this.recordAutoSkillUsageBestEffort(skill);
-        const msg = `Skill "${this.params.skill}" is already loaded in context.`;
+        const msg = `Skill "${this.params.skill}" is already loaded in context.${activationWarning}`;
         return {
           llmContent: msg,
           returnDisplay: msg,
@@ -781,7 +786,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent);
-      this.applySideEffects(skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
