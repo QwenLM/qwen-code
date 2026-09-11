@@ -28,6 +28,7 @@ import {
 } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { IMAGE_REATTACHMENT_START } from '../../../services/image-payload-references.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -735,7 +736,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const messages = request.messages;
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
-    const lastIndex = messages.length - 1;
+    const conversationBreakpoint =
+      this.findConversationCacheBreakpoint(messages);
 
     const updatedMessages =
       messages.length === 0
@@ -743,7 +745,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         : messages.map((message, index) => {
             const shouldAddCacheControl = Boolean(
               (index === systemIndex && systemIndex !== -1) ||
-                (index === lastIndex && cacheControl === 'all'),
+                (index === conversationBreakpoint?.messageIndex &&
+                  cacheControl === 'all'),
             );
 
             if (
@@ -772,6 +775,36 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     };
   }
 
+  private findConversationCacheBreakpoint(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): { messageIndex: number } | undefined {
+    for (const [messageIndex, message] of messages.entries()) {
+      if (!Array.isArray(message.content)) continue;
+      const reattachmentIndex = message.content.findIndex(
+        (part) => IMAGE_REATTACHMENT_START in part,
+      );
+      if (reattachmentIndex < 0) continue;
+
+      // Reattached images move on the next request. Exclude their entire
+      // message because a content-block marker may cache the whole message.
+      for (
+        let previousIndex = messageIndex - 1;
+        previousIndex >= 0;
+        previousIndex--
+      ) {
+        const content = messages[previousIndex].content;
+        if (
+          typeof content === 'string' ||
+          (Array.isArray(content) && content.length > 0)
+        ) {
+          return { messageIndex: previousIndex };
+        }
+      }
+      return undefined;
+    }
+    return { messageIndex: messages.length - 1 };
+  }
+
   private addCacheControlToTools(
     tools: OpenAI.Chat.ChatCompletionTool[],
   ): ChatCompletionToolWithCache[] {
@@ -798,7 +831,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
-    // Add cache control to the last text item or create one if needed
+    // Mark the end of the selected message.
     return this.addCacheControlToContentArray(contentArray);
   }
 
@@ -829,9 +862,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return contentArray;
     }
 
-    // Add cache_control to the last text item
-    const lastItem = contentArray[contentArray.length - 1];
-    contentArray[contentArray.length - 1] = {
+    // Place the marker on the last block, which may be text or media.
+    const contentIndex = contentArray.length - 1;
+    const lastItem = contentArray[contentIndex];
+    contentArray[contentIndex] = {
       ...lastItem,
       cache_control: { type: 'ephemeral' },
     } as ChatCompletionContentPartTextWithCache;
