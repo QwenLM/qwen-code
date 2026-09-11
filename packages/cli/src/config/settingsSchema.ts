@@ -1258,6 +1258,16 @@ const SETTINGS_SCHEMA = {
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
         showInDialog: true,
       },
+      showToolCallDetails: {
+        type: 'boolean',
+        label: 'Show Tool Call Details',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.',
+        showInDialog: true,
+      },
       showToolCallArgs: {
         type: 'boolean',
         label: 'Show Tool Call Arguments',
@@ -1714,7 +1724,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
         description:
-          'Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call. A check whose claims overrun the aggregate byte budget, or include a claim over the per-claim character limit, makes one corrective retry, and both calls share this ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
+          'Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; when a check makes its one corrective retry, both calls share this ceiling (docs/users/features/goals.md lists which failures earn one). A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -2684,6 +2694,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      codeModeOnly: {
+        type: 'boolean',
+        label: 'Code Mode Only (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+        showInDialog: true,
+      },
       sandbox: {
         type: 'object',
         label: 'Sandbox',
