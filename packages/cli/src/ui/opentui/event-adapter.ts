@@ -35,6 +35,34 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
+ * The text a confirmation dialog renders as its payload body: a hook
+ * confirmation's reason (info), a plan, or an exec command. Undefined for the
+ * dialog types that carry no payload text — mcp shows only the server and
+ * tool names, edit windows its diff, ask_user_question runs its own flow
+ * (dialogs-confirm ConfirmationBody). The transcript's pending card measures
+ * it to decide how many rows to yield the dialog (pendingCardMaxRows). The
+ * parameter is structural: the in-process scheduler hands over the real
+ * ToolCallConfirmationDetails, while the stream event is read loosely.
+ */
+export function confirmationDialogBody(details: {
+  type?: string;
+  prompt?: string;
+  plan?: string;
+  command?: string;
+}): string | undefined {
+  switch (details.type) {
+    case 'info':
+      return details.prompt;
+    case 'plan':
+      return details.plan;
+    case 'exec':
+      return details.command;
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Neutral-model union extension: tool detail events the backend folds into
  * tool cards (args preview, result content, approval state), plus turn
  * segmentation and inline images.
@@ -72,7 +100,16 @@ export type OpenTuiStreamEvent =
        * machine via the vision model. */
       visionBridgeNotice?: string;
     }
-  | { type: 'confirm'; id: string; tool: string; title: string }
+  | {
+      type: 'confirm';
+      id: string;
+      tool: string;
+      title: string;
+      /** The payload text the pending dialog renders in its body
+       * (confirmationDialogBody); undefined when the dialog carries no
+       * payload text, so the card stays the only surface with the args. */
+      confirmBody?: string;
+    }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
    * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
@@ -515,7 +552,13 @@ export function createEventMapper(
             name: string;
             args?: Record<string, unknown>;
           };
-          details: { title?: string };
+          details: {
+            title?: string;
+            type?: string;
+            prompt?: string;
+            plan?: string;
+            command?: string;
+          };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
         out.push({
@@ -523,6 +566,7 @@ export function createEventMapper(
           id,
           tool: v.request.name,
           title: v.details.title ?? v.request.name,
+          confirmBody: confirmationDialogBody(v.details),
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

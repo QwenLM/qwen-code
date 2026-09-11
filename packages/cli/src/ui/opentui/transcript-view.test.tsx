@@ -160,11 +160,12 @@ describe('OpenTuiTranscriptView', () => {
   it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
     // The mem0 confirmation duplicates the card's description inside its
     // dialog body: once ctrl-s expands it, the whole payload plus dialog
-    // chrome must fit the viewport, so a ~4k-char payload must shrink the
-    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
-    // at 110 columns). A marker placed past the yielded budget pins the
-    // shrink — that bound alone would still show it and the e2e expansion
-    // stage would stay red.
+    // chrome must fit the viewport, so a ~4k-char dialog body must shrink
+    // the card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible
+    // chars at 110 columns). A marker placed past the yielded budget pins
+    // the shrink — that bound alone would still show it and the e2e
+    // expansion stage would stay red. The dialog body rides the item as
+    // confirmBody (the hook's reason); the card description is the args.
     const description =
       '{"content":"' +
       'a'.repeat(2500) +
@@ -180,6 +181,7 @@ describe('OpenTuiTranscriptView', () => {
             tool: 'mcp__fs__write_file',
             description,
             confirm: 'pending',
+            confirmBody: description,
           }),
         ]}
       />,
@@ -188,6 +190,33 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).toContain('awaiting approval');
     expect(text).toContain('... last');
     expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('keeps the collapsed budget when the pending dialog carries no payload (mcp, R1-2)', () => {
+    // An mcp confirmation dialog renders only the server and tool names, so
+    // the card is the only surface carrying the arguments: the dialog-body
+    // bound must not be charged to it. The marker sits at card row 24 —
+    // past the budget a payload-rendering dialog would yield here (21 rows)
+    // but inside the collapsed one (34), so charging the reserve hides it.
+    const description =
+      '{"path":"/x","content":"' + 'x'.repeat(2500) + 'MCP_TAIL"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('MCP_TAIL');
+    expect(text).not.toContain('... last');
   });
 
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {

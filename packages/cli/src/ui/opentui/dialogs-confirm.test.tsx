@@ -78,6 +78,10 @@ import {
   buildConfirmationPrompt,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import {
+  DIALOG_EXPANDED_RESERVE_ROWS,
+  PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+} from './messages.js';
 
 const onConfirmNoop = async () => {};
 
@@ -583,5 +587,100 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     expect(container.textContent).toContain('OVERFLOW_LINE_00');
     expect(container.textContent).toContain('lines hidden');
+  });
+
+  it('windows a long edit diff to the collapsed body cap (R1-8)', () => {
+    // DiffBody reads the same CONFIRMATION_BODY_MAX_ROWS as TextBody, but no
+    // render in this tree carried a non-empty fileDiff — a cap mutation at
+    // the DiffBody site survived the whole suite. Thirty context lines under
+    // the mandatory @@ hunk header render 30 logical lines, so the window
+    // hides 11 and keeps the tail.
+    const fileDiff = [
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,30 +1,30 @@',
+      ...Array.from(
+        { length: 30 },
+        (_, i) => ` line-${String(i).padStart(2, '0')}`,
+      ),
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'edit',
+          confirmationDetails: {
+            type: 'edit',
+            title: 'Confirm Edit',
+            fileName: 'a.txt',
+            filePath: '/w/a.txt',
+            fileDiff,
+            originalContent: null,
+            newContent: 'x',
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... 11 earlier lines hidden ...');
+    expect(text).toContain('line-29');
+    expect(text).not.toContain('line-00');
+  });
+
+  it('keeps the dialog reserves ahead of the rows a real render produces (R1-9)', () => {
+    // The reserves are hand-accounted sums; the only honest pin is a render.
+    // The jsdom harness drops layout props, so count the structural rows
+    // (one per span, with each DialogSelect row's three spans counting once)
+    // and add the chrome the harness cannot show: the frame's border and
+    // padding (4), the body box's margins (2), and the footer's margin (1).
+    // The above-card share of DIALOG_EXPANDED_RESERVE_ROWS (banner, notices,
+    // prompt echo ≈ 12) is not reachable from a single-component render —
+    // only the dialog's own chrome is pinned here.
+    const INVISIBLE_CHROME_ROWS = 7;
+    const countRows = (container: HTMLElement): number => {
+      const spans = [...container.querySelectorAll('span')];
+      const optionNumbers = spans.filter((span) =>
+        /^\d+\.$/.test(span.textContent ?? ''),
+      ).length;
+      return spans.length - 2 * optionNumbers;
+    };
+    const renderInfoDialog = (prompt: string): number => {
+      const { container, unmount } = render(
+        <OpenTuiToolConfirmation
+          call={{
+            callId: 'call-1',
+            name: 'hook_gate',
+            confirmationDetails: {
+              type: 'info',
+              title: 'Save this content?',
+              prompt,
+              onConfirm: onConfirmNoop,
+            },
+          }}
+          config={trustedConfig}
+          onSettled={() => {}}
+        />,
+      );
+      const rows = countRows(container);
+      unmount();
+      return rows;
+    };
+
+    // Worst-case collapsed body: past the cap, so the hidden-tail label and
+    // the ctrl-s hint rows render too (19 + 2 = 21 body rows).
+    const collapsedRows =
+      renderInfoDialog(
+        Array.from({ length: 26 }, (_, i) => `line-${i}`).join('\n'),
+      ) + INVISIBLE_CHROME_ROWS;
+    expect(collapsedRows).toBeLessThanOrEqual(
+      PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+    );
+
+    // The chrome is the whole dialog minus its one-row body.
+    const chromeRows = renderInfoDialog('fits') - 1 + INVISIBLE_CHROME_ROWS;
+    expect(chromeRows).toBeLessThanOrEqual(DIALOG_EXPANDED_RESERVE_ROWS);
   });
 });

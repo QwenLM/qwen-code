@@ -53,10 +53,7 @@ import {
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
-import {
-  getCachedStringWidth,
-  sanitizeTerminalText,
-} from '../utils/textUtils.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -316,15 +313,16 @@ function ToolCard({
   // is the only surface carrying the arguments (R5-9) — the settled 5-row
   // cap would hide the tail of exactly the payload being approved. The
   // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
-  // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
+  // the dialog renders in flow below the transcript, and when its payload
+  // body (threaded onto the item as confirmBody — a hook reason, plan, or
+  // command) is tall enough to hide rows, the card yields so the dialog
+  // plus its chrome stays on screen.
   const cap = capToolCardDescription(
     text,
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
+      ? pendingCardMaxRows(terminalHeight, item.confirmBody, width)
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
