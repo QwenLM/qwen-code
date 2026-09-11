@@ -118,10 +118,11 @@ function defaultShouldRetry(
     return true;
   }
   // HTTP 429/503 and the provider rate-limit codes reach the retry through the
-  // shared verdict's rate-limit term. There is no other 429 path left in this
-  // function, so that term is load-bearing here rather than redundant. Sharing
-  // the verdict with LlmChat's inline stream predicate is what keeps a change
-  // to the status-less policy from landing on one path and not the other.
+  // shared verdict, whose classification already returns 'retryable' for them;
+  // the verdict's separate rate-limit term matters only where a higher branch
+  // classified the error fail-fast, and its doc names that case. Sharing the
+  // verdict with LlmChat's inline stream predicate is what keeps a change to
+  // the status-less policy from landing on one path and not the other.
   return isRetryableUpstreamError(error, extraRetryErrorCodes);
 }
 

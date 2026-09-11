@@ -424,12 +424,18 @@ export function isFallbackEligible(
  * transport failures, 5xx and 529, and status-less upstream bodies the provider
  * traced with a request id.
  *
- * The rate-limit term is load-bearing rather than a convenience:
- * `defaultShouldRetry` keeps only an explicit 5xx check above its call here, so
- * deleting that term would silently stop retrying throttling on every
- * non-streaming and drain-inside-the-call path. LlmChat's inline predicate does
- * still have its own `status === 429` line, which makes the term redundant
- * there and nowhere else.
+ * The rate-limit term is not the redundancy it looks like, but neither is it
+ * what keeps throttling retryable: `classifyRetryError` runs the same
+ * `isRateLimitError` with the same `extraRetryErrorCodes`, so a throttle this
+ * term matches already classifies `'retryable'` without it — deleting the term
+ * left the retry, classification and send-loop suites green apart from the one
+ * case below. Its only measurable effect is on an error a branch above the
+ * rate-limit one already owns: DashScope's allocated-quota exhaustion, which
+ * surfaces as HTTP 429 and classifies `fail-fast`. There the term keeps this
+ * verdict retryable, so `retryWithBackoff`'s persistent loop bounds the attempt
+ * count with its own fail-fast check (3 attempts) rather than stopping at the
+ * first. LlmChat's inline predicate short-circuits on its own `status === 429`
+ * line, so none of this applies on that path.
  *
  * Both gates end here so the status-less policy is written once. Kept in this
  * module rather than in `retry.ts` because the package barrel re-exports that

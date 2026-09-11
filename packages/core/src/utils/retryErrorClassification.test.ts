@@ -600,11 +600,15 @@ describe('classifyRetryError', () => {
 
   it('fails fast on a permanent provider code scraped from the message', () => {
     // The permanence guard reads the merged providerCode
-    // (`details.providerCode ?? providerFields.providerCode`), and the
-    // message-scraped half has no other pin: making that reader object-only
-    // would flip this moderation rejection from fail-fast to retryable with
-    // the whole suite green. The sibling case above is satisfied by the
-    // anchored pattern alone — KeyError stays unlisted and retryable.
+    // (`details.providerCode ?? providerFields.providerCode`), and this fixture
+    // is the message-scraped half of that merge: the error carries no `.code`
+    // property, so the moderation code reaches the guard only through the JSON
+    // in the message. Reading the merge object-only flips it from fail-fast to
+    // retryable. Several other cases here read the same half — the rate-limit
+    // diagnostics and the nested-`.error` sibling among them — so this is not
+    // the only pin on it, just the one that pins it for a permanent code. The
+    // case above does not read that half at all: its request id comes from a
+    // separate reader, so KeyError stays unlisted and retryable either way.
     const error = new Error(
       'id:1\nevent:error\ndata:{"request_id":"req-stream","code":"data_inspection_failed","message":"Output data may contain inappropriate content."}',
     );
