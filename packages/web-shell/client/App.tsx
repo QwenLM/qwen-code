@@ -16352,6 +16352,11 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenAgents={() => {
+                    closeMobileDrawer();
+                    setAgentsCreateScope(null);
+                    openPanel('agents');
+                  }}
                   onOpenPlugins={() => {
                     closeMobileDrawer();
                     openPanel('plugins');
