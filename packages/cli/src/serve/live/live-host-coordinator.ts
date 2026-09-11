@@ -11,12 +11,14 @@ import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
   LIVE_INPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_HEADER_BYTES,
   type LiveAppshotReadiness,
   type LiveDaemonMessage,
   type LiveHostAction,
   type LiveHostHello,
   type LiveHostShortcutResult,
-  type LiveHostScreenContextResult,
+  type LiveHostVisualCaptureResult,
   type LiveHostStatus,
   type LiveHostMessage,
   type LiveMuteUpdate,
@@ -31,8 +33,11 @@ const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000;
 const DEFAULT_SHORTCUT_TIMEOUT_MS = 5_000;
-const MAX_HOST_TEXT_BYTES = 64 * 1024;
+const MAX_HOST_TEXT_BYTES = 512 * 1024;
 const MAX_HOST_AUDIO_BYTES = 64 * 1024;
+const MAX_HOST_VISUAL_IMAGE_BYTES = 190 * 1024;
+const MAX_HOST_VISUAL_BASE64_LENGTH =
+  Math.ceil(MAX_HOST_VISUAL_IMAGE_BYTES / 3) * 4;
 const MAX_HOST_AUDIO_WIRE_BYTES =
   LIVE_INPUT_AUDIO_EPOCH_BYTES + MAX_HOST_AUDIO_BYTES;
 const MAX_DAEMON_AUDIO_BYTES = 256 * 1024;
@@ -114,7 +119,7 @@ export interface LiveHostCoordinatorOptions {
   now?: () => number;
 }
 
-export interface LiveScreenContextCapture {
+export interface LiveVisualCapture {
   appName: string;
   windowTitle?: string;
   accessibilityText: string;
@@ -124,7 +129,7 @@ export interface LiveScreenContextCapture {
 interface PendingAppshot {
   epoch: number;
   timer: NodeJS.Timeout;
-  resolve: (capture: LiveScreenContextCapture) => void;
+  resolve: (capture: LiveVisualCapture) => void;
   reject: (error: Error) => void;
 }
 
@@ -155,6 +160,10 @@ function isBoundedString(value: unknown, maxLength = MAX_ID_LENGTH): boolean {
   );
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isPermissionState(value: unknown): value is LivePermissionState {
   return (
     value === 'granted' || value === 'denied' || value === 'not_determined'
@@ -162,17 +171,25 @@ function isPermissionState(value: unknown): value is LivePermissionState {
 }
 
 function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
+  const protocolVersion = value['protocolVersion'];
   const permissions = value['permissions'];
   const selfChecks = value['selfChecks'];
+  const cameraPermission = isObject(permissions)
+    ? permissions['camera']
+    : undefined;
+  const legacyHelloWithoutCamera =
+    protocolVersion !== LIVE_HOST_PROTOCOL_VERSION &&
+    cameraPermission === undefined;
   if (
     value['type'] !== 'host.hello' ||
-    typeof value['protocolVersion'] !== 'number' ||
-    !Number.isInteger(value['protocolVersion']) ||
+    typeof protocolVersion !== 'number' ||
+    !Number.isInteger(protocolVersion) ||
     !isBoundedString(value['hostVersion'], MAX_VERSION_LENGTH) ||
     !isBoundedString(value['bundleId']) ||
     !isBoundedString(value['instanceNonce']) ||
     !isObject(permissions) ||
     !isPermissionState(permissions['microphone']) ||
+    (!isPermissionState(cameraPermission) && !legacyHelloWithoutCamera) ||
     !isPermissionState(permissions['accessibility']) ||
     !isPermissionState(permissions['screenRecording']) ||
     !isObject(selfChecks) ||
@@ -183,7 +200,15 @@ function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
   ) {
     return undefined;
   }
-  return value as unknown as LiveHostHello;
+  return {
+    ...(value as unknown as LiveHostHello),
+    permissions: {
+      ...permissions,
+      camera: isPermissionState(cameraPermission)
+        ? cameraPermission
+        : 'not_determined',
+    } as LiveHostHello['permissions'],
+  };
 }
 
 function parseAction(
@@ -226,6 +251,84 @@ function parseAction(
   return undefined;
 }
 
+function isBoundedVisualImage(image: unknown): image is string {
+  if (
+    typeof image !== 'string' ||
+    image.length === 0 ||
+    image.length > MAX_HOST_VISUAL_BASE64_LENGTH ||
+    image.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(image)
+  ) {
+    return false;
+  }
+  const jpeg = Buffer.from(image, 'base64');
+  return (
+    jpeg.byteLength >= 4 &&
+    jpeg.byteLength <= MAX_HOST_VISUAL_IMAGE_BYTES &&
+    jpeg[0] === 0xff &&
+    jpeg[1] === 0xd8 &&
+    jpeg[jpeg.byteLength - 2] === 0xff &&
+    jpeg[jpeg.byteLength - 1] === 0xd9 &&
+    jpeg.toString('base64') === image
+  );
+}
+
+function parseVisualCaptureResult(
+  value: Record<string, unknown>,
+): LiveHostVisualCaptureResult | undefined {
+  const requestId = value['requestId'];
+  if (
+    value['type'] !== 'host.visual_capture_result' ||
+    !isBoundedString(requestId)
+  ) {
+    return undefined;
+  }
+  if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
+    return {
+      type: 'host.visual_capture_result',
+      requestId: requestId as string,
+      success: false,
+      error: value['error'] as string,
+    };
+  }
+  const width = value['width'];
+  const height = value['height'];
+  if (
+    value['success'] !== true ||
+    value['source'] !== 'screen' ||
+    !isBoundedVisualImage(value['image']) ||
+    typeof width !== 'number' ||
+    !Number.isSafeInteger(width) ||
+    width <= 0 ||
+    typeof height !== 'number' ||
+    !Number.isSafeInteger(height) ||
+    height <= 0 ||
+    !isBoundedString(value['appName'], 512) ||
+    (value['windowTitle'] !== undefined &&
+      !isBoundedString(value['windowTitle'], 2_048)) ||
+    typeof value['accessibilityText'] !== 'string' ||
+    value['accessibilityText'].length > MAX_APPSHOT_TEXT_LENGTH ||
+    !isBoundedString(value['screenshotPath'], 4_096)
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.visual_capture_result',
+    requestId: requestId as string,
+    success: true,
+    source: 'screen',
+    image: value['image'],
+    width,
+    height,
+    appName: value['appName'] as string,
+    ...(value['windowTitle']
+      ? { windowTitle: value['windowTitle'] as string }
+      : {}),
+    accessibilityText: value['accessibilityText'],
+    screenshotPath: value['screenshotPath'] as string,
+  };
+}
+
 function parseHostMessage(text: string): LiveHostMessage | undefined {
   let value: unknown;
   try {
@@ -236,6 +339,9 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
   if (!isObject(value)) return undefined;
   if (value['type'] === 'host.hello') return parseHello(value);
   if (value['type'] === 'host.action') return parseAction(value);
+  if (value['type'] === 'host.visual_capture_result') {
+    return parseVisualCaptureResult(value);
+  }
   if (value['type'] === 'host.pong' && isBoundedString(value['pingId'])) {
     return { type: 'host.pong', pingId: value['pingId'] as string };
   }
@@ -261,50 +367,27 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
       };
     }
   }
-  if (value['type'] === 'host.screen_context_result') {
-    const requestId = value['requestId'];
-    if (!isBoundedString(requestId)) return undefined;
-    if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: false,
-        error: value['error'] as string,
-      };
-    }
-    if (
-      value['success'] === true &&
-      isBoundedString(value['appName'], 512) &&
-      (value['windowTitle'] === undefined ||
-        isBoundedString(value['windowTitle'], 2_048)) &&
-      typeof value['accessibilityText'] === 'string' &&
-      value['accessibilityText'].length <= MAX_APPSHOT_TEXT_LENGTH &&
-      isBoundedString(value['screenshotPath'], 4_096)
-    ) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: true,
-        appName: value['appName'] as string,
-        ...(value['windowTitle']
-          ? { windowTitle: value['windowTitle'] as string }
-          : {}),
-        accessibilityText: value['accessibilityText'],
-        screenshotPath: value['screenshotPath'] as string,
-      };
-    }
-  }
   if (
     value['type'] === 'host.playback_started' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_started', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_started',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   if (
     value['type'] === 'host.playback_completed' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_completed', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_completed',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   return undefined;
 }
@@ -366,6 +449,8 @@ export class LiveHostCoordinator {
   private pendingStartMode?: 'new';
   private actionGeneration = 0;
   private nextEpoch = 0;
+  private nextOutputId = 0;
+  private activeOutputId?: number;
   private inputMuted = false;
   private outputMuted = false;
   private lastCallError?: string;
@@ -775,9 +860,7 @@ export class LiveHostCoordinator {
     );
   }
 
-  captureScreenContext(
-    callerSessionId: string,
-  ): Promise<LiveScreenContextCapture> {
+  captureVisualContext(callerSessionId: string): Promise<LiveVisualCapture> {
     const call = this.call;
     const host = this.host;
     if (
@@ -796,7 +879,7 @@ export class LiveHostCoordinator {
       );
     }
     const requestId = randomUUID();
-    return new Promise<LiveScreenContextCapture>((resolve, reject) => {
+    return new Promise<LiveVisualCapture>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingAppshots.delete(requestId);
         reject(new Error('Live Host Appshot timed out.'));
@@ -810,9 +893,10 @@ export class LiveHostCoordinator {
       });
       if (
         !this.sendHost({
-          type: 'host.capture_screen_context',
+          type: 'host.capture_visual',
           requestId,
           epoch: call.epoch,
+          source: 'screen',
         })
       ) {
         this.rejectPendingAppshot(
@@ -862,9 +946,18 @@ export class LiveHostCoordinator {
     ) {
       return false;
     }
-    socket.send(pcm16, { binary: true });
+    const outputId = this.activeOutputId ?? this.allocateOutputId();
+    const frame = Buffer.allocUnsafe(
+      LIVE_OUTPUT_AUDIO_HEADER_BYTES + pcm16.byteLength,
+    );
+    frame.writeBigUInt64BE(BigInt(epoch), 0);
+    frame.writeBigUInt64BE(BigInt(outputId), LIVE_OUTPUT_AUDIO_EPOCH_BYTES);
+    frame.set(pcm16, LIVE_OUTPUT_AUDIO_HEADER_BYTES);
+    socket.send(frame, { binary: true });
+    this.activeOutputId = outputId;
     writeLiveHostDiagnostic('output_audio_sent', {
       epoch,
+      outputId,
       bytes: pcm16.byteLength,
       socketBufferedBytes: socket.bufferedAmount,
     });
@@ -873,6 +966,7 @@ export class LiveHostCoordinator {
 
   clearOutput(epoch: number): void {
     if (this.call && this.call.epoch !== epoch) return;
+    this.activeOutputId = undefined;
     writeLiveHostDiagnostic('clear_output_sent', { epoch });
     this.sendHost({ type: 'host.clear_output', epoch });
   }
@@ -956,6 +1050,7 @@ export class LiveHostCoordinator {
       host_disconnected: 'Qwen Live Host disconnected.',
       host_version: 'Qwen Live Host is not protocol-compatible.',
       microphone_permission: 'Microphone permission is required.',
+      camera_permission: 'Camera permission is required.',
       accessibility_permission: 'Accessibility permission is required.',
       screen_recording_permission: 'Screen Recording permission is required.',
       audio_input: 'Live Host audio input self-check failed.',
@@ -1006,20 +1101,22 @@ export class LiveHostCoordinator {
       }
       return;
     }
-    if (message.type === 'host.screen_context_result') {
-      this.handleScreenContextResult(message);
+    if (message.type === 'host.visual_capture_result') {
+      this.handleVisualCaptureResult(message);
       return;
     }
     if (message.type === 'host.shortcut_result') {
       this.handleShortcutResult(message);
       return;
     }
-    // v7 playback receipts: accepted but not forwarded to the built-in
-    // Live session coordinator (which uses byte estimation). The
-    // standalone qwen-live daemon wires these to its injector.
+    // Standalone extensions are not advertised by the built-in Live daemon
+    // and are unreachable because this parser intentionally omits them.
     if (
       message.type === 'host.playback_started' ||
-      message.type === 'host.playback_completed'
+      message.type === 'host.playback_completed' ||
+      message.type === 'host.visual_frame' ||
+      message.type === 'host.visual_settings' ||
+      message.type === 'host.memory_action'
     ) {
       return;
     }
@@ -1051,8 +1148,8 @@ export class LiveHostCoordinator {
     pending.resolve(status);
   }
 
-  private handleScreenContextResult(
-    message: LiveHostScreenContextResult,
+  private handleVisualCaptureResult(
+    message: LiveHostVisualCaptureResult,
   ): void {
     const pending = this.pendingAppshots.get(message.requestId);
     if (!pending) return;
@@ -1070,6 +1167,18 @@ export class LiveHostCoordinator {
       pending.reject(new Error(message.error));
       return;
     }
+    if (message.source !== 'screen') {
+      pending.reject(
+        new Error('Qwen Live Host returned a non-screen Appshot.'),
+      );
+      return;
+    }
+    if (!message.screenshotPath) {
+      pending.reject(
+        new Error('Qwen Live Host did not persist the requested Appshot.'),
+      );
+      return;
+    }
     pending.resolve({
       appName: message.appName,
       ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
@@ -1085,8 +1194,8 @@ export class LiveHostCoordinator {
       (lease.hello && lease.hello.instanceNonce !== hello.instanceNonce)
     ) {
       this.lastHostFailure = 'host_version';
-      lease.socket.close(4006, 'Incompatible Live Host.');
       this.detachHost(lease, 'host_version');
+      lease.socket.close(4006, 'Incompatible Live Host.');
       return;
     }
     lease.hello = hello;
@@ -1392,6 +1501,14 @@ export class LiveHostCoordinator {
     }
     socket.send(JSON.stringify(message));
     return true;
+  }
+
+  private allocateOutputId(): number {
+    if (this.nextOutputId >= Number.MAX_SAFE_INTEGER) {
+      this.nextOutputId = 0;
+    }
+    this.nextOutputId += 1;
+    return this.nextOutputId;
   }
 
   private notifyInactive(): void {
