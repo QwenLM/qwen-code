@@ -1377,6 +1377,8 @@ export interface WebShellProps {
    * direct or queued logical submit, after local command routing and before
    * session creation, composer commit, optimistic rendering, or admission.
    * Retries reuse the previously prepared payload and skip this callback.
+   * If this callback rejects, the submission is cancelled and the rejection's
+   * `Error.message` is surfaced to the user, so hosts must localize it.
    */
   prepareSubmit?: (
     submission: WebShellSubmitSnapshot,
@@ -1386,6 +1388,8 @@ export interface WebShellProps {
    * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
    * `sessionId` is `undefined` when the session has not yet been created (deferred).
    * Also called for queued prompts (submitted while a turn is streaming).
+   * A rejection's `Error.message` is surfaced to the user, so hosts must
+   * localize it.
    */
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
@@ -9710,6 +9714,25 @@ export function App({
   // to be recreated on every render, cascading into downstream effect chains.
   const dispatchSessionChangeRef = useRef(dispatchSessionChange);
   dispatchSessionChangeRef.current = dispatchSessionChange;
+  // Single error-to-toast helper: suppresses aborts, daemon-turn errors and
+  // already-dispatched notices before surfacing anything. Declared above
+  // sendPrompt / enqueuePrompt so their dep arrays can reference it (a
+  // reference below those callbacks would be a TDZ error).
+  const reportError = useCallback(
+    (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        return;
+      }
+      if (isAlreadyDispatched(error)) {
+        return;
+      }
+      const message = formatError(error, fallback);
+      console.error('[web-shell]', message, error);
+      pushToast('error', message);
+    },
+    [pushToast],
+  );
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -9828,21 +9851,16 @@ export function App({
           }
         } catch (err) {
           if (!appMountedRef.current) return;
-          console.warn(
-            '[web-shell] prompt preflight rejected, prompt cancelled',
-            err,
-          );
           // Say so. Hosts put user-facing text in these errors — the VS Code
           // companion's message-edit rewind throws localized failures here —
-          // and cancelling on a console warning alone leaves the user in front
-          // of a composer that appeared to do nothing (#9911). Only when the
-          // user is still on the session this submission belonged to; a toast
-          // for a session they have left would be noise.
+          // and cancelling silently leaves the user in front of a composer
+          // that appeared to do nothing (#9911). Only when the user is still
+          // on the session this submission belonged to; a toast for a session
+          // they have left would be noise. reportError suppresses aborts and
+          // logs the error itself, so this catch no longer warns (that would
+          // double-log a real failure).
           if (admissionOwnerIsCurrent()) {
-            pushToast(
-              'error',
-              formatError(err, 'Message could not be submitted'),
-            );
+            reportError(err, 'Message could not be submitted');
           }
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
@@ -10046,7 +10064,7 @@ export function App({
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
-      pushToast,
+      reportError,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10306,21 +10324,6 @@ export function App({
     ]),
   );
 
-  const reportError = useCallback(
-    (error: unknown, fallback: string) => {
-      if (isAbortError(error)) return;
-      if (isDaemonTurnError(error)) {
-        return;
-      }
-      if (isAlreadyDispatched(error)) {
-        return;
-      }
-      const message = formatError(error, fallback);
-      console.error('[web-shell]', message, error);
-      pushToast('error', message);
-    },
-    [pushToast],
-  );
   const handleFailedPromptRetry = useCallback(() => {
     if (
       sessionWriteBlockedRef.current ||
@@ -10629,22 +10632,17 @@ export function App({
               sourceWorkspaceCwd,
             );
           } catch (err) {
-            console.warn(
-              '[web-shell] queued prompt preflight rejected, cancelled',
-              err,
-            );
             // A rejected preflight cancels the submission, so it has to say so.
             // Hosts put user-facing text in these errors — the VS Code
-            // companion's rewind failures are localized strings — and a console
-            // warning leaves the user in front of a composer that silently did
-            // nothing (#9911). Stay quiet only when this submission is no
-            // longer the current one, where the toast would belong to a session
-            // the user has already left.
+            // companion's rewind failures are localized strings — and a silent
+            // cancel leaves the user in front of a composer that did nothing
+            // (#9911). Stay quiet only when this submission is no longer the
+            // current one, where the toast would belong to a session the user
+            // has already left. reportError suppresses aborts and logs the
+            // error itself, so this catch no longer warns (that would
+            // double-log a real failure).
             if (submissionSessionIsCurrent()) {
-              pushToast(
-                'error',
-                formatError(err, 'Message could not be submitted'),
-              );
+              reportError(err, 'Message could not be submitted');
             }
           }
         })();
@@ -10661,7 +10659,7 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
-      pushToast,
+      reportError,
       rawEnqueuePrompt,
       sessionCatalogController,
       sessionOwnerGuard,
