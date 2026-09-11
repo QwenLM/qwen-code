@@ -7249,7 +7249,7 @@ export abstract class ChannelBase {
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
-          displayText,
+          displayText: sanitizeDisplayText(promptToSend),
         });
 
         await this.settleCancelRequested(promptState);

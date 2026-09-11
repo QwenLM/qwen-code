@@ -13016,7 +13016,7 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Be concise.');
     });
 
-    it('keeps all model-only context out of the user-facing prompt text', async () => {
+    it('shows the complete delivered channel prompt in session history', async () => {
       const ch = createChannel({
         instructions: 'Be concise.',
         sessionScope: 'thread',
@@ -13049,10 +13049,16 @@ describe('ChannelBase', () => {
       expect(modelText).toContain('earlier message');
       expect(modelText).toContain('/tmp/hidden.txt');
       expect(modelText).toContain('Issue: hidden metadata');
-      expect(options).toMatchObject({ displayText: 'hello' });
+      const displayText = (options as { displayText: string }).displayText;
+      expect(displayText).toContain('[User 1] hello');
+      expect(displayText).toContain('earlier message');
+      expect(displayText).toContain('/tmp/hidden.txt');
+      expect(displayText).toContain('Issue: hidden metadata');
+      expect(displayText).toContain('Be concise.');
+      expect(displayText).toBe(modelText);
     });
 
-    it('neutralizes display-unsafe controls in the raw-text display fallback', async () => {
+    it('neutralizes display-unsafe controls without truncating the delivered prompt', async () => {
       const ch = createChannel();
       const rlo = String.fromCharCode(0x202e); // bidi override (trojan-source)
       const bel = String.fromCharCode(0x07); // C0 control
@@ -13066,11 +13072,10 @@ describe('ChannelBase', () => {
       const [, , options] = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0]!;
       const displayText = (options as { displayText: string }).displayText;
-      // Controls are replaced, the real newline survives, and the projection
-      // is capped by code point.
-      expect(displayText.startsWith('line1  \nline2')).toBe(true);
+      // Controls are replaced and the complete delivered prompt remains
+      // visible in session history.
       expect(displayText).not.toContain(rlo);
-      expect(Array.from(displayText)).toHaveLength(8000);
+      expect(displayText).toBe(`line1  \nline2${'A'.repeat(9000)}`);
     });
 
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
@@ -13447,6 +13452,9 @@ describe('ChannelBase', () => {
         promptText.indexOf('[Current message - respond to this]'),
       );
       expect(promptText).toContain('[Production] deploy staging');
+      const options = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][2] as { displayText: string };
+      expect(options.displayText).toBe(promptText);
     });
 
     it('does not inject chat-scoped channel memory into single-scope sessions', async () => {
@@ -17908,13 +17916,16 @@ describe('ChannelBase', () => {
         .calls[1][1] as string;
       expect(secondCallText).toContain('second');
       expect(secondCallText).toContain('third');
-      // Metadata stays model-facing; the coalesced projection carries only
-      // the raw user-authored texts.
+      // The coalesced display projection carries the complete current channel
+      // prompt, including adapter-provided metadata.
       expect(secondCallText).toContain('hidden policy second');
       expect(secondCallText).toContain('hidden policy third');
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
-      ).toMatchObject({ displayText: '[Alice] second\n\n[Bob] third' });
+      ).toMatchObject({
+        displayText:
+          '[Alice] second\n\nhidden policy second\n\n[Bob] third\n\nhidden policy third',
+      });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(
