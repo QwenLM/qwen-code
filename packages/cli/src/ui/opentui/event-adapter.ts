@@ -711,6 +711,11 @@ export function createEventMapper(
         out.push({ type: 'stop-hook-message', message: ev.value as string });
         break;
       }
+      case 'goal_settlement_failed': {
+        closeThought();
+        out.push({ type: 'warning', text: ev.value as string });
+        break;
+      }
       case 'user_prompt_submit_blocked': {
         closeThought();
         const v = ev.value as { reason: string; originalPrompt: string };

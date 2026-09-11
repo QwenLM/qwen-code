@@ -6,6 +6,7 @@ export function isAllChannelSelectionName(name: string): boolean {
 
 export function normalizeServeChannelSelection(
   rawChannels: string[] | undefined,
+  label = '--channel',
 ): ServeChannelSelection | undefined {
   if (rawChannels === undefined || rawChannels.length === 0) {
     return undefined;
@@ -16,7 +17,7 @@ export function normalizeServeChannelSelection(
   for (const raw of rawChannels) {
     const name = raw.trim();
     if (!name) {
-      throw new Error('--channel requires a non-empty channel name.');
+      throw new Error(`${label} requires a non-empty channel name.`);
     }
     if (seen.has(name)) continue;
     seen.add(name);
@@ -25,7 +26,7 @@ export function normalizeServeChannelSelection(
 
   if (names.some(isAllChannelSelectionName)) {
     if (names.length > 1) {
-      throw new Error('--channel all cannot be combined with channel names.');
+      throw new Error(`${label} all cannot be combined with channel names.`);
     }
     return { mode: 'all' };
   }
