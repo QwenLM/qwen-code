@@ -465,6 +465,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps goal_settlement_failed to a warning', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'goal_settlement_failed',
+        value: 'The approved Goal could not be started.',
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'warning',
+          text: 'The approved Goal could not be started.',
+        },
+      ]);
+    });
+
     it('maps user_prompt_submit_blocked to reason + original prompt', () => {
       const map = createEventMapper();
       const out = map({

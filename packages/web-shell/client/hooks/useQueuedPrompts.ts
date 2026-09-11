@@ -256,6 +256,7 @@ function areQueuedPromptsEqual(
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
       prompt.payloadCompleteness === other.payloadCompleteness &&
+      prompt.submittedPrompt === other.submittedPrompt &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
       (prompt.files?.length ?? 0) === (other.files?.length ?? 0) &&
       (prompt.inputAnnotations?.length ?? 0) ===
@@ -385,6 +386,7 @@ export interface UseQueuedPromptsResult {
     onComplete?: () => void,
     inputAnnotations?: DaemonInputAnnotation[],
     onAdmitted?: () => void,
+    submittedPrompt?: string,
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
@@ -619,7 +621,7 @@ export function useQueuedPrompts({
           next[existingIndex] = {
             ...next[existingIndex]!,
             ...(next[existingIndex]!.payloadCompleteness === 'summary-only'
-              ? { text: serverPrompt.text }
+              ? { text: serverPrompt.text, submittedPrompt: undefined }
               : {}),
             // Restore images from server content if local row doesn't have
             // them; clearing summary-only makes the restored row editable.
@@ -1389,6 +1391,9 @@ export function useQueuedPrompts({
 
       return sessionActions
         .submitPrompt(prompt.text, {
+          ...(prompt.submittedPrompt !== undefined
+            ? { submittedPrompt: prompt.submittedPrompt }
+            : {}),
           images: prompt.images,
           files: prompt.files,
           inputAnnotations: prompt.inputAnnotations,
@@ -1636,6 +1641,7 @@ export function useQueuedPrompts({
       onComplete?: () => void,
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
+      submittedPrompt?: string,
     ) => {
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
@@ -1716,6 +1722,7 @@ export function useQueuedPrompts({
           ...pendingAdmission,
           text: trimmed,
           files: fileList.length > 0 ? [...fileList] : undefined,
+          ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
           inputAnnotations: inputAnnotations
             ? [...inputAnnotations]
             : undefined,
@@ -1991,6 +1998,7 @@ export function useQueuedPrompts({
       }
 
       const prompt: QueuedPrompt = {
+        ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
         id: nextQueuedPromptIdRef.current++,
         sessionId: targetSessionId,
         text: trimmed,

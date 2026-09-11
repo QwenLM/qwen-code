@@ -50,6 +50,8 @@ import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
@@ -104,6 +106,7 @@ import {
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
 } from './bridgeTypes.js';
 import {
   CHANNEL_LIVENESS_INTERVAL_MS,
@@ -430,6 +433,11 @@ describe('createAcpSessionBridge', () => {
         [CHANNEL_STARTUP_PROFILE_META_KEY]: {
           v: CHANNEL_STARTUP_PROFILE_VERSION,
         },
+      });
+      expect(
+        handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
+      ).toEqual({
+        'qwen.goalProposals': true,
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -15823,6 +15831,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('forwards only explicitly declared submission text from trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'machine wrapper' }],
+        _meta: {
+          'qwen.submittedPrompt': 'forged public declaration',
+          'qwen.daemon.submittedPrompt': 'forged private declaration',
+        },
+      } as PromptRequest;
+      await bridge.sendPrompt(session.sessionId, req);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: ' original question\n',
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe(' original question\n');
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: 'human channel message',
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
       // so a forged key must not reach the child; only the authenticated
@@ -15859,6 +15902,51 @@ describe('createAcpSessionBridge', () => {
         true,
       );
 
+      await bridge.shutdown();
+    });
+
+    it('only grants Goal proposal approval to an attached prompt originator', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const request = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text' as const, text: 'draft a goal' }],
+        _meta: { 'qwen.goalProposalApproval': true },
+      };
+      await bridge.sendPrompt(session.sessionId, request);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.goalProposalApproval'],
+      ).toBe(true);
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        restoreAskUserQuestion: true,
+      });
+      expect(
+        handle.agent.promptCalls[3]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        continue: true,
+      });
+      expect(
+        handle.agent.promptCalls[4]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -23195,18 +23283,23 @@ describe('createAcpSessionBridge', () => {
         setModelResult?: Record<string, unknown>;
       } = {},
     ) {
-      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const setModelCalls: Array<{
+        sessionId: string;
+        modelId: string;
+        _meta?: Record<string, unknown> | null;
+      }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
-              return async (req: { sessionId: string; modelId: string }) => {
-                setModelCalls.push({
-                  sessionId: req.sessionId,
-                  modelId: req.modelId,
-                });
+              return async (req: {
+                sessionId: string;
+                modelId: string;
+                _meta?: Record<string, unknown> | null;
+              }) => {
+                setModelCalls.push(req);
                 if (opts.setModelImpl) await opts.setModelImpl();
                 return opts.setModelResult ?? {};
               };
@@ -23273,6 +23366,26 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
       expect(session.modelApplied).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('marks a scheduled-task run model as transient', async () => {
+      const { bridge, setModelCalls } = setup();
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen-max(openai)',
+        sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+        sourceId: `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}task-1`,
+      });
+
+      expect(session.modelApplied).toBe(true);
+      expect(setModelCalls).toEqual([
+        {
+          sessionId: session.sessionId,
+          modelId: 'qwen-max(openai)',
+          _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+        },
+      ]);
       await bridge.shutdown();
     });
 
@@ -37894,9 +38007,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
   it('promotes messages after their client detaches without reapplying the cap', async () => {
     const prompts: string[] = [];
+    const goalApprovalMeta: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async (req) => {
+        goalApprovalMeta.push(req._meta?.['qwen.goalProposalApproval']);
         prompts.push(
           (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
         );
@@ -37943,6 +38058,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    expect(goalApprovalMeta).toEqual([true, undefined]);
     expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
       messages: [],
       settledMessageIds: [],
