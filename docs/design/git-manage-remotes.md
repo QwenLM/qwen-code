@@ -527,8 +527,9 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
     `packages/web-shell/scripts/generate-confusables.mjs`, which also
     closes every emitted prototype under that same runtime fold —
     table-first, NFKC fallback, NFC last — so a value carrying a
-    table-absent compatibility half (`%` → `º/₀`, whose halves NFKC to
-    `o/O`) cannot split one ink-identical class across two skeletons),
+    table-absent compatibility half (`%` → `º/₀`: its halves NFKC to
+    `o/0`, and the per-half table chance lifts the `0` to `O`) cannot
+    split one ink-identical class across two skeletons),
     and a row whose skeleton equals a sibling's while its raw name
     differs marks: an ink-identical twin inside Latin/Common (the
     `ofﬁce` ligature, dotless `ı`) passes every per-property arm, and

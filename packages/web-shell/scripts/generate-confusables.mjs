@@ -132,7 +132,8 @@ for (const [src, targets] of raw) {
 // compatibility shape the table does not list is not a fixed point of
 // the runtime fold: a name holding the source char and a name holding
 // the value verbatim — ink-identical — would land in two skeletons
-// (`%` -> `º/₀`, whose halves NFKC to `o/O`). Close every value under
+// (`%` -> `º/₀`: its halves NFKC to `o/0`, and the per-half table
+// chance lifts the `0` to `O`). Close every value under
 // the consumer fold, map-wide (one value's fold reads another's entry),
 // until stable.
 const consumerFold = (value, table) => {
@@ -157,7 +158,10 @@ for (let pass = 0; ; pass++) {
       // The fold collapsed a value onto its own source char: a self-map
       // is a semantic no-op, but it must leave the map HERE — a direct
       // hit and an NFKC miss differ, so every other value's fixed point
-      // has to be recomputed against the map without it.
+      // has to be recomputed against the map without it. Key membership
+      // also feeds the tooltip escape (escapeSkeletonNameChars'
+      // has(ch)), so an arm that ever fires shrinks both surfaces at
+      // once — re-check that consumer too.
       closed.delete(src);
       changed = true;
       continue;
@@ -179,7 +183,14 @@ for (let pass = 0; ; pass++) {
 // directly keeps the invariant a verified fact, not a loop argument.
 for (const [src, value] of closed) {
   if (consumerFold(value, closed) !== value) {
-    throw new Error(`emitted value not a consumer-fold fixed point: ${src}`);
+    // Code point, not the raw char: a U+2028/U+2029-class source would
+    // otherwise print mangled text into the diagnostic.
+    throw new Error(
+      `emitted value not a consumer-fold fixed point: U+${src
+        .codePointAt(0)
+        .toString(16)
+        .toUpperCase()}`,
+    );
   }
 }
 
