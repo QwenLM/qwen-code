@@ -244,6 +244,11 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export {
+  deleteArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+} from './tools/artifact/artifact-snapshots.js';
+export {
   RecordArtifactTool,
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
@@ -719,6 +724,7 @@ export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
 export * from './utils/secure-browser-launcher.js';
+export { initParser as initShellAstParser } from './utils/shellAstParser.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';

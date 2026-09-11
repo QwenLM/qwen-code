@@ -251,6 +251,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
@@ -274,7 +275,10 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  type ServeSessionContextStatus,
+} from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -2243,6 +2247,7 @@ export class Session implements SessionContext {
   // Implement SessionContext interface
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
+  private readonly restoredHistoryGaps?: HistoryGap[];
 
   constructor(
     id: string,
@@ -2270,6 +2275,8 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    // Config releases the restore projection after this Session is created.
+    this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
@@ -4531,13 +4538,22 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
+    // Every rewind surface resolves a turn through this array's positions:
+    // `getRewindSnapshots` hands out the index, and the agent resolves a
+    // promptId with `findIndex`. Positions therefore have to keep matching the
+    // current history's turn ordinals. A conversation-only rewind abandons the
+    // later turns without going through `FileHistoryService.rewind` — which
+    // trims inclusively itself — so the trim has to happen here. Without it the
+    // next rewind resolves onto a turn the history no longer has and cuts the
+    // wrong turn, while the recorded branch and the live view disagree.
+    //
+    // The file path keeps the target snapshot: the agent restores files by
+    // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
-    if (survivingSnapshots) {
-      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    }
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     this.config
       .getChatRecordingService()
@@ -5191,6 +5207,55 @@ export class Session implements SessionContext {
     }
   }
 
+  #getRecoveryPlan(fullHistory: boolean) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
+      return undefined;
+    }
+
+    // Classify from a bounded, shallow tail — this accept/reject pre-check does
+    // not need to structuredClone the whole history. The authoritative
+    // re-detection inside the fired prompt() reads full history for the strip.
+    const chat = this.#getCurrentChat();
+    // A trailing restorable ask_user_question is awaiting its restore
+    // prompt, not an interruption to close: `interrupted_turn` would answer
+    // the re-hung question with a synthesized failure functionResponse.
+    if (
+      this.config.getRestoreAskUserQuestion?.() === true &&
+      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
+    ) {
+      return undefined;
+    }
+    const runtimeGaps =
+      this.config.getSessionRestoreRuntime?.()?.historyGaps ??
+      (normalizeSessionIdForLookup(this.config.getSessionId()) ===
+      this.sessionId
+        ? this.restoredHistoryGaps
+        : undefined);
+    return buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory: fullHistory
+        ? chat.getHistory()
+        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
+      historyGaps: runtimeGaps?.length
+        ? runtimeGaps
+        : this.config.getResumedSessionData?.()?.historyGaps,
+    });
+  }
+
+  getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
+    const recoveryPlan = this.#getRecoveryPlan(false);
+    // A prompt (or an earlier continuation) is still in flight: there is no
+    // settled turn to continue. Reject rather than abort the live turn.
+    return {
+      kind: recoveryPlan?.kind ?? 'clean',
+      canContinue:
+        recoveryPlan?.canContinue === true &&
+        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+    };
+  }
+
   /**
    * Classify whether an unfinished previous turn can be resumed — an
    * interrupted prompt (the model never answered) or a turn left with dangling
@@ -5208,52 +5273,15 @@ export class Session implements SessionContext {
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const llmClient = this.config.getLlmClient();
-    if (!llmClient || !llmClient.isInitialized()) {
-      return { accepted: false, interruption: 'none' };
-    }
-
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
-    const chat = this.#getCurrentChat();
-    // A trailing restorable ask_user_question is awaiting its restore
-    // prompt, not an interruption to close: `interrupted_turn` would answer
-    // the re-hung question with a synthesized failure functionResponse.
-    if (
-      this.config.getRestoreAskUserQuestion?.() === true &&
-      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
-    ) {
-      return { accepted: false, interruption: 'none' };
-    }
-    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
-      sessionId: this.sessionId,
-      apiHistory:
-        chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
-        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
-    });
-    if (!recoveryPlan.continuation) {
-      return { accepted: false, interruption: 'none' };
-    }
-    const interruption =
-      recoveryPlan.kind === 'interrupted_prompt'
-        ? 'interrupted_prompt'
-        : 'interrupted_turn';
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
-    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
-      return { accepted: false, interruption };
-    }
-
-    // Accepted. This method only classifies — the daemon bridge drives the
-    // actual continuation through the normal prompt-admission path
-    // (`sendPrompt` with the trusted continue meta), so the turn is tracked
-    // like any other prompt and `prompt()` re-detects/strips authoritatively.
-    // Firing an internal `this.prompt()` here would bypass that tracking (the
-    // daemon would report the session idle and a racing prompt could abort the
-    // continuation), which is exactly what routing through the bridge fixes.
-
-    return { accepted: true, interruption };
+    const recovery = this.getRecoveryStatus();
+    return {
+      accepted: recovery.canContinue,
+      interruption:
+        recovery.kind === 'interrupted_prompt' ||
+        recovery.kind === 'interrupted_turn'
+          ? recovery.kind
+          : 'none',
+    };
   }
 
   /**
@@ -5669,11 +5697,8 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
-                sessionId: this.sessionId,
-                apiHistory: this.#getCurrentChat().getHistory(),
-              });
-              if (!recoveryPlan.continuation) {
+              const recoveryPlan = this.#getRecoveryPlan(true);
+              if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -12419,6 +12444,14 @@ export class Session implements SessionContext {
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
     let executeAttempted = false;
+    // Set when the tool starts executing, so hook durations exclude
+    // validation and permission time. Read from the monotonic clock so a
+    // system clock adjustment during a long tool cannot skew the duration.
+    let executionStartedAt: number | undefined;
+    const elapsedExecutionMs = (): number | undefined =>
+      executionStartedAt === undefined
+        ? undefined
+        : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -14107,6 +14140,7 @@ export class Session implements SessionContext {
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
             executeAttempted = true;
+            executionStartedAt = performance.now();
             try {
               const execute = () =>
                 invocation.execute(
@@ -14398,6 +14432,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              elapsedExecutionMs(),
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -14466,6 +14501,7 @@ export class Session implements SessionContext {
                 permissionMode,
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -14703,6 +14739,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(

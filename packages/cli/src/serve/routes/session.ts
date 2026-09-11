@@ -45,6 +45,7 @@ import {
   type SessionArchiveState,
   type WorktreeSession,
   parseGoalControlRequest,
+  readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
@@ -6388,6 +6389,48 @@ export function registerSessionRoutes(
               clientId !== undefined ? { clientId } : undefined,
             ),
           );
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.get(
+    '/session/:id/artifacts/:artifactId/content',
+    withOwnerReadSession(
+      'GET /session/:id/artifacts/:artifactId/content',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const { artifacts } = await runtime.bridge.getSessionArtifacts(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        const artifact = artifacts.find(
+          (item) => item.id === req.params['artifactId'],
+        );
+        let content: string;
+        try {
+          if (!artifact) throw new Error('Snapshot not registered');
+          content = await readArtifactSnapshot(
+            artifact,
+            runtime.sessionRuntimeBaseDir,
+          );
+        } catch {
+          res.status(404).json({
+            error: 'artifact_snapshot_unavailable',
+            message: 'Saved webpage version is missing or has changed.',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set({
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="saved-webpage.html"',
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, no-store',
+          })
+          .send(content);
       },
       { cwdBound: true },
     ),

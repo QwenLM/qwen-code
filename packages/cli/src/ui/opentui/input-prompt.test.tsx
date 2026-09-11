@@ -1047,12 +1047,36 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
   async function renderWithCommands(
     commands: unknown[],
     onSubmit: (text: string) => void = () => {},
+    onSuggestionsVisibilityChange?: (visible: boolean) => void,
   ) {
     mocks.state.slashCommands = commands;
-    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={[]}
+        onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+      />,
+    );
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
   }
+
+  it('publishes completion-list visibility so the shell can hide the footer', async () => {
+    const seen: boolean[] = [];
+    await renderWithCommands(
+      [{ name: 'help', description: 'Show help', kind: 'built-in' }],
+      () => {},
+      (visible) => seen.push(visible),
+    );
+    await typeText('/he');
+    expect(seen).toContain(true);
+
+    // Tab fills `/help `, which matches nothing, so the list closes again.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(seen[seen.length - 1]).toBe(false);
+  });
 
   it('Enter fills the highlighted candidate instead of submitting `/he`', async () => {
     const submitted: string[] = [];
@@ -1265,10 +1289,11 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
 });
 
 describe('OpenTuiInputPrompt approval-mode indicator', () => {
-  // The mode text is the only on-screen proof an auto-accept mode took
-  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
-  // terminal for it. Asserted through the same translation call the component
-  // makes, so a non-English locale cannot flip the pin.
+  // ink's InputPrompt uses its status text only as an aria-label, never as a
+  // visible row, and this renderer has no aria surface — so the composer owns
+  // only the prefix glyph. The readable mode name belongs to the footer
+  // (OpenTuiFooter, through formatApprovalModeName), which is how ink splits
+  // it between InputPrompt and AutoAcceptIndicator.
   const renderWithMode = (approvalMode: ApprovalMode) =>
     render(
       <OpenTuiInputPrompt
@@ -1279,33 +1304,47 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
     );
 
   it.each<[ApprovalMode, string]>([
-    [ApprovalMode.YOLO, 'YOLO mode'],
-    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
-    [ApprovalMode.AUTO, 'Auto mode'],
-  ])('draws the %s status text', (approvalMode, key) => {
+    [ApprovalMode.YOLO, '*'],
+    [ApprovalMode.AUTO_EDIT, '>'],
+    [ApprovalMode.AUTO, '>'],
+    [ApprovalMode.PLAN, '>'],
+    [ApprovalMode.DEFAULT, '>'],
+  ])('draws the %s prefix', (approvalMode, prefix) => {
     renderWithMode(approvalMode);
-    expect(screen.getByText(t(key))).toBeTruthy();
+    expect(screen.getByText(prefix)).toBeTruthy();
   });
 
-  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
-    'draws no status text for %s, matching ink',
-    (approvalMode) => {
-      renderWithMode(approvalMode);
-      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
-        expect(screen.queryByText(t(key))).toBeNull();
-      }
-    },
-  );
+  it.each<ApprovalMode>([
+    ApprovalMode.YOLO,
+    ApprovalMode.AUTO_EDIT,
+    ApprovalMode.AUTO,
+    ApprovalMode.PLAN,
+    ApprovalMode.DEFAULT,
+  ])('draws no visible mode name for %s, matching ink', (approvalMode) => {
+    renderWithMode(approvalMode);
+    for (const key of [
+      'YOLO mode',
+      'Accepting edits',
+      'Auto mode',
+      'plan mode',
+      'Ask permissions',
+      'Shell mode',
+    ]) {
+      expect(screen.queryByText(t(key))).toBeNull();
+    }
+  });
 
-  it('replaces the status text with Shell mode while shell mode is active (R1-16)', () => {
+  it('replaces the prefix with ! while shell mode is active (R1-16)', () => {
     render(
       <OpenTuiInputPrompt
         onSubmit={() => {}}
         userMessages={[]}
+        approvalMode={ApprovalMode.YOLO}
         shellModeActive
       />,
     );
-    expect(screen.getByText(t('Shell mode'))).toBeTruthy();
+    expect(screen.getByText('!')).toBeTruthy();
+    expect(screen.queryByText('*')).toBeNull();
   });
 });
 
@@ -1513,5 +1552,210 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  // The mocked useTerminalDimensions reports width 80, so a row has
+  // columns = 80 and a description keeps 80 - 8 (dropdown margins, active
+  // marker, gutter) minus whatever the widest label column took. Asserting the
+  // exact surviving prefix is what pins that arithmetic: jsdom has no layout, so
+  // an over-allocated budget only shows up as a wrapped row on a real terminal.
+  async function dropdownText(command: Record<string, unknown>) {
+    mocks.state.slashCommands = [command];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/');
+    return container.textContent ?? '';
+  }
+
+  it('draws the source badge ink puts next to the label', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'bundled-skill',
+    });
+    expect(text).toContain('stuck [Skill]');
+  });
+
+  it('counts the badge toward the label column, not on top of it', async () => {
+    // `stuck [Skill]` is 13 wide, so the description keeps 80 - 8 - 13 = 59
+    // columns and truncateToWidth leaves 58 x's plus the ellipsis. Without the
+    // badge in the measurement the same row would keep 66.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+      source: 'bundled-skill',
+    });
+    expect(text).toContain(`${'x'.repeat(58)}…`);
+    expect(text).not.toContain(`${'x'.repeat(59)}…`);
+  });
+
+  it('truncates an over-long description to a single line', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+    });
+    expect(text).toContain(`${'x'.repeat(66)}…`);
+    expect(text).not.toContain('x'.repeat(120));
+  });
+
+  it('collapses the newlines a multi-line SKILL.md description carries', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose\n  a hung\n  session',
+    });
+    expect(text).toContain('Diagnose a hung session');
+  });
+
+  // The wrap alignment measured on a real terminal only holds while these stay
+  // three separate flex children: concatenated into one text run, a long hint
+  // word-wraps the whole run and the row grows to three lines instead of ink's
+  // two. jsdom has no layout, so this pins the structure behind the frame.
+  it('keeps the label, hint and badge as three separate text runs', async () => {
+    mocks.state.slashCommands = [
+      {
+        name: 'stuck',
+        description: 'Diagnose a hung session',
+        source: 'bundled-skill',
+        argumentHint: '[PID or symptom]',
+      },
+    ];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    await act(async () => {});
+    await typeText('/');
+    const runs = [...container.querySelectorAll('span')].map(
+      (span) => span.textContent,
+    );
+    expect(runs).toContain('stuck');
+    expect(runs).toContain(' [PID or symptom]');
+    expect(runs).toContain(' [Skill]');
+    expect(runs).not.toContain('stuck [PID or symptom] [Skill]');
+  });
+});
+
+describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  const shiftTab = baseKeyEvent({
+    name: 'tab',
+    sequence: '\x1b[Z',
+    shift: true,
+  });
+
+  function renderWithCycle(onCycleApprovalMode: () => void) {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={onCycleApprovalMode}
+      />,
+    );
+  }
+
+  async function withPlatform(
+    platform: NodeJS.Platform,
+    run: () => Promise<void>,
+  ) {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: platform,
+      configurable: true,
+    });
+    try {
+      await run();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  }
+
+  it('leaves a real Shift+Tab to the shell', async () => {
+    // The shell broadcasts Shift+Tab to every useKeyboard subscriber, this
+    // composer included, so cycling here too would advance the mode twice.
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(shiftTab);
+      });
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('leaves a bare Tab alone off Windows', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('accepts a bare Tab on Windows, where terminals cannot tell them apart', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(cycles).toBe(1);
+  });
+
+  it('does not also cycle when the bare Tab was spent on a completion', async () => {
+    // The Windows fallback only needs no extra guard because both completion
+    // consumers return, so a Tab that filled `/help ` never reaches the cycle
+    // branch. ink has to thread shouldBlockTab across two components for the
+    // same reason (#4171).
+    mocks.state.slashCommands = [
+      { name: 'help', description: 'Show help', kind: 'built-in' },
+    ];
+    let cycles = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={() => {
+          cycles += 1;
+        }}
+      />,
+    );
+    await act(async () => {});
+    await withPlatform('win32', async () => {
+      await typeText('/he');
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(currentEditor().plainText).toBe('/help ');
+    expect(cycles).toBe(0);
   });
 });

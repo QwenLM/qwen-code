@@ -22,12 +22,40 @@ vi.mock('../WebShellContexts', async () => {
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
 // rest are inert. MessageTimestamp remains real to verify row spacing.
+const captured = vi.hoisted(() => ({
+  userMessageProps: null as null | {
+    editing?: boolean;
+    submittingEdit?: boolean;
+  },
+}));
+
 vi.mock('./messages/UserMessage', async () => {
   const React = await import('react');
   return {
-    UserMessage: ({ content }: { content: string }) => {
-      if (content.includes('__BOOM__')) throw new Error('user boom');
-      return React.createElement('div', { 'data-testid': 'user-ok' }, content);
+    UserMessage: (props: {
+      content: string;
+      editing?: boolean;
+      submittingEdit?: boolean;
+      onEditSubmit?: (content: string) => void;
+    }) => {
+      if (props.content.includes('__BOOM__')) throw new Error('user boom');
+      captured.userMessageProps = props;
+      return React.createElement(
+        'div',
+        { 'data-testid': 'user-ok' },
+        props.content,
+        props.editing
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'edit-submit',
+                onClick: () => props.onEditSubmit?.(props.content),
+                type: 'button',
+              },
+              'submit',
+            )
+          : null,
+      );
     },
   };
 });
@@ -511,4 +539,64 @@ describe('MessageItem background notification spacing', () => {
       expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
     },
   );
+});
+
+describe('MessageItem inline message editing', () => {
+  function renderEditableUserMessage(
+    onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
+  ): HTMLElement {
+    return render(
+      <I18nProvider language="en">
+        <MessageItem
+          message={userMsg('u1', 'hello')}
+          onEditUserMessage={() => undefined}
+          onSubmitUserMessageEdit={onSubmitUserMessageEdit}
+        />
+      </I18nProvider>,
+    );
+  }
+
+  it('closes the editor once the resend is accepted', async () => {
+    const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
+    const container = renderEditableUserMessage(onSubmitUserMessageEdit);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+    expect(captured.userMessageProps?.editing).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="edit-submit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSubmitUserMessageEdit).toHaveBeenCalledWith('hello');
+    expect(captured.userMessageProps?.editing).toBe(false);
+  });
+
+  it('keeps the editor open when the resend is refused', async () => {
+    const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
+    const container = renderEditableUserMessage(onSubmitUserMessageEdit);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="edit-submit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // The refusal must not drop the user's text on the floor.
+    expect(captured.userMessageProps?.editing).toBe(true);
+    expect(captured.userMessageProps?.submittingEdit).toBe(false);
+  });
 });

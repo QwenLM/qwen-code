@@ -9,6 +9,7 @@ import type {
   CreateSessionRequest,
   DaemonCapabilities,
   DaemonBackgroundTurn,
+  DaemonEvent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
@@ -74,7 +75,7 @@ export interface DaemonSessionOwnerSnapshot {
 }
 
 export interface DaemonSessionOwnerGuard {
-  capture(): DaemonSessionOwnerSnapshot;
+  capture(options?: { includeRecovery?: boolean }): DaemonSessionOwnerSnapshot;
 }
 
 export type DaemonProductSessionContext =
@@ -256,6 +257,7 @@ export type DaemonNoticeCategory =
 
 export type DaemonNoticeOperation =
   | 'send_prompt'
+  | 'continue_session'
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
@@ -457,6 +459,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  continueSession(): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -713,6 +716,7 @@ export interface DaemonWorkspaceEventSignals {
 export interface ActivePrompt {
   controller: AbortController;
   promptId?: string;
+  replayedTurnEvents?: Map<string, DaemonEvent>;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
 }
