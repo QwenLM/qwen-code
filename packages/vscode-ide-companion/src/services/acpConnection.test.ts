@@ -671,7 +671,7 @@ describe('AcpConnection child exit cleanup', () => {
           setupChildProcessHandlers: () => Promise<void>;
         }
       ).setupChildProcessHandlers();
-      const setupFailure = await expect(setup).rejects.toThrow(
+      const setupFailure = expect(setup).rejects.toThrow(
         /failed to start|superseded/i,
       );
 
