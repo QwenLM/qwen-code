@@ -8,6 +8,13 @@ connection, and what it sends back. Everything here is what the code
 does today at schema version 1 and frame version 1; the last section
 says what may change and how you will know.
 
+For a Node program, `@qwen-code/sdk/peer` implements the joining side of
+this page — the record, the inbox, the auth line, frames and receipts — with
+nothing but Node, and its tests run it against Qwen Code's own implementation
+in both directions. It applies none of §6 to its own inbox: a program that
+needs rate limits, holds or a duplicate window applies them itself. Use it, or
+read on to write your own.
+
 Every value that crosses a process boundary is untrusted on arrival and
 validated by the reader. Where this page says a field "must" have some
 shape, a value that does not is dropped, never rejected with an error.
@@ -73,11 +80,22 @@ able to receive receipts — writes the same record for itself: its own
 `pid`, `procStart` and `pidNs` computed the same way, a `sessionId` it
 mints (any UUID), `kind: "external"`, a `name` (yours, or derived the
 same way; it is flattened to one line and bounded when displayed), and
-`ipcPath` + `ipcToken` for an inbox it binds itself (§2). Write to a
-temp file in the same directory and `rename` over the target; create the
-file 0600; refuse to write through a symlink. Remove the record on exit.
-A record whose process is gone is swept by the next session that lists,
-but only when `procStart` proves the PID is not merely reused.
+`ipcPath` + `ipcToken` for an inbox it binds itself (§2). On Linux,
+`pidNs` is required: every reader compares it with its own, so a record
+without one is never listed — and never swept. `procStart` is required too,
+for a different reason: without it a reader falls back to plain PID liveness
+and cannot tell a recycled PID from the process that wrote the record. Write
+to a temp file in the same directory and `rename` over the target; create
+the file 0600; refuse to write through a symlink. If `<pid>.json` already
+holds something you cannot prove was left by an earlier process with your
+PID — same `pidNs`, same boot id, different start ticks — write
+`<pid>-<8 hex>.json` instead of replacing it: readers accept both names,
+and the record there may belong to a live process in another namespace or
+on another machine. Remove the record on exit. A record whose process is
+gone is swept by the next session that lists, but only when `procStart`
+proves the PID is not merely reused. `PeerEndpoint.start()` in
+`@qwen-code/sdk/peer` does all of this, and removes the record again on
+`close()`.
 
 **Reading.** Anything that can read the directory can read every record,
 including tokens: being able to discover a session and being able to

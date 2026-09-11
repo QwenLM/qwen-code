@@ -78,6 +78,7 @@ export interface FileMetric {
 
 /** Everything a review plan says about a diff, regardless of where it came from. */
 export interface PlanReport {
+  reviewProfile?: 'docs-nav';
   diffLines: number;
   diffChars: number;
   /**

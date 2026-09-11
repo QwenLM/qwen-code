@@ -981,6 +981,36 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'turn_result') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const startedAt = finiteNumber(payload?.['startedAt']);
+      const promptId = payload?.['promptId'];
+      if (
+        payload?.['state'] !== 'cancelled' ||
+        cancelledAt === undefined ||
+        typeof promptId !== 'string' ||
+        !promptId ||
+        (payload['startedAt'] !== undefined && startedAt === undefined)
+      )
+        return;
+      const elapsedMs = Math.max(0, cancelledAt - (startedAt ?? cancelledAt));
+      if (!Number.isFinite(elapsedMs)) return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            qwenDiscreteMessage: true,
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
     if (record.subtype === 'agent_session_ready') {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
