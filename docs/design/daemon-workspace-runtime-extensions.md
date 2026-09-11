@@ -56,7 +56,16 @@ operation receipts alone never lower it. A recovery and recommit between two
 reads reuses the generation number for different content, which the number
 alone cannot show; the poller records the store's content hash, and a changed
 hash at the desired generation clears applied certification and re-drives
-reconciliation.
+reconciliation. The hash covers the entire store snapshot, including Skill
+overrides and artifact metadata, not just the legacy enablement projection.
+Recovery persists a fresh `recoveryId` (optional for existing V2 stores), so
+recommits with identical artifact metadata still have a distinct identity.
+Changing that recovery identity invalidates certification even when subsequent
+commits advance the generation; a narrow Skill refresh cannot certify the
+recovered artifacts without a full apply first.
+An unknown prior hash or unreadable receipt identity requires reapplication;
+reads overtaken by another observation cannot replace its identity, even at
+the same generation.
 
 Extension invalidation also invalidates the selected runtime's Skills and MCP
 capabilities because both catalogs include Extension contributions. A late

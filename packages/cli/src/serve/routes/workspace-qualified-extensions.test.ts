@@ -1873,12 +1873,13 @@ describe('extension management v2 REST', () => {
       const reusedSnapshot: ExtensionStoreSnapshot = {
         version: 2,
         generation: 7,
-        legacyProjectionHash: 'reused-content-hash',
+        legacyProjectionHash: 'hash',
         extensions: {
           [extensionId]: {
             name: 'demo',
             defaultActivation: 'disabled',
             workspaceOverrides: {},
+            artifactGeneration: 7,
           },
         },
       };
@@ -3433,12 +3434,15 @@ describe('extension management v2 REST', () => {
       const reusedSnapshot: ExtensionStoreSnapshot = {
         version: 2,
         generation: 7,
-        legacyProjectionHash: 'reused-content-hash',
+        legacyProjectionHash: 'hash',
         extensions: {
           [extensionId]: {
             name: 'demo',
             defaultActivation: 'disabled',
             workspaceOverrides: {},
+            skillWorkspaceOverrides: {
+              [h.secondary.workspaceCwd]: { alpha: true },
+            },
           },
         },
       };

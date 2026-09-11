@@ -136,6 +136,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private observedExtensionStoreHash: string | undefined;
 
+  private observedExtensionRecoveryId: string | undefined;
+
   private skillsRevision = 0;
 
   private mcpRevision = 0;
@@ -423,42 +425,48 @@ export class WorkspaceRuntimeCoordinator {
   observeExtensionGeneration(
     generation: number,
     storeReadRevision?: number,
-    storeContentHash?: string,
+    storeContentHash?: string | null,
+    storeRecoveryId?: string,
   ): void {
-    if (generation === this.desiredExtensionGeneration) {
-      if (
-        storeContentHash === undefined ||
-        storeContentHash === this.observedExtensionStoreHash
-      ) {
-        return;
-      }
-      if (this.observedExtensionStoreHash === undefined) {
-        // The first hash-carrying read at this generation records the
-        // identity; there is nothing to diff it against yet.
-        this.observedExtensionStoreHash = storeContentHash;
-        return;
-      }
-      // Automatic backup recovery plus a recommit between two observations
-      // reuses this generation number for different content, which the
-      // monotonic generation comparison cannot see: the recorded application
-      // no longer describes the store.
+    if (
+      storeReadRevision !== undefined &&
+      storeReadRevision !== this.extensionsRevision
+    ) {
+      return;
+    }
+    // Only a fresh store read may adopt backup recovery, not a late receipt.
+    if (
+      generation < this.desiredExtensionGeneration &&
+      storeReadRevision !== this.extensionsRevision
+    ) {
+      return;
+    }
+    const recovered =
+      storeContentHash != null &&
+      storeRecoveryId !== this.observedExtensionRecoveryId;
+    if (
+      !recovered &&
+      generation === this.desiredExtensionGeneration &&
+      (storeContentHash === undefined ||
+        storeContentHash === this.observedExtensionStoreHash)
+    ) {
+      return;
+    }
+    // Recovery can reuse a generation for different artifacts. null denotes
+    // a committed mutation whose identity could not be read; neither it nor
+    // an unknown prior baseline may reuse the previous certification.
+    if (
+      generation <= this.desiredExtensionGeneration ||
+      storeContentHash === null ||
+      recovered
+    ) {
       this.appliedExtensionGeneration = 0;
       this.appliedExtensionRuntimeEpoch = undefined;
-    } else {
-      if (generation < this.desiredExtensionGeneration) {
-        // Only a fresh store read may adopt automatic backup recovery. A late
-        // operation receipt or a read overtaken by a mutation cannot roll back.
-        if (storeReadRevision !== this.extensionsRevision) return;
-        this.appliedExtensionGeneration = 0;
-        this.appliedExtensionRuntimeEpoch = undefined;
-      }
-      this.desiredExtensionGeneration = generation;
     }
-    // Record the identity of what this generation now describes: a mutation
-    // receipt carries the committed store's hash, and a hashless observation
-    // clears the baseline so the next store read at the new generation
-    // re-records instead of diffing against content it no longer describes.
-    this.observedExtensionStoreHash = storeContentHash;
+    this.desiredExtensionGeneration = generation;
+    // A hashless observation at a new generation clears the old identity.
+    this.observedExtensionStoreHash = storeContentHash ?? undefined;
+    this.observedExtensionRecoveryId = storeRecoveryId;
     this.runtime.workspaceService.invalidateWorkspaceSkillsStatus();
     this.extensionsRevision += 1;
     this.extensionsRefreshFailedRevision = undefined;
@@ -479,12 +487,17 @@ export class WorkspaceRuntimeCoordinator {
 
   async reconcileExtensionGeneration(
     generation: number,
-    options: { skillsOnly?: boolean; storeContentHash?: string } = {},
+    options: {
+      skillsOnly?: boolean;
+      storeContentHash?: string | null;
+      storeRecoveryId?: string;
+    } = {},
   ): Promise<WorkspaceExtensionReconciliationResult> {
     this.observeExtensionGeneration(
       generation,
       undefined,
       options.storeContentHash,
+      options.storeRecoveryId,
     );
     if (generation < this.desiredExtensionGeneration) {
       return { state: 'superseded', refreshed: 0, failed: 0 };

@@ -330,16 +330,19 @@ describe('WorkspaceRuntimeCoordinator', () => {
       appliedGeneration: 2,
     });
 
-    // The poller's authoritative read records the store's content identity.
+    // A hashless receipt cannot certify the first observed content identity.
     coordinator.observeExtensionGeneration(
       2,
       coordinator.status().capabilities!.extensions!.revision,
       'store-hash-a',
     );
     expect(coordinator.status().capabilities?.extensions).toMatchObject({
-      state: 'ready',
-      appliedGeneration: 2,
+      state: 'stale',
+      appliedGeneration: 0,
     });
+    await coordinator.reconcileExtensionGeneration(2);
+    const staleReadRevision =
+      coordinator.status().capabilities!.extensions!.revision;
 
     // Automatic backup recovery to generation 1 and a recommit both landed
     // between two reads: generation 2 is back but describes different
@@ -370,6 +373,14 @@ describe('WorkspaceRuntimeCoordinator', () => {
       appliedGeneration: 2,
     });
 
+    // A delayed read of the old content must not undo the newer observation.
+    coordinator.observeExtensionGeneration(
+      2,
+      staleReadRevision,
+      'store-hash-a',
+    );
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('ready');
+
     // The same content at the same generation stays a no-op.
     harness.invokeWorkspaceCommand.mockClear();
     coordinator.observeExtensionGeneration(
@@ -387,50 +398,91 @@ describe('WorkspaceRuntimeCoordinator', () => {
     ).toHaveLength(0);
   });
 
-  it('diffs a recommitted generation against the receipt-recorded hash', async () => {
+  it.each(['store-hash-6-recommitted', null])(
+    're-drives a reused generation with receipt identity %s',
+    async (storeContentHash) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      // The mutation receipt carries the committed store's content identity,
+      // which becomes the baseline later hash-carrying reads diff against.
+      await expect(
+        coordinator.reconcileExtensionGeneration(6, {
+          storeContentHash: 'store-hash-6',
+        }),
+      ).resolves.toMatchObject({ state: 'reconciled' });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+
+      // A backup recovery plus recommit reuses generation 6 for different
+      // content before the next hash-carrying read.
+      harness.invokeWorkspaceCommand.mockClear();
+      const reconciliation = coordinator.reconcileExtensionGeneration(6, {
+        storeContentHash,
+      });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
+
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'reconciled',
+      });
+      expect(
+        (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+          (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+        ),
+      ).toHaveLength(1);
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+    },
+  );
+
+  it('requires a full apply after recovery even when the generation advances', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
     const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-
-    // The mutation receipt carries the committed store's content identity,
-    // which becomes the baseline later hash-carrying reads diff against.
+    await coordinator.reconcileExtensionGeneration(2, {
+      storeContentHash: 'original',
+    });
+    // Recovery to 1, an artifact update to 2, then a Skill change to 3 all
+    // happened between observations. A narrow apply must not certify MCP.
     await expect(
-      coordinator.reconcileExtensionGeneration(6, {
-        storeContentHash: 'store-hash-6',
+      coordinator.reconcileExtensionGeneration(3, {
+        skillsOnly: true,
+        storeContentHash: 'recommitted',
+        storeRecoveryId: 'recovery-1',
+      }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      appliedGeneration: 0,
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(3),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    await expect(
+      coordinator.reconcileExtensionGeneration(4, {
+        skillsOnly: true,
+        storeContentHash: 'next-skill-change',
+        storeRecoveryId: 'recovery-1',
       }),
     ).resolves.toMatchObject({ state: 'reconciled' });
     expect(coordinator.status().capabilities?.extensions).toMatchObject({
       state: 'ready',
-      desiredGeneration: 6,
-      appliedGeneration: 6,
-    });
-
-    // A backup recovery plus recommit reuses generation 6 for different
-    // content before the next hash-carrying read.
-    harness.invokeWorkspaceCommand.mockClear();
-    coordinator.observeExtensionGeneration(
-      6,
-      coordinator.status().capabilities!.extensions!.revision,
-      'store-hash-6-recommitted',
-    );
-    expect(coordinator.status().capabilities?.extensions).toMatchObject({
-      state: 'stale',
-      desiredGeneration: 6,
-      appliedGeneration: 0,
-    });
-
-    await expect(
-      coordinator.reconcileExtensionGeneration(6),
-    ).resolves.toMatchObject({ state: 'reconciled' });
-    expect(
-      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
-        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
-      ),
-    ).toHaveLength(1);
-    expect(coordinator.status().capabilities?.extensions).toMatchObject({
-      state: 'ready',
-      desiredGeneration: 6,
-      appliedGeneration: 6,
+      appliedGeneration: 4,
     });
   });
 

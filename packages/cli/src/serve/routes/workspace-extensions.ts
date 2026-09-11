@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   parseInstallSource,
+  getExtensionStoreContentHash,
   redactUrlCredentials,
   getErrorMessage,
   SettingScope,
@@ -801,7 +802,8 @@ export function registerWorkspaceExtensionRoutes(
           coordinator?.observeExtensionGeneration(
             generation,
             revision,
-            snapshot.legacyProjectionHash,
+            getExtensionStoreContentHash(snapshot),
+            snapshot.recoveryId,
           );
         }
         const pendingRuntimes = workspaceRegistry
@@ -2544,7 +2546,8 @@ export function registerWorkspaceExtensionRoutes(
         coordinator?.observeExtensionGeneration(
           snapshot.generation,
           storeReadRevision,
-          snapshot.legacyProjectionHash,
+          getExtensionStoreContentHash(snapshot),
+          snapshot.recoveryId,
         );
         const extensions = manager.getLoadedExtensions().map((extension) => {
           const activation = manager.getExtensionActivationFromSnapshot(

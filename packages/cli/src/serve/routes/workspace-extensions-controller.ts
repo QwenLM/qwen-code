@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
+  getExtensionStoreContentHash,
   redactUrlCredentials,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
@@ -713,10 +714,12 @@ export function createExtensionsController(
         // own receipt, and a read failure must not fail an operation whose
         // commit already landed.
         let committedStoreContentHash: string | undefined;
+        let committedStoreRecoveryId: string | undefined;
         if (committedGeneration === undefined) {
           const snapshot = await extensionManager.getExtensionStoreSnapshot();
           committedGeneration = snapshot.generation;
-          committedStoreContentHash = snapshot.legacyProjectionHash;
+          committedStoreContentHash = getExtensionStoreContentHash(snapshot);
+          committedStoreRecoveryId = snapshot.recoveryId;
           reconciliationReservation ??=
             options.reserveRuntimeReconciliation?.();
         } else {
@@ -725,7 +728,8 @@ export function createExtensionsController(
               await extensionManager.getExtensionStoreSnapshot();
             if (committedSnapshot.generation === committedGeneration) {
               committedStoreContentHash =
-                committedSnapshot.legacyProjectionHash;
+                getExtensionStoreContentHash(committedSnapshot);
+              committedStoreRecoveryId = committedSnapshot.recoveryId;
             }
           } catch {
             committedStoreContentHash = undefined;
@@ -758,11 +762,9 @@ export function createExtensionsController(
                               ...(options.skillsOnly
                                 ? { skillsOnly: true }
                                 : {}),
-                              ...(committedStoreContentHash
-                                ? {
-                                    storeContentHash: committedStoreContentHash,
-                                  }
-                                : {}),
+                              storeContentHash:
+                                committedStoreContentHash ?? null,
+                              storeRecoveryId: committedStoreRecoveryId,
                             },
                           );
                         const result = {
