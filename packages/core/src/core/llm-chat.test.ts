@@ -10887,6 +10887,104 @@ describe('LlmChat', async () => {
         },
       );
 
+      it.each(['waiting', 'compressed notification'] as const)(
+        'preserves delivered text when cancelled at reactive compression %s',
+        async (phase) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            let compressing = false;
+            vi.spyOn(ChatCompressionService.prototype, 'compress')
+              .mockResolvedValueOnce({
+                newHistory: null,
+                info: {
+                  originalTokenCount: 0,
+                  newTokenCount: 0,
+                  compressionStatus: CompressionStatus.NOOP,
+                },
+              })
+              .mockImplementationOnce(async () => {
+                compressing = true;
+                if (phase === 'waiting') {
+                  return new Promise((_resolve, reject) => {
+                    controller.signal.addEventListener(
+                      'abort',
+                      () => reject(controller.signal.reason),
+                      { once: true },
+                    );
+                  });
+                }
+                return {
+                  newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+                  info: {
+                    originalTokenCount: 135_000,
+                    newTokenCount: 40_000,
+                    compressionStatus: CompressionStatus.COMPRESSED,
+                  },
+                };
+              });
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(cutAfter([textChunk('first half ')]))
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield textChunk('second half');
+                  throw new StreamContentError(
+                    'prompt is too long: 135000 tokens > 128000 maximum',
+                  );
+                })(),
+              );
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              {
+                message: 'write answer',
+                config: { abortSignal: controller.signal },
+              },
+              'cancel-reactive-compression',
+            );
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.CHUNK },
+            });
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.RETRY, isContinuation: true },
+            });
+            const resumed = stream.next();
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(await resumed).toMatchObject({
+              value: { type: StreamEventType.CHUNK },
+            });
+            const compress = stream.next();
+            const outcome = compress.catch((error) => error);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(compressing).toBe(true);
+            if (phase === 'compressed notification') {
+              expect(await outcome).toMatchObject({
+                value: { type: StreamEventType.COMPRESSED },
+              });
+            }
+            controller.abort('qwen:user-cancel');
+            if (phase === 'waiting')
+              expect(await outcome).toBe(controller.signal.reason);
+            else await stream.return(undefined);
+            const parts = [{ text: 'first half second half' }];
+            expect(
+              recordingChat
+                .getHistory()
+                .filter((turn) => turn.role === 'model'),
+            ).toEqual([{ role: 'model', parts }]);
+            expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ message: parts }),
+            );
+            expect(
+              mockContentGenerator.generateContentStream,
+            ).toHaveBeenCalledTimes(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
       it.each(['rate limit', 'compression'])(
         'does not restore a discarded prefix when cancelled at a fresh %s retry',
         async (retry) => {

@@ -3870,6 +3870,10 @@ export class LlmChat {
                     ? 'Request body rejected with HTTP 413; attempting reactive compression.'
                     : 'Context length exceeded; attempting reactive compression.',
                 );
+                // The failed text stream no longer owns cancellation recording.
+                if (!streamYieldedFunctionCall) {
+                  pendingTransportPrefix = transportContinuationText;
+                }
                 try {
                   const reactiveInfo = await self.tryCompress(
                     prompt_id,

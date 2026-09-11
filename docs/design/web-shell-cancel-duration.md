@@ -51,6 +51,8 @@ rather than their original XML. During transport continuation backoff and stream
 establishment, the outer generator retains the accumulated text prefix for
 cancellation. Once the response processor takes over, or a fresh retry discards
 the prefix, this temporary ownership is cleared to prevent duplicate recording.
+If an established text continuation fails into reactive compression, the outer
+generator takes ownership back until a fresh retry discards the visible text.
 Restoring the assistant content also restores the
 existing processed summary; no summary-visibility override is needed.
 
