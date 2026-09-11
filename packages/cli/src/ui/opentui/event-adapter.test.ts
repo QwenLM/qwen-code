@@ -14,6 +14,33 @@ import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('classifies a successful memory write using the mapper project root', () => {
+    const projectRoot = '/tmp/focus-adapter-project';
+    const map = createEventMapper({ projectRoot });
+    map({
+      type: 'tool_call_request',
+      value: {
+        callId: 'memory1',
+        name: 'write_file',
+        args: { file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md` },
+      },
+    } as unknown as AnyEv);
+    const events = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'memory1',
+        resultDisplay: 'written',
+        executionStatus: 'success',
+      },
+    } as unknown as AnyEv);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-result',
+        id: 'memory1',
+        isMemoryOp: 'write',
+      }),
+    );
+  });
   it.each([
     { error: 'failed' },
     { executionStatus: 'error' },
