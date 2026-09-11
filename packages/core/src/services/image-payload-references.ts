@@ -135,9 +135,7 @@ export function buildReattachParts(
 
 function createImageReattachmentParts(images: StoredImagePayload[]): Part[] {
   const introduction: Part & { [IMAGE_REATTACHMENT_START]: true } = {
-    text:
-      'Recent images reattached for visual context: ' +
-      images.map((img) => `Image #${img.id}`).join(', '),
+    text: reattachContextText(images.map((img) => img.id)),
     [IMAGE_REATTACHMENT_START]: true,
   };
   return [introduction, ...images.map(storedImageToPart)];
@@ -333,6 +331,13 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 
 function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function reattachContextText(ids: readonly string[]): string {
+  return (
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    ids.map((id) => `Image #${id}`).join(', ')
+  );
 }
 
 function safeImageMimeType(mimeType: string): string {

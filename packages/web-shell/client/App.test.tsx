@@ -35,6 +35,7 @@ import {
 import type { WebShellApi } from './App';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
+import type { TurnOutputOpenRequest } from './components/artifacts/TurnOutputs';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -357,6 +358,9 @@ const {
       generatedAt: '2026-08-26T00:00:00.000Z',
       limits: { maxArtifacts: 100 },
     }),
+    readSessionArtifactContent: vi
+      .fn()
+      .mockResolvedValue('<h1>Saved version</h1>'),
     sessionStats: vi.fn().mockResolvedValue({}),
     sessionContextUsage: vi.fn().mockResolvedValue({}),
     sessionTaskCancel: vi.fn().mockResolvedValue({ cancelled: true }),
@@ -586,6 +590,7 @@ const {
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
       latestMessageListProps: null as {
+        onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -596,6 +601,14 @@ const {
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
+        onEditUserMessage?: (
+          turnIndex: number,
+          content: string,
+        ) => boolean | void;
+        onSubmitUserMessageEdit?: (
+          turnIndex: number,
+          content: string,
+        ) => boolean | void | Promise<boolean | void>;
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         onAttachmentPreview?: (file: {
           name: string;
@@ -3636,6 +3649,295 @@ describe('task activity key', () => {
     expect(
       mockWorkspace.client.getSessionTranscriptPage,
     ).not.toHaveBeenCalled();
+  });
+
+  it.each(['workspace', 'standalone', 'live'] as const)(
+    'uses a restorable panel kind for published webpages in %s sessions',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockConnection.workspaceCwd = kind === 'workspace' ? '/tmp/project' : '';
+      mockConnection.capabilities.features = ['session_artifacts'];
+      const artifact: DaemonSessionArtifact = {
+        id: 'published-page',
+        kind: 'html',
+        storage: 'published',
+        source: 'tool',
+        toolName: 'Artifact',
+        status: 'available',
+        title: 'Published webpage',
+        url: 'https://preview.example/report.html',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+      };
+      mockSessionActions.loadArtifacts.mockResolvedValue({
+        artifacts: [artifact],
+      });
+      const props = { rightPanel: { items: ['webPreview'] as const } };
+      const first = renderApp(props);
+      await flush();
+      expect(testState.latestMessageListProps?.onTurnOutputOpen).toBeTypeOf(
+        'function',
+      );
+      await act(async () => {
+        testState.latestMessageListProps!.onTurnOutputOpen!({
+          kind: 'artifact',
+          id: 'artifact:published-page',
+          artifactId: artifact.id,
+          title: artifact.title,
+          artifact,
+          sourceSessionId: 'session-1',
+          turnId: 'turn-1',
+        });
+      });
+      await flush();
+      expect(
+        first.container.querySelector('[data-web-shell-web-preview]') !== null,
+      ).toBe(kind === 'workspace');
+      expect(
+        first.container.querySelector('[role="tab"]')?.textContent,
+      ).toContain(artifact.title);
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+      ).toContain(
+        `"kind":"${kind === 'workspace' ? 'web_preview' : 'artifact'}"`,
+      );
+      act(() => first.unmount());
+      const restored = renderApp(props);
+      await flush();
+      await flush();
+      expect(
+        restored.container.querySelector('[data-web-shell-web-preview]') !==
+          null,
+      ).toBe(kind === 'workspace');
+      expect(
+        restored.container.querySelector('[role="tab"]')?.textContent,
+      ).toContain(artifact.title);
+      if (kind !== 'workspace') {
+        expect(restored.container.textContent).toContain(
+          'This workspace may have been removed or the link is no longer valid.',
+        );
+        expect(
+          window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+        ).not.toContain('"kind":"web_preview"');
+      }
+    },
+  );
+
+  it.each(['workspace', 'standalone', 'live'] as const)(
+    'opens a saved webpage version from its card in %s sessions',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockConnection.workspaceCwd = kind === 'workspace' ? '/tmp/project' : '';
+      mockConnection.capabilities.features = ['session_artifacts'];
+      const artifact: DaemonSessionArtifact = {
+        id: 'saved-page-v1',
+        kind: 'html',
+        storage: 'published',
+        source: 'tool',
+        toolName: 'Artifact',
+        status: 'available',
+        title: 'Saved page v1',
+        url: 'file:///runtime/artifacts/snapshots/8c5e8dc7-4d9c-4a52-a703-7391e9b42dad/index.html',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          publishedUrl: 'https://preview.example/report.html',
+        },
+      };
+      mockSessionActions.loadArtifacts.mockResolvedValue({
+        artifacts: [artifact],
+      });
+      const props = { rightPanel: { items: ['webPreview'] as const } };
+      const first = renderApp(props);
+      await flush();
+      expect(testState.latestMessageListProps?.onTurnOutputOpen).toBeTypeOf(
+        'function',
+      );
+      await act(async () => {
+        testState.latestMessageListProps!.onTurnOutputOpen!({
+          kind: 'artifact',
+          id: `artifact:${artifact.id}`,
+          artifactId: artifact.id,
+          title: artifact.title,
+          artifact,
+          sourceSessionId: 'session-1',
+          turnId: 'turn-1',
+        });
+      });
+      await flush();
+      expect(
+        first.container.querySelector('[data-web-shell-saved-preview]'),
+      ).not.toBeNull();
+      expect(first.container.textContent).not.toContain(
+        'This workspace may have been removed',
+      );
+      expect(
+        first.container.querySelector('iframe[title="Saved webpage version"]'),
+      ).not.toBeNull();
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+      ).toContain('"kind":"artifact"');
+      act(() => first.unmount());
+    },
+  );
+
+  it('restores preview settings under their owning session', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        '/tmp/project\0session-2': {
+          open: true,
+          activeTabId: 'web-preview:second',
+          tabs: [
+            {
+              id: 'web-preview:second',
+              kind: 'web_preview',
+              title: 'Second page',
+              url: 'http://localhost:6544/second',
+              viewport: 'desktop',
+            },
+          ],
+        },
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:stored',
+          tabs: [
+            {
+              id: 'web-preview:stored',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543/settings',
+              viewport: 'mobile',
+              html: 'do not persist page content',
+            },
+          ],
+        },
+      }),
+    );
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['webPreview'] },
+    });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+    expect(
+      container.querySelector<HTMLIFrameElement>(
+        'iframe[title="Web preview frame"]',
+      )?.style.width,
+    ).toBe('390px');
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Desktop width"]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'].tabs,
+    ).toEqual([
+      {
+        id: 'web-preview:stored',
+        kind: 'web_preview',
+        title: 'Web preview',
+        url: 'http://localhost:6543/settings',
+        viewport: 'desktop',
+      },
+    ]);
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6544/second');
+    expect(container.innerHTML).not.toContain('http://localhost:6543/settings');
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+  });
+
+  it('defers persisted previews until the embedded host opts in', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:stored',
+          tabs: [
+            {
+              id: 'web-preview:stored',
+              kind: 'web_preview',
+              title: 'Stored page',
+              url: 'http://localhost:6543/settings',
+              viewport: 'desktop',
+            },
+          ],
+        },
+      }),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+    expect(container.querySelector('[data-web-shell-web-preview]')).toBeNull();
+    rerender({ rightPanel: { items: ['webPreview'] } });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+  });
+
+  it('rejects a persisted preview URL targeting the shell', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:unsafe',
+          tabs: [
+            {
+              id: 'web-preview:unsafe',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: window.location.href,
+              viewport: 'desktop',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp({ rightPanel: { items: ['webPreview'] } });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('iframe[title="Web preview frame"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'development address',
+    );
   });
 
   it('restores terminal tabs without persisting terminal output', async () => {
@@ -10104,6 +10406,10 @@ beforeEach(() => {
     generatedAt: '2026-08-26T00:00:00.000Z',
     limits: { maxArtifacts: 100 },
   });
+  mockWorkspace.client.readSessionArtifactContent.mockReset();
+  mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+    '<h1>Saved version</h1>',
+  );
   mockWorkspace.client.sessionStats.mockReset();
   mockWorkspace.client.sessionStats.mockResolvedValue({});
   mockWorkspace.client.sessionContextUsage.mockReset();
@@ -15717,6 +16023,504 @@ describe('App session callbacks', () => {
       'recover connection',
       expect.objectContaining({ images: undefined }),
     );
+  });
+
+  describe('inline user message edits', () => {
+    beforeEach(() => {
+      testState.blocks = [{ id: 'u0', kind: 'user', text: 'original' }];
+      mockStore.appendLocalUserMessage.mockImplementation(
+        (text, images, meta, files) => {
+          testState.blocks = [
+            ...testState.blocks,
+            {
+              id: 'local-recovered-edit',
+              kind: 'user',
+              text,
+              images,
+              meta,
+              files,
+            },
+          ];
+        },
+      );
+      mockSessionActions.getRewindSnapshots.mockResolvedValue({
+        snapshots: [
+          {
+            promptId: 'prompt-1',
+            turnIndex: 0,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+          },
+        ],
+      });
+      mockSessionActions.rewindSession.mockImplementation(async () => {
+        testState.blocks = [];
+      });
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (_text, options) => {
+          options?.onAdmissionStarted?.();
+          options?.onAdmitted?.();
+        },
+      );
+    });
+
+    function submit(content = 'edited text') {
+      return testState.latestMessageListProps!.onSubmitUserMessageEdit!(
+        0,
+        content,
+      );
+    }
+
+    it('opens without rewinding and sends only after preflight and rewind', async () => {
+      const prepareSubmit = vi.fn().mockResolvedValue(undefined);
+      const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+      renderApp({ language: 'en', prepareSubmit, onSubmitBefore });
+      await flush();
+      act(() => {
+        testState.latestMessageListProps?.onEditUserMessage?.(0, 'original');
+      });
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      let accepted;
+      await act(async () => {
+        accepted = await submit();
+      });
+      expect(accepted).toBe(true);
+      expect(prepareSubmit).toHaveBeenCalledOnce();
+      expect(onSubmitBefore).toHaveBeenCalledOnce();
+      expect(onSubmitBefore.mock.invocationCallOrder[0]).toBeLessThan(
+        mockSessionActions.rewindSession.mock.invocationCallOrder[0],
+      );
+      expect(
+        mockSessionActions.rewindSession.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+        'edited text',
+        expect.objectContaining({ images: undefined, files: undefined }),
+      );
+      expect(testState.prompt).toBe('hello');
+    });
+
+    it.each(['prepareSubmit', 'onSubmitBefore'] as const)(
+      'does not rewind when %s rejects',
+      async (hook) => {
+        const reject = vi.fn().mockRejectedValue(new Error('host says no'));
+        renderApp({ language: 'en', [hook]: reject });
+        await flush();
+        let accepted;
+        await act(async () => {
+          accepted = await submit();
+        });
+        expect(reject).toHaveBeenCalledOnce();
+        expect(accepted).toBe(false);
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(testState.blocks).toEqual([
+          { id: 'u0', kind: 'user', text: 'original' },
+        ]);
+        expect(testState.prompt).toBe('hello');
+      },
+    );
+
+    it.each(['snapshots', 'rewind'] as const)(
+      'cancels an old edit after switching sessions during %s',
+      async (stage) => {
+        const gate = deferred<void>();
+        if (stage === 'snapshots') {
+          mockSessionActions.getRewindSnapshots.mockImplementationOnce(
+            async () => {
+              await gate.promise;
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            },
+          );
+        } else {
+          mockSessionActions.rewindSession.mockImplementationOnce(
+            () => gate.promise,
+          );
+        }
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        let operation: ReturnType<typeof submit>;
+        act(() => {
+          operation = submit('private edit');
+        });
+        await flush();
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
+        if (stage === 'rewind')
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        act(() => {
+          mockConnection.sessionId = 'session-2';
+          mockConnection.workspaceCwd = '/tmp/project-2';
+          testState.ownerVersion += 1;
+          rerender();
+        });
+        let accepted;
+        await act(async () => {
+          gate.resolve();
+          accepted = await operation;
+        });
+        expect(accepted).toBe(false);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        if (stage === 'snapshots')
+          expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(testState.prompt).not.toContain('private edit');
+      },
+    );
+
+    it('waits for the rewind event before sending', async () => {
+      mockSessionActions.rewindSession.mockResolvedValue(undefined);
+      renderApp({ language: 'en' });
+      await flush();
+      vi.useFakeTimers();
+      try {
+        let operation: ReturnType<typeof submit>;
+        act(() => {
+          operation = submit();
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(32);
+        });
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        testState.blocks = [];
+        let accepted;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(32);
+          accepted = await operation;
+        });
+        expect(accepted).toBe(true);
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops on rewind timeout and preserves the draft until late synchronization', async () => {
+      mockSessionActions.rewindSession.mockResolvedValue(undefined);
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      vi.useFakeTimers();
+      try {
+        let operation: ReturnType<typeof submit>;
+        act(() => {
+          operation = submit();
+        });
+        let accepted;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2100);
+          accepted = await operation;
+        });
+        expect(accepted).toBe(false);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(testState.prompt).toBe('hello');
+        await act(async () => {
+          await submit('must stay blocked');
+        });
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        act(() => {
+          testState.blocks = [];
+          rerender();
+        });
+        expect(testState.prompt).toBe('hello');
+        expect(testState.latestMessageListProps?.failedPromptMessageId).toBe(
+          'local-recovered-edit',
+        );
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('blocks further rewinds when the rewind response is lost', async () => {
+      mockSessionActions.rewindSession.mockRejectedValueOnce(
+        new TypeError('Failed to fetch'),
+      );
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      await act(async () => {
+        expect(await submit()).toBe(false);
+      });
+      expect(testState.prompt).toBe('hello');
+      await act(async () => {
+        expect(await submit()).toBe(false);
+      });
+      expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      act(() => {
+        testState.blocks = [];
+        rerender();
+      });
+      expect(testState.prompt).toBe('hello');
+      expect(testState.latestMessageListProps?.failedPromptMessageId).toBe(
+        'local-recovered-edit',
+      );
+    });
+
+    it.each(['admission', 'attachment upload'] as const)(
+      'retries the same edited message after %s fails without touching the composer',
+      async (stage) => {
+        if (stage === 'attachment upload') {
+          testState.blocks = [
+            {
+              id: 'u0',
+              kind: 'user',
+              text: 'original',
+              images: [{ data: 'AQID', mimeType: 'image/png' }],
+            },
+          ];
+        }
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (text, options) => {
+            expect(testState.blocks).toEqual([]);
+            await Promise.resolve();
+            testState.blocks = [
+              { id: 'local-failed-user', kind: 'user', text },
+            ];
+            if (stage === 'admission') {
+              options?.onAdmissionStarted?.();
+              throw new DaemonHttpError(413, {}, 'Prompt too large');
+            }
+            throw new Error('attachment upload failed');
+          },
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await act(async () => {
+          expect(await submit()).toBe(false);
+        });
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        expect(testState.prompt).toBe('hello');
+        expect(testState.latestChatEditorProps?.disabled).toBe(false);
+        expect(testState.latestMessageListProps?.failedPromptMessageId).toBe(
+          'local-failed-user',
+        );
+        await act(async () => {
+          testState.latestMessageListProps?.onRetryFailedPrompt?.();
+        });
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+          'edited text',
+          expect.objectContaining({ optimisticUserMessage: false }),
+        );
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('keeps one user through edit failure, retry, and another edit', async () => {
+      const { createDaemonTranscriptStore } = await import(
+        '@qwen-code/sdk/daemon'
+      );
+      const transcript = createDaemonTranscriptStore();
+      transcript.appendLocalUserMessage('original');
+      testState.blocks = transcript.getSnapshot().blocks;
+      const snapshots = [{ promptId: 'original', turnIndex: 0 }];
+      mockSessionActions.getRewindSnapshots.mockImplementation(async () => ({
+        snapshots: [...snapshots],
+      }));
+      mockSessionActions.rewindSession.mockImplementation(async (promptId) => {
+        transcript.dispatch({
+          type: 'session.rewound',
+          targetTurnIndex: 0,
+          promptId,
+        });
+        testState.blocks = transcript.getSnapshot().blocks;
+        snapshots.length = 0;
+      });
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (text, options) => {
+          transcript.appendLocalUserMessage(text);
+          testState.blocks = transcript.getSnapshot().blocks;
+          options?.onAdmissionStarted?.();
+          throw new DaemonHttpError(413, {}, 'Prompt too large');
+        },
+      );
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (text, options) => {
+          if (options?.optimisticUserMessage !== false)
+            transcript.appendLocalUserMessage(text);
+          testState.blocks = transcript.getSnapshot().blocks;
+          snapshots.push({ promptId: 'accepted', turnIndex: 0 });
+          options?.onAdmissionStarted?.();
+          options?.onAdmitted?.();
+        },
+      );
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      await act(async () => {
+        expect(await submit()).toBe(false);
+      });
+      const failedUsers = transcript
+        .getSnapshot()
+        .blocks.filter((block) => block.kind === 'user');
+      expect(failedUsers).toHaveLength(1);
+      expect(testState.latestMessageListProps?.failedPromptMessageId).toBe(
+        failedUsers[0].id,
+      );
+      await act(async () => {
+        testState.latestMessageListProps?.onRetryFailedPrompt?.();
+      });
+      act(() => {
+        rerender();
+      });
+      const users = transcript
+        .getSnapshot()
+        .blocks.filter((block) => block.kind === 'user');
+      expect(users).toHaveLength(1);
+      expect(users[0].id).toBe(failedUsers[0].id);
+      await act(async () => {
+        expect(
+          await testState.latestMessageListProps!.onSubmitUserMessageEdit!(
+            users.length - 1,
+            'next edit',
+          ),
+        ).toBe(true);
+      });
+      expect(
+        transcript
+          .getSnapshot()
+          .blocks.filter((block) => block.kind === 'user')
+          .map((block) => block.text),
+      ).toEqual(['next edit']);
+      expect(mockSessionActions.rewindSession).toHaveBeenCalledTimes(2);
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+      expect(testState.prompt).toBe('hello');
+    });
+
+    it('keeps an unknown admission recoverable and blocks another inline edit', async () => {
+      const prepareSubmit = vi
+        .fn()
+        .mockResolvedValue({ prompt: 'prepared edit', inputAnnotations: [] });
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          testState.blocks = [
+            { id: 'optimistic-new', kind: 'user', text: 'prepared edit' },
+          ];
+          options?.onAdmissionStarted?.();
+          throw new TypeError('Failed to fetch');
+        },
+      );
+      const { container } = renderApp({ language: 'en', prepareSubmit });
+      await flush();
+      await act(async () => {
+        expect(await submit()).toBe(false);
+      });
+      expect(testState.prompt).toBe('hello');
+      await act(async () => {
+        expect(await submit('second edit')).toBe(false);
+      });
+      expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const restore = container.querySelector<HTMLButtonElement>(
+        '[data-testid="prompt-admission-unknown"] button',
+      );
+      expect(restore).not.toBeNull();
+      act(() => {
+        restore!.click();
+      });
+      expect(testState.prompt).toBe('prepared edit\nhello');
+    });
+
+    it('preserves inline and referenced attachments when resending', async () => {
+      testState.blocks = [
+        {
+          id: 'u0',
+          kind: 'user',
+          text: 'original',
+          images: [
+            { data: 'aW5saW5l', mimeType: 'image/png' },
+            { data: '', mimeType: 'image/png', attachmentId: 'image-ref' },
+          ],
+          files: [
+            { name: 'local.txt', mimeType: 'text/plain', text: 'local file' },
+            {
+              name: 'saved.bin',
+              mimeType: 'application/octet-stream',
+              attachmentId: 'file-ref',
+            },
+          ],
+        },
+      ];
+      mockSessionActions.readAttachment.mockImplementation(async (id) => ({
+        data: id === 'image-ref' ? 'aW1hZ2U=' : 'ZmlsZQ==',
+        mimeType: id === 'image-ref' ? 'image/png' : 'application/octet-stream',
+      }));
+      renderApp({ language: 'en' });
+      await flush();
+      await act(async () => {
+        await submit();
+      });
+      expect(
+        mockSessionActions.readAttachment.mock.calls.map(([id]) => id),
+      ).toEqual(['image-ref', 'file-ref']);
+      expect(
+        mockSessionActions.readAttachment.mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(
+        mockSessionActions.rewindSession.mock.invocationCallOrder[0],
+      );
+      const options = mockSessionActions.sendPrompt.mock.calls[0][1];
+      expect(options.images).toEqual([
+        { data: 'aW5saW5l', media_type: 'image/png' },
+        { data: 'aW1hZ2U=', media_type: 'image/png' },
+      ]);
+      expect(options.files[0]).toMatchObject({
+        text: 'local file',
+        media_type: 'text/plain',
+      });
+      expect(options.files[1].data.size).toBe(4);
+    });
+
+    it('does not rewind when an attachment cannot be read', async () => {
+      testState.blocks = [
+        {
+          id: 'u0',
+          kind: 'user',
+          text: 'original',
+          files: [
+            { name: 'file', mimeType: 'text/plain', attachmentId: 'missing' },
+          ],
+        },
+      ];
+      mockSessionActions.readAttachment.mockRejectedValueOnce(
+        new Error('missing attachment'),
+      );
+      renderApp({ language: 'en' });
+      await flush();
+      let accepted;
+      await act(async () => {
+        accepted = await submit();
+      });
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it('refuses an edit resend while a turn is running', async () => {
+      testState.streamingState = 'responding';
+      renderApp({ language: 'en' });
+      await flush();
+      let accepted;
+      await act(async () => {
+        accepted = await submit();
+      });
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+    });
+
+    it('leaves the edit lifecycle to a host that claims it', async () => {
+      const onUserMessageEditRequest = vi.fn(() => true);
+      renderApp({ language: 'en', onUserMessageEditRequest });
+      await flush();
+      let claimed;
+      act(() => {
+        claimed = testState.latestMessageListProps?.onEditUserMessage?.(
+          0,
+          'original',
+        );
+      });
+      expect(claimed).toBe(true);
+      expect(onUserMessageEditRequest).toHaveBeenCalledWith(0, 'original');
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+    });
   });
 
   it('reports the current workspace id and path', async () => {
