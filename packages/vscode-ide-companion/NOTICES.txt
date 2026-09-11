@@ -4193,7 +4193,7 @@ SOFTWARE.
 
 
 ============================================================
-jose@6.1.3
+jose@6.2.12
 (https://github.com/panva/jose)
 
 The MIT License (MIT)

@@ -14498,7 +14498,14 @@ class QwenAgent implements Agent {
         // downgrade would hand the client a session it believes is an agent's:
         // it would carry the agent's name and be resumed as that agent later,
         // with none of the persona or tools that make the claim true.
-        if (!config.isAgentCollaborationEnabled()) {
+        // Guarded like the other optional Config reads in this file. Absent
+        // means not enabled, which refuses — the safe direction here, since the
+        // alternative is granting an agent persona on a Config that cannot say
+        // whether the operator opted in.
+        const collaborationEnabled =
+          typeof config.isAgentCollaborationEnabled === 'function' &&
+          config.isAgentCollaborationEnabled();
+        if (!collaborationEnabled) {
           throw RequestError.invalidParams(
             undefined,
             'Agent collaboration is disabled on this daemon (experimental.agentCollaboration)',

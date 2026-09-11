@@ -5129,6 +5129,22 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
+  /**
+   * Whether this daemon opted into workspace-agent collaboration.
+   *
+   * Guarded rather than called directly. This layer is handed Config-shaped
+   * objects that are not always a full Config — derived configs, shims and
+   * test doubles among them — and the same unguarded pattern in `acpAgent.ts`
+   * turned a missing method into a failed session. Absent means off, which is
+   * the safe reading: no run frame is established, and every consumer of one
+   * refuses in turn.
+   */
+  #collaborationEnabled(): boolean {
+    return typeof this.config.isAgentCollaborationEnabled === 'function'
+      ? this.config.isAgentCollaborationEnabled()
+      : false;
+  }
+
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
     if (
@@ -5249,7 +5265,7 @@ export class Session implements SessionContext {
     // talked into running an agent turn by a frame from any other source — and
     // because every downstream consumer (mid-turn input, the thread tools)
     // requires the frame this establishes, this one line shuts all of them.
-    const agentRun = this.config.isAgentCollaborationEnabled()
+    const agentRun = this.#collaborationEnabled()
       ? parsePromptAgentRun(params)
       : undefined;
     const execute = () => {
@@ -5503,7 +5519,7 @@ export class Session implements SessionContext {
                   : undefined,
                 daemonPromptId,
               );
-              const agentRun = this.config.isAgentCollaborationEnabled()
+              const agentRun = this.#collaborationEnabled()
                 ? parsePromptAgentRun(params)
                 : undefined;
               if (agentRun) {
