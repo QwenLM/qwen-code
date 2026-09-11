@@ -49,6 +49,10 @@ export const TOP_LEVEL_COMMANDS = [
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
   ],
   [
+    'sandbox [cmd...]',
+    'Inspect the sandbox backend, or run a command inside it',
+  ],
+  [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
