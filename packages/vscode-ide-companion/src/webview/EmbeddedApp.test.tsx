@@ -902,15 +902,11 @@ describe('EmbeddedApp host wiring', () => {
     expect(document.querySelector('[data-session-id="web-1"]')).not.toBeNull();
 
     // Machine-owned rows must never render as ordinary chats.
-    expect(
-      document.querySelector('[data-session-id="channel-1"]'),
-    ).toBeNull();
+    expect(document.querySelector('[data-session-id="channel-1"]')).toBeNull();
     expect(
       document.querySelector('[data-session-id="scheduled-1"]'),
     ).toBeNull();
-    expect(
-      document.querySelector('[data-session-id="subagent-1"]'),
-    ).toBeNull();
+    expect(document.querySelector('[data-session-id="subagent-1"]')).toBeNull();
 
     // The request itself must not scope by source — that filter is what hid
     // the CLI and pre-attribution sessions.
