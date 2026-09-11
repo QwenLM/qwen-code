@@ -129,6 +129,7 @@ vi.mock('./early-input.js', () => ({
 }));
 vi.mock('./resume-session.js', () => ({
   resumeEventsFromConfig: () => null,
+  seedLivePromptCountFromResume: () => {},
 }));
 
 import { startOpenTuiUI } from './start-opentui-ui.js';

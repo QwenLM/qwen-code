@@ -332,6 +332,49 @@ describe('handleResumeSession', () => {
     resetPromptCountForTesting();
   });
 
+  it('seeds before the swap awaits, so a submit inside the window cannot re-mint a claimed id (R39-2)', async () => {
+    resetPromptCountForTesting();
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      sessionWithClaims('target-session', 3) as never,
+    );
+    const { config } = createFakeConfig();
+    let initializeEntered!: () => void;
+    const initializeParked = new Promise<void>((resolve) => {
+      initializeEntered = resolve;
+    });
+    let releaseInitialize!: () => void;
+    const initializeGate = new Promise<void>((resolve) => {
+      releaseInitialize = resolve;
+    });
+    (config as unknown as { getGeminiClient: () => unknown }).getGeminiClient =
+      () => ({
+        initialize: () => {
+          initializeEntered();
+          return initializeGate;
+        },
+      });
+    const host = createFakeHost(config);
+
+    try {
+      // Fire-and-forget — the shape the picker's onSelect has
+      // (opentui-dialog-mount.tsx). The swap parks inside initialize, after
+      // the core re-key, with the submit gate open.
+      const swap = handleResumeSession(host, 'target-session');
+      await initializeParked;
+
+      // A submit here mints synchronously (live-turn.ts); with the seed
+      // ordered after the awaits this re-mints the resumed turn 0.
+      expect(
+        nextLivePromptId({ getSessionId: () => 'target-session' } as Config),
+      ).toBe('target-session########3');
+
+      releaseInitialize();
+      await swap;
+    } finally {
+      resetPromptCountForTesting();
+    }
+  });
+
   it('settles the unarmed swap transaction when the session is not found (R4-4)', async () => {
     vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
       null as never,

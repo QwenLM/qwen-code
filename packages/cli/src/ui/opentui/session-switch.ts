@@ -171,6 +171,19 @@ export async function handleResumeSession(
     resetBackgroundStateForSessionSwitch(config);
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
+    // Seed the live prompt counter past the ids the resumed transcript
+    // claims NOW — before the awaits below: the submit gate is open across
+    // them (the picker path holds no busy latch), and a mint inside that
+    // window would use the unseeded counter, re-minting an id a resumed
+    // turn still wears (R39-2). Placed after coreSwapped = true so a throw
+    // still takes the rollback branch; monotonic, so the early seed cannot
+    // lower a counter an earlier session left higher.
+    seedLivePromptCount(
+      computeResumedPromptCountSeed(
+        sessionData.conversation.messages,
+        sessionId,
+      ),
+    );
     await waitForGoalRuntime(config);
     // Rebuild turn boundary tracking so rewind works within resumed sessions.
     config
@@ -189,15 +202,6 @@ export async function handleResumeSession(
     // 2. UI swap. The commit point is the UI-side session re-key: from here
     //    on a failure must not roll core back OR undo the telemetry replay.
     host.startNewSession(sessionId);
-    // Seed the live prompt counter past the ids the resumed transcript
-    // claims before any new turn can mint one (R38-1); monotonic, so 0 is
-    // a no-op.
-    seedLivePromptCount(
-      computeResumedPromptCountSeed(
-        sessionData.conversation.messages,
-        sessionId,
-      ),
-    );
     host.setSessionName(customTitle ?? null);
     host.clearPendingState();
     host.clearItems();
@@ -363,21 +367,22 @@ export async function handleBranchSession(
     // 7. Core swap first.
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
-    await waitForGoalRuntime(config);
-    await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
-
-    // 8. UI swap.
-    const uiHistoryItems = buildUiHistoryItems(resumed, host);
-    host.startNewSession(newSessionId);
     // Seed the live prompt counter past the ids the forked transcript
-    // claims before any new turn can mint one (R38-1); monotonic, so 0 is
-    // a no-op.
+    // claims NOW — before the awaits below, for the same open-window reason
+    // as handleResumeSession (R39-2). The fork remapped record ids to the
+    // new session id, so the seed keys on newSessionId.
     seedLivePromptCount(
       computeResumedPromptCountSeed(
         resumed.conversation.messages,
         newSessionId,
       ),
     );
+    await waitForGoalRuntime(config);
+    await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
+
+    // 8. UI swap.
+    const uiHistoryItems = buildUiHistoryItems(resumed, host);
+    host.startNewSession(newSessionId);
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
