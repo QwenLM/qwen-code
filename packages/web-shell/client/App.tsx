@@ -9832,6 +9832,18 @@ export function App({
             '[web-shell] prompt preflight rejected, prompt cancelled',
             err,
           );
+          // Say so. Hosts put user-facing text in these errors — the VS Code
+          // companion's message-edit rewind throws localized failures here —
+          // and cancelling on a console warning alone leaves the user in front
+          // of a composer that appeared to do nothing (#9911). Only when the
+          // user is still on the session this submission belonged to; a toast
+          // for a session they have left would be noise.
+          if (admissionOwnerIsCurrent()) {
+            pushToast(
+              'error',
+              formatError(err, 'Message could not be submitted'),
+            );
+          }
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
@@ -10034,6 +10046,7 @@ export function App({
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
+      pushToast,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10564,13 +10577,22 @@ export function App({
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
         const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
-        const submissionOwnerIsCurrent = () =>
+        // Narrower than submissionOwnerIsCurrent below: it answers "is the user
+        // still looking at the session this submission belonged to", which is
+        // what decides whether a failure is worth telling them about. The full
+        // guard also tracks composer identity, and submitting is itself what
+        // moves that — so reusing it here would suppress the very message the
+        // user needs (#9911). The full guard is composed on this base rather
+        // than restating the same four conjuncts, so the two cannot drift.
+        const submissionSessionIsCurrent = () =>
           appMountedRef.current &&
           sourceOwner.isCurrent() &&
+          connectionRef.current.sessionId === sourceSessionId &&
+          getComposerWorkspaceCwd() === sourceWorkspaceCwd;
+        const submissionOwnerIsCurrent = () =>
+          submissionSessionIsCurrent() &&
           !sessionWriteBlockedRef.current &&
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
-          connectionRef.current.sessionId === sourceSessionId &&
-          getComposerWorkspaceCwd() === sourceWorkspaceCwd &&
           composerSourceVersionRef.current === sourceVersion;
         void (async () => {
           let preparedPrompt = text;
@@ -10611,6 +10633,19 @@ export function App({
               '[web-shell] queued prompt preflight rejected, cancelled',
               err,
             );
+            // A rejected preflight cancels the submission, so it has to say so.
+            // Hosts put user-facing text in these errors — the VS Code
+            // companion's rewind failures are localized strings — and a console
+            // warning leaves the user in front of a composer that silently did
+            // nothing (#9911). Stay quiet only when this submission is no
+            // longer the current one, where the toast would belong to a session
+            // the user has already left.
+            if (submissionSessionIsCurrent()) {
+              pushToast(
+                'error',
+                formatError(err, 'Message could not be submitted'),
+              );
+            }
           }
         })();
         return false;
@@ -10626,6 +10661,7 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      pushToast,
       rawEnqueuePrompt,
       sessionCatalogController,
       sessionOwnerGuard,
