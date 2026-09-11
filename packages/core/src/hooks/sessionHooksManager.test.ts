@@ -587,6 +587,26 @@ describe('SessionHooksManager', () => {
       ).toBe(0);
     });
 
+    it('matches an unanchored regex anywhere in the target, like settings hooks', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash.*',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'RunBashCommand',
+        ).length,
+      ).toBe(1);
+    });
+
     it('should fallback to exact match for invalid regex', () => {
       const callback = vi.fn().mockResolvedValue({ continue: true });
 

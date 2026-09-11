@@ -368,8 +368,8 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
 | Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
 | Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                           |
-| Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
-| Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
+| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
+| Compact Events      | `PreCompact`                                                                               | ✅ Regex        | Trigger: `manual`, `auto`                                     |
 | Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
 | Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
 | Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
@@ -377,8 +377,10 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 **Matcher Syntax:**
 
-- Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`)
+- Empty string `""`, `"*"` or `".*"` matches all events of that type
+- A matcher is first compared exactly, and so is each entry of a `|`-separated list such as `permission_prompt|idle_prompt`
+- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`), so `read` also matches `read_file`; add `^` and `$` to match a whole value
+- The same rules apply to every event that supports a matcher, and to hooks registered by skills
 - Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids.
 
 **Examples:**
