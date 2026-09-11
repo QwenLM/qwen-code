@@ -5,7 +5,6 @@
  */
 
 import { statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const CHROME_BRIDGE_PROTOCOL_VERSION = 1;
@@ -37,18 +36,19 @@ interface DirectoryStat {
   mode: number;
 }
 
-// /tmp is world-writable, so any local user can squat the predictable socket
-// name (or its recovery lock) and deny the bridge permanently. Prefer a
-// per-user directory when the platform offers one. The choice must stay a
-// pure function of uid and platform — never of $TMPDIR/$XDG_RUNTIME_DIR — so
-// the CLI and the Chrome-launched native host derive the same path without
+// The world-writable temp root lets any local user squat a predictable
+// socket name (or its recovery lock) and deny the bridge permanently.
+// Prefer a per-user directory when the platform offers one; otherwise fall
+// back to a per-user subdirectory of the temp root, which the bridge server
+// creates 0700 and verifies before binding. The choice must stay a pure
+// function of uid and platform — never of $TMPDIR/$XDG_RUNTIME_DIR — so the
+// CLI and the Chrome-launched native host derive the same path without
 // sharing an environment.
 export function defaultChromeBridgeSocketDirectory(
   uid: number | 'default',
   platform: NodeJS.Platform = process.platform,
   stat: (path: string) => DirectoryStat | undefined = statDirectory,
 ): string {
-  if (platform === 'darwin') return tmpdir();
   if (platform !== 'win32' && typeof uid === 'number') {
     const runtimeDir = `/run/user/${uid}`;
     const info = stat(runtimeDir);
@@ -60,7 +60,8 @@ export function defaultChromeBridgeSocketDirectory(
     )
       return runtimeDir;
   }
-  return '/tmp';
+  const base = platform === 'darwin' ? '/private/tmp' : '/tmp';
+  return join(base, 'qwen-browser-use', String(uid));
 }
 
 function statDirectory(path: string): DirectoryStat | undefined {

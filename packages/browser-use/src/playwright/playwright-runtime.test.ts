@@ -1427,17 +1427,49 @@ describe('PlaywrightRuntime command contracts', () => {
       dismiss: vi.fn(async () => undefined),
     } as unknown as Dialog);
     const navigatedListener = listeners.get('framenavigated') as
-      | (() => void)
+      | ((frame: Frame) => void)
       | undefined;
     expect(navigatedListener).toBeDefined();
 
-    navigatedListener?.();
+    navigatedListener?.(fixture.page.mainFrame() as Frame);
 
     await fixture.runtime.dispatch('tab.goto', {
       tabId: tab.id,
       url: 'https://example.com/',
     });
     expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the cached dialog when a subframe navigates', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const listeners = new Map(
+      fixture.page.on.mock.calls as Array<[string, (value: never) => void]>,
+    );
+    const dialogListener = listeners.get('dialog') as
+      | ((value: Dialog) => void)
+      | undefined;
+    dialogListener?.({
+      type: () => 'confirm',
+      message: () => 'Leave?',
+      defaultValue: () => '',
+      accept: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    } as unknown as Dialog);
+    const navigatedListener = listeners.get('framenavigated') as
+      | ((frame: Frame) => void)
+      | undefined;
+    expect(navigatedListener).toBeDefined();
+
+    navigatedListener?.({} as Frame);
+
+    await expect(
+      fixture.runtime.dispatch('tab.goto', {
+        tabId: tab.id,
+        url: 'https://example.com/',
+      }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+    expect(fixture.page.goto).not.toHaveBeenCalled();
   });
 
   it('records console.warn entries at the warn level', async () => {
@@ -1999,6 +2031,7 @@ function fakePage(
   value: Page;
   methods: {
     on: ReturnType<typeof vi.fn>;
+    mainFrame: ReturnType<typeof vi.fn>;
     bringToFront: ReturnType<typeof vi.fn>;
     evaluate: ReturnType<typeof vi.fn>;
     title: ReturnType<typeof vi.fn>;

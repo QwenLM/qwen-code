@@ -70,6 +70,25 @@ describe('Playwright AI snapshots', () => {
     );
   });
 
+  it('keeps clickable generic nodes that AI mode marks cursor=pointer', async () => {
+    const fixture = fakePage(
+      [
+        '- generic [ref=e1]:',
+        '  - generic [ref=e2] [cursor=pointer]',
+        '  - text: plain text',
+        '  - button "Save" [ref=e3]',
+      ].join('\n'),
+    );
+
+    await expect(
+      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
+    ).resolves.toBe(
+      ['- generic [ref=e2] [cursor=pointer]', '- button "Save" [ref=e3]'].join(
+        '\n',
+      ),
+    );
+  });
+
   it('does not treat multiline text as accessibility nodes', async () => {
     const fixture = fakePage(
       [

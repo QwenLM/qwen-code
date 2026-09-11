@@ -184,16 +184,20 @@ export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
   try {
     await page.keyboard.press(keys.join('+'));
   } catch (error) {
-    // Playwright presses chord modifiers left to right and never releases
-    // them when a later token is rejected; release every modifier so the tab
-    // is not left with keys physically held.
-    await Promise.allSettled(
-      (['Shift', 'Control', 'Alt', 'Meta'] as const).map((key) =>
-        page.keyboard.up(key),
-      ),
-    );
+    await releaseChordModifiers(page);
     throw error;
   }
+}
+
+// Playwright presses chord modifiers left to right and never releases them
+// when a later token is rejected; release every modifier so the tab is not
+// left with keys physically held.
+export async function releaseChordModifiers(page: Page): Promise<void> {
+  await Promise.allSettled(
+    (['Shift', 'Control', 'Alt', 'Meta'] as const).map((key) =>
+      page.keyboard.up(key),
+    ),
+  );
 }
 
 export function selectOptions(

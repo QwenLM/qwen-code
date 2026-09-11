@@ -24,6 +24,7 @@ import {
 } from '../protocol.js';
 import {
   ChromeExtensionTransport,
+  ensureSocketDirectory,
   isAddressInUse,
 } from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
@@ -36,6 +37,30 @@ afterEach(async () => {
   for (const root of roots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe('ensureSocketDirectory', () => {
+  it('creates a missing directory with owner-only permissions', async () => {
+    if (process.platform === 'win32') return;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    roots.push(root);
+    const dir = path.join(root, 'qwen-browser-use', '1000');
+    await ensureSocketDirectory(dir);
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it('tightens a permissive owned directory and rejects a non-directory', async () => {
+    if (process.platform === 'win32') return;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-dir-'));
+    roots.push(root);
+    const dir = path.join(root, 'loose');
+    fs.mkdirSync(dir, { mode: 0o755 });
+    await ensureSocketDirectory(dir);
+    expect(fs.statSync(dir).mode & 0o077).toBe(0);
+    const squat = path.join(root, 'squat');
+    fs.writeFileSync(squat, '');
+    await expect(ensureSocketDirectory(squat)).rejects.toThrow('not usable');
+  });
 });
 
 describe('ChromeExtensionTransport', () => {
@@ -264,39 +289,60 @@ describe('ChromeExtensionTransport', () => {
     expect(defaultChromeBridgeSocketDirectory(42, 'linux', owned)).toBe(
       '/run/user/42',
     );
-    // A foreign-owned or group/other-accessible runtime dir is not safer.
+    // A foreign-owned or group/other-accessible runtime dir is not safer
+    // than the per-user temp subdirectory the server creates 0700.
     expect(
       defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
         isDirectory: () => true,
         uid: 43,
         mode: 0o040700,
       })),
-    ).toBe('/tmp');
+    ).toBe('/tmp/qwen-browser-use/42');
     expect(
       defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
         isDirectory: () => true,
         uid: 42,
         mode: 0o040770,
       })),
-    ).toBe('/tmp');
+    ).toBe('/tmp/qwen-browser-use/42');
     expect(
       defaultChromeBridgeSocketDirectory(42, 'linux', () => undefined),
-    ).toBe('/tmp');
+    ).toBe('/tmp/qwen-browser-use/42');
     expect(
       defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
         isDirectory: () => false,
         uid: 42,
         mode: 0o040700,
       })),
-    ).toBe('/tmp');
-    expect(defaultChromeBridgeSocketDirectory('default', 'linux')).toBe('/tmp');
-    expect(defaultChromeBridgeSocketDirectory(42, 'darwin')).toBe(os.tmpdir());
+    ).toBe('/tmp/qwen-browser-use/42');
+    expect(defaultChromeBridgeSocketDirectory('default', 'linux')).toBe(
+      '/tmp/qwen-browser-use/default',
+    );
+    expect(defaultChromeBridgeSocketDirectory(42, 'darwin')).toBe(
+      '/private/tmp/qwen-browser-use/42',
+    );
+  });
+
+  it('derives the macOS socket directory without reading ambient TMPDIR', () => {
+    const original = process.env.TMPDIR;
+    try {
+      process.env.TMPDIR = '/var/folders/one';
+      const first = defaultChromeBridgeSocketDirectory(42, 'darwin');
+      process.env.TMPDIR = '/var/folders/two';
+      expect(defaultChromeBridgeSocketDirectory(42, 'darwin')).toBe(first);
+      expect(first).toBe('/private/tmp/qwen-browser-use/42');
+    } finally {
+      if (original === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = original;
+    }
   });
 
   it('derives the default socket path from a private directory when one is available', () => {
     if (process.platform === 'win32') return;
     const parent = path.dirname(defaultChromeBridgeSocketPath({}));
-    if (parent === '/tmp' || parent === os.tmpdir()) return;
+    // The per-user fallback subdirectory is created 0700 by the server at
+    // bind time and may not exist yet.
+    if (parent.includes('/qwen-browser-use/')) return;
     expect(parent).toBe(
       `/run/user/${typeof process.getuid === 'function' ? process.getuid() : 0}`,
     );

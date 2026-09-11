@@ -113,6 +113,13 @@ export class BrowserModel {
       throw new Error('Playwright transport is closed');
   }
 
+  private assertOwned(tabId: number): void {
+    // qwenBrowser.tabRemoved is handled outside the per-tab queue, so the
+    // event can land while either request above is in flight.
+    if (!this.ownedTabs.has(tabId))
+      throw new Error(`Tab ${tabId} was removed during attachment`);
+  }
+
   private async releaseTab(tabId: number): Promise<void> {
     this.detachTab(tabId);
     if (this.ownedTabs.delete(tabId) && this.bridge.isConnected())
@@ -294,6 +301,7 @@ export class BrowserModel {
     this.ownedTabs.add(tabId);
     await this.bridge.request('tabs.attach', { tabId });
     this.assertOpen();
+    this.assertOwned(tabId);
     const response = record(
       await this.bridge.request('cdp.send', {
         tabId,
@@ -302,6 +310,7 @@ export class BrowserModel {
       }),
     );
     this.assertOpen();
+    this.assertOwned(tabId);
     const info = targetInfo(response.targetInfo);
     const session: TabSession = {
       tabId,

@@ -57,6 +57,15 @@ export function sanitizeOperationError(
   // Playwright prefixes every client error with the API name
   // ("locator.fill: ..."); classify on the failure text, not the call site.
   const failure = rawMessage.replace(/^[a-zA-Z][\w$]*(?:\.[\w$]+)*:\s/, '');
+  // Playwright's rendered message partly quotes page content (selectors,
+  // accessible names), so text must not pick the code. Its structured error
+  // name survives the client boundary, and a crashed target is a stale tab
+  // per the published contract.
+  const name = error instanceof Error ? error.name : '';
+  if (name === 'TargetClosedError' || /^(target|page) crashed/im.test(failure))
+    return new BrowserRuntimeError('STALE_TAB', message);
+  if (name === 'TimeoutError')
+    return new BrowserRuntimeError('OPERATION_TIMEOUT', message);
   if (/LOCATOR_NOT_UNIQUE|strict mode violation/i.test(failure)) {
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
   }
@@ -68,12 +77,6 @@ export function sanitizeOperationError(
     return new BrowserRuntimeError('STALE_TAB', message);
   }
   if (/INVALID_LOCATOR|frame was detached/i.test(failure)) {
-    return new BrowserRuntimeError('INVALID_LOCATOR', message);
-  }
-  if (/timeout/i.test(failure)) {
-    return new BrowserRuntimeError('OPERATION_TIMEOUT', message);
-  }
-  if (/selector|locator/i.test(failure)) {
     return new BrowserRuntimeError('INVALID_LOCATOR', message);
   }
   return new BrowserRuntimeError('OPERATION_FAILED', message);

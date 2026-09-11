@@ -7,12 +7,14 @@
 import {
   chmod,
   lstat,
+  mkdir,
   open,
   readFile,
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
 import { connect, createServer, type Server, type Socket } from 'node:net';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { clearTimeout, setTimeout } from 'node:timers';
 
@@ -76,6 +78,8 @@ const RECOVERY_LOCK_STALE_MS = 60_000;
 export class ChromeExtensionTransport implements ChromeBridge {
   readonly socketPath: string;
 
+  private readonly derivedSocketDirectory: string | undefined;
+
   private readonly connectTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private server: Server | undefined;
@@ -96,6 +100,14 @@ export class ChromeExtensionTransport implements ChromeBridge {
 
   constructor(options: ChromeExtensionTransportOptions = {}) {
     this.socketPath = options.socketPath ?? defaultChromeBridgeSocketPath();
+    // Only the derived default path gets its private parent directory
+    // created and verified; a configured path's parent stays the caller's.
+    this.derivedSocketDirectory =
+      options.socketPath === undefined &&
+      !process.env.QWEN_BROWSER_USE_SOCKET_PATH?.trim() &&
+      process.platform !== 'win32'
+        ? dirname(this.socketPath)
+        : undefined;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 5_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
@@ -209,6 +221,8 @@ export class ChromeExtensionTransport implements ChromeBridge {
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
     try {
+      if (this.derivedSocketDirectory !== undefined)
+        await ensureSocketDirectory(this.derivedSocketDirectory);
       try {
         await listen(server, this.socketPath);
       } catch (error) {
@@ -431,6 +445,28 @@ export class ChromeExtensionTransport implements ChromeBridge {
     await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
     this.socketIdentity = undefined;
   }
+}
+
+// The derived socket directory lives under a world-writable temp root, so
+// bind only into a directory this user owns alone: a foreign-owned or
+// symlinked entry means a co-tenant is squatting the rendezvous.
+export async function ensureSocketDirectory(directory: string): Promise<void> {
+  const owner =
+    typeof process.getuid === 'function' ? process.getuid() : undefined;
+  const info = await lstat(directory).catch(() => undefined);
+  if (info !== undefined) {
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      (owner !== undefined && info.uid !== owner)
+    )
+      throw new Error(
+        `Chrome bridge socket directory is not usable: ${directory}`,
+      );
+    if ((info.mode & 0o077) !== 0) await chmod(directory, 0o700);
+    return;
+  }
+  await mkdir(directory, { recursive: true, mode: 0o700 });
 }
 
 async function listen(server: Server, socketPath: string): Promise<void> {

@@ -173,11 +173,11 @@ describe('locator input completion', () => {
     );
     await executeLocatorOperation(
       'locator.type',
-      { steps, value: 'a'.repeat(100_000) },
+      { steps, value: 'a'.repeat(60_000) },
       f.tab,
     );
     expect(f.locator.pressSequentially).toHaveBeenLastCalledWith(
-      'a'.repeat(100_000),
+      'a'.repeat(60_000),
       { timeout: 120_000 },
     );
     await executeLocatorOperation(
@@ -189,6 +189,43 @@ describe('locator input completion', () => {
       'a'.repeat(10_000),
       { timeout: 500 },
     );
+  });
+});
+
+describe('locator.press', () => {
+  function pressFixture() {
+    const keyboard = { up: vi.fn(async () => undefined) };
+    const locator = { press: vi.fn(async () => undefined) };
+    const tab = {
+      page: { locator: () => locator, keyboard },
+    } as unknown as TabState;
+    const args = {
+      steps: [{ kind: 'locator', selector: '#target' }],
+      value: 'Control+Esc',
+    };
+    return { keyboard, locator, tab, args };
+  }
+
+  it('releases every modifier when a later chord token is rejected', async () => {
+    const f = pressFixture();
+    f.locator.press.mockRejectedValue(new Error('Unknown key: "Esc"'));
+    await expect(
+      executeLocatorOperation('locator.press', f.args, f.tab),
+    ).rejects.toThrow('Unknown key');
+    expect(f.keyboard.up).toHaveBeenCalledTimes(4);
+    expect(f.keyboard.up).toHaveBeenCalledWith('Control');
+  });
+
+  it('leaves the keyboard alone when the press succeeds', async () => {
+    const f = pressFixture();
+    await expect(
+      executeLocatorOperation('locator.press', f.args, f.tab),
+    ).resolves.toBeNull();
+    expect(f.locator.press).toHaveBeenCalledExactlyOnceWith('Control+Esc', {
+      timeout: 5_000,
+      noWaitAfter: true,
+    });
+    expect(f.keyboard.up).not.toHaveBeenCalled();
   });
 });
 
