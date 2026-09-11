@@ -1082,14 +1082,14 @@ describe('EmbeddedApp host wiring', () => {
     // The second page was requested with the cursor the first page returned.
     expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     expect(
-      (sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
-        cursor?: string;
-      }).cursor,
+      (
+        sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
+          cursor?: string;
+        }
+      ).cursor,
     ).toBe('c1');
     // Machine-owned rows stay filtered, presentable rows render.
-    expect(
-      document.querySelector('[data-session-id="machine-1"]'),
-    ).toBeNull();
+    expect(document.querySelector('[data-session-id="machine-1"]')).toBeNull();
     expect(document.querySelector('[data-session-id="chat-1"]')).not.toBeNull();
   });
 
@@ -1145,9 +1145,11 @@ describe('EmbeddedApp host wiring', () => {
       expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     });
     expect(
-      (sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
-        cursor?: string;
-      }).cursor,
+      (
+        sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
+          cursor?: string;
+        }
+      ).cursor,
     ).toBe('c2');
     expect(
       document.querySelector('[data-session-id="sess-extra"]'),

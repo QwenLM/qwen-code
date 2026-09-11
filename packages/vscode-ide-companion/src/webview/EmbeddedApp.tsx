@@ -491,9 +491,7 @@ export function EmbeddedApp() {
             }
           })();
           if (!page) break;
-          const rawSessions = Array.isArray(page.sessions)
-            ? page.sessions
-            : [];
+          const rawSessions = Array.isArray(page.sessions) ? page.sessions : [];
           const pageSessions = rawSessions.filter(isPresentableHistorySession);
           // A cursor page that comes back empty means the strict `mtime <`
           // keyset dropped a whole tie group; the rest of the history is
