@@ -141,6 +141,7 @@ import {
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
   isReservedStandaloneSessionSourceType,
+  isScheduledTaskRunSource,
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
   STANDALONE_SESSION_SOURCE_TYPE,
@@ -184,6 +185,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   activeWorkCloseRetryDelayMs,
@@ -5902,11 +5904,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // model_switched right beside the model_switch_failed below.
       let succeeded = false;
       try {
+        const persistDefault = !isScheduledTaskRunSource({
+          sourceType: entry.sourceType,
+          sourceId: entry.sourceId,
+        });
         const result = await Promise.race([
           withTimeout(
             conn.unstable_setSessionModel({
               sessionId: entry.sessionId,
               modelId,
+              ...(!persistDefault
+                ? {
+                    _meta: {
+                      [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false,
+                    },
+                  }
+                : {}),
             }),
             timeoutMs,
             'setSessionModel',
@@ -5914,7 +5927,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
-        if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+        if (
+          persistDefault &&
+          !isReservedStandaloneSessionSourceType(entry.sourceType)
+        ) {
           broadcastWorkspaceEvent({
             type: 'settings_changed',
             data: {
