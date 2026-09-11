@@ -161,8 +161,9 @@ describe('isResponsesReasoningSignature', () => {
   });
 
   it('rejects non-string input without throwing', () => {
-    // Gemini `signature_delta` can surface a number/boolean on a history part;
-    // the recognizer must not throw `startsWith` on a non-string.
+    // The SDK types thoughtSignature as string, but the value crosses untyped
+    // boundaries — persisted-history restore performs no Part shape validation —
+    // so treat a non-string as a native opaque token rather than throwing.
     expect(isResponsesReasoningSignature(undefined)).toBe(false);
     expect(isResponsesReasoningSignature(null)).toBe(false);
     expect(isResponsesReasoningSignature(1)).toBe(false);

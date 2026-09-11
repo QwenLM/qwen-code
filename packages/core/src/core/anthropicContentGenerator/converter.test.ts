@@ -4581,7 +4581,10 @@ describe('AnthropicContentConverter', () => {
           },
           ...(isLatestTurn
             ? []
-            : [{ role: 'user' as const, parts: [{ text: 'Second' }] }]),
+            : [
+                { role: 'user' as const, parts: [{ text: 'Second' }] },
+                { role: 'model' as const, parts: [{ text: 'Later answer' }] },
+              ]),
         ],
       });
 
@@ -4601,13 +4604,27 @@ describe('AnthropicContentConverter', () => {
         ]);
       };
 
-      // Under the bare option set the block is kept but left unsigned (no
-      // `signature` key), so the foreign payload still never reaches the wire.
+      // Under the bare option set on the LATEST turn the empty-text block is
+      // kept but left unsigned (no `signature` key), so the foreign payload
+      // still never reaches the wire — the latest turn's signatures must
+      // replay byte-exact, so dropEmptyTextThinkingBlocks leaves it.
       const assertUnsigned = (result: {
         messages: Array<{ role: string; content: unknown }>;
       }) => {
         expect(findAssistant(result)?.content).toEqual([
           { type: 'thinking', thinking: '' },
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Under the bare option set on a NON-latest turn, dropEmptyTextThinkingBlocks
+      // deletes the empty-text thinking block, leaving only the visible answer.
+      // This is the assertion that only a genuine second (later) model turn can
+      // reach: with today's single-model-turn fixture the block would survive.
+      const assertNonLatestThinkingDropped = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        expect(findAssistant(result)?.content).toEqual([
           { type: 'text', text: 'Visible answer' },
         ]);
       };
@@ -4626,7 +4643,7 @@ describe('AnthropicContentConverter', () => {
           dropUnsignedAssistantThinking: true,
         }),
       );
-      assertUnsigned(
+      assertNonLatestThinkingDropped(
         converter.convertLlmRequestToAnthropic(build(false), {
           enableCacheControl: false,
         }),

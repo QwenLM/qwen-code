@@ -48,9 +48,10 @@ export function isOpenAIReasoningThoughtPart(part: Part): boolean {
  * never takes this JSON shape, so recognizing the payload is enough to keep it
  * off a foreign wire without putting a legitimate native signature at risk.
  *
- * Mirrors the shape checks already in `llm-chat.ts`
- * (`isCompleteResponsesReasoningSignature`) and `responses-converter.ts`
- * (`decodeReasoningSignature`).
+ * Mirrors `decodeReasoningSignature` in `responses-converter.ts`, which also
+ * tolerates leading whitespace. `llm-chat.ts`'s
+ * `isCompleteResponsesReasoningSignature` is the same check without that
+ * tolerance.
  * See https://github.com/QwenLM/qwen-code/issues/9453
  */
 export function isResponsesReasoningSignature(signature: unknown): boolean {

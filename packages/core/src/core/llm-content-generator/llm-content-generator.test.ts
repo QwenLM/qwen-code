@@ -890,10 +890,9 @@ describe('LlmContentGenerator', () => {
     });
 
     it('forwards a non-string thoughtSignature without throwing', async () => {
-      // Gemini `signature_delta` can surface a non-string thoughtSignature on
-      // a history part (number/boolean). The recognizer must not crash on it
-      // with `startsWith is not a function` — it should treat it as a native
-      // opaque token and forward it unchanged, matching the base behavior.
+      // The SDK types thoughtSignature as string, but the value crosses untyped
+      // boundaries — persisted-history restore performs no Part shape validation —
+      // so treat a non-string as a native opaque token rather than throwing.
       const nonStringSignature = 1 as unknown as string;
 
       await generator.generateContent(
