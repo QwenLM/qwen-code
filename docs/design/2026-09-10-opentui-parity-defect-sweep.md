@@ -610,16 +610,25 @@ What was verified, and how far the verification reaches:
 - Two dialog list widgets remain where one would do; consolidating them touches
   numbering, colour and scroll arrows at once.
 - A line-by-line comparison against ink's component and rendering source turned
-  up gaps well past this change's scope. Dialogs with no counterpart here at all
-  — among them the OAuth progress, without which a Qwen login cannot be
-  completed in this renderer, and the startup approval of a project's MCP
-  servers, so a checked-in server list is silently never offered. Dialogs that
-  open read-only where ink's are actionable: trust, rewind, diff, subagent
-  creation and listing, skills, hooks, the status line, memory, two of the stats
-  tabs, and the extension manager's discover and source tabs. And the whole
-  subagent and background-task surface — no live agent panel, no background-task
-  dialog or footer pill, and no inline attribution of an approval a subagent
-  asked for, so one arrives with nothing to say whose it is.
+  up gaps well past this change's scope. The one that blocks a workflow outright
+  is the startup approval of a project's MCP servers: ink opens that dialog
+  whenever its approval queue is non-empty, and this renderer has no counterpart
+  at all, so a server list checked into a repository is silently never offered.
+  Dialogs that open read-only where ink's are actionable: trust, rewind, diff,
+  subagent creation and listing, skills, hooks, the status line, memory, two of
+  the stats tabs, and the extension manager's discover and source tabs. And the
+  whole subagent and background-task surface — no live agent panel, no
+  background-task dialog or footer pill, and no inline attribution of an
+  approval a subagent asked for, so one arrives with nothing to say whose it is.
+- Two of ink's authentication progress screens were reported as missing here on
+  the grounds that a login could not be completed without them. That does not
+  survive a reachability check, and they are not gaps. No provider in the
+  registry declares the OAuth auth type, and the protocol picker offers four
+  others, so the single write site for the pending auth type can never produce
+  it; and the external-auth state those screens read is assigned null at both of
+  its two write sites and never anything else. Both branches are unreachable in
+  ink, so omitting them here is parity rather than absence — recorded so the
+  omission is not re-reported.
 - The footer has no right-hand segment. ink joins several indicators there with
   a pipe — sandbox, safe mode, debug mode, context percentage, and the goal and
   cron pills — and adds an MCP health pill, a worktree indicator, a workflow
