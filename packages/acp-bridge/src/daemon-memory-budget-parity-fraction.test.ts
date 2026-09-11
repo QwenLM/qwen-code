@@ -18,6 +18,13 @@ const { mockedTotalMem, mockedHeapSizeLimit } = vi.hoisted(() => ({
   mockedHeapSizeLimit: { value: 2_048 * 1024 * 1024 },
 }));
 
+// Without this stub each of the 11 vi.resetModules() + spawnChannel.js
+// re-imports below re-evaluates core's built barrel, which registers two
+// top-level process 'exit' listeners per cycle (hookRunner, sleepInhibitor):
+// ~6s slower here, and Node's MaxListenersExceededWarning once past 5 cycles.
+// The suite still passes without it, so this is a runtime/noise guard, not a
+// module-resolution requirement. Extend this object if the closure grows
+// another core-root value import.
 vi.mock('@qwen-code/qwen-code-core', () => ({
   SkillError: class extends Error {},
 }));
@@ -106,7 +113,7 @@ describe('spawn-path constant parity', () => {
       3_072,
       undefined,
     ],
-    ['saturated 64 GiB host', 65_536, 0, 4_096, 16_384],
+    ['saturated 64 GiB host', 65_536, 0, 4_096, MAX_CHILD_HEAP_MB],
   ] as const)(
     'preserves the host-derived policy for %s',
     async (
