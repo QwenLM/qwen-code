@@ -4371,7 +4371,10 @@ export class LlmClient {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
             eventName: 'Stop',
             input: {
-              stop_hook_active: true,
+              // True only when a Stop hook blocked the previous turn, so a hook
+              // can tell its own continuation apart and avoid re-blocking forever.
+              stop_hook_active:
+                (options?.stopHookState?.iterationCount ?? 0) > 0,
               last_assistant_message: responseText,
               ...contextUsage,
             },

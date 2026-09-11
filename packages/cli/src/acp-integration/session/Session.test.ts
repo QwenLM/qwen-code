@@ -31510,12 +31510,52 @@ describe('Session', () => {
             expect.objectContaining({
               eventName: 'Stop',
               input: expect.objectContaining({
-                stop_hook_active: true,
+                stop_hook_active: false,
                 last_assistant_message: 'response text',
               }),
             }),
             expect.anything(),
           );
+        });
+
+        it('reports stop_hook_active only on a continuation a Stop hook forced', async () => {
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockResolvedValueOnce({
+                success: true,
+                output: { decision: 'block', reason: 'Keep working' },
+              })
+              .mockResolvedValue({ success: true, output: {} }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const stopInputs = messageBus.request.mock.calls
+            .filter(([request]) => request.eventName === 'Stop')
+            .map(([request]) => request.input);
+          expect(stopInputs).toHaveLength(2);
+          expect(stopInputs[0]).toMatchObject({ stop_hook_active: false });
+          expect(stopInputs[1]).toMatchObject({ stop_hook_active: true });
         });
 
         it('preserves goal feedback alongside an external stop reason', async () => {

@@ -6686,7 +6686,7 @@ export class Session implements SessionContext {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'Stop',
               input: {
-                stop_hook_active: true,
+                stop_hook_active: stopHookIterationCount > 0,
                 last_assistant_message: responseText,
                 ...contextUsage,
               },

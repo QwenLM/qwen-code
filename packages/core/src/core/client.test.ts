@@ -12312,6 +12312,54 @@ Other open files:
         ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
       });
 
+      it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-active',
+          ),
+        );
+
+        const stopInputs = mockMessageBus.request.mock.calls
+          .filter(([request]) => request.eventName === 'Stop')
+          .map(([request]) => request.input);
+        expect(stopInputs).toHaveLength(2);
+        expect(stopInputs[0]).toMatchObject({ stop_hook_active: false });
+        expect(stopInputs[1]).toMatchObject({ stop_hook_active: true });
+      });
+
       it('should not skip hooks when hasHooksForEvent returns true', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),

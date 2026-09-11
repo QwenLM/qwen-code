@@ -805,7 +805,7 @@ The hook uses the deleting runtime's normal session fields (`session_id`, `trans
 
 ```json
 {
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "false on the first stop check; true when the agent is continuing because a stop hook blocked the previous stop",
   "last_assistant_message": "the last message from the assistant",
   "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
   "context_limit": "context window size in tokens (optional)",
@@ -928,7 +928,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "stop_hook_active": "boolean indicating if stop hook is active",
+  "stop_hook_active": "false on the first stop check; true when the agent is continuing because a stop hook blocked the previous stop",
   "agent_id": "identifier for the subagent",
   "agent_type": "type of agent",
   "agent_transcript_path": "path to the subagent's transcript",
