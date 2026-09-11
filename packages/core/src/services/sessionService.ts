@@ -294,6 +294,14 @@ export interface ListSessionsResult {
   nextCursor?: number;
   /** Whether there are more items after this page */
   hasMore: boolean;
+  /**
+   * True when the strict `mtime < cursor` boundary dropped files at
+   * `mtime >= cursor` (a tie group at a page boundary). Those rows are
+   * unreachable through this cursor, so the page is not a complete tail even
+   * though `items` may be empty and `nextCursor` undefined. Absent for a
+   * first page or when no file was dropped.
+   */
+  truncated?: boolean;
 }
 
 /**
@@ -2564,9 +2572,15 @@ export class SessionService {
     files.sort((a, b) => b.mtime - a.mtime);
     signal?.throwIfAborted();
 
-    // Apply cursor filter (items with mtime < cursor)
+    // Apply cursor filter (items with mtime < cursor). The strict boundary
+    // drops files at `mtime >= cursor`; those rows are unreachable through
+    // this cursor (a tie group at a page boundary), so a non-empty drop is
+    // the one case where this page cannot certify a complete tail.
+    let truncated = false;
     if (cursor !== undefined) {
+      const filesBeforeCursorFilter = files.length;
       files = files.filter((f) => f.mtime < cursor);
+      truncated = files.length < filesBeforeCursorFilter;
     }
 
     // Iterate through files until we have enough matching ones.
@@ -2681,6 +2695,7 @@ export class SessionService {
       items,
       nextCursor,
       hasMore: hasMoreFiles,
+      ...(truncated ? { truncated: true } : {}),
     };
   }
 

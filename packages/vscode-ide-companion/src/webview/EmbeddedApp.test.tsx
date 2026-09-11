@@ -1166,6 +1166,53 @@ describe('EmbeddedApp host wiring', () => {
     sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
       cursor === undefined
         ? { sessions: presentable, nextCursor: 'c1' }
+        : { sessions: [], nextCursor: undefined, truncated: true },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    });
+
+    const loadMore = document.querySelector(
+      'button[data-load-more]',
+    ) as HTMLButtonElement;
+    expect(loadMore).not.toBeNull();
+    await act(async () => {
+      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    // A page the daemon flags `truncated` (a strict-cursor tie drop) must
+    // surface the notice rather than silently truncating.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain(
+        'Some conversations may not be shown.',
+      );
+    });
+  });
+
+  it('does not flag an empty cursor page without a server truncation signal', async () => {
+    const presentable = Array.from({ length: 20 }, (_, index) => ({
+      sessionId: `sess-${index}`,
+      workspaceCwd: '/workspace',
+      displayName: `Session ${index}`,
+      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+    }));
+    // Ordinary exhaustion: page 1 fills, a trailing empty/foreign file makes
+    // page 2 come back empty with no cursor and no `truncated` flag. Nothing
+    // was lost, so the panel must not claim truncation.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
+      cursor === undefined
+        ? { sessions: presentable, nextCursor: 'c1' }
         : { sessions: [], nextCursor: undefined },
     );
 
@@ -1191,13 +1238,12 @@ describe('EmbeddedApp host wiring', () => {
       await Promise.resolve();
     });
 
-    // A cursor page that comes back empty is a tie-drop, not a complete
-    // catalog — the panel must say so rather than silently truncating.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain(
-        'Some conversations may not be shown.',
-      );
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     });
+    expect(container.textContent).not.toContain(
+      'Some conversations may not be shown.',
+    );
   });
 
   it('keeps rows fetched before a later page rejects', async () => {

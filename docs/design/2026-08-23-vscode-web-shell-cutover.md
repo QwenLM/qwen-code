@@ -64,10 +64,10 @@ Consequences worth stating plainly:
   user's pre-attribution or terminal/browser history (#11574). Listing is
   paged through the daemon's `SessionService.listSessions` strict `mtime <`
   cursor, which can stop at a group of transcripts sharing an mtime; the panel
-  surfaces a truncation notice when a cursor page comes back empty rather
-  than presenting a short list as complete. The stamp still
-  keeps companion-created sessions out of the browser Web Shell's
-  `default`-scoped lists.
+  surfaces a truncation notice when the daemon reports that the strict cursor
+  dropped such a tie group, rather than presenting a short list as complete.
+  The stamp still keeps companion-created sessions out of the browser Web
+  Shell's `default`-scoped lists.
 - A daemon is bound to one workspace at spawn, so a multi-root window respawns
   it when the active root changes.
 - Turn-lifecycle features that were driven by ACP agent events — the editor tab

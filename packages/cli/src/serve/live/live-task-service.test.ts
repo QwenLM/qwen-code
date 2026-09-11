@@ -1484,6 +1484,7 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.spawnOrAttach).toHaveBeenCalledWith({
       workspaceCwd: '/project',
       sessionScope: 'thread',
+      sourceType: 'qwen-live',
     });
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
     expect(harness.sendPrompt).toHaveBeenCalledOnce();

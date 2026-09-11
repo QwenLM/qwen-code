@@ -446,14 +446,16 @@ export function EmbeddedApp() {
         // Dropping the source scope also moves this request off the daemon's
         // metadata list path and onto `SessionService.listSessions`, whose
         // cursor is a strict `mtime <` keyset. A group of transcripts that
-        // shares an mtime with a page boundary is silently skipped; in the
-        // degenerate case a tie group at the boundary makes the next cursor
-        // page come back empty while rows remain on disk, so the daemon
-        // reports the catalog exhausted. A dropped `vscode`-stamped row is
-        // not recoverable from any other GUI (the browser Web Shell scopes to
-        // `'default'`, which excludes it, and the CLI resume picker pages the
-        // same strict cursor), so an empty cursor page surfaces a truncation
-        // notice below instead of presenting a short list as complete.
+        // shares an mtime with a page boundary is silently skipped, and the
+        // daemon reports that as `truncated` on the page where the drop
+        // happened. An empty cursor page is NOT truncation by itself — it
+        // also occurs on ordinary exhaustion when a trailing empty or foreign
+        // file yields no row — so the truncation notice is driven only by the
+        // daemon's `truncated` flag, never by the row count. A dropped
+        // `vscode`-stamped row is not recoverable from any other GUI (the
+        // browser Web Shell scopes to `'default'`, which excludes it, and the
+        // CLI resume picker pages the same strict cursor), so the notice
+        // keeps a short list from being presented as complete.
         //
         // The unfiltered catalog also returns rows another surface owns
         // (channel conversations, Live voice threads, scheduled-task
@@ -493,11 +495,12 @@ export function EmbeddedApp() {
           if (!page) break;
           const rawSessions = Array.isArray(page.sessions) ? page.sessions : [];
           const pageSessions = rawSessions.filter(isPresentableHistorySession);
-          // A cursor page that comes back empty means the strict `mtime <`
-          // keyset dropped a whole tie group; the rest of the history is
-          // unreachable through this cursor, so flag it rather than report
-          // the catalog as exhausted.
-          if (pageCursor !== undefined && rawSessions.length === 0) {
+          // The daemon flags a page as `truncated` when its strict `mtime <`
+          // keyset dropped a tie group the cursor can never reach. An empty
+          // page is NOT truncation by itself — it also happens on ordinary
+          // exhaustion (a trailing empty or foreign file yields no row), so
+          // the signal must come from the server rather than the row count.
+          if (page.truncated) {
             truncated = true;
           }
           collected.push(...pageSessions);

@@ -1428,7 +1428,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
-    return { sessions, nextCursor };
+    return {
+      sessions,
+      nextCursor,
+      ...(persisted.truncated ? { truncated: true } : {}),
+    };
   }
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
@@ -1469,7 +1473,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
   const nextCursor =
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
-  return { sessions, nextCursor };
+  return {
+    sessions,
+    nextCursor,
+    ...(persisted.truncated ? { truncated: true } : {}),
+  };
 }
 
 export async function listLiveWorkspaceSessionsForResponse(
