@@ -45,7 +45,7 @@ export function formatLegacyHookTimeoutWarning(
   const advice =
     seconds >= LEGACY_MILLISECOND_TIMEOUT_THRESHOLD
       ? `A timeout this long cannot be written in seconds while the old form is supported, so leave it as ${timeout}.`
-      : `Set it to ${seconds} to keep this timeout.`;
+      : `Set it to ${seconds} to keep this timeout. If you meant ${timeout} seconds, set it to ${timeout * 1000}.`;
   return (
     `Hook "${hookLabel}" sets timeout ${timeout}, which is read as ${timeout}ms: ` +
     `hook timeouts are in seconds, and values of ${LEGACY_MILLISECOND_TIMEOUT_THRESHOLD} or more keep their old millisecond meaning. ` +

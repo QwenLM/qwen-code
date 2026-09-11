@@ -111,6 +111,12 @@ describe('formatLegacyHookTimeoutWarning', () => {
     );
   });
 
+  it('shows how to keep a value that was meant as seconds', () => {
+    expect(formatLegacyHookTimeoutWarning(1800, 'guard')).toContain(
+      'If you meant 1800 seconds, set it to 1800000.',
+    );
+  });
+
   it('does not suggest a seconds value that would itself be read as milliseconds', () => {
     const warning = formatLegacyHookTimeoutWarning(1_800_000, 'build');
     expect(warning).not.toContain('Set it to 1800');
