@@ -3640,10 +3640,15 @@ export class Config {
                   signal,
                 );
                 break;
-              // These three return the aggregated result. The bus replies with
-              // its final output as is, which is what direct callers read
-              // (todoWrite checks `finalOutput.decision`); Stop and
-              // MessageDisplay instead wrap theirs with createHookOutput.
+              // These three return the aggregated result, and the bus replies
+              // with its final output as is. For TodoCreated and TodoCompleted
+              // that is what direct callers read (todoWrite checks
+              // `finalOutput.decision`). StopFailure is fire-and-forget: the
+              // aggregator hard-codes its `finalOutput` to undefined and every
+              // direct caller detaches without reading the result, so its arm
+              // always replies with no output and awaits only so the hooks run.
+              // Stop and MessageDisplay instead wrap theirs with
+              // createHookOutput.
               case 'StopFailure':
                 result = (
                   await hookSystem.fireStopFailureEvent(
