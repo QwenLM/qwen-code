@@ -754,6 +754,59 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('logs the child close-refusal detail on the explicit-close and kill paths', async () => {
+      // The child's refusal crosses the ACP wire as a JSON-RPC error
+      // record (a plain object with `code`/`message`, not an `Error`
+      // instance). Both the explicit-close and kill notification-failure
+      // logs must carry that real detail — a raw `String()` interpolation
+      // collapses it to `[object Object]`.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            throw new RequestError(
+              -32603,
+              'Session close is already in progress',
+            );
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        try {
+          const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+          // Explicit close: the definitive refusal rethrows after logging.
+          await expect(bridge.closeSession(first.sessionId)).rejects.toThrow();
+          // Kill: the definitive refusal spares the channel.
+          await expect(bridge.killSession(second.sessionId)).resolves.toBe(
+            false,
+          );
+
+          const logged = stderrSpy.mock.calls
+            .map((call) => String(call[0]))
+            .join('\n');
+          expect(logged).toContain(
+            'closeSession ACP session close notification failed',
+          );
+          expect(logged).toContain(
+            'killSession ACP session close notification failed',
+          );
+          expect(logged).toContain('Session close is already in progress');
+          expect(logged).not.toContain('[object Object]');
+        } finally {
+          await bridge.shutdown();
+        }
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('accepts the aggregate shell hold as active work', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
@@ -18257,6 +18310,62 @@ describe('createAcpSessionBridge', () => {
         bridge.branchSession(session.sessionId, {}),
       ).rejects.toBeInstanceOf(SessionBusyError);
       await bridge.shutdown();
+    });
+
+    it('logs the child close-refusal detail when branchSession cleanup fails', async () => {
+      // The restore of a committed branch fails, and the child then also
+      // refuses the live-state cleanup close with a RequestError. The
+      // cleanup log must carry the child's real detail — the refusal
+      // crosses the ACP wire as a plain JSON-RPC error record, which raw
+      // template interpolation collapses to `[object Object]`.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const handle = makeChannel({
+          loadSessionImpl: () => {
+            throw new Error('branch restore exploded');
+          },
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+              return {
+                newSessionId: 'branch-restore-fail',
+                title: 'Branch',
+              };
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              throw new RequestError(
+                -32603,
+                'Session close is already in progress',
+              );
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        try {
+          const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await expect(
+            bridge.branchSession(session.sessionId, {}),
+          ).rejects.toThrow();
+
+          const logged = stderrSpy.mock.calls
+            .map((call) => String(call[0]))
+            .join('\n');
+          expect(logged).toContain(
+            'branchSession live-state close for branch-restore-fail failed',
+          );
+          expect(logged).toContain('Session close is already in progress');
+          expect(logged).not.toContain('[object Object]');
+        } finally {
+          await bridge.shutdown();
+        }
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('dispatches a historical branch on the source channel without restoring it', async () => {
