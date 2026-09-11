@@ -1481,13 +1481,23 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
       const KNOWN_AGENT_OPTS = ['label', 'stepId', 'extensions', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      // Keep aligned with isWorkflowReferenceString. This VM bootstrap cannot
+      // import host modules, so the code-point ranges must be mirrored here.
+      const isUnsafeWorkflowReferenceCharacter = function (char) {
+        const code = char.charCodeAt(0);
+        return code < 32 ||
+          (code >= 127 && code <= 159) ||
+          code === 0x061c || code === 0x200e || code === 0x200f ||
+          (code >= 0x202a && code <= 0x202e) ||
+          (code >= 0x2066 && code <= 0x2069);
+      };
       const validateAgentStepId = function (stepId) {
         if (stepId !== undefined && (
           typeof stepId !== 'string' ||
           stepId.length === 0 ||
           stepId.length > 256 ||
           stepId.trim() !== stepId ||
-          Array.from(stepId).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+          Array.from(stepId).some(isUnsafeWorkflowReferenceCharacter)
         )) {
           throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
         }
@@ -1496,7 +1506,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         if (extensions !== undefined && (
           !Array.isArray(extensions) || extensions.length === 0 || extensions.length > 16 ||
           extensions.some((name) => typeof name !== 'string' || name.length === 0 || name.length > 128 || name.trim() !== name ||
-            Array.from(name).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) ||
+            Array.from(name).some(isUnsafeWorkflowReferenceCharacter)) ||
           new Set(extensions.map((name) => name.toLowerCase())).size !== extensions.length
         )) {
           throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");

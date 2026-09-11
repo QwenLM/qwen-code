@@ -2456,6 +2456,17 @@ describe('createProductionDispatch', () => {
     expect(created).toHaveLength(0);
   });
 
+  it.each(['a\u0085b', 'a\u009bb', 'a\u061cb', 'a\u202eb', 'a\u2066b'])(
+    'refuses an unsafe extension reference before any leaf starts',
+    async (name) => {
+      const config = { getActiveExtensions: () => [] } as unknown as Config;
+      await expect(
+        createProductionDispatch(config)('check', { extensions: [name] }),
+      ).rejects.toThrow(/expected 1 to 16 unique/);
+      expect(created).toHaveLength(0);
+    },
+  );
+
   it.each([false, true])(
     'does not start a leaf when its extension is disabled or unreadable (active=%s)',
     async (isActive) => {

@@ -1713,6 +1713,11 @@ describe('createWorkflowSandbox security', () => {
     null,
     'a\nb',
     'a\u007fb',
+    'a\u0085b',
+    'a\u009bb',
+    'a\u061cb',
+    'a\u202eb',
+    'a\u2066b',
   ])('rejects invalid stepId %j before dispatch', async (stepId) => {
     const dispatch = vi.fn(async () => 'unused');
     const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
@@ -1769,6 +1774,11 @@ describe('createWorkflowSandbox security', () => {
     [1],
     ['a', 'A'],
     ['x'.repeat(129)],
+    ['a\u0085b'],
+    ['a\u009bb'],
+    ['a\u061cb'],
+    ['a\u202eb'],
+    ['a\u2066b'],
     Array.from({ length: 17 }, (_, index) => `ext-${index}`),
   ])('rejects invalid extension selection %j', async (extensions) => {
     const dispatch = vi.fn(async () => 'unused');

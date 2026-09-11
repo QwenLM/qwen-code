@@ -34,6 +34,11 @@ describe('normalizeWorkflowSourceRef', () => {
     { id: 'flow', revision: '1', title: 'x'.repeat(513) },
     { id: 'flow', revision: '1', permissions: ['*'] },
     { id: 'flow', revision: '1', title: 'a\nb' },
+    { id: 'flow', revision: '1', title: 'a\u0085b' },
+    { id: 'flow', revision: '1', title: 'a\u009bb' },
+    { id: 'flow', revision: '1', title: 'a\u061cb' },
+    { id: 'flow', revision: '1', title: 'a\u202eb' },
+    { id: 'flow', revision: '1', title: 'a\u2066b' },
   ])('rejects malformed provenance %j', (source) => {
     expect(() => normalizeWorkflowSourceRef(source)).toThrow(/sourceRef/);
   });

@@ -12,6 +12,19 @@ export interface WorkflowSourceRef {
   title?: string;
 }
 
+function isUnsafeWorkflowReferenceCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return (
+    code < 32 ||
+    (code >= 127 && code <= 159) ||
+    code === 0x061c ||
+    code === 0x200e ||
+    code === 0x200f ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
 export function isWorkflowReferenceString(
   value: unknown,
   maxLength = 256,
@@ -21,10 +34,7 @@ export function isWorkflowReferenceString(
     value.length > 0 &&
     value.length <= maxLength &&
     value.trim() === value &&
-    !Array.from(value).some((char) => {
-      const code = char.charCodeAt(0);
-      return code < 32 || code === 127;
-    })
+    !Array.from(value).some(isUnsafeWorkflowReferenceCharacter)
   );
 }
 

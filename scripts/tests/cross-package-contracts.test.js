@@ -110,7 +110,7 @@ it('distinguishes locale resolution from prompt sanitization', () => {
   ).toEqual(['packages/core/src/extension/i18n.ts']);
   expect(
     definitionFiles('^export function getSanitizedExtensionDisplayName[(]'),
-  ).toEqual(['packages/cli/src/utils/extension-mention.ts']);
+  ).toEqual(['packages/core/src/utils/extension-mention.ts']);
 });
 
 it('publishes the external subagent runtime through its declared subpath', () => {
