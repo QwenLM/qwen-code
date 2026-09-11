@@ -10935,10 +10935,14 @@ export class Session implements SessionContext {
    * `origin: 'settings-reload'` marks the notification as
    * reload-originated so the bridge demux does not mistake it for the echo
    * of a bridge-initiated round trip and suppress it.
+   *
+   * Resolves to whether the bridge side-channel frame was written. A
+   * reload-driven caller advances its convergence record only on `true`,
+   * so a dropped announcement is retried by the next reload.
    */
   async sendCurrentModeUpdateNotification(
     origin?: 'settings-reload',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
@@ -10978,8 +10982,10 @@ export class Session implements SessionContext {
         legacyFrameSent,
         ...(origin !== undefined ? { origin } : {}),
       });
+      return true;
     } catch (error) {
       debugLogger.debug('mode-update extNotification failed', error);
+      return false;
     }
   }
 

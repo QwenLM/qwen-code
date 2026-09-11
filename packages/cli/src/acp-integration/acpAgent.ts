@@ -13845,10 +13845,6 @@ class QwenAgent implements Agent {
                   } else if (previousMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                   }
-                  this.sessionApprovalModeConverged.set(
-                    id,
-                    reloadedSessionMode,
-                  );
                   modeConverged = true;
                 } catch (err) {
                   debugLogger.warn(
@@ -13856,23 +13852,32 @@ class QwenAgent implements Agent {
                   );
                 }
               } else {
-                this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
                 modeConverged = true;
               }
               if (modeConverged) {
+                // The origin marks the notification as reload-originated
+                // so the bridge demux cannot swallow it as the echo of a
+                // bridge-initiated round trip. Advance the convergence
+                // record only when the frame was actually written: a
+                // dropped convergence would leave the session's
+                // remembered mode unretired, so — like the busy-session
+                // skip above — it must stay unrecorded for the next
+                // reload to retry.
+                let announced = false;
                 try {
-                  // The origin marks the notification as reload-originated
-                  // so the bridge demux cannot swallow it as the echo of a
-                  // bridge-initiated round trip: a dropped convergence
-                  // would leave the session's remembered mode unretired,
-                  // and the record below has already advanced, so no later
-                  // no-edit reload retries it.
-                  await session.sendCurrentModeUpdateNotification(
-                    'settings-reload',
-                  );
+                  announced =
+                    await session.sendCurrentModeUpdateNotification(
+                      'settings-reload',
+                    );
                 } catch (err) {
                   debugLogger.warn(
                     `reload: sendCurrentModeUpdateNotification failed for session ${id}: ${err}`,
+                  );
+                }
+                if (announced) {
+                  this.sessionApprovalModeConverged.set(
+                    id,
+                    reloadedSessionMode,
                   );
                 }
               }

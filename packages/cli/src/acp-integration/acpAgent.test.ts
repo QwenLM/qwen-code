@@ -29292,9 +29292,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
-    const sendCurrentModeUpdateNotification = vi
-      .fn()
-      .mockResolvedValue(undefined);
+    const sendCurrentModeUpdateNotification = vi.fn().mockResolvedValue(true);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -29728,9 +29726,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
-    const sendCurrentModeUpdateNotification = vi
-      .fn()
-      .mockResolvedValue(undefined);
+    const sendCurrentModeUpdateNotification = vi.fn().mockResolvedValue(true);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -29816,6 +29812,197 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('emits no mode-update notification when the reload mode apply fails', async () => {
+    // A throwing `config.setApprovalMode` (e.g. a privileged mode in a
+    // workspace whose trust was revoked) means the session did not
+    // converge: no announcement goes out, and the record stays put so the
+    // next reload retries.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'yolo' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'yolo';
+    let throwOnSet = true;
+    const setApprovalMode = vi.fn((mode: string) => {
+      if (throwOnSet) throw new Error('TrustGateError: untrusted folder');
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-approval-throws'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const sendCurrentModeUpdateNotification = vi.fn().mockResolvedValue(true);
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getDefaultReasoningConfig: vi.fn(),
+          getId: vi.fn().mockReturnValue('s-approval-throws'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
+          sendCurrentModeUpdateNotification,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    mergedSettings = { tools: { approvalMode: 'default' } };
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'yolo');
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('default');
+      expect(sendCurrentModeUpdateNotification).not.toHaveBeenCalled();
+
+      // The apply is retried on the next reload (the record never
+      // advanced), and succeeds once the gate stops throwing.
+      throwOnSet = false;
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledTimes(2);
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('retries the convergence announcement on the next reload when the notification was not written', async () => {
+    // The convergence record must advance only on a confirmed
+    // announcement: a dropped mode-update leaves the session's remembered
+    // mode unretired on the daemon side, so a later no-edit reload must
+    // retry instead of treating the session as converged.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'yolo' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'yolo';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-approval-retry'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    // The first announcement is never written; later ones succeed.
+    const sendCurrentModeUpdateNotification = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getDefaultReasoningConfig: vi.fn(),
+          getId: vi.fn().mockReturnValue('s-approval-retry'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
+          sendCurrentModeUpdateNotification,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    mergedSettings = { tools: { approvalMode: 'default' } };
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'yolo');
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      // The apply landed but the announcement was not written, so the
+      // record must not have advanced.
+      expect(setApprovalMode).toHaveBeenCalledWith('default');
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
+
+      // A no-edit reload retries the announcement — through the
+      // record-only branch, since the session already holds the file's
+      // mode.
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledTimes(2);
+      expect(setApprovalMode).toHaveBeenCalledTimes(1);
+
+      // Once the announcement is confirmed the record has advanced, so a
+      // further no-edit reload is a per-session no-op again.
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledTimes(2);
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
     // The file pins plan; the session legitimately exits plan through an
     // approved exit_plan_mode, which switches the live mode at runtime
@@ -29849,9 +30036,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
-    const sendCurrentModeUpdateNotification = vi
-      .fn()
-      .mockResolvedValue(undefined);
+    const sendCurrentModeUpdateNotification = vi.fn().mockResolvedValue(true);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -30101,6 +30286,7 @@ describe('sessionLanguage multi-session propagation', () => {
           isIdle: vi.fn().mockReturnValue(true),
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
+          sendCurrentModeUpdateNotification: vi.fn().mockResolvedValue(true),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
@@ -30401,6 +30587,7 @@ describe('sessionLanguage multi-session propagation', () => {
         isIdle: vi.fn(() => !busySessionIds.has(id)),
         clearActiveTodoPlanRevision,
         clearTodoStopGuardTrust,
+        sendCurrentModeUpdateNotification: vi.fn().mockResolvedValue(true),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),

@@ -6299,6 +6299,30 @@ describe('Session', () => {
       );
     });
 
+    it('reports whether the side-channel frame was written', async () => {
+      // The reload convergence record advances only on a confirmed
+      // announcement, so a dropped extNotification must surface as
+      // `false` (and a written one as `true`).
+      vi.mocked(mockClient.extNotification).mockRejectedValueOnce(
+        new Error('side-channel unavailable'),
+      );
+      await expect(
+        (
+          session as unknown as {
+            sendCurrentModeUpdateNotification: () => Promise<boolean>;
+          }
+        ).sendCurrentModeUpdateNotification(),
+      ).resolves.toBe(false);
+
+      await expect(
+        (
+          session as unknown as {
+            sendCurrentModeUpdateNotification: () => Promise<boolean>;
+          }
+        ).sendCurrentModeUpdateNotification(),
+      ).resolves.toBe(true);
+    });
+
     it('still sends the side-channel when the legacy notification fails', async () => {
       vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
         new Error('legacy unavailable'),
