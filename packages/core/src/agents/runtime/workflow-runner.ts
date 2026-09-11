@@ -312,7 +312,11 @@ export class WorkflowRunner {
           script,
           scriptPath,
           ...(journalPath ? { journalPath } : {}),
-          ...(options.authoringHint
+          // A saved workflow is the user's file, and the recovery advice says to
+          // copy it first. The name is resolved here — from the resumed run
+          // too, which a caller re-running a saved workflow's inline source
+          // does not pass — so the hint follows the same decision.
+          ...(options.authoringHint && !workflowName
             ? { authoringHint: options.authoringHint }
             : {}),
           args: options.args,

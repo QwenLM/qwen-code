@@ -177,6 +177,8 @@ at its index.
 - 30-minute wall-clock cap per run, override via
   `QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given). A fan-out near the agent
   cap will not fit inside the default cap.
+- 30 seconds for the script's synchronous code before its first `await`, with
+  no override. A synchronous loop that runs longer is aborted.
 - Per subagent attempt: 50 turns (`QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS`, clamped
   to 500) and 10 minutes (`QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES`, clamped
   to 100). Raise them for legitimately long work rather than letting agents
@@ -398,10 +400,11 @@ const refuted = verdicts.filter(
   (entry) => entry !== null && !entry.verdict.isReal,
 );
 log(`confirmed ${confirmed.length} finding(s), refuted ${refuted.length}`);
-return { confirmed };
+return { confirmed, refuted };
 ```
 
 Note what the example does with failure: it refuses to run without the input
 it needs, handles each `null` in the stage that dispatched the agent, gives
-every verify dispatch its own label, and `log()`s every dimension, claim and
-refutation it drops rather than silently omitting them.
+every verify dispatch its own label, `log()`s every dimension and agent it
+loses, and returns what the verifiers refuted next to what they confirmed — a
+verifier can be wrong too, and nothing is silently omitted.

@@ -820,10 +820,12 @@ await agent('scan package.json')
     ).toThrow(/interactive TUI/i);
   });
 
-  // A session-owned run of a saved workflow is the user's script even when it
-  // is started from inline source. Its failure notice must not tell the model
-  // to "fix the script", which would contradict the copy-first resume advice.
-  it('keeps the authoring hint off a failed session-owned run of a saved workflow', async () => {
+  // A retry of a saved workflow whose file is no longer readable falls back to
+  // the run's inline source and passes no name — the ACP retry path. The runner
+  // still resolves the name from the resumed run, so the notice says to copy
+  // the saved workflow, and must not also say "fix the script". The same
+  // holds for a foreground resume, whose trailer carries the same advice.
+  it('keeps the authoring hint off a saved workflow resumed from its inline source', async () => {
     const runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'workflow-session-hint-'),
     );
@@ -837,21 +839,36 @@ await agent('scan package.json')
       getWorkflowRunRegistry: () => registry,
       getSkipWorkflowUsageWarning: () => true,
     } as unknown as Config;
+    const script = 'throw new Error("boom");';
 
     try {
       const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
       expect(tool.authoringSurface).toBe('pointer');
-      await tool
-        .buildSessionOwnedBackground(
-          { script: 'throw new Error("boom");' },
-          'review-and-fix',
-        )
-        .execute(new AbortController().signal);
-      await vi.waitFor(() => expect(completion).toHaveBeenCalled());
+      const first = (await tool
+        .buildSessionOwnedBackground({ script }, 'review-and-fix')
+        .execute(new AbortController().signal)) as { workflowRunId?: string };
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
+      const runId = first.workflowRunId;
+      expect(runId).toMatch(/^wf_/);
 
-      const modelText = completion.mock.calls[0][1] as string;
-      expect(modelText).toContain('<recovery>');
-      expect(modelText).not.toContain('hint:');
+      await tool
+        .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      const retryText = completion.mock.calls[1][1] as string;
+      expect(retryText).toContain(
+        'This reads the saved /review-and-fix workflow',
+      );
+      expect(retryText).not.toContain('hint:');
+
+      const foreground = await tool
+        .build({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      const trailer = (foreground.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('hint:');
     } finally {
       await fs.rm(runtimeDir, { recursive: true, force: true });
     }

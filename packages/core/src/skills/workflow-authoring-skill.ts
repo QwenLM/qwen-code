@@ -93,10 +93,11 @@ export function readWorkflowAuthoringReference(): WorkflowAuthoringReference | n
  * How the reference reaches the model in this session.
  *
  * - `skill` — the Skill tool is in the request; the model can load it.
- * - `skill-via-tool-search` — the Skill tool is registered but its schema is
- *   withheld by a `tools.eager` allowlist (not listed in `tools.visible`, not
- *   revealed yet); the model has to reveal it with ToolSearch first, and the
- *   pointer has to say so.
+ * - `skill-via-tool-search` — the Skill tool is registered but a `tools.eager`
+ *   allowlist can withhold its schema (it is not listed in `tools.visible`);
+ *   the model may have to reveal it with ToolSearch first, and the pointer has
+ *   to say so. A reveal already made does not change this: `/clear` drops
+ *   reveals, and the route is decided only once.
  * - `inline` — no route to any skill; the reference has to travel in the
  *   Workflow tool's own description.
  * - `withheld` — the user turned this reference off; carry nothing.
@@ -138,9 +139,11 @@ export function resolveWorkflowAuthoringRoute(
     const toolNames = registry?.getAllToolNames?.();
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
-    if (isToolHiddenBehindToolSearch(config, ToolNames.SKILL)) {
+    if (isToolDeferredBehindToolSearch(config, ToolNames.SKILL)) {
       // A withheld schema is only reachable through ToolSearch. Without it
       // the Skill tool is registered but invisible, which is no route at all.
+      // Whether it is revealed right now is not asked: this is recorded for
+      // the session, and a reveal lasts only until `/clear`.
       return toolNames.includes(ToolNames.TOOL_SEARCH)
         ? 'skill-via-tool-search'
         : 'inline';
@@ -196,9 +199,21 @@ export function resolveWorkflowAuthoringSurface(
 }
 
 /**
+ * Whether a registered tool's schema can be withheld from the request:
+ * permission-deferred by a `tools.eager` allowlist and not listed in
+ * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
+ * drops it — a decision recorded once has to ask this, not
+ * {@link isToolHiddenBehindToolSearch}.
+ */
+function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
+  if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
+  return !config.getVisibleTools?.()?.has(name);
+}
+
+/**
  * Whether a registered tool's schema is withheld from the request right now:
- * permission-deferred by a `tools.eager` allowlist, not listed in
- * `tools.visible`, and not revealed through ToolSearch yet.
+ * deferred as above and not revealed through ToolSearch yet. For a question
+ * asked again on every turn, such as the keyword reminder's.
  *
  * Mirrors `ToolRegistry.isDeferredAndHidden`, which cannot be used here: it
  * answers false for a tool that is still only a lazy factory, which is exactly
@@ -208,11 +223,8 @@ export function isToolHiddenBehindToolSearch(
   config: Config,
   name: string,
 ): boolean {
-  const registry = config.getToolRegistry?.();
-  if (!registry?.isPermissionDeferred?.(name)) return false;
-  if (config.getVisibleTools?.()?.has(name)) return false;
-  if (registry.isDeferredToolRevealed?.(name)) return false;
-  return true;
+  if (!isToolDeferredBehindToolSearch(config, name)) return false;
+  return !config.getToolRegistry?.()?.isDeferredToolRevealed?.(name);
 }
 
 /**
@@ -220,9 +232,10 @@ export function isToolHiddenBehindToolSearch(
  * description, the failure hint and the keyword reminder so the three never
  * phrase it differently.
  *
- * Conditional on purpose: the description is built once, and the tool can be
+ * Conditional on purpose: the description is built once, and a tool can be
  * revealed later in the session (a ToolSearch call, or a resumed history that
- * references it), which would make a flat "it is deferred" untrue.
+ * references it) and dropped again by `/clear`, so neither a flat "it is
+ * deferred" nor leaving the sentence out stays true for the whole session.
  */
 export function toolSearchRevealSentence(toolDisplayName: string): string {
   return `If the ${toolDisplayName} tool is not in your tool list, reveal it with ToolSearch first.`;

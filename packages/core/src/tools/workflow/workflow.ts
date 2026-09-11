@@ -698,8 +698,11 @@ function buildRunTrailer(
   // A script that threw has to be rewritten, and the model may have written
   // it without reading the reference — the description only points at it. The
   // caller decides whether this run is one the model authored, and the wording
-  // comes from what this session's description actually holds.
-  if (authoringHint) lines.push(authoringHint);
+  // comes from what this session's description actually holds. A name the
+  // runner resolved — from a resumed run too, which a caller re-running a
+  // saved workflow's inline source does not pass — wins: the resume advice
+  // above then says to copy the saved workflow, not to fix the script.
+  if (authoringHint && !entry?.workflowName) lines.push(authoringHint);
   const tail = (logs ?? []).slice(-TRAILER_LOG_LINES);
   if (tail.length > 0) {
     lines.push(

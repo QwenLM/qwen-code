@@ -183,18 +183,40 @@ describe('buildWorkflowKeywordPrefix', () => {
     expect(prefix!.length).toBeLessThan(1_000);
   });
 
-  // The Workflow tool recorded its description shape when it was built. A
-  // `/skills` toggle since then changes what a live re-derivation would say,
-  // but not the description the model holds — so the reminder follows the
-  // record.
-  it('follows the shape the Workflow tool recorded, not a re-derivation', () => {
-    const prefix = buildWorkflowKeywordPrefix(
-      stubConfig({ recordedSurface: 'inline', skillEnabledNow: true }),
-      'run a workflow',
-    );
+  // The Workflow tool recorded its description shape when it was built. What
+  // a live re-derivation would say now does not change the description the
+  // model holds, so the reminder follows the record in both directions: a
+  // recorded inline shape while a live one would point, and a recorded
+  // pointer after the user disabled the skill in `/skills`.
+  it.each([
+    [
+      'recorded inline, live pointer',
+      { recordedSurface: 'inline', skillEnabledNow: true },
+      false,
+    ],
+    [
+      'recorded pointer, live opt-out',
+      { recordedSurface: 'pointer', skillEnabledNow: false },
+      true,
+    ],
+  ] as const)(
+    'follows the shape the Workflow tool recorded, not a re-derivation: %s',
+    (_case, options, namesSkill) => {
+      const prefix = buildWorkflowKeywordPrefix(
+        stubConfig(options),
+        'run a workflow',
+      );
 
-    expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
-  });
+      if (namesSkill) {
+        expect(prefix).toContain(
+          `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\``,
+        );
+      } else {
+        expect(prefix).toContain('<system-reminder>');
+        expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+      }
+    },
+  );
 
   it('derives the shape when the Workflow tool is not instantiated yet', () => {
     const prefix = buildWorkflowKeywordPrefix(stubConfig(), 'run a workflow');

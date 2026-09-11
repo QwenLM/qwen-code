@@ -3057,10 +3057,14 @@ describe('AppContainer State Management', () => {
         expect(mockQueueMessage).toHaveBeenCalledTimes(1);
         const submitted = mockQueueMessage.mock.calls[0][0] as string;
         expect(submitted).toContain('gh workflow list');
+        // Asserted on the workflow reminder's own text: this call site gates
+        // only that reminder. The other notices the handler can prepend do not
+        // check shell mode yet (#11626).
+        const workflowReminder = 'includes the "workflow" keyword';
         if (expectReminder) {
-          expect(submitted).toContain('<system-reminder>');
+          expect(submitted).toContain(workflowReminder);
         } else {
-          expect(submitted).not.toContain('<system-reminder>');
+          expect(submitted).not.toContain(workflowReminder);
         }
       },
     );

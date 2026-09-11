@@ -31,12 +31,12 @@ constant and stay literals on both sides.
 tool is constructed. The order matters: a user opt-out wins over the lack of a
 Skill tool.
 
-| Route                   | When                                                                                                                | Description shape                                                     |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `withheld`              | The skill is disabled by name, or the bundled level is disabled                                                     | Decision and runtime, nothing about the reference                     |
-| `inline`                | No SkillManager, the Skill tool is not registered, or it is deferred with no ToolSearch                             | Decision and the full reference                                       |
-| `skill-via-tool-search` | The Skill tool is deferred by a `tools.eager` allowlist, not made visible or revealed, and ToolSearch is registered | Decision, runtime, pointer, and a note to reveal the Skill tool first |
-| `skill`                 | Otherwise, including when the config cannot answer                                                                  | Decision, runtime, and a pointer                                      |
+| Route                   | When                                                                                                                                                                                                                  | Description shape                                                     |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `withheld`              | The skill is disabled by name, or the bundled level is disabled                                                                                                                                                       | Decision and runtime, nothing about the reference                     |
+| `inline`                | No SkillManager, the Skill tool is not registered, or it is deferred with no ToolSearch                                                                                                                               | Decision and the full reference                                       |
+| `skill-via-tool-search` | The Skill tool is deferred by a `tools.eager` allowlist and not listed in `tools.visible`, and ToolSearch is registered. A current ToolSearch reveal does not count: `/clear` drops it, and the route is decided once | Decision, runtime, pointer, and a note to reveal the Skill tool first |
+| `skill`                 | Otherwise, including when the config cannot answer                                                                                                                                                                    | Decision, runtime, and a pointer                                      |
 
 An `inline` route with an unreadable `SKILL.md` falls back to the pointer, the
 only remaining text that names the reference.
@@ -80,9 +80,14 @@ queued turn is cancelled, and kept in history. A skill body travelling that way
 would miss what a real Skill load gets: dedup on resume, `/context`
 attribution, microcompaction, and the skill's declared side effects.
 
-The reminder is skipped for shell-mode submissions and when the Workflow tool
-is out of reach: not registered, or deferred with no ToolSearch to reveal it.
-When ToolSearch can reveal it, the reminder says to do that first.
+The reminder is skipped for a submission made in shell mode and when the
+Workflow tool is out of reach: not registered, or deferred with no ToolSearch to
+reveal it. When ToolSearch can reveal it, the reminder says to do that first.
+
+Shell mode is read when the prompt is submitted. Two gaps predate this reminder
+and are tracked in #11626: a prompt queued while the model is responding is
+routed by the mode in effect when the queue drains, and the recovered-agents and
+worktree notices prepended by the same handler do not check shell mode at all.
 
 ## Not in scope
 

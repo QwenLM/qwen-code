@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { parseSkillContent } from './skill-load.js';
 import {
+  isToolHiddenBehindToolSearch,
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringRoute,
   resolveWorkflowAuthoringSurface,
@@ -165,19 +166,31 @@ describe('resolveWorkflowAuthoringRoute', () => {
   });
 
   // Deferred is not the same as hidden: `tools.visible` declares the schema
-  // from session start, and a ToolSearch reveal brings it back. Either way the
-  // Skill tool is in the request, and a detour note would be false.
+  // from session start, so the Skill tool is in every request and a detour
+  // note would be false.
+  it('points straight at the skill when a deferred Skill tool is listed in tools.visible', () => {
+    const { config } = stubConfig({
+      deferred: [ToolNames.SKILL],
+      visibleTools: [ToolNames.SKILL],
+    });
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+  });
+
+  // A ToolSearch reveal is not like `tools.visible`: `/clear` drops it, while
+  // the route is recorded once for the session. Pointing straight at the skill
+  // because it happened to be revealed when the Workflow tool was built would
+  // leave the pointer wrong after the next `/clear`; the conditional detour
+  // stays true either way.
   it.each([
-    ['listed in tools.visible', { visibleTools: [ToolNames.SKILL] }],
-    ['already revealed', { revealed: [ToolNames.SKILL] }],
+    ['revealed when the route is decided', [ToolNames.SKILL]],
+    ['un-revealed again, as after /clear', []],
   ])(
-    'points straight at the skill when a deferred Skill tool is %s',
-    (_case, options: StubOptions) => {
-      const { config } = stubConfig({
-        deferred: [ToolNames.SKILL],
-        ...options,
-      });
-      expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    'keeps the ToolSearch detour for a deferred Skill tool %s',
+    (_case, revealed: string[]) => {
+      const { config } = stubConfig({ deferred: [ToolNames.SKILL], revealed });
+      expect(resolveWorkflowAuthoringRoute(config)).toBe(
+        'skill-via-tool-search',
+      );
     },
   );
 
@@ -215,6 +228,32 @@ describe('resolveWorkflowAuthoringSurface', () => {
     expect(resolveWorkflowAuthoringSurface(stubConfig(options).config)).toBe(
       surface,
     );
+  });
+});
+
+// Asked again on every turn (the keyword reminder asks it of the Workflow tool),
+// so a reveal counts here — unlike the route, which is recorded once.
+describe('isToolHiddenBehindToolSearch', () => {
+  it.each([
+    ['deferred', { deferred: [ToolNames.WORKFLOW] }, true],
+    [
+      'deferred and revealed',
+      { deferred: [ToolNames.WORKFLOW], revealed: [ToolNames.WORKFLOW] },
+      false,
+    ],
+    [
+      'deferred and listed in tools.visible',
+      { deferred: [ToolNames.WORKFLOW], visibleTools: [ToolNames.WORKFLOW] },
+      false,
+    ],
+    ['not deferred', {}, false],
+  ])('answers for a tool that is %s', (_case, options: StubOptions, hidden) => {
+    expect(
+      isToolHiddenBehindToolSearch(
+        stubConfig(options).config,
+        ToolNames.WORKFLOW,
+      ),
+    ).toBe(hidden);
   });
 });
 

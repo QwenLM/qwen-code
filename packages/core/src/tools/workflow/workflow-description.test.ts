@@ -23,6 +23,7 @@ import { buildWorkflowToolDescription, WorkflowTool } from './workflow.js';
 interface RouteOptions {
   toolNames?: string[];
   deferred?: string[];
+  revealed?: string[];
   disabledNames?: string[];
   disabledLevels?: string[];
 }
@@ -31,6 +32,7 @@ function configFor(options: RouteOptions = {}): Config {
   const {
     toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
     deferred = [],
+    revealed = [],
     disabledNames = [],
     disabledLevels = [],
   } = options;
@@ -39,6 +41,7 @@ function configFor(options: RouteOptions = {}): Config {
     getToolRegistry: () => ({
       getAllToolNames: () => toolNames,
       isPermissionDeferred: (name: string) => deferred.includes(name),
+      isDeferredToolRevealed: (name: string) => revealed.includes(name),
       getTool: () => undefined,
     }),
     isSkillEnabled: (skill: { name: string }) =>
@@ -82,6 +85,18 @@ describe('Workflow tool description shape', () => {
 
     expect(tool.authoringSurface).toBe('pointer-via-tool-search');
     expect(tool.description).toContain(POINTER_SENTENCE);
+    expect(tool.description).toContain('reveal it with ToolSearch first');
+  });
+
+  // Built while the Skill tool happens to be revealed, the description is
+  // still the one held after `/clear` drops that reveal, so it keeps the
+  // (conditional) detour.
+  it('keeps the ToolSearch detour when the Skill tool is revealed at build time', () => {
+    const tool = new WorkflowTool(
+      configFor({ deferred: [ToolNames.SKILL], revealed: [ToolNames.SKILL] }),
+    );
+
+    expect(tool.authoringSurface).toBe('pointer-via-tool-search');
     expect(tool.description).toContain('reveal it with ToolSearch first');
   });
 

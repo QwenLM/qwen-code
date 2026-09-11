@@ -21,8 +21,11 @@ import {
   MAX_WORKFLOW_AGENTS_ENV,
   MAX_WORKFLOW_CONCURRENCY_ENV,
   WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../../agents/runtime/workflow-orchestrator.js';
+import { WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS } from '../../../agents/runtime/workflow-sandbox.js';
+import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
 import {
   DEFAULT_STALL_MS,
   MAX_STALL_ATTEMPTS,
@@ -85,7 +88,9 @@ describe('bundled workflow-authoring skill', () => {
     ['Common single-phase shapes'],
     ['Default to `pipeline()`'],
     ['A barrier is right only when'],
-    ['spawn independent verifiers prompted to'],
+    [
+      'spawn independent verifiers prompted to _refute_, and drop what a majority refutes',
+    ],
     ['against everything already seen'],
     ['`log()` what was dropped'],
     ['workingDir'],
@@ -144,6 +149,9 @@ describe('bundled workflow-authoring skill', () => {
     ],
     ['`QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given)'],
     ['30-minute wall-clock cap per run'],
+    [
+      `${WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS / 1000} seconds for the script's synchronous code before its first \`await\`, with no override`,
+    ],
     ['max(2, min(16, availableParallelism()-2))'],
   ])('states the runtime limit: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
@@ -168,10 +176,8 @@ describe('bundled workflow-authoring skill', () => {
     // The phase option is ambient, not per call.
     ['every dispatch issued after it'],
     ['It is not scoped to the one call'],
-    // The disallowed-tool floor, all six, and what it means for a script.
-    [
-      'AskUserQuestion, SendMessage, Monitor, EnterPlanMode, ExitPlanMode, or the Agent tool',
-    ],
+    // What the disallowed-tool floor means for a script. The tools themselves
+    // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
     // workflow(): both forms, that a bare string is a name, and that its
     // rejection is only loud at the top level.
@@ -197,6 +203,33 @@ describe('bundled workflow-authoring skill', () => {
     ['`workflow-creator` skill'],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
+  });
+
+  // Generated from the list the orchestrator enforces rather than copied from
+  // it: a tool added there and not named here turns this red, and so does a
+  // tool named here that the list no longer holds.
+  it('names exactly the tools a workflow subagent can never use', () => {
+    const prose = skillProse();
+    const lead = 'Workflow subagents can never use ';
+    const start = prose.indexOf(lead);
+    const end = prose.indexOf(', whatever their `agentType`', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const named = prose.slice(start + lead.length, end).split(/,\s*(?:or\s+)?/);
+    const displayNames = WORKFLOW_SUBAGENT_DISALLOWED_TOOLS.map((name) => {
+      const key = Object.keys(ToolNames).find(
+        (candidate) => ToolNames[candidate as keyof typeof ToolNames] === name,
+      );
+      return key
+        ? (ToolDisplayNames as Record<string, string>)[key]
+        : undefined;
+    });
+
+    expect(displayNames).not.toContain(undefined);
+    expect(named).toHaveLength(displayNames.length);
+    for (const displayName of displayNames) {
+      expect(named.some((item) => item.includes(displayName!))).toBe(true);
+    }
   });
 
   // Ultracode is an upstream concept qwen-code does not have. A stray
@@ -248,7 +281,13 @@ describe('the worked example', () => {
         display.indexOf('```json\n') + 8,
         display.lastIndexOf('\n```'),
       ),
-    ) as { logs: string[]; result: { confirmed: Array<{ file: string }> } };
+    ) as {
+      logs: string[];
+      result: {
+        confirmed: Array<{ file: string }>;
+        refuted: Array<{ file: string; verdict: { why: string } }>;
+      };
+    };
   }
 
   const failed = () =>
@@ -300,6 +339,11 @@ describe('the worked example', () => {
     expect(payload.result.confirmed.map((entry) => entry.file)).toEqual([
       'correctness-a.ts',
     ]);
+    // A verifier can be wrong too, so what it refuted is returned with its
+    // reason, not only counted.
+    expect(
+      payload.result.refuted.map((entry) => [entry.file, entry.verdict.why]),
+    ).toEqual([['correctness-b.ts', 'refuted']]);
   });
 
   // A stage that throws drops its dimension to a null slot. Flattening would
