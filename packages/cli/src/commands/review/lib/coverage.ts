@@ -163,6 +163,29 @@ export const CHUNK_FAILURE_CLASSES = [
   'unknown',
 ] as const satisfies readonly ChunkFailureClass[];
 
+/**
+ * The subset of `ChunkFailureClass` that means the chunk's agents read
+ * NOTHING — defined once, beside the vocabulary it is a subset of.
+ *
+ * Three channels state this fact in prose: `check-coverage`'s stderr line,
+ * the posted body's `Not reviewed:` sentence, and `verdictLine`'s cap
+ * reason. Each had its own predicate, and they drifted exactly as three
+ * copies do — a run reached the point of saying "no read of it could be
+ * accepted for this plan" in the body and "part of the diff was never read"
+ * in the verdict line, about the same chunk, in the same report (R36-1, and
+ * the undirected audit that followed it).
+ *
+ * What is deliberately NOT here is the residue: `rewritten-prompt`,
+ * `declared-uncoverable` and `unknown` are chunks whose agents demonstrably
+ * read something this run could not accept, which is the other sentence.
+ */
+export const READ_NOTHING_CLASSES = new Set<ChunkFailureClass>([
+  'no-agent',
+  'blind-prompt',
+  'idle',
+  'unopened',
+]);
+
 /** One planned chunk's entry in the coverage ledger. */
 export interface ChunkCoverageItem {
   id: number;

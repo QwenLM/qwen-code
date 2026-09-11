@@ -33,6 +33,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
   ChunkPartitionError,
+  READ_NOTHING_CLASSES,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
@@ -9957,6 +9958,42 @@ export function buildLedger(
 }
 
 /** The terminal verdict, in the words Step 6 is told to print. */
+/**
+ * Why the `chunk-nobody-read` cap fired, in one clause, true of every chunk
+ * it covers.
+ *
+ * The THIRD channel to state this fact, after `check-coverage`'s stderr line
+ * and the posted body's `Not reviewed:` sentence — and the one that was left
+ * behind when the other two learned to tell "read nothing" from "read
+ * something this run could not accept". Measured, one run said "no read of
+ * it could be accepted for this plan" in its body and "part of the diff was
+ * never read" in its verdict line, about the same chunk (undirected audit of
+ * R36-1). All three now read `READ_NOTHING_CLASSES`, which is defined once
+ * beside the vocabulary it is a subset of.
+ *
+ * A mixed set claims neither, for the reason the stderr twin does: the cap
+ * covers a LIST, and no single clause is true of one holding both kinds.
+ */
+function chunkGapReason(r: ComposeReviewResult): string {
+  if (r.coverageIdentityUnreadable) {
+    return 'part of the diff could not be credited to this plan, whose identity could not be read';
+  }
+  const missing = r.chunkLedger.filter((i) => i.outcome === 'missing');
+  // An artifact written before the ledger existed carries none, and an
+  // absent ledger cannot contradict the older sentence — keep it.
+  if (missing.length === 0) return 'part of the diff was never read';
+  const readNothing = missing.filter(
+    (i) =>
+      i.classification !== undefined &&
+      READ_NOTHING_CLASSES.has(i.classification),
+  ).length;
+  if (readNothing === missing.length) return 'part of the diff was never read';
+  if (readNothing === 0) {
+    return 'part of the diff was read but could not be credited to this plan';
+  }
+  return 'part of the diff went uncovered — see the disclosures for each';
+}
+
 export function verdictLine(r: ComposeReviewResult): string {
   const label: Record<ReviewEvent, string> = {
     APPROVE: 'Approve',
@@ -9966,9 +10003,7 @@ export function verdictLine(r: ComposeReviewResult): string {
   const why: Record<string, string> = {
     'cannot-tell-existing-critical':
       'an existing blocker could not be ruled on',
-    'chunk-nobody-read': r.coverageIdentityUnreadable
-      ? 'part of the diff could not be credited to this plan, whose identity could not be read'
-      : 'part of the diff was never read',
+    'chunk-nobody-read': chunkGapReason(r),
     'uncoverable-chunk': 'part of the diff cannot be read at all',
     'unreviewed-dimension': 'a dimension nobody reviewed',
     'context-unavailable': "the PR's existing discussion could not be read",

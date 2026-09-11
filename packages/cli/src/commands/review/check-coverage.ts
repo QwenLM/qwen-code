@@ -38,7 +38,9 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   ChunkPartitionError,
   coverageFromTranscripts,
+  READ_NOTHING_CLASSES,
   TranscriptsUnavailableError,
+  type ChunkCoverageItem,
 } from './lib/coverage.js';
 import { promptRecordDir } from './lib/prompt-record.js';
 import { shellQuotePath } from './lib/shell-quote.js';
@@ -59,27 +61,6 @@ interface CheckCoverageArgs {
  * model answer is a check that fails closed on good work, and the cost of that
  * is a relaunch of an agent that had already done its job.
  */
-/**
- * The failure classes that mean the chunk's agents read NOTHING — the only
- * ones the plain sentence below is true of.
- *
- * `no-agent` alone was too narrow: `blind-prompt` (launched with a prompt
- * that never named the diff), `idle` (zero successful tool calls) and
- * `unopened` (worked, never opened the diff) all say the same thing in the
- * ledger's own docs, and putting them on the other arm told the operator
- * reads existed and could not be accepted — contradicting the per-agent line
- * printed a few lines above, and naming the wrong repair class (R36-1).
- *
- * What stays OFF this list is the residue the other sentence is for:
- * `rewritten-prompt`, `declared-uncoverable` and `unknown` are chunks whose
- * agents demonstrably read something this run could not accept.
- */
-const READ_NOTHING: ReadonlySet<string> = new Set([
-  'no-agent',
-  'blind-prompt',
-  'idle',
-  'unopened',
-]);
 
 /**
  * The half-sentence that says WHAT happened to the missing chunks, true of
@@ -93,14 +74,14 @@ const READ_NOTHING: ReadonlySet<string> = new Set([
  * printed above (undirected audit of R36-1's fix).
  */
 function readWhatHappened(report: {
-  missingChunks: number[];
-  chunkItems: ReadonlyArray<{ id: number; classification?: string }>;
+  missingChunks: readonly number[];
+  chunkItems: readonly ChunkCoverageItem[];
 }): string {
   const classOf = (id: number) =>
     report.chunkItems.find((i) => i.id === id)?.classification;
   const readNothing = report.missingChunks.filter((id) => {
     const cls = classOf(id);
-    return cls !== undefined && READ_NOTHING.has(cls);
+    return cls !== undefined && READ_NOTHING_CLASSES.has(cls);
   }).length;
   if (readNothing === report.missingChunks.length) {
     return `Nobody read those lines. `;

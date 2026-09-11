@@ -18105,6 +18105,68 @@ describe('terminalState — coverage, not verdict', () => {
     expect(r.chunkLedger.every((i) => i.outcome === 'covered')).toBe(true);
   });
 
+  it('says the same thing in the body and the verdict line', () => {
+    // The third channel of the class R36-1 names. `check-coverage`'s stderr
+    // line and the posted body both learned to tell "read nothing" from
+    // "read something this run could not accept"; `verdictLine` did not, so
+    // one run said `no read of it could be accepted for this plan` in its
+    // body and `part of the diff was never read` in its verdict line, about
+    // the same chunk. All three now read `READ_NOTHING_CLASSES`, which is
+    // defined once beside the vocabulary it is a subset of — three copies is
+    // how they drifted.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    for (const id of ['a2', 'a2b']) {
+      transcript(id, goodPrompt(2), {
+        toolCalls: 1,
+        range: [100, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      });
+    }
+    recordBuilt(p, 1, goodPrompt(1));
+    recordBuilt(p, 2, goodPrompt(2));
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
+      'unknown',
+    );
+    expect(r.cappedBy).toContain('chunk-nobody-read');
+    const line = verdictLine(r);
+    expect(line).toContain('could not be credited to this plan');
+    expect(line).not.toContain('was never read');
+    expect(r.body).not.toContain('nobody read');
+  });
+
+  it('keeps "never read" in the verdict line for a chunk nothing was launched for', () => {
+    // The other direction, so the split is a split and not a rename.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    recordBuilt(p, 1, goodPrompt(1));
+    recordBuilt(p, 2, goodPrompt(2));
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
+      'no-agent',
+    );
+    expect(verdictLine(r)).toContain('part of the diff was never read');
+  });
+
   it('does not post "nobody read it" for a chunk the ledger says an agent read', () => {
     // The posted twin of `check-coverage`'s stderr sentence, and the reason
     // they are fixed together: on a plan whose metadata cannot answer the
