@@ -894,6 +894,18 @@ export class TestRig {
     return apiRequests.pop() || null;
   }
 
+  // Unlike waitForTelemetryEvent's boolean poll, this exposes the latest
+  // matching payload so integration tests can assert event semantics.
+  readTelemetryEvent(eventName: string): ParsedLog | null {
+    const logs = this._readAndParseTelemetryLog();
+    const events = logs.filter(
+      (logData) =>
+        logData.attributes &&
+        logData.attributes['event.name'] === `qwen-code.${eventName}`,
+    );
+    return events.pop() || null;
+  }
+
   readMetric(metricName: string): Record<string, unknown> | null {
     const logs = this._readAndParseTelemetryLog();
     for (const logData of logs) {

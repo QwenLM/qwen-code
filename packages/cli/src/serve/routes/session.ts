@@ -45,11 +45,14 @@ import {
   type SessionArchiveState,
   type WorktreeSession,
   parseGoalControlRequest,
+  readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -6391,6 +6394,48 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.get(
+    '/session/:id/artifacts/:artifactId/content',
+    withOwnerReadSession(
+      'GET /session/:id/artifacts/:artifactId/content',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const { artifacts } = await runtime.bridge.getSessionArtifacts(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        const artifact = artifacts.find(
+          (item) => item.id === req.params['artifactId'],
+        );
+        let content: string;
+        try {
+          if (!artifact) throw new Error('Snapshot not registered');
+          content = await readArtifactSnapshot(
+            artifact,
+            runtime.sessionRuntimeBaseDir,
+          );
+        } catch {
+          res.status(404).json({
+            error: 'artifact_snapshot_unavailable',
+            message: 'Saved webpage version is missing or has changed.',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set({
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="saved-webpage.html"',
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, no-store',
+          })
+          .send(content);
+      },
+      { cwdBound: true },
+    ),
+  );
+
   app.post(
     '/session/:id/artifacts',
     mutate({ strict: true }),
@@ -6901,6 +6946,7 @@ export function registerSessionRoutes(
           !Array.isArray(forwardedBody['_meta'])
             ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
             : undefined;
+        const submittedPrompt = forwardedMeta?.[SUBMITTED_PROMPT_META_KEY];
         const promptAuthorization =
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
@@ -6909,6 +6955,8 @@ export function registerSessionRoutes(
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
+          delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
           delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
@@ -6978,6 +7026,12 @@ export function registerSessionRoutes(
                 : {}),
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
+                : {}),
+              ...(typeof submittedPrompt === 'string' &&
+              channelPrompt === undefined &&
+              promptAuthorization === undefined &&
+              promptDisplayText === undefined
+                ? { submittedPrompt }
                 : {}),
               ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined

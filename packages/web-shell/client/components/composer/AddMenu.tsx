@@ -379,10 +379,12 @@ export function AddMenu({
           className="min-w-56 max-w-[calc(100vw-1rem)] sm:min-w-64"
           onClick={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
-            event.preventDefault();
             const pendingCloseAction = pendingCloseActionRef.current;
             pendingCloseActionRef.current = null;
-            pendingCloseAction?.();
+            if (pendingCloseAction) {
+              event.preventDefault();
+              pendingCloseAction();
+            }
           }}
         >
           {!anyAvailable ? (

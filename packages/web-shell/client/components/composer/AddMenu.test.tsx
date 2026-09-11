@@ -158,6 +158,20 @@ describe('AddMenu', () => {
     expect(trigger.disabled).toBe(true);
   });
 
+  it('returns keyboard focus to the trigger after Escape', async () => {
+    render();
+    await openMenu();
+    await act(async () => {
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    );
+  });
+
   it('lets an outside editor click close the menu without restoring trigger focus', async () => {
     render(
       <>

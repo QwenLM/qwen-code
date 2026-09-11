@@ -1866,6 +1866,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      submittedPrompt: 'hello there',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2021,6 +2022,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2044,6 +2046,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      '/deploy staging',
     );
   });
 
@@ -2077,6 +2080,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2092,6 +2096,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      submittedPrompt: '/usr/local/bin/tool',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2157,6 +2162,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('with image', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      submittedPrompt: 'with image',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2172,6 +2178,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
+      submittedPrompt: '',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2204,6 +2211,7 @@ describe('ChatPane', () => {
       });
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      submittedPrompt: 'check @.husky/',
       inputAnnotations,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2226,6 +2234,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued next',
     );
     expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -2344,6 +2353,7 @@ describe('ChatPane', () => {
       undefined,
       inputAnnotations,
       expect.any(Function),
+      'queue @.husky/',
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -2362,6 +2372,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued image',
     );
   });
 
@@ -2374,7 +2385,15 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '',
+      images,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '',
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -2902,6 +2921,28 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onShowContextUsage).toEqual(
       expect.any(Function),
     );
+  });
+
+  it('suppresses stale context and its action after a pane session becomes unavailable', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = null;
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('suppresses stale context while the pane connection is in error', () => {
+    connectionState.status = 'error';
+    connectionState.sessionId = 'sess-1';
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
   });
 
   it('shows context usage for this pane session', async () => {
