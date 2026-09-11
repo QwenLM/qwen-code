@@ -199,7 +199,7 @@ export function parseAgentHooks(
  * silently change what runs:
  *
  *   - non-object / array / null → undefined (whole field dropped)
- *   - `kind` absent or not `'acp'` → undefined
+ *   - `kind` absent or not `'acp'` / `'codex'` → undefined
  *   - `command` absent, non-string, or blank after trim → undefined
  *   - `args` present but not an array of strings → undefined. Dropped whole
  *     rather than filtered: running with silently-truncated arguments is
@@ -214,14 +214,15 @@ export function parseAgentExecutor(
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (record['kind'] !== 'acp') return undefined;
+  const kind = record['kind'];
+  if (kind !== 'acp' && kind !== 'codex') return undefined;
   const command = record['command'];
   if (typeof command !== 'string') return undefined;
   const trimmedCommand = command.trim();
   if (trimmedCommand === '') return undefined;
   const rawArgs = record['args'];
   if (rawArgs === undefined) {
-    return { kind: 'acp', command: trimmedCommand };
+    return { kind, command: trimmedCommand };
   }
   if (!Array.isArray(rawArgs)) return undefined;
   const args: string[] = [];
@@ -229,5 +230,5 @@ export function parseAgentExecutor(
     if (typeof arg !== 'string') return undefined;
     args.push(arg);
   }
-  return { kind: 'acp', command: trimmedCommand, args };
+  return { kind, command: trimmedCommand, args };
 }
