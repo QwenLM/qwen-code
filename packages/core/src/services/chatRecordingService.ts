@@ -771,6 +771,8 @@ export interface TurnResultRecordPayload {
   error?: TurnResultErrorPayload;
   /** Epoch ms the turn started executing (agent clock). */
   startedAt?: number;
+  /** Epoch ms the user-cancel signal was received (agent clock). */
+  cancelledAt?: number;
   /** Epoch ms the turn settled (agent clock). */
   endedAt: number;
   promptText?: string;
@@ -812,6 +814,7 @@ export function isTurnResultRecordPayload(
   if (
     !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
+    !optionalTimestamp('cancelledAt') ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||

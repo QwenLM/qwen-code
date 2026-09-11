@@ -42,6 +42,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   goalPauseReasonForFailure,
   SYSTEM_REMINDER_OPEN,
@@ -4441,6 +4442,8 @@ describe('Session', () => {
             cronExpr: string;
             lastFiredAt: number;
             sessionMode: 'per_run';
+            modelServiceId: string;
+            groupId: string;
           }) => void,
         ) => {
           callback({
@@ -4450,6 +4453,8 @@ describe('Session', () => {
             cronExpr: '0 * * * *',
             lastFiredAt: 123,
             sessionMode: 'per_run',
+            modelServiceId: 'qwen-max(openai)',
+            groupId: 'group-1',
           });
         },
       ),
@@ -4476,6 +4481,8 @@ describe('Session', () => {
           name: expect.stringMatching(/^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/),
           sourceType: 'default',
           sourceId: 'scheduled_task_run:task-1',
+          model: 'qwen-max(openai)',
+          groupId: 'group-1',
           callerSessionId: 'test-session-id',
         },
       );
@@ -4552,6 +4559,152 @@ describe('Session', () => {
     expect(
       JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
     ).not.toContain('Scheduled task:');
+  });
+
+  it('does not fall back to the task session when a routed dispatch fails', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            groupId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            groupId: 'group-1',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new Error('session capacity exhausted'),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        dispatchFailed: true,
+      });
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('restores a consumed one-shot when selected-model dispatch fails', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const restoreConsumedOneShot = vi.fn().mockResolvedValue(true);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            recurring: false;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            modelServiceId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            recurring: false,
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            modelServiceId: 'missing-model',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      restoreConsumedOneShot,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new Error('session capacity exhausted'),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+    });
+    expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+      dispatchFailed: true,
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch a scheduled task with an over-long model id', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const restoreConsumedOneShot = vi.fn().mockResolvedValue(true);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            recurring: false;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            modelServiceId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            recurring: false,
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            modelServiceId: 'm'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      restoreConsumedOneShot,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        dispatchFailed: true,
+      });
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+    });
+    expect(mockClient.extMethod).not.toHaveBeenCalled();
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('enqueues a missed one-shot carrier instead of dispatching it headless', async () => {
@@ -9274,6 +9427,8 @@ describe('Session', () => {
       });
 
       it('records a cancelled turn when admission aborts before dispatch', async () => {
+        let now = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
         let releaseAdmission!: () => void;
         const admission = new Promise<void>((resolve) => {
           releaseAdmission = resolve;
@@ -9292,15 +9447,27 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
         );
+        now = 4_500;
         cancellation.abort();
+        now = 9_500;
         releaseAdmission();
 
-        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(prompt).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': {
+              cancelledAt: 4_500,
+              elapsedMs: 0,
+            },
+          },
+        });
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
             stopReason: 'cancelled',
+            cancelledAt: 4_500,
+            endedAt: 9_500,
           }),
         );
       });
@@ -9383,10 +9550,14 @@ describe('Session', () => {
         );
       });
 
-      it('records a cancelled turn when user cancel races an abort-shaped stream error', async () => {
+      it('records cancellation time before stream wind-down completes', async () => {
+        let now = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createFailingStream('Request was aborted.', () => {
+            now = 4_500;
             void session.cancelPendingPrompt();
+            now = 9_500;
           }),
         );
 
@@ -9398,14 +9569,62 @@ describe('Session', () => {
             },
             trustedContext,
           ),
-        ).resolves.toEqual({ stopReason: 'cancelled' });
+        ).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: 4_500, elapsedMs: 3_500 },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
+            startedAt: 1_000,
+            cancelledAt: 4_500,
+            endedAt: 9_500,
           }),
         );
+      });
+
+      it('waits for the cancellation record to flush before returning', async () => {
+        let releaseFlush!: () => void;
+        const flushed = new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        mockChatRecordingService.flush.mockReturnValue(flushed);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+        let settled = false;
+        const prompt = session
+          .prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          )
+          .then((response) => {
+            settled = true;
+            return response;
+          });
+        await vi.waitFor(() =>
+          expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ state: 'cancelled' }),
+        );
+        expect(settled).toBe(false);
+        releaseFlush();
+        await expect(prompt).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+          },
+        });
       });
 
       it('records a cancelled turn when user cancel races a plain stream error', async () => {
@@ -9423,7 +9642,12 @@ describe('Session', () => {
             },
             trustedContext,
           ),
-        ).resolves.toEqual({ stopReason: 'cancelled' });
+        ).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -9616,6 +9840,7 @@ describe('Session', () => {
           stopReason: 'cancelled',
           promptText: 'first prompt',
         });
+        expect(firstPayload).not.toHaveProperty('cancelledAt');
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           2,
         );
@@ -9763,7 +9988,15 @@ describe('Session', () => {
 
         releaseFirst();
         await first;
-        await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(second).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': {
+              cancelledAt: expect.any(Number),
+              elapsedMs: 0,
+            },
+          },
+        });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           2,
@@ -25175,7 +25408,7 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'The autonomous token budget for this Goal window is spent.',
+                  'An autonomous budget for this Goal window is spent',
                 ),
               }),
               expect.objectContaining({
@@ -25307,7 +25540,7 @@ describe('Session', () => {
             (part) =>
               typeof part['text'] === 'string' &&
               (part['text'] as string).includes(
-                'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+                'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
               ),
           ),
         ).toBe(true);
@@ -40148,7 +40381,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseWait();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     it('lets cancellation win while a loop-detected Stop continuation is preserved', async () => {
@@ -40199,7 +40432,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseDrain();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     it('rejects a foreground turn whose Stop continuation trips loop protection', async () => {
@@ -43667,7 +43900,7 @@ describe('Session', () => {
             }),
           ],
         });
-        expect(firstResult).toEqual({ stopReason: 'cancelled' });
+        expect(firstResult).toMatchObject({ stopReason: 'cancelled' });
       },
     );
 
