@@ -24,9 +24,11 @@ const { mockedTotalMem, mockedHeapSizeLimit } = vi.hoisted(() => ({
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
+  const totalmem = () => mockedTotalMem.value;
   return {
     ...actual,
-    totalmem: () => mockedTotalMem.value,
+    default: { ...actual, totalmem },
+    totalmem,
   };
 });
 

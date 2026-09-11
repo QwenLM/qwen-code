@@ -4,17 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Unsaturated counterpart to daemon-memory-budget-parity.test.ts. The two
-// cases are split across files because getAcpMemoryArgs() memoizes into module
-// state; a fresh registry per file keeps them independent of execution order
-// without a slow vi.resetModules() re-import inside a test.
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   LEGACY_CHILD_HEAP_FRACTION,
   legacyChildCeilingMb,
   MAX_CHILD_HEAP_MB,
 } from './daemon-memory-budget.js';
-import { getAcpMemoryArgs } from './spawnChannel.js';
 
 const MB = 1024 * 1024;
 
@@ -23,11 +18,17 @@ const { mockedTotalMem, mockedHeapSizeLimit } = vi.hoisted(() => ({
   mockedHeapSizeLimit: { value: 2_048 * 1024 * 1024 },
 }));
 
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  SkillError: class extends Error {},
+}));
+
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
+  const totalmem = () => mockedTotalMem.value;
   return {
     ...actual,
-    totalmem: () => mockedTotalMem.value,
+    default: { ...actual, totalmem },
+    totalmem,
   };
 });
 
@@ -42,8 +43,17 @@ vi.mock('node:v8', async (importOriginal) => {
   };
 });
 
+beforeEach(() => {
+  // Each case needs fresh memoized spawn arguments.
+  vi.resetModules();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('spawn-path constant parity', () => {
-  it('getAcpMemoryArgs uses the same fraction as legacyChildCeilingMb (unsaturated)', () => {
+  it('getAcpMemoryArgs uses the same fraction as legacyChildCeilingMb (unsaturated)', async () => {
     const availableMb = 8_192;
     mockedTotalMem.value = availableMb * MB;
     mockedHeapSizeLimit.value = 2_048 * MB;
@@ -52,6 +62,7 @@ describe('spawn-path constant parity', () => {
       'constrainedMemory',
     ).mockReturnValue(0);
 
+    const { getAcpMemoryArgs } = await import('./spawnChannel.js');
     const args = getAcpMemoryArgs();
     const expected = legacyChildCeilingMb(availableMb);
     expect(expected).toBe(
@@ -62,5 +73,44 @@ describe('spawn-path constant parity', () => {
     );
     expect(expected).toBeLessThan(MAX_CHILD_HEAP_MB);
     expect(args).toContain(`--max-old-space-size=${expected}`);
+    mockedTotalMem.value = 4_096 * MB;
+    expect(getAcpMemoryArgs()).toBe(args);
   });
+
+  it.each([
+    ['cgroup v1 unlimited sentinel', 2 ** 63 - 4_096, 2_096, 3_632],
+    ['cgroup v2 unlimited sentinel', 2 ** 64, 2_096, 3_632],
+    ['cgroup limit above host memory', 8_192 * MB, 2_096, 3_632],
+    ['cgroup limit equal to host memory', 7_265 * MB, 2_096, 3_632],
+    ['unconstrained host', 0, 2_096, 3_632],
+    ['6 GiB cgroup limit', 6_144 * MB, 2_096, 3_072],
+    [
+      '4 GiB cgroup limit below the current heap limit',
+      4_096 * MB,
+      2_096,
+      undefined,
+    ],
+    [
+      '2 GiB cgroup limit below the current heap limit',
+      2_048 * MB,
+      1_048,
+      undefined,
+    ],
+    ['target equal to the current heap limit', 6_144 * MB, 3_072, undefined],
+  ] as const)(
+    'preserves the host-derived policy for %s',
+    async (_name, constrainedBytes, currentLimitMb, expectedTargetMb) => {
+      mockedTotalMem.value = 7_265 * MB;
+      mockedHeapSizeLimit.value = currentLimitMb * MB;
+      vi.spyOn(process, 'constrainedMemory').mockReturnValue(constrainedBytes);
+
+      const { getAcpMemoryArgs } = await import('./spawnChannel.js');
+      expect(getAcpMemoryArgs()).toEqual([
+        ...(expectedTargetMb === undefined
+          ? []
+          : [`--max-old-space-size=${expectedTargetMb}`]),
+        '--expose-gc',
+      ]);
+    },
+  );
 });
