@@ -102,6 +102,9 @@ describe('Session.pendingWorktreeNotice', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
