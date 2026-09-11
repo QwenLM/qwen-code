@@ -13742,6 +13742,7 @@ class QwenAgent implements Agent {
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
         const providersChanged =
           changed.has('modelProviders') || changed.has('providerProtocol');
+        const imageChanged = changed.has('imageModel');
         if (providersChanged) {
           this.modelProviderReloadRevision += 1;
         }
@@ -13813,6 +13814,16 @@ class QwenAgent implements Agent {
               } catch (err) {
                 debugLogger.warn(
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
+                );
+              }
+            }
+
+            if (imageChanged || providersChanged) {
+              try {
+                await config.setImageModel(newMerged.imageModel);
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: setImageModel failed for session ${id}: ${err}`,
                 );
               }
             }

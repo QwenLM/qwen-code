@@ -1030,6 +1030,32 @@ describe('model configuration routes', () => {
     },
   );
 
+  it.each([
+    { key: 'imageModel', value: 5 },
+    { key: 'imageModel', value: { id: 'model' } },
+    { key: 'advisorModel', value: 5 },
+    { key: 'advisorModel', value: { id: 'model' } },
+  ])(
+    'removes a model without rewriting a non-string $key ($value)',
+    async ({ key, value }) => {
+      writeUserSettings({
+        modelProviders: { openai: [{ id: 'model' }] },
+        [key]: value,
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      expect(listed.status).toBe(200);
+      const response = await request(app)
+        .delete('/workspace/models')
+        .send(listed.body.models[0]);
+      expect(response.status).toBe(200);
+      expect(response.body.removed).toBe(true);
+      const saved = readUserSettings();
+      expect(saved[key]).toEqual(value);
+      expect(saved['modelProviders']).toEqual({ openai: [] });
+    },
+  );
+
   it('persists a workspace-owned window and reports runtime sync failure without touching user settings', async () => {
     writeUserSettings({
       $version: 4,

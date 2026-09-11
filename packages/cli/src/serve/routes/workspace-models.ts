@@ -401,7 +401,7 @@ export function registerWorkspaceModelsRoutes(
           }
           for (const key of ['imageModel', 'advisorModel'] as const) {
             const value = settings[key];
-            if (!value) continue;
+            if (typeof value !== 'string' || !value) continue;
             const separator = value.indexOf('\0');
             const selector = separator < 0 ? value : value.slice(0, separator);
             const endpoint =

@@ -736,6 +736,48 @@ for (const [purpose, label, modelId] of [
   });
 }
 
+test('reports a failed runtime sync after saving a context window', async ({
+  page,
+}, testInfo) => {
+  const { configurations } = await openModelSettings(page, testInfo);
+  await page.route('**/workspace/models', async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback();
+      return;
+    }
+    expect(route.request().postDataJSON()).toEqual({
+      key: 'configured-test-key',
+      contextWindowSize: 65536,
+    });
+    configurations.find(
+      (item) => item.key === 'configured-test-key',
+    )!.contextWindowSize = 65536;
+    await route.fulfill({
+      json: {
+        updated: true,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' },
+      },
+    });
+  });
+  const edit = page.getByRole('button', {
+    name: 'Edit context window Configured Test Model',
+    exact: true,
+  });
+  await edit.click();
+  await page.getByLabel('Context window', { exact: true }).fill('65536');
+  await page
+    .getByRole('button', { name: 'save Configured Test Model', exact: true })
+    .click();
+  await expect(page.getByRole('status')).toContainText(
+    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+  );
+  await edit.click();
+  await expect(page.getByLabel('Context window', { exact: true })).toHaveValue(
+    '65536',
+  );
+});
+
 test('edits a persisted context window, retries a failure, and resets to automatic', async ({
   page,
 }, testInfo) => {

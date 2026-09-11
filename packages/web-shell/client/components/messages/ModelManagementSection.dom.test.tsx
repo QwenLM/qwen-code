@@ -95,6 +95,64 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it.each([
+    {
+      result: { updated: true as const, requiresRestart: true },
+      notice: 'Saved. Restart existing sessions to apply.',
+    },
+    {
+      result: {
+        updated: true as const,
+        requiresRestart: true,
+        runtimeSync: { status: 'applied' as const },
+      },
+      notice: 'Saved. Restart existing sessions to apply.',
+    },
+    {
+      result: {
+        updated: true as const,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' as const },
+      },
+      notice:
+        'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+    },
+  ])(
+    'reports the context-window save result ($result)',
+    async ({ result, notice }) => {
+      const onUpdateContextWindow = vi.fn().mockResolvedValue(result);
+      const { container } = renderSection({
+        providers: [],
+        configurations: [
+          {
+            key: 'saved-model',
+            authType: 'openai',
+            modelId: 'gpt-4o',
+            contextWindowSize: 65536,
+            purpose: 'chat',
+            canEditContextWindow: true,
+          },
+        ],
+        onUpdateContextWindow,
+      });
+      act(() => buttonByText(container, 'Edit context window').click());
+      await act(async () => {
+        container
+          .querySelector('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onUpdateContextWindow).toHaveBeenCalledExactlyOnceWith(
+        'saved-model',
+        65536,
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        notice,
+      );
+    },
+  );
+
   it('labels an ambiguous saved row and keeps its exact delete action without an ineffective window editor', () => {
     const { container, props } = renderSection({
       onUpdateContextWindow: vi.fn(),

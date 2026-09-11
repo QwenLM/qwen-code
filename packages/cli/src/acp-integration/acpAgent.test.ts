@@ -5556,6 +5556,103 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    'enable',
+    'clear',
+    'repoint',
+    'remove-provider',
+    'change-protocol',
+    'unchanged',
+    'busy',
+    'setter-failure',
+  ])(
+    'reconciles image settings on general workspace reload (%s)',
+    async (scenario) => {
+      const sessionId = `session-image-reload-${scenario}`;
+      const innerConfig = await setupSessionMocks(sessionId);
+      const oldImage = 'openai:image\0https://old.example/v1';
+      const newImage = 'openai:image\0https://new.example/v1';
+      const providersChanged = ['remove-provider', 'change-protocol'].includes(
+        scenario,
+      );
+      const nextImage =
+        scenario === 'clear'
+          ? undefined
+          : providersChanged || scenario === 'unchanged'
+            ? oldImage
+            : newImage;
+      let merged: Record<string, unknown> = {
+        mcpServers: {},
+        imageModel: scenario === 'enable' ? undefined : oldImage,
+        modelProviders: { openai: [{ id: 'image', imageOnly: true }] },
+      };
+      const settings = makeSessionSettings();
+      Object.defineProperty(settings, 'merged', { get: () => merged });
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
+        merged = {
+          ...merged,
+          imageModel: nextImage,
+          ...(scenario === 'remove-provider'
+            ? { modelProviders: { openai: [] } }
+            : {}),
+          ...(scenario === 'change-protocol'
+            ? { providerProtocol: { openai: 'anthropic' } }
+            : {}),
+        };
+        return true;
+      });
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const { agent, agentPromise } = await bootInitializedAcpAgent(settings);
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        innerConfig.setImageModel.mockClear();
+        innerConfig.reloadModelProvidersConfig.mockClear();
+        innerConfig.refreshAuth.mockClear();
+        innerConfig.setWorkflowsEnabled.mockClear();
+        if (scenario === 'busy') lastSessionMock!.isIdle.mockReturnValue(false);
+        if (scenario === 'setter-failure') {
+          innerConfig.setImageModel.mockRejectedValueOnce(
+            new Error('Image tools refresh failed'),
+          );
+        }
+        const result = await agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          { cwd: '/tmp' },
+        );
+        expect(result).toMatchObject({
+          sessionsRefreshed: scenario === 'busy' ? [] : [sessionId],
+          sessionsSkipped: scenario === 'busy' ? [sessionId] : [],
+        });
+        if (scenario === 'busy' || scenario === 'unchanged') {
+          expect(innerConfig.setImageModel).not.toHaveBeenCalled();
+        } else {
+          expect(innerConfig.setImageModel).toHaveBeenCalledExactlyOnceWith(
+            nextImage,
+          );
+        }
+        expect(innerConfig.reloadModelProvidersConfig).toHaveBeenCalledTimes(
+          providersChanged ? 1 : 0,
+        );
+        expect(innerConfig.refreshAuth).toHaveBeenCalledTimes(
+          providersChanged ? 1 : 0,
+        );
+        if (providersChanged) {
+          expect(
+            innerConfig.reloadModelProvidersConfig.mock.invocationCallOrder[0],
+          ).toBeLessThan(
+            innerConfig.setImageModel.mock.invocationCallOrder[0]!,
+          );
+        }
+        if (scenario === 'setter-failure') {
+          expect(innerConfig.setWorkflowsEnabled).toHaveBeenCalledOnce();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('does not apply an older reload snapshot to initializing configs after a newer reload', async () => {
     const innerConfig = await setupSessionMocks('session-image-reload-race');
     const { agent, agentPromise } = await bootAcpAgent();

@@ -404,9 +404,11 @@ function ModelWindowEditor({
           .then((result) => {
             setEditing(false);
             setNotice(
-              result.requiresRestart
-                ? t('settings.models.windowSaved')
-                : t('settings.models.saved'),
+              result.runtimeSync?.status === 'failed'
+                ? t('settings.models.runtimeSyncFailed')
+                : result.requiresRestart
+                  ? t('settings.models.windowSaved')
+                  : t('settings.models.saved'),
             );
           })
           .catch((err: unknown) =>
