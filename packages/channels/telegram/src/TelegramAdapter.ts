@@ -12,7 +12,6 @@ import {
 import {
   ChannelBase,
   isTerminalTaskLifecycleType,
-  startsWithMessagePrefix,
 } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
@@ -115,7 +114,7 @@ export class TelegramChannel extends ChannelBase {
       const msg = ctx.message;
       const text = msg.text;
 
-      const envelope = this.buildEnvelope(msg, text, msg.entities, true);
+      const envelope = this.buildEnvelope(msg, text, msg.entities);
 
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
@@ -132,7 +131,6 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(image)',
         msg.caption_entities,
-        false,
         !msg.caption,
       );
 
@@ -173,7 +171,6 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || `(file: ${fileName})`,
         msg.caption_entities,
-        false,
         !msg.caption,
       );
 
@@ -194,12 +191,7 @@ export class TelegramChannel extends ChannelBase {
           );
           writeFileSync(filePath, buf);
 
-          // Cleared when the caption is absent too: the bypass above
-          // skips stripping entirely, so the `(file: …)` placeholder
-          // would otherwise reach the model as prompt text.
-          if (!this.configuredMessagePrefix() || !msg.caption) {
-            envelope.text = msg.caption || '';
-          }
+          envelope.text = msg.caption || '';
           envelope.attachments = [
             {
               type: 'file',
@@ -214,10 +206,7 @@ export class TelegramChannel extends ChannelBase {
           );
           // Mirrors the success branch: the placeholder is adapter text, so
           // only a real caption may survive into the prompt.
-          const promptText =
-            this.configuredMessagePrefix() && msg.caption
-              ? envelope.text
-              : msg.caption || '';
+          const promptText = msg.caption || '';
           envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
@@ -237,7 +226,6 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(voice message)',
         msg.caption_entities,
-        false,
         // Standard Telegram clients cannot caption a voice message, so
         // this is effectively always synthetic.
         !msg.caption,
@@ -257,12 +245,7 @@ export class TelegramChannel extends ChannelBase {
           const filePath = join(dir, fileName);
           writeFileSync(filePath, buf);
 
-          // Cleared when the caption is absent too: the bypass above
-          // skips stripping entirely, so the `(file: …)` placeholder
-          // would otherwise reach the model as prompt text.
-          if (!this.configuredMessagePrefix() || !msg.caption) {
-            envelope.text = msg.caption || '';
-          }
+          envelope.text = msg.caption || '';
           envelope.attachments = [
             {
               type: 'audio',
@@ -277,10 +260,7 @@ export class TelegramChannel extends ChannelBase {
           );
           // Mirrors the success branch: the placeholder is adapter text, so
           // only a real caption may survive into the prompt.
-          const promptText =
-            this.configuredMessagePrefix() && msg.caption
-              ? envelope.text
-              : msg.caption || '';
+          const promptText = msg.caption || '';
           envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
@@ -314,16 +294,13 @@ export class TelegramChannel extends ChannelBase {
   }
 
   private startMessage(): string {
-    const prefix = this.configuredMessagePrefix();
     return [
       'Qwen Code Telegram bot',
       '',
-      prefix
-        ? `Start each message with ${prefix} to chat with Qwen Code.`
-        : 'Send any message to chat with Qwen Code.',
-      `Use ${this.prefixedCommand('/new')} to start a fresh conversation.`,
-      `Use ${this.prefixedCommand('/cancel')} to stop a running request.`,
-      `Use ${this.prefixedCommand('/help')} to see available commands.`,
+      'Send any message to chat with Qwen Code.',
+      'Use /new to start a fresh conversation.',
+      'Use /cancel to stop a running request.',
+      'Use /help to see available commands.',
     ].join('\n');
   }
 
@@ -525,14 +502,7 @@ export class TelegramChannel extends ChannelBase {
     },
     text: string,
     entities?: Array<{ type: string; offset: number; length: number }>,
-    allowRegisteredCommandBypass = false,
-    /**
-     * True when `text` is an adapter-synthesized placeholder rather than
-     * something the user typed. Media with no caption can never carry the
-     * configured prefix -- voice messages cannot carry one at all -- so
-     * gating it would drop the message with no action the user could
-     * take. Same contract DingTalk and WeCom already implement.
-     */
+    /** Whether the text is an adapter-generated media placeholder. */
     syntheticText = false,
   ): Envelope {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
@@ -565,37 +535,6 @@ export class TelegramChannel extends ChannelBase {
 
     // Extract referenced message text (when user replies to a message)
     const referencedText = msg.reply_to_message?.text || undefined;
-    // A configured prefix wins over the command-menu bypass: nothing rejects
-    // `/new` as a prefix, and without this every prefixed message would run
-    // the colliding command instead of being stripped and dispatched. Bare
-    // menu commands that do not start with the prefix keep the bypass.
-    const configuredPrefix = this.configuredMessagePrefix();
-    const bypassMessagePrefix =
-      allowRegisteredCommandBypass &&
-      !(
-        configuredPrefix &&
-        startsWithMessagePrefix(text.trim(), configuredPrefix)
-      ) &&
-      (entities?.some((entity) => {
-        if (entity.type !== 'bot_command' || entity.offset !== 0) return false;
-        const value = text.slice(0, entity.length).toLowerCase();
-        const command = value.slice(1).split('@', 1)[0];
-        // `/cancel@OtherBot` is addressed to a different bot. `parseCommand`
-        // strips the suffix, so without this check the bypass would let a
-        // command meant for someone else past the prefix gate and run it
-        // here -- cancelling our own request, for instance.
-        const atIndex = value.indexOf('@', 1);
-        if (
-          atIndex !== -1 &&
-          value.slice(atIndex + 1) !== this.botUsername.toLowerCase()
-        ) {
-          return false;
-        }
-        return TELEGRAM_BOT_COMMANDS.some(
-          (registered) => registered.command === command,
-        );
-      }) ??
-        false);
 
     return {
       channelName: this.name,
@@ -611,7 +550,6 @@ export class TelegramChannel extends ChannelBase {
           : undefined,
       text: cleanText,
       ...(syntheticText ? { syntheticText: true as const } : {}),
-      ...(bypassMessagePrefix ? { bypassMessagePrefix: true as const } : {}),
       isGroup,
       isMentioned,
       isReplyToBot,
