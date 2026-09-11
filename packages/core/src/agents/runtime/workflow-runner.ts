@@ -59,6 +59,12 @@ export interface WorkflowRunnerOptions {
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /**
+   * Where this session's authoring reference is, sent with a failed background
+   * run's completion notification. Omitted for a script the model did not
+   * author (a saved workflow), where "fix the script" would be wrong advice.
+   */
+  authoringHint?: string;
 }
 
 export type WorkflowRunSettlement =
@@ -306,6 +312,13 @@ export class WorkflowRunner {
           script,
           scriptPath,
           ...(journalPath ? { journalPath } : {}),
+          // A saved workflow is the user's file, and the recovery advice says to
+          // copy it first. The name is resolved here — from the resumed run
+          // too, which a caller re-running a saved workflow's inline source
+          // does not pass — so the hint follows the same decision.
+          ...(options.authoringHint && !workflowName
+            ? { authoringHint: options.authoringHint }
+            : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
