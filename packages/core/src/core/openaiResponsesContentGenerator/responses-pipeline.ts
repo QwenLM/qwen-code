@@ -23,6 +23,8 @@ import {
 } from './responses-converter.js';
 import {
   countReasoningItems,
+  downgradeEncryptedReasoningItems,
+  isEncryptedReasoningRejection,
   downgradeRejectedReasoningItems,
   parseReasoningIdRejection,
 } from './responses-reasoning-rejection.js';
@@ -291,8 +293,8 @@ export class ResponsesPipeline {
 
   /**
    * Connect, and if the endpoint explicitly refuses a replayed reasoning item
-   * id, send the same request once more with those items downgraded (issue
-   * #9452).
+   * id or encrypted content, send the same request once more with those items
+   * downgraded (issue #9452).
    *
    * The first request always goes out exactly as built. Recovery matters
    * because the offending ids live in persisted history: without it, every
@@ -317,7 +319,7 @@ export class ResponsesPipeline {
   }
 
   /**
-   * The retry request, or undefined when the error is not a reasoning-id
+   * The retry request, or undefined when the error is not a reasoning replay
    * rejection or nothing in this body would change. Builds a new request
    * object -- the caller's request, the input array, and every item it holds
    * are left untouched.
@@ -329,17 +331,21 @@ export class ResponsesPipeline {
     if (typeof error !== 'object' || error === null) return undefined;
     const { reasoningIdRejection: rejection } =
       error as Partial<ResponsesApiError>;
-    if (!rejection) return undefined;
-
-    const input = downgradeRejectedReasoningItems(apiRequest.input, rejection);
+    const encryptedRejected = (error as Partial<ResponsesApiError>)
+      .encryptedReasoningRejected;
+    const input = rejection
+      ? downgradeRejectedReasoningItems(apiRequest.input, rejection)
+      : encryptedRejected
+        ? downgradeEncryptedReasoningItems(apiRequest.input)
+        : apiRequest.input;
     if (input === apiRequest.input) return undefined;
 
     const reasoningItems = countReasoningItems(apiRequest.input);
     // Metadata only: no id, no encrypted content, no endpoint.
     debugLogger.debug(
       'Retrying once with downgraded reasoning replay',
-      `namedIndex=${rejection.namedIndex}`,
-      `maxLengthReported=${rejection.maxLength !== null}`,
+      `namedIndex=${rejection?.namedIndex ?? 'all'}`,
+      `maxLengthReported=${rejection?.maxLength != null}`,
       `reasoningItems=${reasoningItems}`,
       `downgradedItems=${reasoningItems - countReasoningItems(input)}`,
     );
@@ -735,6 +741,10 @@ export class ResponsesPipeline {
       ) as ResponsesApiError;
       err.status = response.status;
       err.reasoningIdRejection = rejection;
+      err.encryptedReasoningRejected = isEncryptedReasoningRejection(
+        response.status,
+        errBody,
+      );
       throw redactProxyError(err);
     }
 
@@ -1130,6 +1140,7 @@ function sanitizePromptCacheKey(key: string): string {
 interface ResponsesApiError extends Error {
   status: number;
   reasoningIdRejection?: ReasoningIdRejection;
+  encryptedReasoningRejected?: boolean;
 }
 
 export function mergeStreamResponses(
