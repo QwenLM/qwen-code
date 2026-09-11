@@ -789,6 +789,7 @@ describe('package scripts', () => {
       '.npmrc',
       '.pnpmfile.mjs',
       'package.json',
+      'package-lock.json',
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',
