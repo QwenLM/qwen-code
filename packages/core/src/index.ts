@@ -246,6 +246,11 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export {
+  deleteArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+} from './tools/artifact/artifact-snapshots.js';
+export {
   RecordArtifactTool,
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';

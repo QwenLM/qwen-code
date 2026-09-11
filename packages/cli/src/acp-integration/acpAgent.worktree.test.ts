@@ -388,6 +388,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     );
 
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({

@@ -9,6 +9,7 @@ import type { GenerateContentParameters } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
 import type {
+  ResponsesApiInputItem,
   ResponsesApiRequest,
   ResponsesApiReasoning,
   ResponsesSSEEvent,
@@ -52,6 +53,7 @@ import {
   type ResolvedModelReasoningConfig,
 } from '../model-reasoning-config.js';
 import { getGptReasoningCapabilities } from '../reasoning-effort.js';
+import { ResponsesHttpError } from '../../utils/responses-http-error.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -627,7 +629,8 @@ export class ResponsesPipeline {
     const body = JSON.stringify(apiRequest);
     debugLogger.debug(
       `POST ${redactProxyCredentials(url)}`,
-      body.substring(0, 500),
+      `bodyBytes=${body.length}`,
+      `inputItems=${summarizeInputItemTypes(apiRequest.input)}`,
     );
 
     // Compose the caller's AbortSignal with a connect-timeout controller so a
@@ -735,11 +738,18 @@ export class ResponsesPipeline {
         // A truncated URL authority can end before the credential's '@'.
         diagnosticBody = diagnosticBody.replace(/\/\/[^/\s]*$/, '//<redacted>');
       }
-      const excerpt = redactProxyCredentials(diagnosticBody).substring(0, 500);
-      const err = new Error(
-        `Responses API error ${response.status}: ${excerpt}`,
+      diagnosticBody = redactProxyCredentials(diagnosticBody);
+      const err = new ResponsesHttpError(
+        response.status,
+        diagnosticBody,
+        response.headers,
+        [
+          apiKey,
+          headers['authorization'],
+          headers['authorization']?.replace(/^Bearer\s+/i, ''),
+          headers['api-key'],
+        ],
       ) as ResponsesApiError;
-      err.status = response.status;
       err.reasoningIdRejection = rejection;
       err.encryptedReasoningRejected = isEncryptedReasoningRejection(
         response.status,
@@ -1137,8 +1147,23 @@ function sanitizePromptCacheKey(key: string): string {
     .slice(0, PROMPT_CACHE_KEY_MAX_LENGTH);
 }
 
-interface ResponsesApiError extends Error {
-  status: number;
+/**
+ * Counts `input` items by type for the connect-phase debug log. Metadata only:
+ * the log must never carry message text, tool names/arguments, reasoning ids,
+ * or encrypted reasoning content (see the sibling convention at
+ * `buildReasoningReplayRetry` and issue #11667).
+ */
+function summarizeInputItemTypes(items: ResponsesApiInputItem[]): string {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    counts.set(item.type, (counts.get(item.type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([type, count]) => `${type}=${count}`)
+    .join(',');
+}
+
+interface ResponsesApiError extends ResponsesHttpError {
   reasoningIdRejection?: ReasoningIdRejection;
   encryptedReasoningRejected?: boolean;
 }
