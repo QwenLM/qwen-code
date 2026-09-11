@@ -384,17 +384,7 @@ class FileConversationRuntimeOwnership implements ConversationRuntimeOwnership {
           await this.commitRecord(identity, undefined);
         }
       };
-      const liveDiscovery = await import('../live/discovery.js');
-      const handoff = await liveDiscovery.handoffLiveDiscoveryOwner(
-        this.stableBaseDir,
-        this.current,
-        commitOwner,
-        {
-          isProcessAlive: this.isProcessAlive,
-          waitForHandoffGrace: false,
-        },
-      );
-      reclaimed ||= handoff.reclaimed;
+      await commitOwner();
     } catch (error) {
       operationError = error;
     }
@@ -561,19 +551,10 @@ class FileConversationRuntimeOwnership implements ConversationRuntimeOwnership {
 
   private mapAcquireError(error: unknown): ConversationRuntimeOwnershipError {
     if (error instanceof ConversationRuntimeOwnershipError) return error;
-    if (
-      error instanceof Error &&
-      error.name === 'LiveDiscoveryOwnerActiveError'
-    ) {
-      return conversationRuntimeInUseError();
-    }
     if (error instanceof UnsafeOwnershipStateError) {
       return this.compromise(error);
     }
-    if (
-      this.state === 'provisional' ||
-      (error instanceof Error && error.name === 'LiveDiscoveryStateError')
-    ) {
+    if (this.state === 'provisional') {
       return this.compromise(error);
     }
     const code = (error as NodeJS.ErrnoException).code;

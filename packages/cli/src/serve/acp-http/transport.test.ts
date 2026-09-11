@@ -5523,7 +5523,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         () => undefined,
         {
           materializeConversationDirectory,
-          isSessionActive: () => false,
         },
         Storage.getRuntimeBaseDir(),
         () => ({
@@ -5630,7 +5629,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       () => undefined,
       {
         materializeConversationDirectory,
-        isSessionActive: () => false,
       },
       Storage.getRuntimeBaseDir(),
     );

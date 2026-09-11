@@ -127,7 +127,6 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
-  buildPermissionCheckContext,
   evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -273,22 +272,6 @@ import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import { normalizeChannelDeliveryText } from '../../runtime/channel-delivery.js';
-import {
-  CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
-  CaptureScreenContextTool,
-} from '../live/capture-screen-context.js';
-import {
-  createLiveTaskTools,
-  type LiveTaskTool,
-} from '../live/live-task-tools.js';
-import {
-  SPEAK_TO_USER_TOOL_NAME,
-  SpeakToUserTool,
-} from '../live/live-speak-to-user.js';
-import {
-  LIVE_BACKEND_END_INSTRUCTIONS,
-  LIVE_BACKEND_START_INSTRUCTIONS,
-} from '../live/live-backend-instructions.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -2178,11 +2161,6 @@ export class Session implements SessionContext {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
-  private liveScreenContextTool?: CaptureScreenContextTool;
-  private liveTaskTools: readonly LiveTaskTool[] = [];
-  private liveSpeakToUserTool?: SpeakToUserTool;
-  private liveConversationActive: boolean | undefined;
-  private liveEndInstructionPending = false;
   private readonly requiresManagedConversationBinding: boolean;
   private readonly requiresManagedConversationActivation: boolean;
   private readonly slashCommandPolicy?: NonInteractiveSlashCommandPolicy;
@@ -3444,178 +3422,6 @@ export class Session implements SessionContext {
     });
   }
 
-  async enableLiveScreenContext(): Promise<void> {
-    const registry = this.config.getToolRegistry();
-    const existing = registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
-    if (existing && existing !== this.liveScreenContextTool) {
-      throw new Error(
-        'capture_screen_context is reserved for the trusted Live Appshot channel.',
-      );
-    }
-    if (!this.liveScreenContextTool) {
-      const tool = new CaptureScreenContextTool(async () => {
-        const response = await this.client.extMethod(
-          SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
-          { callerSessionId: this.sessionId },
-        );
-        const appName = response['appName'];
-        const windowTitle = response['windowTitle'];
-        const accessibilityText = response['accessibilityText'];
-        const screenshotPath = response['screenshotPath'];
-        if (
-          typeof appName !== 'string' ||
-          !appName ||
-          (windowTitle !== undefined && typeof windowTitle !== 'string') ||
-          typeof accessibilityText !== 'string' ||
-          typeof screenshotPath !== 'string' ||
-          !screenshotPath
-        ) {
-          throw new Error('capture_screen_context: invalid daemon response');
-        }
-        return {
-          appName,
-          ...(windowTitle ? { windowTitle } : {}),
-          accessibilityText,
-          screenshotPath,
-        };
-      });
-      registry.registerTool(tool);
-      if (registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME) !== tool) {
-        throw new Error(
-          'capture_screen_context is required for Live Voice but is disabled.',
-        );
-      }
-      this.liveScreenContextTool = tool;
-    }
-
-    if (this.liveTaskTools.length === 0) {
-      const tools = createLiveTaskTools(async (name, args) =>
-        this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveTaskTool, {
-          callerSessionId: this.sessionId,
-          name,
-          arguments: args,
-        }),
-      );
-      for (const tool of tools) {
-        if (registry.getTool(tool.name)) {
-          throw new Error(
-            `${tool.name} is reserved for the trusted Live task channel.`,
-          );
-        }
-      }
-      for (const tool of tools) registry.registerTool(tool);
-      for (const tool of tools) {
-        if (registry.getTool(tool.name) !== tool) {
-          throw new Error(
-            `${tool.name} is required for Live Voice but is disabled.`,
-          );
-        }
-      }
-      this.liveTaskTools = tools;
-    }
-
-    const existingSpeakToUser = registry.getTool(SPEAK_TO_USER_TOOL_NAME);
-    if (
-      existingSpeakToUser &&
-      existingSpeakToUser !== this.liveSpeakToUserTool
-    ) {
-      throw new Error(
-        'speak_to_user is reserved for the trusted Live speech channel.',
-      );
-    }
-    if (!this.liveSpeakToUserTool) {
-      const tool = new SpeakToUserTool(async (message) => {
-        await this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
-          callerSessionId: this.sessionId,
-          message,
-        });
-      });
-      registry.registerTool(tool);
-      if (registry.getTool(SPEAK_TO_USER_TOOL_NAME) !== tool) {
-        throw new Error(
-          'speak_to_user is required for Live Voice but is disabled.',
-        );
-      }
-      this.liveSpeakToUserTool = tool;
-    }
-    await this.#syncLiveToolDeclarations();
-  }
-
-  async #syncLiveToolDeclarations(): Promise<void> {
-    const llmClient = this.config.getLlmClient();
-    if (!llmClient) {
-      throw new Error('The Live backend model client is unavailable.');
-    }
-    await llmClient.setTools();
-  }
-
-  async setLiveConversationActive(active: boolean): Promise<void> {
-    if (this.liveConversationActive === active) return;
-    if (active) {
-      this.liveConversationActive = true;
-      this.liveEndInstructionPending = false;
-      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_START_INSTRUCTIONS);
-    } else {
-      if (this.liveConversationActive !== true) {
-        this.liveConversationActive = false;
-        return;
-      }
-      this.liveConversationActive = false;
-      this.liveEndInstructionPending = true;
-      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
-    }
-    await this.config.getLlmClient()?.refreshSystemInstruction();
-  }
-
-  async appendLiveConversationTranscript(
-    entries: ReadonlyArray<{
-      role: 'user' | 'assistant';
-      text: string;
-    }>,
-    model: string,
-  ): Promise<void> {
-    if (this.liveConversationActive !== true) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Live conversation is not active for this session.',
-      );
-    }
-    const recording = this.config.getChatRecordingService();
-    if (!recording) {
-      throw RequestError.internalError(
-        undefined,
-        'Chat recording service unavailable',
-      );
-    }
-    await recording.recordRealtimeConversation(entries, model);
-    for (const entry of entries) {
-      try {
-        await this.sendUpdate({
-          sessionUpdate:
-            entry.role === 'user'
-              ? 'user_message_chunk'
-              : 'agent_message_chunk',
-          content: { type: 'text', text: entry.text },
-          _meta: {
-            source: 'realtime_voice',
-            qwenDiscreteMessage: true,
-          },
-        });
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to emit persisted realtime transcript: ${this.#formatError(error)}`,
-        );
-      }
-    }
-  }
-
-  async #consumeLiveEndInstruction(): Promise<void> {
-    if (this.liveConversationActive || !this.liveEndInstructionPending) return;
-    this.liveEndInstructionPending = false;
-    this.config.setLiveAppendSystemPrompt(undefined);
-    await this.config.getLlmClient()?.refreshSystemInstruction();
-  }
-
   getId(): string {
     return this.sessionId;
   }
@@ -4721,13 +4527,6 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
-    if (
-      this.liveScreenContextTool ||
-      this.liveTaskTools.length > 0 ||
-      this.liveSpeakToUserTool
-    ) {
-      await this.#syncLiveToolDeclarations();
-    }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -5100,7 +4899,6 @@ export class Session implements SessionContext {
       resolveCompletion();
       this.pendingPromptCompletion = null;
       void this.#drainGoalQueue();
-      await this.#consumeLiveEndInstruction();
     }
   }
 
@@ -12321,21 +12119,8 @@ export class Session implements SessionContext {
         }
 
         // ---- L1: Tool enablement check ----
-        const isTrustedLiveScreenContextTool =
-          tool === this.liveScreenContextTool;
-        const isTrustedLiveTaskTool = this.liveTaskTools.includes(
-          tool as LiveTaskTool,
-        );
-        const isTrustedLiveSpeakToUserTool = tool === this.liveSpeakToUserTool;
         const pm = this.config.getPermissionManager?.();
-        const isTrustedLiveTool =
-          isTrustedLiveScreenContextTool ||
-          isTrustedLiveTaskTool ||
-          isTrustedLiveSpeakToUserTool;
-        const toolEnabled =
-          pm && !isTrustedLiveTool
-            ? await pm.isToolEnabled(policyToolName)
-            : true;
+        const toolEnabled = pm ? await pm.isToolEnabled(policyToolName) : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;
         if (pm && !toolEnabled) {
@@ -12475,27 +12260,12 @@ export class Session implements SessionContext {
             tool.constructor.name === 'AskUserQuestionTool';
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
-          const flowResult =
-            isTrustedLiveScreenContextTool || isTrustedLiveTaskTool
-              ? {
-                  defaultPermission: 'allow' as const,
-                  finalPermission: 'allow' as const,
-                  pmForcedAsk: false,
-                  pmCtx: buildPermissionCheckContext(
-                    policyToolName,
-                    toolParams,
-                    this.config.getTargetDir(),
-                    invocation.permissionAliases,
-                  ),
-                  requiresUserInteraction: false,
-                  denyMessage: undefined,
-                }
-              : await evaluatePermissionFlow(
-                  this.config,
-                  invocation,
-                  policyToolName,
-                  toolParams,
-                );
+          const flowResult = await evaluatePermissionFlow(
+            this.config,
+            invocation,
+            policyToolName,
+            toolParams,
+          );
           const permissionFlowCancellation =
             cancelBeforeExecutionIfAborted(toolName);
           if (permissionFlowCancellation) return permissionFlowCancellation;

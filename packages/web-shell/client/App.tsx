@@ -125,7 +125,6 @@ import {
 } from './session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from './session-catalog/workspace-session-live-state';
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
-import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -9278,7 +9277,6 @@ export function App({
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
     sourceSessionId: string | undefined;
-    mode: 'cleared' | 'live';
     newSessionReady: boolean;
     submitScheduled: boolean;
   } | null>(null);
@@ -10757,11 +10755,6 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
-  const liveSetup = useLiveVoiceSetup(
-    workspaceSettings.some(
-      (setting) => setting.key === 'experimental.liveVoice.enabled',
-    ),
-  );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
   // required to fail closed in that case too. `loading` is deliberately NOT
@@ -10893,7 +10886,6 @@ export function App({
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
-    liveSetup,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
@@ -12202,17 +12194,7 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live') {
-          pendingManualTitleRef.current = undefined;
-          gitModeIntentRef.current = { mode: 'current' };
-          setGitModeIntent({ mode: 'current' });
-          try {
-            await workspace.client.startLive('new');
-            return sessionOpenInvocationRef.current === invocation;
-          } catch (error) {
-            if (sessionOpenInvocationRef.current !== invocation) return false;
-            reportError(error, 'Failed to start a new Live chat');
-            return false;
-          }
+          nextContext = { kind: 'standalone' };
         }
       } else {
         let capabilities = workspaceCapabilitiesRef.current;
@@ -12300,6 +12282,7 @@ export function App({
             ? reloadLoadedSkills(targetWorkspaceCwd, false, true)
             : Promise.resolve(undefined),
         ]);
+        if (sessionOpenInvocationRef.current !== invocation) return false;
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
@@ -12334,7 +12317,6 @@ export function App({
       showChat,
       t,
       workspaceCapabilitiesReady,
-      workspace.client,
       workspace.status,
     ],
   );
@@ -12633,14 +12615,9 @@ export function App({
 
       const activeSessionId = connectionRef.current.sessionId;
       if (
-        (pending.mode === 'cleared' &&
-          pending.sourceSessionId !== undefined &&
-          activeSessionId !== undefined &&
-          activeSessionId !== pending.sourceSessionId) ||
-        (pending.mode === 'live' &&
-          activeSessionId !== undefined &&
-          activeSessionId !== pending.sourceSessionId &&
-          connectionRef.current.sessionContext?.kind !== 'live')
+        pending.sourceSessionId !== undefined &&
+        activeSessionId !== undefined &&
+        activeSessionId !== pending.sourceSessionId
       ) {
         pendingNewSessionSuggestionSubmitRef.current = null;
         setIsStartingNewSessionSuggestion(false);
@@ -12651,13 +12628,7 @@ export function App({
         return;
       }
 
-      if (
-        pending.mode === 'live'
-          ? activeSessionId === undefined ||
-            activeSessionId === pending.sourceSessionId ||
-            connectionRef.current.sessionContext?.kind !== 'live'
-          : activeSessionId !== undefined
-      ) {
+      if (activeSessionId !== undefined) {
         return;
       }
 
@@ -12675,13 +12646,7 @@ export function App({
           return;
         }
         const latestSessionId = connectionRef.current.sessionId;
-        if (
-          latestPending.mode === 'live'
-            ? latestSessionId === undefined ||
-              latestSessionId === latestPending.sourceSessionId ||
-              connectionRef.current.sessionContext?.kind !== 'live'
-            : latestSessionId !== undefined
-        ) {
+        if (latestSessionId !== undefined) {
           pendingNewSessionSuggestionSubmitRef.current = null;
           setIsStartingNewSessionSuggestion(false);
           return;
@@ -12714,16 +12679,9 @@ export function App({
     setIsStartingNewSessionSuggestion(true);
     const token = newSessionSuggestionSubmitTokenRef.current + 1;
     newSessionSuggestionSubmitTokenRef.current = token;
-    const mode =
-      !lockedWorkspaceCwd &&
-      (pendingSessionContextRef.current ?? connectionRef.current.sessionContext)
-        ?.kind === 'live'
-        ? 'live'
-        : 'cleared';
     pendingNewSessionSuggestionSubmitRef.current = {
       token,
       sourceSessionId: connectionRef.current.sessionId,
-      mode,
       newSessionReady: false,
       submitScheduled: false,
     };
@@ -12740,13 +12698,11 @@ export function App({
         ...pending,
         newSessionReady: true,
       };
-      if (mode === 'cleared') {
-        const nextContext = pendingSessionContextRef.current;
-        if (nextContext?.kind === 'standalone') {
-          onSessionIdChange?.(undefined, undefined, undefined, nextContext);
-        } else {
-          onSessionIdChange?.(undefined);
-        }
+      const nextContext = pendingSessionContextRef.current;
+      if (nextContext?.kind === 'standalone') {
+        onSessionIdChange?.(undefined, undefined, undefined, nextContext);
+      } else {
+        onSessionIdChange?.(undefined);
       }
       flushPendingNewSessionSuggestionSubmit(token);
     });
@@ -12755,7 +12711,6 @@ export function App({
     dismissNewSessionSuggestion,
     flushPendingNewSessionSuggestionSubmit,
     isStartingNewSessionSuggestion,
-    lockedWorkspaceCwd,
     newSessionSuggestion,
     onSessionIdChange,
     suppressNewSessionSuggestion,

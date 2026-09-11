@@ -29,8 +29,6 @@ import {
   type WebShellLanguage,
 } from '../../i18n';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
-import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
-import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
   WEB_SHELL_THEMES,
   WebShellThemeId,
@@ -105,7 +103,6 @@ export interface SettingsMessageSettingsState {
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
-  liveSetup?: UseLiveVoiceSetupResult;
 }
 
 const SUB_DIALOG_KEYS = new Set([
@@ -120,12 +117,11 @@ const HIDDEN_SETTING_KEYS = new Set([
   // Compact behavior is fixed on in the web shell; the daemon schema still
   // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
-  'mcpServers',
-  'model.reasoningEffort',
-]);
-const LIVE_SETTING_KEYS = new Set([
+  // Older daemons may still advertise the retired built-in Live settings.
   'experimental.liveVoice.enabled',
   'experimental.liveVoice.shortcut',
+  'mcpServers',
+  'model.reasoningEffort',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -252,8 +248,7 @@ interface CategoryGroup {
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
   | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
-  | { type: 'local-control' }
-  | { type: 'live' };
+  | { type: 'local-control' };
 
 interface SettingsPageCategory {
   id: string;
@@ -432,8 +427,7 @@ export function SettingsMessage({
   useEffect(() => {
     refreshNotificationPermission?.();
   }, [refreshNotificationPermission]);
-  const { status, settings, loading, error, reload, setValue, liveSetup } =
-    settingsState;
+  const { status, settings, loading, error, reload, setValue } = settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -444,9 +438,7 @@ export function SettingsMessage({
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
-      (setting) =>
-        !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+      (setting) => !HIDDEN_SETTING_KEYS.has(setting.key),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -485,18 +477,6 @@ export function SettingsMessage({
       const group = groups.find((item) => item.items.includes(localItem));
       group?.items.push({ type: 'local', localKey: 'browserNotifications' });
     }
-    if (liveSetup?.supported) {
-      const experimental = groups.find((group) => group.id === 'Experimental');
-      if (experimental) {
-        experimental.items.unshift({ type: 'live' });
-      } else {
-        groups.push({
-          id: 'Experimental',
-          label: formatSettingCategory('Experimental', t),
-          items: [{ type: 'live' }],
-        });
-      }
-    }
     const daemon = groups.find((group) => group.id === 'Daemon');
     if (daemon) {
       daemon.items.unshift({ type: 'local-control' });
@@ -508,7 +488,7 @@ export function SettingsMessage({
       });
     }
     return groups;
-  }, [liveSetup, settings, t, hasNotifications]);
+  }, [settings, t, hasNotifications]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -912,14 +892,6 @@ export function SettingsMessage({
                               />
                             </div>
                           );
-                        }
-                        if (item.type === 'live') {
-                          return liveSetup ? (
-                            <div key="live-voice-setup">
-                              {separator}
-                              <LiveVoiceSettingsCard setup={liveSetup} />
-                            </div>
-                          ) : null;
                         }
                         if (item.type === 'local-control') {
                           return (

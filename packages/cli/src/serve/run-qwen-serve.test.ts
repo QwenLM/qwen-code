@@ -591,9 +591,6 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
         ...makeRuntimeBridge(),
         recordHeartbeat: vi.fn(),
         resumeSession: vi.fn().mockResolvedValue({}),
-        setLiveScreenContextCaptureHandler: vi.fn(),
-        setLiveTaskToolRequestHandler: vi.fn(),
-        setLiveSpeakToUserHandler: vi.fn(),
       }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
   );
   let handle: RunHandle | undefined;
@@ -687,9 +684,6 @@ it('marks only the live-conversation bridge with the Conversations provenance en
           ...makeRuntimeBridge(),
           recordHeartbeat: vi.fn(),
           resumeSession: vi.fn().mockResolvedValue({}),
-          setLiveScreenContextCaptureHandler: vi.fn(),
-          setLiveTaskToolRequestHandler: vi.fn(),
-          setLiveSpeakToUserHandler: vi.fn(),
         }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );
   const overridesOf = (

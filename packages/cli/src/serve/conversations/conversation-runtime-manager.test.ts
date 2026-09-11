@@ -31,9 +31,6 @@ function createBridge(mandatoryLeaseAttested = true) {
   return {
     mandatoryLeaseAttested,
     preheat: vi.fn(async () => undefined),
-    setLiveScreenContextCaptureHandler: vi.fn(),
-    setLiveTaskToolRequestHandler: vi.fn(),
-    setLiveSpeakToUserHandler: vi.fn(),
   } as unknown as AcpSessionBridge;
 }
 
@@ -192,9 +189,6 @@ describe('ConversationRuntimeManager', () => {
     expect(workspace.assertExactRoot).toHaveBeenCalledTimes(2);
     expect(workspace.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
     expect(bridge.preheat).not.toHaveBeenCalled();
-    expect(bridge.setLiveScreenContextCaptureHandler).not.toHaveBeenCalled();
-    expect(bridge.setLiveTaskToolRequestHandler).not.toHaveBeenCalled();
-    expect(bridge.setLiveSpeakToUserHandler).not.toHaveBeenCalled();
   });
 
   it('adopts an active owned runtime without publishing another one', async () => {

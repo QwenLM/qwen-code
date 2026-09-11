@@ -326,10 +326,6 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
-vi.mock('../live/LiveVoiceButton', () => ({
-  LiveVoiceButton: () => <span data-testid="live-voice-button" />,
-}));
-
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -499,7 +495,7 @@ function rerenderChatEditor(
 }
 
 describe('ChatEditor voice toolbar integration', () => {
-  it('keeps dictation and Live together when the host toolbar allows voice', () => {
+  it('shows dictation when the host toolbar allows voice', () => {
     const defaults = renderChatEditor({});
     const voiceOnly = renderChatEditor({ visibleToolbarActions: ['voice'] });
     const hidden = renderChatEditor({ visibleToolbarActions: [] });
@@ -508,14 +504,8 @@ describe('ChatEditor voice toolbar integration', () => {
       expect(
         container.querySelector('[data-testid="voice-button"]'),
       ).not.toBeNull();
-      expect(
-        container.querySelector('[data-testid="live-voice-button"]'),
-      ).not.toBeNull();
     }
     expect(hidden.querySelector('[data-testid="voice-button"]')).toBeNull();
-    expect(
-      hidden.querySelector('[data-testid="live-voice-button"]'),
-    ).toBeNull();
   });
 });
 
@@ -926,13 +916,10 @@ describe('ChatEditor context usage ring', () => {
     expect(
       button.querySelector('[data-level]')?.getAttribute('data-level'),
     ).toBe('normal');
-    const liveVoice = container.querySelector(
-      '[data-testid="live-voice-button"]',
-    )!;
+    const voice = container.querySelector('[data-testid="voice-button"]')!;
     // The ring sits immediately left of the voice cluster.
     expect(
-      button.compareDocumentPosition(liveVoice) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+      button.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 

@@ -1620,6 +1620,14 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  it.each(['', ' \n\t '])(
+    'ignores an empty appended system prompt %j',
+    (prompt) => {
+      const config = new Config({ ...baseParams, appendSystemPrompt: prompt });
+      expect(config.getAppendSystemPrompt()).toBeUndefined();
+    },
+  );
+
   describe('getDefaultVisionBridgeModel', () => {
     // Primary is text-only and lives on the 'openai' provider.
     const stubProvider = (config: Config, models: unknown[]) => {

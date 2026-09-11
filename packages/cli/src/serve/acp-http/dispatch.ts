@@ -1035,7 +1035,6 @@ export const ACP_PROTOCOL_VERSION = 1;
 
 export interface LiveSessionIsolation {
   materializeConversationDirectory(sessionId: string): Promise<string>;
-  isSessionActive?(sessionId: string): boolean;
 }
 
 export type LegacyStandaloneSessionRestorer = Pick<
@@ -1300,32 +1299,6 @@ export class AcpDispatcher {
       throw new AcpParamError('`resolveConflicts` must be a boolean');
     }
     return value;
-  }
-
-  private rejectActiveLiveSessionMutation(
-    conn: AcpConnection,
-    id: JsonRpcId | undefined,
-    sessionIds: readonly string[],
-  ): boolean {
-    const activeSessionId = sessionIds.find((sessionId) =>
-      this.liveSessionIsolation?.isSessionActive?.(sessionId),
-    );
-    if (!activeSessionId) return false;
-    if (id !== undefined) {
-      conn.sendConn(
-        error(
-          id,
-          RPC.INVALID_REQUEST,
-          'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
-          {
-            errorKind: 'live_session_active',
-            httpStatus: 409,
-            sessionId: activeSessionId,
-          },
-        ),
-      );
-    }
-    return true;
   }
 
   private serializeSessionErrors(
@@ -1752,7 +1725,7 @@ export class AcpDispatcher {
                 error(
                   id,
                   RPC.INVALID_PARAMS,
-                  'Sessions in the Conversations workspace can only be created by Live Voice.',
+                  'Use the standalone session API to create sessions in the Conversations workspace.',
                   { errorKind: 'live_session_creation_reserved' },
                 ),
               );
@@ -2368,9 +2341,6 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          if (this.rejectActiveLiveSessionMutation(conn, id, [sessionId])) {
-            return;
-          }
           // Close the ownership gate before the coordinator await so
           // concurrent closes from this connection cannot both reach the bridge.
           conn.ownedSessions.delete(sessionId);
@@ -2449,7 +2419,7 @@ export class AcpDispatcher {
                 error(
                   id,
                   RPC.INVALID_PARAMS,
-                  'Sessions in the Conversations workspace can only be created by Live Voice.',
+                  'Use the standalone session API to create sessions in the Conversations workspace.',
                   { errorKind: 'live_session_creation_reserved' },
                 ),
               );
@@ -4998,7 +4968,6 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
-          if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace);
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
@@ -5027,7 +4996,6 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
           const resolveConflicts = this.parseResolveConflicts(params);
-          if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });

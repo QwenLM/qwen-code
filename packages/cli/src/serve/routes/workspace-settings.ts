@@ -60,13 +60,6 @@ const WEB_SHELL_SETTINGS = new Set([
   'mcpServers',
 ]);
 
-const LIVE_WEB_SHELL_SETTINGS = [
-  'experimental.liveVoice.enabled',
-  'experimental.liveVoice.shortcut',
-] as const;
-
-const LIVE_MANAGED_SETTINGS = new Set<string>(LIVE_WEB_SHELL_SETTINGS);
-
 // The primary /workspace/settings route may write the global user scope
 // (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
 // workspace-only by design.
@@ -139,7 +132,7 @@ function rejectWorkspaceRestrictedWrite(
   return false;
 }
 
-function getAllowedKeys(includeLiveVoice = false): Set<string> {
+function getAllowedKeys(): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -147,9 +140,6 @@ function getAllowedKeys(includeLiveVoice = false): Set<string> {
   );
   for (const key of WEB_SHELL_SETTINGS) {
     keys.add(key);
-  }
-  if (includeLiveVoice) {
-    for (const key of LIVE_WEB_SHELL_SETTINGS) keys.add(key);
   }
   return keys;
 }
@@ -184,14 +174,12 @@ function buildSettingsResponse(
 
     const publicValue = (value: unknown) =>
       key === 'mcpServers' ? redactMcpServersSetting(value) : value;
-    const effective = LIVE_MANAGED_SETTINGS.has(key)
-      ? (userVal ?? def.default)
-      : (mergedEffective ?? def.default);
+    const effective = mergedEffective ?? def.default;
     const values: SettingDescriptor['values'] = {
       effective: publicValue(effective),
     };
     if (userVal !== undefined) values.user = publicValue(userVal);
-    if (wsVal !== undefined && !LIVE_MANAGED_SETTINGS.has(key)) {
+    if (wsVal !== undefined) {
       values.workspace = publicValue(wsVal);
     }
 
@@ -369,7 +357,6 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  includeLiveVoice?: boolean;
 }
 
 // A user-scoped write can be shadowed by a workspace-scoped value (workspace
@@ -447,7 +434,7 @@ export function registerWorkspaceSettingsRoutes(
     parseAndValidateClientId,
   } = deps;
 
-  const allowedKeys = getAllowedKeys(deps.includeLiveVoice === true);
+  const allowedKeys = getAllowedKeys();
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -531,14 +518,6 @@ export function registerWorkspaceSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
-
-      if (LIVE_MANAGED_SETTINGS.has(key)) {
-        res.status(400).json({
-          error: `Setting "${key}" must be changed through the Live setup API`,
-          code: 'live_managed_setting',
-        });
-        return;
-      }
 
       if (value === undefined || value === null) {
         res.status(400).json({
@@ -717,7 +696,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     invalidateServeFeaturesCache: () => void;
   },
 ): void {
-  const allowedKeys = getAllowedKeys(false);
+  const allowedKeys = getAllowedKeys();
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -796,13 +775,6 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
-      if (LIVE_MANAGED_SETTINGS.has(key)) {
-        res.status(400).json({
-          error: `Setting "${key}" must be changed through the Live setup API`,
-          code: 'live_managed_setting',
-        });
-        return;
-      }
       if (value === undefined || value === null) {
         res.status(400).json({
           error: 'value is required',

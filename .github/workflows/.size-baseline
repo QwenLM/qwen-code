@@ -28,8 +28,6 @@
 10005 dsw-swe-verified-release.yml
 23879 e2e.yml
 11394 finalize-release.yml
-16647 live-host-release.yml
-5950 live-host.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
 2489 pnpm-worktree-smoke.yml
@@ -59,7 +57,6 @@
 17013 serve-ab.yml
 2641 stale.yml
 10920 sync-desktop-to-oss.yml
-10018 sync-live-host-to-oss.yml
 10988 sync-release-to-oss.yml
 2508 tui-parity.yml
 7187 update-ecs-runner-qwen.yml

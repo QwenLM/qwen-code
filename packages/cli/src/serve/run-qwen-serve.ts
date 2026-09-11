@@ -173,9 +173,7 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
-import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
-import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
   workspaceRegistrationId,
@@ -274,7 +272,6 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
-const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
 // Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
 // here so the serve pre-listen graph does not statically import that module.
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
@@ -1901,7 +1898,6 @@ function hasRetryableChannelWorkerShutdownError(error: unknown): boolean {
 }
 
 type CoreRuntime = typeof import('./core-runtime.js');
-type LiveDiscoveryRuntime = typeof import('./live/discovery.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
 type EnvironmentRuntime = typeof import('../config/environment.js');
@@ -2150,12 +2146,8 @@ export interface RunQwenServeDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
   liveConversationWorkspace?: ConversationWorkspace;
-  /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
+  /** Test/embed override; production uses ~/.qwen for Conversations state. */
   liveDiscoveryStableBaseDir?: string;
-  /** Test/embed override for stable Live locator ownership handoff. */
-  liveDiscoveryRetryDelayMs?: number;
-  /** Test/embed override; production uses process.platform. */
-  runtimePlatform?: NodeJS.Platform;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -2167,12 +2159,6 @@ let coreRuntimePromise: Promise<CoreRuntime> | undefined;
 function loadCoreRuntime(): Promise<CoreRuntime> {
   coreRuntimePromise ??= import('./core-runtime.js');
   return coreRuntimePromise;
-}
-
-let liveDiscoveryRuntimePromise: Promise<LiveDiscoveryRuntime> | undefined;
-function loadLiveDiscoveryRuntime(): Promise<LiveDiscoveryRuntime> {
-  liveDiscoveryRuntimePromise ??= import('./live/discovery.js');
-  return liveDiscoveryRuntimePromise;
 }
 
 async function resolveDaemonLogBaseDirForRun(input: {
@@ -4722,7 +4708,6 @@ async function runQwenServeImpl(
     const locals = app.locals as {
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
-      stopLiveCoordinator?: () => void;
       stopWebTerminalRegistry?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
@@ -4739,7 +4724,6 @@ async function runQwenServeImpl(
     };
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
-    stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
@@ -7697,7 +7681,6 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
-      runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
@@ -8348,315 +8331,6 @@ async function runQwenServeImpl(
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const scheme = tlsOptions ? 'https' : 'http';
       const url = `${scheme}://${formatHostForUrl(optsIn.hostname)}:${actualPort}`;
-      const liveRuntimeBaseDir = path.dirname(daemonLogBaseDir);
-      const liveDiscoveryOwners: Array<{
-        runtimeBaseDir: string;
-        instanceNonce: string;
-        pid: number;
-      }> = [];
-      const rememberLiveDiscoveryOwner = (owner: {
-        runtimeBaseDir: string;
-        instanceNonce: string;
-        pid: number;
-      }): void => {
-        if (
-          liveDiscoveryOwners.some(
-            (candidate) =>
-              candidate.runtimeBaseDir === owner.runtimeBaseDir &&
-              candidate.instanceNonce === owner.instanceNonce &&
-              candidate.pid === owner.pid,
-          )
-        ) {
-          return;
-        }
-        liveDiscoveryOwners.push(owner);
-      };
-      let liveDiscoveryPublish: Promise<void> | undefined;
-      let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
-      let liveDiscoveryRetryTask: Promise<void> | undefined;
-      let liveDiscoveryBootRetryApp: Application | undefined;
-      let liveDiscoveryEnabled = false;
-      let liveDiscoveryShuttingDown = false;
-      let liveDiscoveryToggle: Promise<void> = Promise.resolve();
-      let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
-      const pendingLiveDiscoveryBaseDirs = new Set<string>();
-      const warnedLiveDiscoveryOwners = new Set<string>();
-      let warnedLiveDiscoveryBootFailure = false;
-      const liveDiscoveryRetryDelayMs =
-        deps.liveDiscoveryRetryDelayMs !== undefined &&
-        Number.isFinite(deps.liveDiscoveryRetryDelayMs) &&
-        deps.liveDiscoveryRetryDelayMs >= 10
-          ? Math.min(deps.liveDiscoveryRetryDelayMs, 60_000)
-          : DEFAULT_LIVE_DISCOVERY_RETRY_MS;
-      const scheduleLiveDiscoveryRetry = (): void => {
-        if (
-          liveDiscoveryShuttingDown ||
-          !liveDiscoveryEnabled ||
-          liveDiscoveryRetryTimer ||
-          liveDiscoveryRetryTask ||
-          (!liveDiscoveryBootRetryApp &&
-            (pendingLiveDiscoveryBaseDirs.size === 0 ||
-              !attemptPendingLiveDiscovery))
-        ) {
-          return;
-        }
-        liveDiscoveryRetryTimer = setTimeout(() => {
-          liveDiscoveryRetryTimer = undefined;
-          if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) {
-            return;
-          }
-          const retryApp = liveDiscoveryBootRetryApp;
-          liveDiscoveryBootRetryApp = undefined;
-          const retryOperation = retryApp
-            ? publishLiveDiscovery(retryApp)
-            : attemptPendingLiveDiscovery?.();
-          if (!retryOperation) return;
-          const retry = retryOperation.finally(() => {
-            if (liveDiscoveryRetryTask === retry) {
-              liveDiscoveryRetryTask = undefined;
-            }
-            scheduleLiveDiscoveryRetry();
-          });
-          liveDiscoveryRetryTask = retry;
-        }, liveDiscoveryRetryDelayMs);
-        liveDiscoveryRetryTimer.unref();
-      };
-      const cancelLiveDiscoveryRetry = (): void => {
-        if (!liveDiscoveryRetryTimer) return;
-        clearTimeout(liveDiscoveryRetryTimer);
-        liveDiscoveryRetryTimer = undefined;
-      };
-      const publishLiveDiscovery = (
-        candidateApp: Application,
-      ): Promise<void> => {
-        if (liveDiscoveryShuttingDown) return Promise.resolve();
-        if (!resolveAcpHttpEnabled()) return Promise.resolve();
-        if (candidateApp.locals?.['liveVoiceEnabled'] !== true)
-          return Promise.resolve();
-        liveDiscoveryEnabled = true;
-        if (liveDiscoveryPublish) return liveDiscoveryPublish;
-        const coordinator = candidateApp.locals?.['liveCoordinator'] as
-          | { daemonInstanceNonce?: unknown }
-          | undefined;
-        const instanceNonce = coordinator?.daemonInstanceNonce;
-        if (typeof instanceNonce !== 'string') return Promise.resolve();
-        let publicationFailed = false;
-        let publicationRetryable = false;
-        const publication = serveAppLifecycle
-          .startBoot()
-          .then(() => loadLiveDiscoveryRuntime())
-          .then(
-            async ({
-              handoffLiveDiscoveryOwner,
-              LiveDiscoveryOwnerActiveError,
-              LiveDiscoveryPublicationError,
-              removeLiveDiscoveryFile,
-              writeLiveDiscoveryFile,
-            }) => {
-              if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) return;
-              liveDiscoveryBootRetryApp = undefined;
-              warnedLiveDiscoveryBootFailure = false;
-              const stableBaseDir = liveDiscoveryStableBaseDir;
-              const runtimeBaseDir = path.resolve(liveRuntimeBaseDir);
-              const targetBaseDirs = new Set<string>();
-              if (runtimeBaseDir !== stableBaseDir) {
-                targetBaseDirs.add(runtimeBaseDir);
-              }
-              targetBaseDirs.add(stableBaseDir);
-              for (const baseDir of targetBaseDirs) {
-                pendingLiveDiscoveryBaseDirs.add(baseDir);
-              }
-              const record = {
-                url,
-                ...(token ? { token } : {}),
-                protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
-                pid: process.pid,
-                instanceNonce,
-              };
-              attemptPendingLiveDiscovery = async () => {
-                const targets = [...pendingLiveDiscoveryBaseDirs];
-                const published: Array<{
-                  runtimeBaseDir: string;
-                  instanceNonce: string;
-                  pid: number;
-                }> = [];
-                const rollbackPublished = async (): Promise<void> => {
-                  for (const owner of published.splice(0)) {
-                    try {
-                      await removeLiveDiscoveryFile(
-                        owner.runtimeBaseDir,
-                        owner,
-                      );
-                    } catch (cleanupError) {
-                      rememberLiveDiscoveryOwner(owner);
-                      daemonLog.warn(
-                        `failed to roll back Live Host discovery at ${owner.runtimeBaseDir}: ${
-                          cleanupError instanceof Error
-                            ? cleanupError.message
-                            : String(cleanupError)
-                        }`,
-                      );
-                    }
-                  }
-                };
-                for (const runtimeBaseDir of targets) {
-                  if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) {
-                    await rollbackPublished();
-                    return;
-                  }
-                  try {
-                    await handoffLiveDiscoveryOwner(
-                      runtimeBaseDir,
-                      record,
-                      async () => undefined,
-                    );
-                    await writeLiveDiscoveryFile(runtimeBaseDir, record);
-                    published.push({
-                      runtimeBaseDir,
-                      instanceNonce,
-                      pid: process.pid,
-                    });
-                  } catch (err) {
-                    if (
-                      err instanceof LiveDiscoveryPublicationError &&
-                      err.published
-                    ) {
-                      published.push({
-                        runtimeBaseDir,
-                        instanceNonce,
-                        pid: process.pid,
-                      });
-                    }
-                    await rollbackPublished();
-                    if (err instanceof LiveDiscoveryOwnerActiveError) {
-                      if (!warnedLiveDiscoveryOwners.has(runtimeBaseDir)) {
-                        warnedLiveDiscoveryOwners.add(runtimeBaseDir);
-                        daemonLog.warn(
-                          `failed to publish Live Host discovery at ${runtimeBaseDir}: ${err.message}`,
-                        );
-                      }
-                      return;
-                    }
-                    daemonLog.warn(
-                      `failed to publish Live Host discovery at ${runtimeBaseDir}: ${
-                        err instanceof Error ? err.message : String(err)
-                      }`,
-                    );
-                    return;
-                  }
-                }
-                for (const owner of published) {
-                  pendingLiveDiscoveryBaseDirs.delete(owner.runtimeBaseDir);
-                  warnedLiveDiscoveryOwners.delete(owner.runtimeBaseDir);
-                  rememberLiveDiscoveryOwner(owner);
-                }
-              };
-              await attemptPendingLiveDiscovery();
-              scheduleLiveDiscoveryRetry();
-            },
-          )
-          .catch((err) => {
-            publicationFailed = true;
-            publicationRetryable =
-              err instanceof ConversationRuntimeOwnershipError && err.retryable;
-            if (!publicationRetryable || !warnedLiveDiscoveryBootFailure) {
-              warnedLiveDiscoveryBootFailure = publicationRetryable;
-              daemonLog.warn(
-                `failed to publish Live Host discovery: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            }
-          });
-        const trackedPublication = publication.finally(() => {
-          if (
-            publicationFailed &&
-            liveDiscoveryPublish === trackedPublication
-          ) {
-            liveDiscoveryPublish = undefined;
-            if (
-              publicationRetryable &&
-              !liveDiscoveryShuttingDown &&
-              liveDiscoveryEnabled
-            ) {
-              liveDiscoveryBootRetryApp = candidateApp;
-              scheduleLiveDiscoveryRetry();
-            }
-          }
-        });
-        liveDiscoveryPublish = trackedPublication;
-        return liveDiscoveryPublish;
-      };
-      const removeLiveDiscoveryOwners = async (): Promise<void> => {
-        const owners = [...liveDiscoveryOwners];
-        if (owners.length === 0) return;
-        let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
-        try {
-          ({ removeLiveDiscoveryFile } = await loadLiveDiscoveryRuntime());
-        } catch (err) {
-          throw new Error('Failed to load Live discovery cleanup support.', {
-            cause: err,
-          });
-        }
-        const errors: unknown[] = [];
-        for (const owner of owners) {
-          try {
-            await removeLiveDiscoveryFile(owner.runtimeBaseDir, owner);
-            const index = liveDiscoveryOwners.indexOf(owner);
-            if (index >= 0) liveDiscoveryOwners.splice(index, 1);
-          } catch (err) {
-            errors.push(err);
-          }
-        }
-        if (errors.length > 0) {
-          throw new AggregateError(
-            errors,
-            'Live Host discovery cleanup is incomplete.',
-          );
-        }
-      };
-      const unpublishLiveDiscovery = async (): Promise<void> => {
-        liveDiscoveryEnabled = false;
-        liveDiscoveryBootRetryApp = undefined;
-        warnedLiveDiscoveryBootFailure = false;
-        cancelLiveDiscoveryRetry();
-        pendingLiveDiscoveryBaseDirs.clear();
-        attemptPendingLiveDiscovery = undefined;
-        await liveDiscoveryPublish;
-        await liveDiscoveryRetryTask;
-        liveDiscoveryPublish = undefined;
-        liveDiscoveryRetryTask = undefined;
-        await removeLiveDiscoveryOwners();
-      };
-      const attachLiveDiscoveryControl = (candidateApp: Application): void => {
-        (
-          candidateApp.locals as {
-            setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
-            onConversationRuntimeReady?: () => void;
-          }
-        ).setLiveDiscoveryEnabled = (enabled) => {
-          const operation = liveDiscoveryToggle.then(() =>
-            enabled
-              ? publishLiveDiscovery(candidateApp)
-              : unpublishLiveDiscovery(),
-          );
-          liveDiscoveryToggle = operation.catch(() => undefined);
-          return operation;
-        };
-        (
-          candidateApp.locals as {
-            onConversationRuntimeReady?: () => void;
-          }
-        ).onConversationRuntimeReady = () => {
-          void publishLiveDiscovery(candidateApp);
-        };
-      };
-      const cleanupLiveDiscovery = async (): Promise<void> => {
-        liveDiscoveryShuttingDown = true;
-        cancelLiveDiscoveryRetry();
-        await liveDiscoveryToggle;
-        await unpublishLiveDiscovery();
-      };
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
@@ -9073,7 +8747,7 @@ async function runQwenServeImpl(
       ): Promise<void> => {
         if (runtimeStartupSettled) return;
         runtimeApp = candidateApp;
-        attachLiveDiscoveryControl(candidateApp);
+
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
@@ -9110,7 +8784,7 @@ async function runQwenServeImpl(
         }
         if (runtimeStartupSettled) return;
         markServeAppStartupReady();
-        await publishLiveDiscovery(candidateApp);
+
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
         markRuntimeReady();
@@ -9339,8 +9013,7 @@ async function runQwenServeImpl(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
-            liveDiscoveryShuttingDown = true;
-            cancelLiveDiscoveryRetry();
+
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
             const beginRuntimeCoordinatorDrains = (
@@ -9372,11 +9045,6 @@ async function runQwenServeImpl(
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
-            const initiallyMountedLive = initiallyMountedApp?.locals as
-              | { sealAndWaitLiveCoordinator?: () => Promise<void> }
-              | undefined;
-            const initialLiveWait =
-              initiallyMountedLive?.sealAndWaitLiveCoordinator?.();
             const initialSessionMaintenanceWait =
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
@@ -9452,7 +9120,7 @@ async function runQwenServeImpl(
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error
                   // captured during shutdown if any.
-                  let finalErr =
+                  const finalErr =
                     err ?? bridgeShutdownError ?? channelWorkerShutdownError;
                   const retryableChannelClose =
                     channelWorkerShutdownError !== undefined &&
@@ -9469,23 +9137,6 @@ async function runQwenServeImpl(
                     retryableChannelWorkerShutdownErrors.add(retryableError);
                     rej(retryableError);
                     return;
-                  }
-                  try {
-                    await cleanupLiveDiscovery();
-                  } catch (cleanupError) {
-                    const normalizedCleanupError =
-                      cleanupError instanceof Error
-                        ? cleanupError
-                        : new Error(String(cleanupError));
-                    if (finalErr) {
-                      writeDaemonLifecycleBestEffort(() => {
-                        daemonLog.error(
-                          'Live Host discovery cleanup failed during shutdown',
-                          normalizedCleanupError,
-                        );
-                      });
-                    }
-                    finalErr ??= normalizedCleanupError;
                   }
                   if (loggerPublished || loggerSignalOwned) {
                     writeDaemonLifecycleBestEffort(() => {
@@ -9541,13 +9192,6 @@ async function runQwenServeImpl(
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
-                }
-                const liveLifecycleHandle = appForCleanup?.locals as
-                  | { sealAndWaitLiveCoordinator?: () => Promise<void> }
-                  | undefined;
-                await initialLiveWait;
-                if (liveLifecycleHandle !== initiallyMountedLive) {
-                  await liveLifecycleHandle?.sealAndWaitLiveCoordinator?.();
                 }
                 await initialSessionMaintenanceWait;
                 if (sessionMaintenance !== initiallyMountedSessionMaintenance) {
@@ -9774,7 +9418,7 @@ async function runQwenServeImpl(
       const preparedRuntimeApp = runtimeApp ?? runtimeAppForCleanup;
       if (preparedRuntimeApp && bridgeRef && deps.bridge) {
         runtimeApp ??= preparedRuntimeApp;
-        attachLiveDiscoveryControl(preparedRuntimeApp);
+
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef, preparedRuntimeApp);
         }
@@ -9789,7 +9433,7 @@ async function runQwenServeImpl(
             | undefined;
           acpHandle?.attachServer?.(server);
           markServeAppStartupReady();
-          void publishLiveDiscovery(preparedRuntimeApp);
+
           if (!runtimeStartupSettled) {
             runtimeStartupSettled = true;
             clearRuntimeStartupTimer();
@@ -9805,13 +9449,10 @@ async function runQwenServeImpl(
       if (deps.resolveOnListen) {
         loggerPublished = true;
         loggerLifecycle.published();
-        void (liveDiscoveryPublish ?? Promise.resolve()).then(() =>
-          resolve(handle),
-        );
+        resolve(handle);
       } else {
         void runtimeReady.then(
           async () => {
-            await liveDiscoveryPublish;
             loggerPublished = true;
             loggerLifecycle.published();
             resolve(handle);

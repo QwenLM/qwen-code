@@ -135,11 +135,6 @@ const configModules: Record<
   'packages/core': () => import('../../packages/core/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
-  // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
-  // it passes the on-pool floor from any runner name and stays out of the
-  // off-pool sample below.
-  'packages/qwen-live': () =>
-    import('../../packages/qwen-live/vitest.config.js'),
   'packages/sdk-typescript': () =>
     import('../../packages/sdk-typescript/vitest.config.js'),
   'packages/vscode-ide-companion': () =>
@@ -239,7 +234,7 @@ describe('shared-pool test timeout', () => {
     // a flat `testTimeout: 60_000` in any of them must fail here. The rest of
     // the map stays out on purpose: cli/core pin a lower off-pool value and
     // `expectOffPoolCeilings` asserts it, node-repl/sdk-typescript/scripts/tests
-    // carry flat ceilings, and qwen-live's ceiling is unconditional.
+    // carry flat ceilings.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
     vi.resetModules();
     try {
@@ -277,10 +272,9 @@ describe('shared-pool test timeout', () => {
     // the map, so a dropped or double-registered name fails here first.
     const FLAT_CEILING_CONFIGS = [
       // No gated ternary, hence no off-pool branch to sample: node-repl,
-      // sdk-typescript and scripts/tests carry flat literals, qwen-live's
-      // ceiling is unconditional.
+      // sdk-typescript and scripts/tests carry flat literals.
       'packages/node-repl',
-      'packages/qwen-live',
+
       'packages/sdk-typescript',
       'scripts/tests',
     ];

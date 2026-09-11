@@ -6,7 +6,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -66,8 +65,6 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
-import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
-import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
@@ -510,7 +507,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
-    recordRealtimeConversation: ReturnType<typeof vi.fn>;
+
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
@@ -857,7 +854,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
-      recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
+
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
@@ -935,7 +932,7 @@ describe('Session', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
-      setLiveAppendSystemPrompt: vi.fn(),
+
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       // The restore-ask_user_question prompt path is gated on this flag;
       // the restore describe block overrides to true.
@@ -2339,110 +2336,6 @@ describe('Session', () => {
     );
     session.dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
-  });
-
-  it('registers the dedicated Live screen tool and routes it over extMethod', async () => {
-    const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    const screenshotPath = path.join(directory, `${randomUUID()}.png`);
-    await fs.writeFile(
-      screenshotPath,
-      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
-    );
-    const registered = new Map<string, core.AnyDeclarativeTool>();
-    mockToolRegistry.registerTool = vi.fn((tool) => {
-      registered.set(tool.name, tool);
-    });
-    mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
-    mockClient.extMethod = vi.fn().mockResolvedValue({
-      appName: 'Safari',
-      windowTitle: 'LIVE_APP_A',
-      accessibilityText: 'AXWindow LIVE_APP_A',
-      screenshotPath,
-    });
-
-    try {
-      await session.enableLiveScreenContext();
-      const screenTool = registered.get(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
-      expect(screenTool?.name).toBe('capture_screen_context');
-      const invocation = screenTool?.build({});
-      expect(invocation).toBeDefined();
-      await expect(invocation?.getDefaultPermission()).resolves.toBe('allow');
-      await expect(
-        invocation?.execute(new AbortController().signal),
-      ).resolves.toMatchObject({
-        returnDisplay: 'Captured Safari — LIVE_APP_A',
-      });
-      expect(mockClient.extMethod).toHaveBeenCalledWith(
-        'qwen/control/live/capture-screen-context',
-        { callerSessionId: 'test-session-id' },
-      );
-      const speakTool = registered.get(SPEAK_TO_USER_TOOL_NAME);
-      const speakInvocation = speakTool?.build({ message: '测试语音' });
-      await expect(speakInvocation?.getDefaultPermission()).resolves.toBe(
-        'allow',
-      );
-      await speakInvocation?.execute(new AbortController().signal);
-      expect(mockClient.extMethod).toHaveBeenCalledWith(
-        'qwen/control/live/speak-to-user',
-        { callerSessionId: 'test-session-id', message: '测试语音' },
-      );
-      expect(mockLlmClient.setTools).toHaveBeenCalledOnce();
-    } finally {
-      await fs.unlink(screenshotPath).catch(() => undefined);
-    }
-  });
-
-  it('persists Realtime-owned dialogue without adding a backend model turn', async () => {
-    await session.setLiveConversationActive(true);
-    vi.spyOn(session, 'isIdle').mockReturnValue(false);
-    const entries = [
-      { role: 'user' as const, text: '你好' },
-      { role: 'assistant' as const, text: '你好！' },
-    ];
-
-    await session.appendLiveConversationTranscript(
-      entries,
-      'qwen3.5-omni-plus-realtime',
-    );
-
-    expect(
-      mockChatRecordingService.recordRealtimeConversation,
-    ).toHaveBeenCalledWith(entries, 'qwen3.5-omni-plus-realtime');
-    expect(mockChat.addHistory).not.toHaveBeenCalled();
-    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-      sessionId: 'test-session-id',
-      update: {
-        sessionUpdate: 'user_message_chunk',
-        content: { type: 'text', text: '你好' },
-        _meta: {
-          source: 'realtime_voice',
-          qwenDiscreteMessage: true,
-        },
-      },
-    });
-    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-      sessionId: 'test-session-id',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: '你好！' },
-        _meta: {
-          source: 'realtime_voice',
-          qwenDiscreteMessage: true,
-        },
-      },
-    });
-  });
-
-  it('rejects a conflicting tool at the reserved Live Appshot name', async () => {
-    mockToolRegistry.getTool.mockReturnValue({
-      name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
-    });
-
-    await expect(session.enableLiveScreenContext()).rejects.toThrow(
-      /reserved for the trusted Live Appshot channel/u,
-    );
-    expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
   });
 
   it('holds standalone turns until exact directory binding is committed and released', async () => {
@@ -28541,135 +28434,6 @@ describe('Session', () => {
       expect(options.some((option) => option.kind === 'allow_always')).toBe(
         false,
       );
-    });
-
-    it('never requests ACP permission for the trusted Live Appshot tool', async () => {
-      const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
-      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-      const screenshotPath = path.join(directory, `${randomUUID()}.png`);
-      await fs.writeFile(
-        screenshotPath,
-        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
-      );
-      const registered = new Map<string, core.AnyDeclarativeTool>();
-      mockToolRegistry.registerTool = vi.fn((tool) => {
-        registered.set(tool.name, tool);
-      });
-      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
-      mockClient.extMethod = vi.fn().mockResolvedValue({
-        appName: 'Safari',
-        accessibilityText: 'AXWindow',
-        screenshotPath,
-      });
-      await session.enableLiveScreenContext();
-      const permissionManager = {
-        isToolEnabled: vi.fn().mockResolvedValue(false),
-        hasRelevantRules: vi.fn().mockReturnValue(true),
-        evaluate: vi.fn().mockResolvedValue('ask'),
-        hasMatchingAskRule: vi.fn().mockReturnValue(true),
-        findMatchingDenyRule: vi.fn(),
-      };
-      mockConfig.getPermissionManager = vi
-        .fn()
-        .mockReturnValue(permissionManager);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        createStreamWithChunks([
-          {
-            type: core.StreamEventType.CHUNK,
-            value: {
-              functionCalls: [
-                {
-                  id: 'call-live-appshot',
-                  name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
-                  args: {},
-                },
-              ],
-            },
-          },
-        ]),
-      );
-
-      try {
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '看看当前页面' }],
-        });
-
-        expect(permissionManager.isToolEnabled).not.toHaveBeenCalled();
-        expect(permissionManager.evaluate).not.toHaveBeenCalled();
-        expect(mockClient.requestPermission).not.toHaveBeenCalled();
-        expect(mockClient.extMethod).toHaveBeenCalledWith(
-          'qwen/control/live/capture-screen-context',
-          { callerSessionId: 'test-session-id' },
-        );
-      } finally {
-        await fs.unlink(screenshotPath).catch(() => undefined);
-      }
-    });
-
-    it('keeps ordinary Live tools on the normal ACP permission path', async () => {
-      const registered = new Map<string, core.AnyDeclarativeTool>();
-      const execute = vi.fn().mockResolvedValue({
-        llmContent: 'file contents',
-        returnDisplay: 'file contents',
-      });
-      const onConfirm = vi.fn().mockResolvedValue(undefined);
-      const ordinaryTool = {
-        name: 'read_file',
-        kind: core.Kind.Read,
-        displayName: 'Read file',
-        description: 'Read a file',
-        build: vi.fn().mockReturnValue({
-          params: { path: '/tmp/private' },
-          execute,
-          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-          getConfirmationDetails: vi.fn().mockResolvedValue({
-            type: 'info',
-            title: 'Read file',
-            prompt: 'Allow reading this file?',
-            onConfirm,
-          }),
-          getDescription: vi.fn().mockReturnValue('Read /tmp/private'),
-          toolLocations: vi.fn().mockReturnValue([]),
-        }),
-      } as unknown as core.AnyDeclarativeTool;
-      registered.set(ordinaryTool.name, ordinaryTool);
-      mockToolRegistry.registerTool = vi.fn((tool) => {
-        registered.set(tool.name, tool);
-      });
-      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
-      await session.enableLiveScreenContext();
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
-      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        createStreamWithChunks([
-          {
-            type: core.StreamEventType.CHUNK,
-            value: {
-              functionCalls: [
-                {
-                  id: 'call-live-read-file',
-                  name: 'read_file',
-                  args: { path: '/tmp/private' },
-                },
-              ],
-            },
-          },
-        ]),
-      );
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: '读取文件' }],
-      });
-
-      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
-      expect(onConfirm).toHaveBeenCalledOnce();
-      expect(execute).toHaveBeenCalledOnce();
     });
 
     it('emits terminalSequence returned by permission notification hooks over ACP', async () => {

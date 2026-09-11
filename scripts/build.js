@@ -74,7 +74,6 @@ const buildOrder = [
   ...(cliOnly
     ? []
     : [
-        'packages/qwen-live',
         'packages/vscode-ide-companion',
         'packages/chrome-extension',
         'integrations/external-context',

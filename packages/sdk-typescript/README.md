@@ -4,6 +4,10 @@ A minimum experimental TypeScript SDK for programmatic access to Qwen Code.
 
 Feel free to submit a feature request/issue/PR.
 
+## Migrating to 0.2.0
+
+Qwen Live is maintained in [Qwen-Live-Harness](https://github.com/QwenLM/Qwen-Live-Harness) and runs independently of the Qwen Code daemon. This release removes the Live Voice HTTP helpers from `DaemonClient` and `WorkspaceDaemonClient`, together with their `DaemonLive*` types. Use the standalone Live application for voice calls and Host setup. Workspace voice transcription and the ordinary session live-state APIs remain available.
+
 ## Installation
 
 ```bash

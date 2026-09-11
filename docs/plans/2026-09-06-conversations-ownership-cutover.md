@@ -1,5 +1,7 @@
 # Conversations Ownership Cutover Plan
 
+This is a historical implementation plan. The [standalone Live extraction](../design/2026-09-11-qwen-live-extraction.md) retires the built-in Live discovery, routes and tool injection described below. Generic Conversations ownership remains in Qwen Code and no longer claims the independent Live daemon's discovery file.
+
 Date: 2026-09-06
 
 Design: [Relaxed Standalone Daemon Ownership](../design/2026-09-02-relaxed-standalone-daemon-ownership.md)

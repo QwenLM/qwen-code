@@ -2328,7 +2328,6 @@ export class Config {
   private readonly question: string | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
-  private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
@@ -6356,14 +6355,9 @@ export class Config {
   }
 
   getAppendSystemPrompt(): string | undefined {
-    const parts = [this.appendSystemPrompt, this.liveAppendSystemPrompt].filter(
-      (part): part is string => Boolean(part?.trim()),
-    );
-    return parts.length > 0 ? parts.join('\n\n') : undefined;
-  }
-
-  setLiveAppendSystemPrompt(prompt: string | undefined): void {
-    this.liveAppendSystemPrompt = prompt;
+    return this.appendSystemPrompt?.trim()
+      ? this.appendSystemPrompt
+      : undefined;
   }
 
   getOutputStyle(): OutputStyleDefinition | undefined {

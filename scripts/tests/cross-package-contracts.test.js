@@ -25,17 +25,6 @@ function definitionFiles(pattern) {
 
 const definitions = [
   {
-    symbol: 'LIVE_TASK_TOOL_NAMES',
-    pattern: '^(export )?(const|let|var) LIVE_TASK_TOOL_NAMES[[:space:]]*[:=]',
-    owner: 'packages/acp-bridge/src/bridgeOptions.ts',
-  },
-  {
-    symbol: 'LiveTaskToolName',
-    pattern:
-      '^(export )?type LiveTaskToolName[[:space:]]*(<[^>]+>)?[[:space:]]*=',
-    owner: 'packages/acp-bridge/src/bridgeOptions.ts',
-  },
-  {
     symbol: 'MAX_SUB_SESSION_PROMPT_CHARS',
     pattern:
       '^(export )?(const|let|var) MAX_SUB_SESSION_PROMPT_CHARS[[:space:]]*[:=]',
@@ -48,31 +37,6 @@ it.each(definitions)('$symbol has one owner', ({ pattern, owner }) => {
 });
 
 const imports = [
-  [
-    'LIVE_TASK_TOOL_NAMES',
-    'packages/acp-bridge/src/bridgeClient.ts',
-    './bridgeOptions.js',
-  ],
-  [
-    'LIVE_TASK_TOOL_NAMES',
-    'packages/cli/src/acp-integration/live/live-task-tools.ts',
-    '@qwen-code/acp-bridge/bridgeOptions',
-  ],
-  [
-    'LIVE_TASK_TOOL_NAMES',
-    'packages/cli/src/serve/live/live-task-service.ts',
-    '@qwen-code/acp-bridge/bridgeOptions',
-  ],
-  [
-    'LiveTaskToolName',
-    'packages/cli/src/acp-integration/live/live-task-tools.ts',
-    '@qwen-code/acp-bridge/bridgeOptions',
-  ],
-  [
-    'LiveTaskToolName',
-    'packages/cli/src/serve/live/live-task-service.ts',
-    '@qwen-code/acp-bridge/bridgeOptions',
-  ],
   [
     'MAX_SUB_SESSION_PROMPT_CHARS',
     'packages/core/src/tools/create-sub-session.ts',

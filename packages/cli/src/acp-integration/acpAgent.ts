@@ -240,7 +240,6 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
   hasVerifiableInode,
@@ -3314,7 +3313,7 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
     // the POSIX mode/uid check has no equivalent here. Containment then rests
     // on the structural checks around this predicate — symlink rejection and
     // dev/ino identity across the realpath round trip — the same trade-off
-    // serve/live/discovery.ts already makes on this platform.
+    // other owner-only runtime files use on this platform.
     return true;
   }
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
@@ -5588,9 +5587,6 @@ class QwenAgent implements Agent {
                     ),
                 }
               : {}),
-            enableLiveScreenContext: isCompatibleLiveSessionSource(
-              sessionSource ?? {},
-            ),
             replayHistory: false,
             prepareBeforeSessionCreate: async () => {
               if (bulkReplay && projection?.replay) {
@@ -5952,9 +5948,6 @@ class QwenAgent implements Agent {
                     ),
                 }
               : {}),
-            enableLiveScreenContext: isCompatibleLiveSessionSource(
-              sessionSource ?? {},
-            ),
             replayHistory: false,
             beforeSessionPublish: () => {
               response = profiler.timeSync('response_build', () => ({
@@ -10821,9 +10814,6 @@ class QwenAgent implements Agent {
           }
         }
         const session = this.sessionOrThrow(sessionId);
-        if (isCompatibleLiveSessionSource(source)) {
-          await session.enableLiveScreenContext();
-        }
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
@@ -10840,90 +10830,6 @@ class QwenAgent implements Agent {
             : {}),
           persisted: ok,
         };
-      }
-      case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
-        const sessionId = params['sessionId'];
-        const active = params['active'];
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing sessionId',
-          );
-        }
-        if (typeof active !== 'boolean') {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing active state',
-          );
-        }
-        await this.sessionOrThrow(sessionId).setLiveConversationActive(active);
-        return { sessionId, active };
-      }
-      case SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript: {
-        const sessionId = params['sessionId'];
-        const entries = params['entries'];
-        const model = params['model'];
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing sessionId',
-          );
-        }
-        if (
-          typeof model !== 'string' ||
-          model.length === 0 ||
-          model.length > 256
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing realtime model',
-          );
-        }
-        if (!Array.isArray(entries) || entries.length > 128) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid realtime transcript entries',
-          );
-        }
-        const transcript: Array<{
-          role: 'user' | 'assistant';
-          text: string;
-        }> = [];
-        let totalLength = 0;
-        for (const entry of entries) {
-          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Invalid realtime transcript entry',
-            );
-          }
-          const role = (entry as Record<string, unknown>)['role'];
-          const text = (entry as Record<string, unknown>)['text'];
-          if (
-            (role !== 'user' && role !== 'assistant') ||
-            typeof text !== 'string' ||
-            text.length === 0 ||
-            text.length > 32_768
-          ) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Invalid realtime transcript entry',
-            );
-          }
-          totalLength += text.length;
-          if (totalLength > 131_072) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Realtime transcript is too large',
-            );
-          }
-          transcript.push({ role, text });
-        }
-        await this.sessionOrThrow(sessionId).appendLiveConversationTranscript(
-          transcript,
-          model,
-        );
-        return { sessionId, persisted: transcript.length };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
         const sessionId = params['sessionId'];
@@ -14730,7 +14636,6 @@ class QwenAgent implements Agent {
     sessionData?: ResumedSessionData,
     options: {
       replayHistory?: boolean;
-      enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
@@ -14942,9 +14847,6 @@ class QwenAgent implements Agent {
       // learns about this Session from a report rather than inferring it.
       this.activeWorkReporter?.notifyChanged();
       this.initializingConfigs.delete(config);
-      if (options.enableLiveScreenContext) {
-        await session.enableLiveScreenContext();
-      }
 
       if (
         options.deferWorkspaceActivation !== true &&

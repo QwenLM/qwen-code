@@ -139,10 +139,6 @@ export default defineConfig(({ command }) => ({
       // returns index.html in dev and clicking or creating a standalone
       // session fails JSON parsing.
       '/standalone': daemonProxy,
-      // Live voice routes (`/live/status`, `/live/setup`, ...). The prefix
-      // overlaps `client/live/*` source modules; the bypass above exempts
-      // those source files from proxying.
-      '/live': daemonProxy,
       // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
       // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
       // path — a bare `/voice` prefix would shadow the client's own

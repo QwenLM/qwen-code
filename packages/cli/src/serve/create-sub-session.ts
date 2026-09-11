@@ -19,7 +19,7 @@
  *                    A background event-stream subscription holds the concurrency
  *                    slot until the turn finishes (or `stop()` aborts it), so the
  *                    per-caller cap stays meaningful for fire-and-forget runs.
- *                    Live Voice launchers additionally deliver a completion
+ *                    Conversations launchers additionally deliver a completion
  *                    notification to the parent session, triggering an automatic
  *                    follow-up turn. Other callers retain fire-and-forget behavior.
  *  - `'first-turn'`— subscribe to the sub-session's event stream, accumulate its
@@ -151,7 +151,7 @@ export interface CreateSubSessionLauncherOptions {
   boundWorkspace: string;
   runtimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
-   * Enabled only for the Live conversation runtime. */
+   * Enabled only for the Conversations runtime. */
   notifySentCompletion?: boolean;
   isolatedWorkspace?: {
     materializeDirectory(sessionId: string): Promise<string>;

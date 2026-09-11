@@ -307,12 +307,6 @@ const {
     sessionStatus: vi.fn(() =>
       Promise.resolve({ workspaceCwd: '/tmp/project' }),
     ),
-    startLive: vi.fn().mockResolvedValue({
-      v: 1,
-      available: true,
-      state: 'listening',
-      shortcut: 'Command+Q',
-    }),
     getStandaloneSession: vi.fn().mockResolvedValue({
       sessionId: 'session-1',
       sourceType: 'standalone',
@@ -10046,13 +10040,6 @@ beforeEach(() => {
   mockWorkspace.client.sessionStatus.mockReset();
   mockWorkspace.client.sessionStatus.mockResolvedValue({
     workspaceCwd: '/tmp/project',
-  });
-  mockWorkspace.client.startLive.mockReset();
-  mockWorkspace.client.startLive.mockResolvedValue({
-    v: 1,
-    available: true,
-    state: 'listening',
-    shortcut: 'Command+Q',
   });
   mockWorkspace.client.getStandaloneSession.mockReset();
   mockWorkspace.client.getStandaloneSession.mockResolvedValue({
@@ -21712,7 +21699,7 @@ describe('App session callbacks', () => {
     expect(editorInsertText).not.toHaveBeenCalled();
   });
 
-  it('waits for the replacement Live session before sending an accepted new-topic suggestion', async () => {
+  it('starts a standalone conversation for an accepted new-topic suggestion in a historical Live chat', async () => {
     vi.useFakeTimers();
     mockConnection.sessionId = 'live-session-current';
     mockConnection.sessionContext = { kind: 'live' };
@@ -21757,8 +21744,11 @@ describe('App session callbacks', () => {
         };
       },
     );
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      mockConnection.sessionId = undefined;
+    });
     const onSessionIdChange = vi.fn();
-    const { container, rerender } = renderApp({ onSessionIdChange });
+    const { container } = renderApp({ onSessionIdChange });
     await flush();
 
     act(() => {
@@ -21783,16 +21773,14 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
-    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
-
-    act(() => {
-      mockConnection.sessionId = 'live-session-next';
-      rerender({ onSessionIdChange });
-    });
-    await flush();
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'standalone' },
+    );
     act(() => {
       vi.runOnlyPendingTimers();
     });
@@ -21887,7 +21875,6 @@ describe('App session callbacks', () => {
     act(() => vi.runOnlyPendingTimers());
     await flush();
 
-    expect(mockWorkspace.client.startLive).not.toHaveBeenCalled();
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
     expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
@@ -21896,14 +21883,9 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('cancels an accepted Live new-topic suggestion when a newer global new-chat request wins', async () => {
+  it('cancels a historical Live new-topic suggestion when a newer global new-chat request wins', async () => {
     vi.useFakeTimers();
-    const startLive = deferred<{
-      v: 1;
-      available: true;
-      state: 'listening';
-      shortcut: string;
-    }>();
+    const clearSession = deferred<void>();
     mockConnection.sessionId = 'live-session-current';
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = '';
@@ -21938,10 +21920,11 @@ describe('App session callbacks', () => {
       timestamp: index,
     }));
     testState.prompt = 'Start a different Live conversation about tests';
-    mockWorkspace.client.startLive.mockReturnValueOnce(startLive.promise);
-    mockSessionActions.clearSession.mockImplementation(async () => {
-      mockConnection.sessionId = undefined;
-    });
+    mockSessionActions.clearSession
+      .mockImplementation(async () => {
+        mockConnection.sessionId = undefined;
+      })
+      .mockReturnValueOnce(clearSession.promise);
     mockSessionActions.generateSessionContent.mockImplementation(
       async function* () {
         yield {
@@ -21984,13 +21967,8 @@ describe('App session callbacks', () => {
       await shellRef.current?.createNewSession();
     });
     await act(async () => {
-      startLive.resolve({
-        v: 1,
-        available: true,
-        state: 'listening',
-        shortcut: 'Command+Q',
-      });
-      await startLive.promise;
+      clearSession.resolve();
+      await clearSession.promise;
     });
     act(() => vi.runOnlyPendingTimers());
     await flush();
@@ -32658,7 +32636,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('routes /new through the existing Live-specific path', async () => {
+  it('starts a standalone draft for /new in a historical Live chat', async () => {
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = '';
     renderApp();
@@ -32669,9 +32647,10 @@ describe('App session callbacks', () => {
     });
     await flush();
 
-    expect(mockWorkspace.client.startLive).toHaveBeenCalledOnce();
-    expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
-    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(testState.latestChatEditorProps?.composerScopeKey).toBe(
+      'standalone',
+    );
   });
 
   it('keeps a legacy Live runtime cwd out of workspace product context', async () => {

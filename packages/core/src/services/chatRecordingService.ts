@@ -2179,27 +2179,6 @@ export class ChatRecordingService {
     }
   }
 
-  async recordRealtimeConversation(
-    entries: ReadonlyArray<{
-      role: 'user' | 'assistant';
-      text: string;
-    }>,
-    model: string,
-  ): Promise<void> {
-    for (const entry of entries) {
-      const record: ChatRecord = {
-        ...this.createBaseRecord(entry.role),
-        subtype: 'realtime_message',
-        message:
-          entry.role === 'user'
-            ? createUserContent([{ text: entry.text }])
-            : createModelContent([{ text: entry.text }]),
-        ...(entry.role === 'assistant' ? { model } : {}),
-      };
-      await this.appendRecordStrict(record);
-    }
-  }
-
   /**
    * Fire-and-forget: after an assistant turn is recorded, attempt to generate
    * a short session title from the conversation so far. Runs at most once per

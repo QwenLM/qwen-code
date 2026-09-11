@@ -250,9 +250,6 @@ import type {
   BridgeOptions,
   BridgeSessionLifecycleEvent,
   BridgeTelemetry,
-  LiveScreenContextCaptureHandler,
-  LiveSpeakToUserHandler,
-  LiveTaskToolRequestHandler,
   PromptLedgerSink,
 } from './bridgeOptions.js';
 import type {
@@ -2748,11 +2745,6 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
-  let liveScreenContextCaptureHandler:
-    | LiveScreenContextCaptureHandler
-    | undefined;
-  let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
-  let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // Resolved once beside the other option defaults: this default is
   // load-bearing for every non-daemon consumer, and reading `?? true` inline
@@ -4747,9 +4739,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () =>
             channelInfo?.sessionIds === sessionIds &&
             channelInfo.sessionSpawnsInFlight > 0,
-          () => liveScreenContextCaptureHandler,
-          () => liveTaskToolRequestHandler,
-          () => liveSpeakToUserHandler,
+          undefined,
+          undefined,
+          undefined,
           opts.externalToolGuard,
           (snapshot) => {
             const currentInfo = infoRef.current;
@@ -9483,15 +9475,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // Derived once from the frozen overrides and the configured channel
     // factory; immutable for the bridge's lifetime.
     mandatoryLeaseAttested,
-    setLiveScreenContextCaptureHandler(handler) {
-      liveScreenContextCaptureHandler = handler;
-    },
-    setLiveTaskToolRequestHandler(handler) {
-      liveTaskToolRequestHandler = handler;
-    },
-    setLiveSpeakToUserHandler(handler) {
-      liveSpeakToUserHandler = handler;
-    },
     getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
       return {
         limits: {
@@ -13299,22 +13282,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         initTimeoutMs,
         SERVE_CONTROL_EXT_METHODS.userLanguage,
       )) as { language: string; sessions: number; failed: number };
-    },
-
-    async setSessionLiveConversationActive(sessionId, active) {
-      await requestSessionStatus<Record<string, unknown>>(
-        sessionId,
-        SERVE_CONTROL_EXT_METHODS.sessionLiveConversation,
-        { active },
-      );
-    },
-
-    async appendSessionLiveTranscript(sessionId, entries, model) {
-      await requestSessionStatus<Record<string, unknown>>(
-        sessionId,
-        SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript,
-        { entries, model },
-      );
     },
 
     async setSessionApprovalMode(sessionId, mode, opts, context) {

@@ -1,5 +1,7 @@
 # 实施计划：Standalone PR2 —— Session core 与私有目录隔离
 
+本文保留历史实施记录。内置 Live 的 discovery、路由和工具注入已随[独立拆分](../design/2026-09-11-qwen-live-extraction.md)退役；下文对应步骤不再是当前实现要求。通用 standalone session core 与私有目录隔离仍由 Qwen Code 维护。
+
 日期：2026-08-14
 
 上游设计：`docs/design/standalone-daemon-sessions.md`

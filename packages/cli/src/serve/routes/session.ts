@@ -272,7 +272,6 @@ interface RegisterSessionRoutesDeps {
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
-  isLiveSessionActive?: (sessionId: string) => boolean;
   ensureConversationRuntime?: () => Promise<WorkspaceRuntime>;
   liveConversationRootPath?: string;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
@@ -887,23 +886,6 @@ export function registerSessionRoutes(
         activeBranchSessions.delete(cwd);
       }
     }
-  };
-
-  const rejectActiveLiveSessionMutation = (
-    res: Response,
-    sessionIds: readonly string[],
-  ): boolean => {
-    const activeSessionId = sessionIds.find((sessionId) =>
-      deps.isLiveSessionActive?.(sessionId),
-    );
-    if (!activeSessionId) return false;
-    res.status(409).json({
-      error:
-        'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
-      code: 'live_session_active',
-      sessionId: activeSessionId,
-    });
-    return true;
   };
 
   /** Roll back a branch creation: restore the base ref and delete the branch. */
@@ -2829,7 +2811,7 @@ export function registerSessionRoutes(
     if (runtime.provenance === 'live-conversation') {
       res.status(400).json({
         error:
-          'Sessions in the Conversations workspace can only be created by Live Voice.',
+          'Use the standalone session API to create sessions in the Conversations workspace.',
         code: 'live_session_creation_reserved',
       });
       return;
@@ -7291,7 +7273,7 @@ export function registerSessionRoutes(
 
   app.delete('/session/:id', async (req, res) => {
     const sessionId = req.params['id'];
-    if (rejectActiveLiveSessionMutation(res, [sessionId])) return;
+
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -7329,7 +7311,7 @@ export function registerSessionRoutes(
     if (clientId === null) return;
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
-    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
+
     try {
       const operation = await deleteSessions(
         undefined,
@@ -7358,7 +7340,6 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
-    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
       const operation = await archiveSessions(
@@ -7419,7 +7400,7 @@ export function registerSessionRoutes(
       if (clientId === null) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
-      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
+
       try {
         const operation = await deleteSessions(req, res, route, uniqueIds);
         if (!operation) return;
@@ -7448,7 +7429,7 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
-      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
+
       try {
         const operation = await archiveSessions(
           req,

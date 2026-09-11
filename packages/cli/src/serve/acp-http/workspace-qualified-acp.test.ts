@@ -193,7 +193,6 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let secondaryRuntime: WorkspaceRuntime;
   let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
   let materializeLiveConversationDirectory: ReturnType<typeof vi.fn>;
-  let activeLiveSessionIds: Set<string>;
   let runtimeDir: string;
   let previousRuntimeDir: string | undefined;
 
@@ -268,7 +267,6 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     materializeLiveConversationDirectory = vi.fn(
       async (sessionId: string) => `/live-root/conversation-${sessionId}`,
     );
-    activeLiveSessionIds = new Set();
 
     const app = express();
     app.use(express.json());
@@ -319,8 +317,6 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       workspaceVoiceConnection,
       liveSessionIsolation: {
         materializeConversationDirectory: materializeLiveConversationDirectory,
-        isSessionActive: (sessionId: string) =>
-          activeLiveSessionIds.has(sessionId),
       },
     });
 

@@ -1486,29 +1486,6 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 
   /**
-   * Installs the daemon-owned capture handler used by the dedicated Live
-   * `capture_screen_context` tool. Undefined disables the child-to-daemon
-   * route. The bridge authenticates the caller session before invoking it.
-   */
-  setLiveScreenContextCaptureHandler?(
-    handler:
-      | import('./bridgeOptions.js').LiveScreenContextCaptureHandler
-      | undefined,
-  ): void;
-
-  /** Installs the daemon-owned handler for the five Codex-parity Live task tools. */
-  setLiveTaskToolRequestHandler?(
-    handler:
-      | import('./bridgeOptions.js').LiveTaskToolRequestHandler
-      | undefined,
-  ): void;
-
-  /** Installs the daemon-owned handler for the backend-only Live speech tool. */
-  setLiveSpeakToUserHandler?(
-    handler: import('./bridgeOptions.js').LiveSpeakToUserHandler | undefined,
-  ): void;
-
-  /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
    */
@@ -2210,22 +2187,6 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessions: number;
     failed: number;
   }>;
-
-  /** Apply Codex's realtime-active world-state transition to one session. */
-  setSessionLiveConversationActive(
-    sessionId: string,
-    active: boolean,
-  ): Promise<void>;
-
-  /** Persist Realtime-owned dialogue without starting a backend model turn. */
-  appendSessionLiveTranscript(
-    sessionId: string,
-    entries: ReadonlyArray<{
-      role: 'user' | 'assistant';
-      text: string;
-    }>,
-    model: string,
-  ): Promise<void>;
 
   /**
    * Change the approval mode of a live session and broadcast an

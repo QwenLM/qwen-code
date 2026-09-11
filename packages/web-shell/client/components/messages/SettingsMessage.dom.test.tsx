@@ -14,7 +14,6 @@ import {
   type SettingsMessageSettingsState,
 } from './SettingsMessage';
 import type { ModelManagementProps } from './ModelManagementSection';
-import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 
 // The Daemon category renders LocalControlSettingsCard, which reads the
 // workspace connection from context; stub it so the category can be
@@ -79,49 +78,9 @@ function subDialogSetting(): DaemonSettingDescriptor {
   };
 }
 
-function liveEnabledSetting(): DaemonSettingDescriptor {
-  return {
-    key: 'experimental.liveVoice.enabled',
-    type: 'boolean',
-    label: 'Qwen Live',
-    category: 'Experimental',
-    requiresRestart: false,
-    default: false,
-    values: { effective: false },
-  };
-}
-
-function liveSetup(keyConfigured: boolean): UseLiveVoiceSetupResult {
-  return {
-    supported: true,
-    status: {
-      v: 1,
-      enabled: false,
-      keyConfigured,
-      model: 'qwen3.5-omni-plus-realtime',
-      shortcut: 'Command+E',
-      install: { state: 'missing' },
-      live: {
-        v: 1,
-        available: false,
-        state: 'unavailable',
-        shortcut: 'Command+E',
-      },
-    },
-    loading: false,
-    mutating: false,
-    error: undefined,
-    refresh: vi.fn(async () => {}),
-    update: vi.fn(async () => {}),
-    retryInstall: vi.fn(async () => {}),
-    launchHost: vi.fn(async () => {}),
-  };
-}
-
 function makeState(
   settings: DaemonSettingDescriptor[],
   setValue: SettingsMessageSettingsState['setValue'],
-  setup?: UseLiveVoiceSetupResult,
 ): SettingsMessageSettingsState {
   const status: DaemonWorkspaceSettingsStatus = { v: 1, settings };
   return {
@@ -131,7 +90,6 @@ function makeState(
     error: undefined,
     reload: vi.fn(async () => status),
     setValue,
-    ...(setup ? { liveSetup: setup } : {}),
   };
 }
 
@@ -378,120 +336,6 @@ describe('SettingsMessage user-scope editing', () => {
     );
   });
 
-  it('keeps the dedicated key secret out of the response and saves replacements', async () => {
-    const setValue = vi.fn(() =>
-      Promise.resolve({} as DaemonSettingUpdateResult),
-    );
-    const setup = liveSetup(false);
-    const container = renderPanel(
-      makeState([liveEnabledSetting()], setValue, setup),
-    );
-
-    const experimental = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('nav button'),
-    ).find((button) => button.textContent?.includes('Experimental'));
-    act(() => experimental?.click());
-    const keyInput =
-      container.querySelector<HTMLInputElement>('#live-realtime-key');
-    if (!keyInput) throw new Error('Live Realtime key input not found');
-    expect(keyInput.type).toBe('password');
-    expect(container.textContent).not.toContain('test-dashscope-key');
-
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value',
-      )?.set;
-      setter?.call(keyInput, 'test-dashscope-key');
-      keyInput.dispatchEvent(new Event('input', { bubbles: true }));
-      keyInput.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }),
-      );
-      await Promise.resolve();
-    });
-
-    expect(setup.update).toHaveBeenCalledWith({
-      apiKey: { operation: 'replace', value: 'test-dashscope-key' },
-    });
-    expect(setValue).not.toHaveBeenCalled();
-  });
-
-  it('clears the dedicated key only through an explicit setup mutation', async () => {
-    const setValue = vi.fn(() =>
-      Promise.resolve({} as DaemonSettingUpdateResult),
-    );
-    const setup = liveSetup(true);
-    const container = renderPanel(
-      makeState([liveEnabledSetting()], setValue, setup),
-    );
-    const experimental = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('nav button'),
-    ).find((button) => button.textContent?.includes('Experimental'));
-    act(() => experimental?.click());
-    const removeKey = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button'),
-    ).find((button) => button.textContent === 'Remove key');
-
-    await act(async () => {
-      removeKey?.click();
-      await Promise.resolve();
-    });
-
-    expect(setup.update).toHaveBeenCalledWith({
-      apiKey: { operation: 'clear' },
-    });
-    expect(setValue).not.toHaveBeenCalled();
-  });
-
-  it('requires confirmation before enabling and describes the native install', async () => {
-    const setValue = vi.fn(() =>
-      Promise.resolve({} as DaemonSettingUpdateResult),
-    );
-    const setup = liveSetup(true);
-    const container = renderPanel(
-      makeState([liveEnabledSetting()], setValue, setup),
-    );
-    const experimental = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('nav button'),
-    ).find((button) => button.textContent?.includes('Experimental'));
-    act(() => experimental?.click());
-
-    act(() => switchButton(container).click());
-    expect(document.body.textContent).toContain(
-      'download, verify, install, and open',
-    );
-    const confirm = Array.from(
-      document.body.querySelectorAll<HTMLButtonElement>('button'),
-    ).find((button) => button.textContent === 'Enable and install');
-    await act(async () => {
-      confirm?.click();
-      await Promise.resolve();
-    });
-
-    expect(setup.update).toHaveBeenCalledWith({ enabled: true });
-    expect(setValue).not.toHaveBeenCalled();
-  });
-
-  it('does not show a stale Host error before Live is enabled', () => {
-    const setValue = vi.fn(() =>
-      Promise.resolve({} as DaemonSettingUpdateResult),
-    );
-    const setup = liveSetup(true);
-    setup.status = {
-      ...setup.status!,
-      install: { state: 'error', message: 'Gatekeeper rejected old Host' },
-    };
-    const container = renderPanel(
-      makeState([liveEnabledSetting()], setValue, setup),
-    );
-    const experimental = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('nav button'),
-    ).find((button) => button.textContent?.includes('Experimental'));
-    act(() => experimental?.click());
-
-    expect(container.textContent).not.toContain('Gatekeeper rejected old Host');
-  });
-
   it('forwards the active scope to onSubDialog for model sub-dialog keys', () => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),
@@ -531,28 +375,32 @@ describe('SettingsMessage user-scope editing', () => {
     expect(labels).not.toContain('settings.category.UI');
   });
 
-  it('keeps retired daemon keys like ui.compactMode out of the panel', () => {
+  it.each([
+    ['ui.compactMode', 'Compact Mode'],
+    ['experimental.liveVoice.enabled', 'Live Voice'],
+    ['experimental.liveVoice.shortcut', 'Live Shortcut'],
+  ])('keeps the retired daemon key %s out of the panel', (key, label) => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),
     );
-    const retiredCompactMode: DaemonSettingDescriptor = {
-      key: 'ui.compactMode',
+    const retiredSetting: DaemonSettingDescriptor = {
+      key,
       type: 'boolean',
-      label: 'Compact Mode',
+      label,
       category: 'General',
       requiresRestart: false,
       default: false,
       values: { effective: false },
     };
     const container = renderPanel(
-      makeState([boolSetting(), retiredCompactMode], setValue),
+      makeState([boolSetting(), retiredSetting], setValue),
     );
 
     // The visible control proves the panel rendered settings rows; the
     // retired key must stay hidden even though the daemon still lists it.
     expect(container.textContent).toContain('Test Flag');
     expect(switchButton(container)).toBeTruthy();
-    expect(container.textContent).not.toContain('Compact Mode');
+    expect(container.textContent).not.toContain(label);
   });
 
   it('keeps model.reasoningEffort out of the generic settings panel', () => {

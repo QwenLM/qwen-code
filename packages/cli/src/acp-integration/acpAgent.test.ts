@@ -2211,13 +2211,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
-        enableLiveScreenContext: ReturnType<typeof vi.fn>;
+
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         installPendingManagedConversationBinding: ReturnType<typeof vi.fn>;
         commitManagedConversationBinding: ReturnType<typeof vi.fn>;
         releaseManagedConversationBinding: ReturnType<typeof vi.fn>;
-        appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
+
         collectActiveWorkHolds: ReturnType<typeof vi.fn>;
         hasStandaloneRelocationBlockers: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
@@ -4921,7 +4921,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           enqueueBackgroundNotification: vi
             .fn()
             .mockResolvedValue({ accepted: true }),
-          enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+
           buildAvailableCommandsSnapshot: vi.fn(() =>
             buildAvailableCommandsSnapshot(createdConfig),
           ),
@@ -4933,9 +4933,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           releaseManagedConversationBinding: vi
             .fn()
             .mockResolvedValue(undefined),
-          appendLiveConversationTranscript: vi
-            .fn()
-            .mockResolvedValue(undefined),
+
           collectActiveWorkHolds: vi.fn().mockReturnValue([]),
           hasStandaloneRelocationBlockers: vi.fn().mockReturnValue(false),
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
@@ -8005,34 +8003,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('enables the dedicated screen tool for a compatible Live source', async () => {
-    const sessionId = 'session-A';
-    const recording = {
-      recordSessionSource: vi.fn().mockResolvedValue(true),
-    };
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
-    const { agent, agentPromise } = await bootAcpAgent();
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
-        sessionId,
-        sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:call-1',
-      }),
-    ).resolves.toMatchObject({ persisted: true });
-
-    expect(lastSessionMock?.enableLiveScreenContext).toHaveBeenCalledOnce();
-    expect(recording.recordSessionSource).toHaveBeenCalledWith(
-      'default',
-      'realtime_voice:p1:h1:a1:call-1',
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
   it('rejects direct mutation to the reserved standalone source', async () => {
     const sessionId = 'session-A';
     const recording = {
@@ -8053,7 +8023,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
 
     expect(recording.recordSessionSource).not.toHaveBeenCalled();
-    expect(lastSessionMock?.enableLiveScreenContext).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -8223,33 +8192,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockConnectionState.resolve();
       await agentPromise;
     }
-  });
-
-  it('persists trusted direct Realtime dialogue without prompting the backend', async () => {
-    const sessionId = 'session-A';
-    await setupSessionMocks(sessionId);
-    const { agent, agentPromise } = await bootAcpAgent();
-    const entries = [
-      { role: 'user', text: '你好' },
-      { role: 'assistant', text: '你好！' },
-    ];
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript, {
-        sessionId,
-        entries,
-        model: 'qwen3.5-omni-plus-realtime',
-      }),
-    ).resolves.toEqual({ sessionId, persisted: 2 });
-
-    expect(
-      lastSessionMock?.appendLiveConversationTranscript,
-    ).toHaveBeenCalledWith(entries, 'qwen3.5-omni-plus-realtime');
-    expect(lastSessionMock?.prompt).not.toHaveBeenCalled();
-
-    mockConnectionState.resolve();
-    await agentPromise;
   });
 
   it('lets the trusted daemon bridge queue a worker completion', async () => {
@@ -24392,7 +24334,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         installRewriter: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
-        enableLiveScreenContext: ReturnType<typeof vi.fn>;
+
         assertCanStartTurn: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -24804,7 +24746,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           },
         ),
         startCronScheduler: vi.fn(),
-        enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+
         beginClose: vi.fn().mockReturnValue(releaseCloseGate),
         beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
@@ -25855,8 +25797,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       } else {
         await agent.unstable_resumeSession(params);
       }
-
-      expect(lastSessionMock?.enableLiveScreenContext).toHaveBeenCalledOnce();
 
       mockConnectionState.resolve();
       await agentPromise;

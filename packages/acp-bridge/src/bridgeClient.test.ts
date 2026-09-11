@@ -53,7 +53,6 @@ import {
   type BridgeClientDeferredArtifactBatch,
 } from './bridgeClient.js';
 import {
-  type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
   type ExternalToolGuardHandler,
@@ -147,64 +146,6 @@ function makeClient(
     currentSessionTask?.handler,
   );
 }
-
-function makeLiveSpeakClient(
-  handler: LiveSpeakToUserHandler,
-  ownsSession: (sessionId: string) => boolean = () => true,
-): BridgeClient {
-  const noPermissionFlow = () => {
-    throw new Error('test: permission flow should not run');
-  };
-  return new BridgeClient(
-    (() => undefined) as never,
-    (() => undefined) as never,
-    { request: noPermissionFlow } as never,
-    0,
-    Infinity,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    ownsSession,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    () => handler,
-  );
-}
-
-describe('BridgeClient — Live speak-to-user channel', () => {
-  it('routes exact speech only for a session owned by the connection', async () => {
-    const handler = vi.fn(async () => undefined);
-    const client = makeLiveSpeakClient(
-      handler,
-      (sessionId) => sessionId === 'live-session',
-    );
-
-    await expect(
-      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
-        callerSessionId: 'live-session',
-        message: '原样说出这句话。',
-      }),
-    ).resolves.toEqual({ accepted: true });
-    expect(handler).toHaveBeenCalledWith({
-      callerSessionId: 'live-session',
-      message: '原样说出这句话。',
-    });
-
-    await expect(
-      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
-        callerSessionId: 'other-session',
-        message: '不应发送',
-      }),
-    ).rejects.toMatchObject({ code: -32602 });
-  });
-});
 
 describe('BridgeClient — background notification turn boundary', () => {
   it('publishes the child end-turn signal for the owned live session', async () => {
@@ -359,6 +300,51 @@ describe('BridgeClient — background notification turn boundary', () => {
 });
 
 describe('BridgeClient — managed external tool guard', () => {
+  it('preserves the legacy constructor position of the external tool guard', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      { request: vi.fn() } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+      undefined,
+      undefined,
+      undefined,
+      handler,
+    );
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
   it('uses runtime-owned session/prompt identity before calling the host', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
       allowed: true,
@@ -1952,88 +1938,6 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       ),
     ).rejects.toThrow(/source/i);
     expect(handler).not.toHaveBeenCalled();
-  });
-});
-
-describe('BridgeClient — Live screen-context extMethod dispatch', () => {
-  function makeLiveClient(
-    handler:
-      | (() => Promise<{
-          appName: string;
-          accessibilityText: string;
-          screenshotPath: string;
-        }>)
-      | undefined,
-  ): BridgeClient {
-    const noFlow = () => {
-      throw new Error('test: unexpected flow');
-    };
-    return new BridgeClient(
-      (() => undefined) as never,
-      noFlow as never,
-      { request: noFlow } as never,
-      0,
-      Infinity,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      (sessionId) => sessionId === 'live-coordinator',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      () => false,
-      () =>
-        handler
-          ? async ({ callerSessionId }) => {
-              expect(callerSessionId).toBe('live-coordinator');
-              return handler();
-            }
-          : undefined,
-    );
-  }
-
-  it('authenticates and forwards the argument-free Live capture', async () => {
-    const handler = vi.fn(async () => ({
-      appName: 'Safari',
-      accessibilityText: 'AXWindow',
-      screenshotPath: '/private/tmp/shot.png',
-    }));
-    const client = makeLiveClient(handler);
-
-    await expect(
-      client.extMethod('qwen/control/live/capture-screen-context', {
-        callerSessionId: 'live-coordinator',
-      }),
-    ).resolves.toEqual({
-      appName: 'Safari',
-      accessibilityText: 'AXWindow',
-      screenshotPath: '/private/tmp/shot.png',
-    });
-    expect(handler).toHaveBeenCalledOnce();
-  });
-
-  it('rejects unowned sessions and a missing daemon handler', async () => {
-    const handler = vi.fn(async () => ({
-      appName: 'Safari',
-      accessibilityText: '',
-      screenshotPath: '/private/tmp/shot.png',
-    }));
-    await expect(
-      makeLiveClient(handler).extMethod(
-        'qwen/control/live/capture-screen-context',
-        { callerSessionId: 'worker-or-forged' },
-      ),
-    ).rejects.toThrow(/callerSessionId/u);
-    expect(handler).not.toHaveBeenCalled();
-    await expect(
-      makeLiveClient(undefined).extMethod(
-        'qwen/control/live/capture-screen-context',
-        { callerSessionId: 'live-coordinator' },
-      ),
-    ).rejects.toThrow();
   });
 });
 

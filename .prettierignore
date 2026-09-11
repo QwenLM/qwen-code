@@ -32,7 +32,6 @@ packages/cua-driver/
 # "intentionally non-idiomatic ink input/output", so normalising them to
 # house style would corrupt the very data the codemod tests assert on.
 scripts/codemod/fixtures/
-packages/live-host/
 packages/desktop-shell/runtime/
 # Vendored from mobile-next/mobile-mcp and carries its own eslint config, so
 # reformatting it to house style only widens the diff against upstream on the

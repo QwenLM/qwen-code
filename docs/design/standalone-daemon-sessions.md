@@ -31,7 +31,7 @@ Live Voice. It does not authorize a second projectless runtime, a second session
 catalog, or a child process per standalone session.
 
 This contract extends, and does not replace, the projectless runtime decisions
-in [WebShell Live Voice Codex-Parity Refactor Contract](./web-shell-live-voice-codex-parity-refactor.md).
+in [WebShell Live Voice Codex-Parity Refactor Contract](https://github.com/QwenLM/Qwen-Live-Harness/blob/main/docs/design/web-shell-live-voice-codex-parity-refactor.md), now archived with Qwen Live.
 
 ## Problem
 

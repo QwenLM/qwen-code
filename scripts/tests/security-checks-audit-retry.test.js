@@ -53,7 +53,7 @@ describe('security-checks audit step endpoint-error retry', () => {
     try {
       // mobile-mcp is the one lockfile the loop skips. Including it means
       // deleting that skip line changes the counts below instead of passing.
-      for (const pkg of ['desktop-shell', 'live-host', 'mobile-mcp']) {
+      for (const pkg of ['desktop-shell', 'audit-fixture', 'mobile-mcp']) {
         mkdirSync(join(dir, 'packages', pkg), { recursive: true });
         writeFileSync(join(dir, 'packages', pkg, 'package-lock.json'), '{}');
       }
