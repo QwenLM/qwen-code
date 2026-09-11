@@ -1418,11 +1418,6 @@ export function recoverLedger(
     (best.commitId === null ||
       best.commitId.toLowerCase() !== bestOwnAnchor.sha.toLowerCase())
   ) {
-    // No `mb` rides the graft (#10136 R18-3). The base names the range ONE
-    // round captured over, and the grafted anchor comes from a different,
-    // strictly earlier round — pairing this winner's absent base with that
-    // round's anchor would vouch a continuity nobody measured. The absence
-    // reads as "unproven, bound off", which is the fail-safe direction.
     ledger = {
       ...ledger,
       sha: bestOwnAnchor.sha,
@@ -1609,10 +1604,10 @@ export function persistRecoveredLedger(
       // holds, so it turns on the file HOLDING one — a real round — not on
       // the file merely existing (#10136 R20-1). A contentless object (a
       // torn write, a stub some other writer left) carries no round, reads
-      // `exRound: -1`, and used to divert the recovery here: the branch
-      // advanced a counter over nothing and dropped the recovered work
-      // list, so the next round had no ledger to dedup against and
-      // re-posted what the previous round already reported.
+      // `exRound: -1`, and diverted the recovery here: the branch advanced
+      // a counter over nothing and dropped the recovered work list, so the
+      // next round had no ledger to dedup against and re-posted what the
+      // previous round already reported.
       if (!identityKnown && existing !== null && exRound >= 0) {
         // Anonymous recovery over an existing file: the guard the docblock's
         // fourth outcome describes. A same-round winner changes nothing (the
@@ -1665,10 +1660,6 @@ export function persistRecoveredLedger(
           // `anchorFromRound` beside a dropped sha would name a source
           // whose anchor no longer rides the file.
           model: _droppedModel,
-          // Same rung, same reason (#10136 R18-3): the base names the range
-          // the round being advanced past captured over, and an anonymous
-          // recovery can re-vouch neither.
-          mb: _droppedMergeBase,
           anchorFromRound: _droppedAnchorFromRound,
           commitId: _droppedCommitId,
           ...rest
@@ -1940,18 +1931,8 @@ export function persistRecoveredLedger(
  * both or neither), so they fall together here.
  */
 function stripAnchor(ledger: Ledger): Ledger {
-  if (
-    ledger.sha === undefined &&
-    ledger.model === undefined &&
-    ledger.mb === undefined
-  ) {
-    return ledger;
-  }
-  // The merge base goes with them (#10136 R18-3): it names the range this
-  // marker certified, and a foreign or anonymous winner's base is no more
-  // this account's to vouch than its anchor is. Left behind, it would let a
-  // drive-by marker decide which hunks the next round stops republishing.
-  const { sha: _sha, model: _model, mb: _mb, ...rest } = ledger;
+  if (ledger.sha === undefined && ledger.model === undefined) return ledger;
+  const { sha: _sha, model: _model, ...rest } = ledger;
   return rest;
 }
 

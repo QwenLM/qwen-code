@@ -3385,7 +3385,6 @@ function ledgerMarkerFor(
     }
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
-      mergeBaseSha?: unknown;
       srcDiffLines?: unknown;
       fullSrcDiffLines?: unknown;
       incremental?: { effective?: unknown };
@@ -3505,20 +3504,6 @@ function ledgerMarkerFor(
         // round as a pre-field marker rather than as "nobody certified this".
         ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
         ...(model ? { model } : {}),
-        // The base this round's published diff was captured over, for the
-        // next round's seam-bound continuity gate (#10136 R18-3). Written
-        // HERE, at the posting boundary, so the stamp belongs to a round
-        // that actually reviewed the range — a capture that published and
-        // stopped (`upToDate`, `emptyDiff`, a same-round re-capture on the
-        // anchor-recovery path) posts no marker and vouches nothing. Rides
-        // the anchor's rung in the serializer, so a fail-closed or
-        // truncated round withholds it with the pair.
-        ...(shaCandidate &&
-        !identityDrifted &&
-        typeof plan.mergeBaseSha === 'string' &&
-        plan.mergeBaseSha !== ''
-          ? { mb: plan.mergeBaseSha }
-          : {}),
         // Carry the baseline forward unchanged once one exists; only measure a
         // full-range diff when there is none. Re-measuring every round would let
         // a diff that shrinks rewrite its own baseline and erase the growth it
@@ -3714,26 +3699,6 @@ function fixAuditShapeFacts(planPath: string | undefined): {
   cause: 'explicit' | 'round' | 'flat-trend' | null;
   /** Interaction entries the brief builder would render — one admission. */
   interactionFiles: number;
-  /** Entries whose census sheds at least one hunk (`kept < total`). */
-  seamFiles: number;
-  seamKept: number;
-  seamTotal: number;
-  /** Entries whose census kept every hunk (`kept === total`). */
-  wholeFiles: number;
-  /**
-   * The capture recorded that no TypeScript parser could be resolved, so
-   * the seam bound never ran and every interaction file republished in
-   * full (#10136 R18-2) — named, or the sentence below would describe a
-   * bound that never executed.
-   */
-  oracleUnavailable: boolean;
-  /**
-   * The capture recorded that merge-base continuity with the previous
-   * POSTED round could not be proven, so the seam bound never ran and
-   * every interaction file republished in full (#10136 R18-3) — named,
-   * or the sentence below would read as "nothing needed seam-bounding".
-   */
-  baseUnproven: boolean;
 } | null {
   try {
     if (!planPath) return null;
@@ -3753,28 +3718,13 @@ function fixAuditShapeFacts(planPath: string | undefined): {
     const scope = rec.scope;
     const interaction = (scope as { interaction?: unknown }).interaction;
     let interactionFiles = 0;
-    let seamFiles = 0;
-    let seamKept = 0;
-    let seamTotal = 0;
-    let wholeFiles = 0;
     if (Array.isArray(interaction)) {
       for (const raw of interaction) {
-        // The SAME admission the brief builder applies — `interactionEntryOf`,
-        // called, not restated (#10136): an entry the briefs would not render
-        // (no path, no surviving edge) counts for nothing here either, and a
-        // census that cannot be true ("5 of 2 republished") is silenced,
-        // never rendered into a posted body.
-        const e = interactionEntryOf(raw);
-        if (e === null) continue;
-        interactionFiles += 1;
-        if (e.seam === undefined) continue;
-        if (e.seam.kept < e.seam.total) {
-          seamFiles += 1;
-          seamKept += e.seam.kept;
-          seamTotal += e.seam.total;
-        } else {
-          wholeFiles += 1;
-        }
+        // The SAME admission the brief builder applies —
+        // `interactionEntryOf`, called, not restated (#10136): an entry the
+        // briefs would not render (no path, no surviving edge) counts for
+        // nothing here either.
+        if (interactionEntryOf(raw) !== null) interactionFiles += 1;
       }
     }
     const cause =
@@ -3783,18 +3733,7 @@ function fixAuditShapeFacts(planPath: string | undefined): {
       rec.postureCause === 'flat-trend'
         ? rec.postureCause
         : null;
-    return {
-      cause,
-      interactionFiles,
-      seamFiles,
-      seamKept,
-      seamTotal,
-      wholeFiles,
-      oracleUnavailable:
-        (scope as { seamOracle?: unknown }).seamOracle === 'unavailable',
-      baseUnproven:
-        (scope as { baseContinuity?: unknown }).baseContinuity === 'unproven',
-    };
+    return { cause, interactionFiles };
   } catch {
     return null;
   }
@@ -7878,45 +7817,11 @@ function composeReviewBody(
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
       fixAuditOpenTailZh;
-  // The census names a REDUCTION only where one happened (#10136): a file
-  // whose every hunk displays a seam line republished whole, and counting
-  // it among the seam-bounded ones claimed a shed that never was. Files
-  // the scan kept whole are named as such; files with no census at all
-  // (a doubt state) republished in full and are not counted either way.
-  // An oracle that never ran is named as such (#10136 R18-2): with no
-  // parser resolvable the bound never executed, and the sentence must not
-  // read as if it ran and kept everything.
-  const fixAuditSeamEn =
-    fixAudit && fixAudit.oracleUnavailable
-      ? ' — but the seam oracle could not resolve a TypeScript parser at ' +
-        'run time, so every interaction file republished in full'
-      : fixAudit && fixAudit.baseUnproven
-        ? ' — but merge-base continuity with the previous posted round ' +
-          'could not be proven, so the bound never ran and every ' +
-          'interaction file republished in full'
-        : fixAudit && fixAudit.seamFiles > 0
-          ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
-            (fixAudit.wholeFiles > 0
-              ? `; ${fixAudit.wholeFiles} republished whole, nothing shed)`
-              : ')')
-          : fixAudit && fixAudit.wholeFiles > 0
-            ? ` (${fixAudit.wholeFiles} republished whole, nothing shed)`
-            : '';
-  const fixAuditSeamZh =
-    fixAudit && fixAudit.oracleUnavailable
-      ? '——但接缝 oracle 在运行时无法解析到 TypeScript 解析器，' +
-        '所有 interaction 文件均按全量重新发布'
-      : fixAudit && fixAudit.baseUnproven
-        ? '——但无法证明与上一轮已发布轮次之间的 merge base 连续性，' +
-          '限宽未运行，所有 interaction 文件均按全量重新发布'
-        : fixAudit && fixAudit.seamFiles > 0
-          ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
-            (fixAudit.wholeFiles > 0
-              ? `；${fixAudit.wholeFiles} 个整体重发，未裁剪任何 hunk）`
-              : '）')
-          : fixAudit && fixAudit.wholeFiles > 0
-            ? `（${fixAudit.wholeFiles} 个整体重发，未裁剪任何 hunk）`
-            : '';
+  // The interaction files re-enter with their full-range sections, the
+  // same as on any other incremental round — the posture changes the
+  // fan-out and the waves, never what a widened file displays.
+  const fixAuditSeamEn = '';
+  const fixAuditSeamZh = '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
         {

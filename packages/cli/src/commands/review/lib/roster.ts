@@ -424,14 +424,7 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // carries hunks no round has read, they arrive inside a heavy interaction
   // file's full-range slice, and these three agents are the only ones that
   // would have walked them. A clean verdict re-anchors past them for good.
-  //
-  // The seam bound has since given the widening its own gate on exactly
-  // that premise — each posted round carries the base it captured over in
-  // its marker (`mb`, #10136 R18-3), and the bound engages only where the
-  // bases match — but the gate covers the BOUND, not this skip: it is off
-  // on every round that cannot prove continuity, and those are precisely
-  // the rounds whose interaction slices carry the smuggled hunks. So the
-  // skip stays off unconditionally.
+
   //
   // So the skip is off until the anchor can prove base continuity. It costs
   // three agents on a rare shape — heavy, unchanged since the anchor, and

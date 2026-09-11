@@ -39,30 +39,15 @@
 // is unit-testable without a repository.
 
 import type { NarrowSelection } from './narrow-diff.js';
-import type { DiffHunk } from './diff-plan.js';
 import {
   dependentsOfChanged,
   discoverWorkspacePackages,
-  loadTypeScript,
-  resolveSpecifier,
-  scanImportSpecifiers,
-  seamRead,
-  type WorkspacePackage,
 } from './import-graph.js';
-import { classifyHeavy } from './heavy.js';
 
 /** A still-clean file pulled in because it imports a changed one. */
 export interface InteractionFile {
   path: string;
   importsChanged: string[];
-  /**
-   * Present exactly when the fix-audit posture seam-bounded this file
-   * (#10104): of its section's `total` hunks, `kept` republish — the ones
-   * displaying a line that imports or uses what changed. The rest were
-   * cleared by the round that reviewed them and are not re-shown; the brief
-   * and the posted body both disclose the reduction through this record.
-   */
-  seam?: { kept: number; total: number };
 }
 
 export interface IncrementalScope {
@@ -74,30 +59,6 @@ export interface IncrementalScope {
   interaction: InteractionFile[];
   /** Clean source files the widening considered and did NOT pull in. */
   contextFileCount: number;
-  /**
-   * Set exactly when the seam bound was asked for but no TypeScript
-   * parser could be resolved at run time (#10136 R18-2): every
-   * interaction file republished in full with NO census — byte-identical
-   * to the pre-bound widening — and the capture note and the posted body
-   * name the oracle's absence instead of reading as "no interaction file
-   * needed seam-bounding". TypeScript is a build-time dependency of the
-   * CLI and the published package carries no runtime dependencies, so
-   * this is the steady state of a global install; the seam bound only
-   * ever runs where a parser resolves.
-   */
-  seamOracle?: 'unavailable';
-  /**
-   * Set exactly when the seam bound was asked for but the round could not
-   * prove merge-base continuity with the previous POSTED round (#10136
-   * R18-3): every interaction file republished in full with NO census —
-   * byte-identical to the pre-bound widening — and the capture note and
-   * the posted body name the unproven base instead of reading as "no
-   * interaction file needed seam-bounding". The sibling of
-   * `seamOracle`, for the other deployment condition the bound has, and
-   * recorded by the CAPTURE rather than by `widenScope`: continuity is a
-   * fact about two rounds, which the widening cannot see.
-   */
-  baseContinuity?: 'unproven';
 }
 
 export interface WidenedScope {
@@ -105,86 +66,6 @@ export interface WidenedScope {
   paths: Set<string>;
   /** The record the plan carries and the chunk briefs read. */
   scope: IncrementalScope;
-  /**
-   * Per seam-bounded interaction file, the indices (into its section's
-   * `hunks`) to republish — `assembleSections` reads it. An entry exists only
-   * where the bound actually dropped something; an empty set is legal and
-   * means "header only": the file stays in the published diff (and so in a
-   * chunk, and so in a brief) with none of its already-cleared hunks.
-   */
-  hunkKeep?: Map<string, ReadonlySet<number>>;
-}
-
-/**
- * A test for "this hunk deletes a line that displays the seam".
- *
- * The seam matcher reads POST-IMAGE line numbers, and a removed line has no
- * post-image — so no mark can ever name it, and a hunk whose only seam
- * content is a removal was structurally unkeepable (#10136 R20-5). The
- * `newCount === 0` clause that first answered that covers only a hunk with
- * no new-side line AT ALL, which under the pinned `--unified=3` means a
- * file whose whole content is gone: never an interaction file. The removed
- * text itself is the only evidence there is.
- *
- * `tokens` are the names and specifiers the seam is made of. A NAME is
- * matched at identifier boundaries — `$` and `_` are identifier characters,
- * so a boundary built from `\b` would fire inside `moved$1` — and a
- * SPECIFIER as the substring it is, since a removed
- * `import … from './changed.js'` leaves no surviving binding to look for.
- *
- * A regex heuristic over removed text, in the same budgeted direction as
- * the widening's own edge scan: a false hit republishes one hunk more than
- * needed, and a miss drops one hunk from republication while the file stays
- * briefed to re-ask the seam question from the worktree.
- */
-function removedSeamMatcher(
-  tokens: readonly string[],
-  /** The file the hunk belongs to — a removed specifier resolves from it. */
-  fromFile: string,
-  changed: ReadonlySet<string>,
-  packages: readonly WorkspacePackage[],
-): (diffLines: readonly string[], hunk: DiffHunk) => boolean {
-  const names: string[] = [];
-  const specifiers: string[] = [];
-  for (const t of tokens) {
-    if (t === '') continue;
-    (/^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u.test(t)
-      ? names
-      : specifiers
-    ).push(t);
-  }
-  const escape = (t: string): string =>
-    t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const nameRe =
-    names.length === 0
-      ? null
-      : new RegExp(
-          `(?:^|[^\\p{ID_Continue}$])(?:${names.map(escape).join('|')})(?![\\p{ID_Continue}$])`,
-          'u',
-        );
-  return (diffLines, hunk) => {
-    if (nameRe === null && specifiers.length === 0) return false;
-    for (let ln = hunk.diffStart; ln <= hunk.diffEnd; ln++) {
-      const raw = diffLines[ln - 1];
-      // Removed lines only. The `---` file header cannot appear inside a
-      // hunk's own range, so a leading `-` here is a deletion.
-      if (raw === undefined || !raw.startsWith('-')) continue;
-      const text = raw.slice(1);
-      if (nameRe !== null && nameRe.test(text)) return true;
-      if (specifiers.some((spec) => text.includes(spec))) return true;
-      // A hunk that removes a whole import names a binding the head source
-      // no longer has and a specifier `resolvedSpecs` never saw — neither
-      // is in `tokens`. The removed line's own specifier is: read it the
-      // way the widening reads its edges, and resolve it against the same
-      // change set.
-      for (const spec of scanImportSpecifiers(text)) {
-        if (resolveSpecifier(fromFile, spec, changed, packages) !== null) {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
 }
 
 export interface WidenInput {
@@ -194,13 +75,6 @@ export interface WidenInput {
   selection: NarrowSelection;
   /** Read a repo-relative file from the worktree; null when unreadable. */
   readWorktree: (repoRelPath: string) => string | null;
-  /**
-   * Bound each interaction file to the hunks near its import seams (#10104)
-   * — the fix-audit posture's widening. Off, the widening republishes
-   * full-range sections exactly as it always has; the flag is resolved by
-   * the capture command from the posture, never by a later reader.
-   */
-  seamBound?: boolean;
 }
 
 /**
@@ -211,7 +85,7 @@ export interface WidenInput {
  * floor rather than a separate path that could disagree with it.
  */
 export function widenScope(input: WidenInput): WidenedScope {
-  const { anchor, selection, readWorktree, seamBound } = input;
+  const { anchor, selection, readWorktree } = input;
   const touched = new Set(selection.touched);
 
   // Test and docs dependents stay out: re-running tests is `build-test`'s job,
@@ -230,157 +104,6 @@ export function widenScope(input: WidenInput): WidenedScope {
     packages,
   );
 
-  // The seam bound (#10104). Under the critical posture an interaction
-  // file's full-range republication is what re-entered 89% of a measured
-  // long-lived diff every round, and everything it re-found below Critical
-  // was deferred anyway. So each interaction file keeps only the hunks that
-  // DISPLAY a seam line — an import of a changed file, or a use of a binding
-  // such an import introduces — and the record says how many were shed. The
-  // file itself always stays in scope (header at minimum), so its chunk
-  // agent is still briefed to re-ask the seam question against the worktree.
-  // Every doubt state republishes in full: an unreadable source, a section
-  // with no hunks, a scan that keeps everything, a FULL-RANGE slice that
-  // classifies heavy (#10136), and the oracle's own doubt return — each
-  // leaves the file exactly as the unbounded widening published it. The
-  // heavy state is a doubt state because heaviness is classified from the
-  // PUBLISHED slice: bounding a heavy interaction file would flip it
-  // non-heavy, `heavyFiles()` would drop it, and the invariant agents that
-  // read it whole from the worktree — the only auditors of hunks a backward
-  // base move smuggles into the full-range slice — would never launch on
-  // exactly the rounds the bound runs.
-  const hunkKeep = new Map<string, ReadonlySet<number>>();
-  const seams = new Map<string, { kept: number; total: number }>();
-  // The oracle's unavailable state is named, not doubted through (#10136
-  // R18-2). `seamRead` answers the doubt shape for every file when no
-  // parser resolves, which republishes everything whole correctly — but
-  // the plan, the capture's note and the posted body could not then tell
-  // "the oracle never ran" from "nothing needed bounding", and the round
-  // would certify the narrowed shape while running the full one (a
-  // global install resolves no `typescript`: it is a build-time
-  // dependency of the CLI and the published package carries no runtime
-  // dependencies). Record it instead: every interaction file republishes
-  // in full with NO census — the pre-bound behaviour, byte-identical —
-  // and `seamOracle` says why.
-  const oracleUnavailable =
-    seamBound === true && interaction.size > 0 && loadTypeScript() === null;
-  if (seamBound === true && interaction.size > 0 && !oracleUnavailable) {
-    const byPath = new Map(selection.sections.map((f) => [f.path, f]));
-    // The full capture's lines, for the kept slice's own +/- counts — the
-    // second heaviness classification below reads them exactly as a
-    // re-parse of the emitted hunks would (`assembleSections` emits each
-    // kept hunk's diff text verbatim).
-    const diffLines = selection.fullText.split('\n');
-    for (const path of interaction.keys()) {
-      const section = byPath.get(path);
-      if (!section || section.hunks.length === 0) continue;
-      const source = readWorktree(path);
-      if (source === null) continue;
-      // Heavy exemption (#10136): classify against the FULL-RANGE section,
-      // not the slice the bound would leave — the same counts
-      // `buildPlanReport` derives (added+removed, and preLines from the
-      // post-image line count), so the plan's `heavy` and the roster's
-      // invariant agents agree with what this loop decided to publish.
-      const fileLines =
-        source === ''
-          ? 0
-          : source.split('\n').length - (source.endsWith('\n') ? 1 : 0);
-      if (
-        classifyHeavy({
-          preLines: Math.max(
-            0,
-            fileLines - section.addedLines + section.removedLines,
-          ),
-          fileLines,
-          changedLines: section.addedLines + section.removedLines,
-          binary: section.binary,
-          kind: section.kind,
-        }).heavy
-      ) {
-        continue;
-      }
-      const read = seamRead(path, source, touched, packages);
-      // The doubt state — `null`, a read whose bindings cannot be proven
-      // collected (#10136) — is detected before hunk matching:
-      // `parseDiff` clamps a pure-deletion hunk at the top of a file
-      // (`@@ -1,N +0,0 @@`) to new-side [0,0], no marked line is ever 0,
-      // so matching in the doubt state would shed exactly the hunks the
-      // doubt state promises to keep. An explicit signal, never a
-      // count-based guess (#10136 R18-1): span-widened marking can
-      // legitimately cover nearly every line of a file, so "all lines
-      // marked" stopped being a shape a detector could read. Leave the
-      // file unbounded with NO seam record, exactly like the
-      // unreadable-source doubt state.
-      if (read === null) continue;
-      const lines = read.lines;
-      // A REMOVED line has no post-image, so no mark can ever name it —
-      // which is why the post-image matcher below cannot see a seam a hunk
-      // DELETES (#10136 R20-5 round 22). Its own text is the only evidence
-      // there is, so it is tested against the names and specifiers the
-      // seam is made of.
-      const removesSeam = removedSeamMatcher(
-        read.tokens,
-        path,
-        touched,
-        packages,
-      );
-      const kept = new Set<number>();
-      section.hunks.forEach((h, i) => {
-        // A pure-deletion hunk (`@@ -a,N +b,0 @@`) occupies no post-image
-        // line, and `parseDiff` clamps it to a point `newCount` disowns as a
-        // range — at the top of a file that point is 0, which no mark can
-        // ever equal. A post-image match therefore CANNOT keep such a hunk,
-        // however much seam its removed lines carry, so the one adaptation
-        // the bound most owes a re-read — a caller that answered a changed
-        // API by deleting its import or its call — was structurally
-        // unkeepable (#10136 R20-5). Keep it unconditionally instead:
-        // over-collection is the budgeted direction, and the marks are
-        // post-image line numbers that cannot be compared against old-side
-        // text at all.
-        if (
-          h.newCount === 0 ||
-          lines.some((ln) => ln >= h.newStart && ln <= h.newEnd) ||
-          removesSeam(diffLines, h)
-        ) {
-          kept.add(i);
-        }
-      });
-      // The heavy exemption's second direction (#10136 R17-4): the plan
-      // classifies heaviness from the PUBLISHED slice — the kept hunks'
-      // own +/- counts against the whole-file post-image, by the same
-      // identity `buildPlanReport` applies — and the bound is the first
-      // partial publisher, so a full-range NON-heavy file can classify
-      // heavy once bounded (shedding hunks lowers changedLines while the
-      // identity raises preLines; the two move in opposite directions).
-      // The classifications must tell one story: a disagreement
-      // republishes the file whole with NO census, or the plan's `heavy`
-      // would roster three whole-file invariant agents on a file this
-      // loop deliberately bounded, in the round shape whose purpose is to
-      // stop spending them.
-      if (kept.size < section.hunks.length) {
-        let keptAdded = 0;
-        let keptRemoved = 0;
-        section.hunks.forEach((h, i) => {
-          if (!kept.has(i)) return;
-          for (let ln = h.diffStart; ln <= h.diffEnd; ln++) {
-            const ch = diffLines[ln - 1]?.charAt(0);
-            if (ch === '+') keptAdded++;
-            else if (ch === '-') keptRemoved++;
-          }
-        });
-        const keptHeavy = classifyHeavy({
-          preLines: Math.max(0, fileLines - keptAdded + keptRemoved),
-          fileLines,
-          changedLines: keptAdded + keptRemoved,
-          binary: section.binary,
-          kind: section.kind,
-        }).heavy;
-        if (keptHeavy) continue;
-      }
-      seams.set(path, { kept: kept.size, total: section.hunks.length });
-      if (kept.size < section.hunks.length) hunkKeep.set(path, kept);
-    }
-  }
-
   const paths = new Set([...touched, ...interaction.keys()]);
   return {
     paths,
@@ -389,14 +112,8 @@ export function widenScope(input: WidenInput): WidenedScope {
       deltaFiles: [...touched].sort(),
       interaction: [...interaction.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([path, importsChanged]) => ({
-          path,
-          importsChanged,
-          ...(seams.has(path) ? { seam: seams.get(path) } : {}),
-        })),
+        .map(([path, importsChanged]) => ({ path, importsChanged })),
       contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
-      ...(oracleUnavailable ? { seamOracle: 'unavailable' as const } : {}),
     },
-    ...(hunkKeep.size > 0 ? { hunkKeep } : {}),
   };
 }

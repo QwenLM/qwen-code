@@ -1388,20 +1388,6 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
 });
 
 describe('interactionEntryOf — one admission for every census reader (#10136)', () => {
-  it('admits a well-formed entry with its census', () => {
-    expect(
-      interactionEntryOf({
-        path: 'src/b.ts',
-        importsChanged: ['src/a.ts', '', 7],
-        seam: { kept: 1, total: 3 },
-      }),
-    ).toEqual({
-      path: 'src/b.ts',
-      importsChanged: ['src/a.ts'],
-      seam: { kept: 1, total: 3 },
-    });
-  });
-
   it('keeps the entry and drops a census that cannot be true', () => {
     for (const seam of [
       { kept: 5, total: 2 },

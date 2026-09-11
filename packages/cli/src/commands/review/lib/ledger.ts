@@ -187,31 +187,6 @@ export interface Ledger {
    */
   model?: string;
   /**
-   * The merge base the round's published diff was captured over (#10136
-   * R18-3). Its one consumer is the seam-bounded widening's continuity
-   * gate: that bound sheds an interaction file's hunks on the premise a
-   * PRIOR round published them, which holds only while the merge base
-   * holds still between rounds — a backward base move smuggles hunks no
-   * round ever published into the full-range slice, and the bound would
-   * drop them from every agent's view.
-   *
-   * It rides the MARKER, not a temporary file, because the deployment that
-   * runs these rounds deletes `.qwen/` before every run: a stamp that lives
-   * only beside the plan is null on every CI round, and a gate that can
-   * never be proven is a bound that never engages. The marker is on the
-   * pull request, so the round that posted it is the round that vouches
-   * the base — and the pairing is what makes the gate a claim about a
-   * round that REVIEWED rather than about one that merely captured.
-   *
-   * Rides and falls WITH the anchor, for the same reason `model` does: the
-   * serializer writes it only beside a `sha` it is willing to certify, the
-   * parser drops it when that sha did not survive, and `pr-context` strips
-   * it wherever it strips the anchor (a foreign or anonymous winner's base
-   * is not this account's to vouch). A grafted anchor carries none — the
-   * graft's source round is not the round whose base this field names.
-   */
-  mb?: string;
-  /**
    * Source-diff line count as of the FIRST round that recorded one, carried
    * forward unchanged. A baseline, never re-measured: growth is only legible
    * cumulatively. A change that arrives at 228 source lines and leaves at 920
@@ -714,8 +689,6 @@ export function serializeLedger(ledger: Ledger): string {
     anchor: boolean,
     volume: 'both' | 'posted' | 'none',
     closures: boolean,
-    /** The continuity base — its own rung above the anchor it rides with. */
-    base = true,
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -813,13 +786,6 @@ export function serializeLedger(ledger: Ledger): string {
       if (model === undefined || model.length <= LEDGER_MAX_MODEL) {
         payload.sha = ledger.sha;
         if (model) payload.model = model;
-        // The base rides the anchor's rung: a round that will not certify
-        // its own range does not vouch the base it captured over either
-        // (#10136 R18-3). ~48 bytes, shed with the pair it qualifies — and,
-        // one rung sooner, on its own (see the cascade below).
-        if (base && ledger.mb && SHA_RE.test(ledger.mb)) {
-          payload.mb = ledger.mb;
-        }
       }
     }
     // Unconditional, unlike `sha` above: the ruling that withholds an anchor
@@ -870,16 +836,6 @@ export function serializeLedger(ledger: Ledger): string {
     // and losing it costs one round of lineage, while everything below it
     // — the anchor, the work list — is a claim the next round acts on.
     marker = render(capped, total - kept, true, 'none', false);
-  }
-  if (marker.length > LEDGER_MAX_BYTES) {
-    // The continuity base sheds one rung ABOVE the anchor it rides with
-    // (#10136 R18-3). The two buy different things for the next round: the
-    // anchor narrows its DIFF, and losing it pays a full re-review; the
-    // base only lets the seam bound narrow the republication of files that
-    // diff already carries, and losing it pays a full-range republication
-    // of those files. ~48 bytes must not cost the more expensive of the
-    // two.
-    marker = render(capped, total - kept, true, 'none', false, false);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
@@ -1108,13 +1064,6 @@ export function parseLedger(body: string | undefined): Ledger | null {
       sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
         ? rawModel
         : undefined;
-    // Anchored-only on READ as on WRITE, exactly like `model`: a base beside
-    // no surviving sha names a range this marker does not certify, and the
-    // continuity gate reads its absence as "unproven, bound off".
-    const mb =
-      sha && typeof raw.mb === 'string' && SHA_RE.test(raw.mb)
-        ? raw.mb
-        : undefined;
     // Survives truncation on read as it does on write — a partial list still
     // measured the same diff. Anything that is not a positive integer is
     // dropped, so a garbled baseline degrades to "unknown" (silence) rather
@@ -1188,7 +1137,6 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
-      ...(mb ? { mb } : {}),
       ...(src0 ? { src0 } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),

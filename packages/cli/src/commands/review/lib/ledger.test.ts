@@ -173,50 +173,6 @@ describe('ledger marker', () => {
     }
   });
 
-  it('round-trips the merge base beside the sha, and drops it without one (#10136 R18-3)', () => {
-    // The seam-bounded widening sheds an interaction file's hunks on the
-    // premise a PRIOR round published them, which holds only while the
-    // merge base holds still. The base rides the marker so the round that
-    // POSTED it is the round that vouches it — and it rides the anchor's
-    // rung: a round unwilling to certify its own range vouches no base
-    // either, on write or on read.
-    const anchored: Ledger = {
-      ...LEDGER,
-      sha: 'abc1234def567890',
-      mb: 'b'.repeat(40),
-    };
-    expect(parseLedger(`Reviewed.\n\n${serializeLedger(anchored)}`)).toEqual(
-      anchored,
-    );
-    expect(serializeLedger({ ...LEDGER, mb: 'b'.repeat(40) })).not.toContain(
-      'mb',
-    );
-    const truncated = serializeLedger({
-      v: 1,
-      round: 2,
-      sha: 'abc1234def567890',
-      mb: 'b'.repeat(40),
-      findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
-        id: `R2-${i}`,
-        sev: 'C' as const,
-        file: 'src/a.ts',
-        title: 'x',
-      })),
-    });
-    expect(parseLedger(truncated)!.mb).toBeUndefined();
-    for (const forged of [
-      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"mb":"' +
-        'b'.repeat(40) +
-        '"} -->',
-      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"not hex","mb":"' +
-        'b'.repeat(40) +
-        '"} -->',
-      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234def567890","mb":"not hex"} -->',
-    ]) {
-      expect(parseLedger(forged)!.mb).toBeUndefined();
-    }
-  });
-
   it('normalises the model on both sides — trimmed, WHOLE, never a non-string', () => {
     // The model rides whole or not at all: a truncated id is a prefix, and a
     // prefix can equal a DIFFERENT model's full id — the same-model gate
@@ -365,83 +321,6 @@ describe('ledger marker', () => {
     expect(back.dropped).toBeUndefined();
     expect(back.sha).toBeUndefined();
     expect(back.model).toBeUndefined();
-  });
-
-  it('sheds the continuity base one rung ABOVE the anchor it rides with (#10136 R18-3)', () => {
-    // The two buy different things for the next round: the anchor narrows
-    // its DIFF, and losing it pays a full re-review; the base only lets the
-    // seam bound narrow the republication of files that diff already
-    // carries. ~48 bytes must not cost the more expensive of the two.
-    const sha = 'deadbeef'.repeat(5);
-    const model = 'qwen3.7-max';
-    const mb = 'b'.repeat(40);
-    const anchoredOf = (findings: LedgerFinding[]): string =>
-      serializeLedger({ v: 1, round: 2, findings, sha, model });
-    const basedOf = (findings: LedgerFinding[]): string =>
-      serializeLedger({ v: 1, round: 2, findings, sha, model, mb });
-    const keepsAnchor = (findings: LedgerFinding[]): boolean =>
-      parseLedger(anchoredOf(findings))?.sha === sha;
-    const wide = (i: number): LedgerFinding => ({
-      id: `R2-${i}`,
-      sev: 'S',
-      file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
-      line: 99999,
-      title: 'x'.repeat(LEDGER_MAX_TITLE),
-    });
-    // Pack the ANCHOR-ONLY form to the last byte that still keeps its
-    // anchor: coarse entries first, then entries grown a character at a
-    // time. At the boundary the form has zero headroom, so ANY base beside
-    // it overflows — which is the rung under test.
-    const findings: LedgerFinding[] = [];
-    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
-      findings.push(wide(i));
-      if (!keepsAnchor(findings)) {
-        findings.pop();
-        break;
-      }
-    }
-    let atCap = false;
-    while (!atCap && findings.length < LEDGER_MAX_FINDINGS) {
-      const seed: LedgerFinding = {
-        id: `R2-${findings.length}`,
-        sev: 'S',
-        file: 'a.ts',
-        title: '',
-      };
-      findings.push(seed);
-      if (!keepsAnchor(findings)) {
-        findings.pop();
-        break;
-      }
-      let last = seed;
-      for (;;) {
-        const title = last.title + 'x';
-        if (title.length > LEDGER_MAX_TITLE) break;
-        const grown = { ...last, title };
-        findings[findings.length - 1] = grown;
-        if (!keepsAnchor(findings)) {
-          findings[findings.length - 1] = last;
-          atCap = true;
-          break;
-        }
-        last = grown;
-      }
-    }
-    const anchored = anchoredOf(findings).length;
-    // The premise, asserted rather than assumed: the anchor-only form fits
-    // and keeps its pair, and the base beside it does not fit.
-    expect(anchored).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
-    expect(keepsAnchor(findings)).toBe(true);
-    expect(
-      anchored + (basedOf([]).length - anchoredOf([]).length),
-    ).toBeGreaterThan(LEDGER_MAX_BYTES);
-
-    const back = parseLedger(basedOf(findings))!;
-    expect(back.findings).toHaveLength(findings.length);
-    expect(back.dropped).toBeUndefined();
-    expect(back.sha).toBe(sha);
-    expect(back.model).toBe(model);
-    expect(back.mb).toBeUndefined();
   });
 
   it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {

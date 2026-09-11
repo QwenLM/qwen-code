@@ -5784,7 +5784,6 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
             {
               path: 'bundle.min.js',
               importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
-              seam: { kept: 2, total: 2 },
             },
           ],
         },
@@ -5832,8 +5831,6 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     );
     if (key15 === undefined) throw new Error('chunk 15 was not built');
     const brief = readFileSync(briefPath(plan, key15), 'utf8');
-    expect(brief).toContain('all 2 hunk(s) republished, none shed');
-    expect(brief).not.toContain('not re-shown');
     // The reverse auditor's brief carries the fix-audit framing too — the
     // floor governs posting, never finding (#10136).
     expect(brief).toContain('Fix-audit round (critical posting posture)');
@@ -5848,61 +5845,6 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     const err = roundStderr();
     expect(err).toContain('posture narrowing (#10104)');
     expect(err).toContain('chunk 14 — not a delta territory, dry in round 2');
-  });
-
-  it('a reverse-audit brief names a shed census as seam-bounded, and a plain round carries no banner (#10136)', () => {
-    const shed = {
-      ...PLAN,
-      incremental: {
-        since: 'a'.repeat(40),
-        effective: true,
-        posture: 'critical',
-        postureCause: 'round',
-        scope: {
-          anchor: 'a'.repeat(40),
-          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
-          interaction: [
-            {
-              path: 'a.ts',
-              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
-            },
-            {
-              path: 'bundle.min.js',
-              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
-              seam: { kept: 1, total: 3 },
-            },
-          ],
-        },
-      },
-    };
-    writeFileSync(plan, JSON.stringify(shed));
-    const old = new Date(2020, 0, 1);
-    utimesSync(plan, old, old);
-    runRound(1);
-    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
-      k.startsWith('reverse-audit--chunk-15--round-1--'),
-    );
-    if (key15 === undefined) throw new Error('chunk 15 was not built');
-    const brief = readFileSync(briefPath(plan, key15), 'utf8');
-    expect(brief).toContain(
-      'seam-bounded: 1 of 3 hunk(s) republished; the rest were cleared by an earlier round and are not re-shown',
-    );
-    expect(brief).toContain('Fix-audit round (critical posting posture)');
-
-    // Without the posture: the same incremental scope, no banner.
-    const plain = {
-      ...shed,
-      incremental: { ...shed.incremental, posture: undefined },
-    };
-    writeFileSync(plan, JSON.stringify(plain));
-    utimesSync(plan, old, old);
-    runRound(1);
-    const key15b = [...readRecordedPrompts(plan).keys()].find((k) =>
-      k.startsWith('reverse-audit--chunk-15--round-1--'),
-    );
-    if (key15b === undefined) throw new Error('chunk 15 was not built');
-    const plainBrief = readFileSync(briefPath(plan, key15b), 'utf8');
-    expect(plainBrief).not.toContain('Fix-audit round');
   });
 
   it('a round that converges through narrowing names the narrowed chunks in CONVERGED (#10136 R1-10)', () => {
@@ -8059,7 +8001,7 @@ describe('incremental-scope briefs', () => {
     expect(seam).toContain('src/changed.ts');
   });
 
-  it('a fix-audit round frames the brief and discloses the seam bound (#10104)', () => {
+  it('a fix-audit round frames the brief (#10104)', () => {
     const fixAudit = {
       ...INCREMENTAL_PLAN,
       incremental: {
@@ -8067,16 +8009,7 @@ describe('incremental-scope briefs', () => {
         effective: true,
         posture: 'critical',
         postureCause: 'round',
-        scope: {
-          ...INCREMENTAL_PLAN.incremental.scope,
-          interaction: [
-            {
-              path: 'src/caller.ts',
-              importsChanged: ['src/changed.ts'],
-              seam: { kept: 1, total: 4 },
-            },
-          ],
-        },
+        scope: { ...INCREMENTAL_PLAN.incremental.scope },
       },
     };
     const delta = buildChunkAgentPrompt(fixAudit, 1);
@@ -8087,66 +8020,15 @@ describe('incremental-scope briefs', () => {
     // could drop a `[test]` finding the floor keeps inline at any floor.
     expect(delta).toContain('never posted — except pre-confirmed');
 
+    // The interaction file's brief is the ordinary incremental one: the
+    // posture changes the fan-out and the waves, never what a widened
+    // file displays.
     const seam = buildChunkAgentPrompt(fixAudit, 2);
-    expect(seam).toContain('SEAM-BOUNDED: 1 of 4 hunk(s)');
-    expect(seam).toContain('still yours in full, from the worktree');
+    expect(seam).toContain('INTERACTION only');
 
-    // Without the posture, no fix-audit frame and no seam clause — the seam
-    // census is a fix-audit fact, and a plan without one renders none.
+    // Without the posture, no fix-audit frame.
     const plain = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
     expect(plain).not.toContain('Fix-audit round');
-    expect(plain).not.toContain('SEAM-BOUNDED');
-  });
-
-  it('a census that kept every hunk is briefed as complete, never as seam-bounded (#10136 R1-7)', () => {
-    const whole = {
-      ...INCREMENTAL_PLAN,
-      incremental: {
-        since: 'abc1234def5678900000',
-        effective: true,
-        posture: 'critical',
-        postureCause: 'round',
-        scope: {
-          ...INCREMENTAL_PLAN.incremental.scope,
-          interaction: [
-            {
-              path: 'src/caller.ts',
-              importsChanged: ['src/changed.ts'],
-              seam: { kept: 4, total: 4 },
-            },
-          ],
-        },
-      },
-    };
-    const seam = buildChunkAgentPrompt(whole, 2);
-    expect(seam).not.toContain('SEAM-BOUNDED');
-    expect(seam).not.toContain('not re-shown');
-    expect(seam).toContain('The seam scan shed none of its 4 hunk(s)');
-    expect(seam).toContain('its diff here is complete');
-  });
-
-  it('a malformed seam census renders no seam clause', () => {
-    const bad = {
-      ...INCREMENTAL_PLAN,
-      incremental: {
-        since: 'abc1234def5678900000',
-        effective: true,
-        posture: 'critical',
-        scope: {
-          ...INCREMENTAL_PLAN.incremental.scope,
-          interaction: [
-            {
-              path: 'src/caller.ts',
-              importsChanged: ['src/changed.ts'],
-              seam: { kept: 5, total: 2 },
-            },
-          ],
-        },
-      },
-    };
-    const seam = buildChunkAgentPrompt(bad, 2);
-    expect(seam).toContain('INTERACTION only');
-    expect(seam).not.toContain('SEAM-BOUNDED');
   });
 
   it('whole-diff role briefs carry the frame once, up front', () => {

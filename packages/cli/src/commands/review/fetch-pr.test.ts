@@ -18,7 +18,6 @@ import {
   resolveIncrementalAnchor,
   type AnchorProbe,
 } from './fetch-pr.js';
-import { loadTypeScript } from './lib/import-graph.js';
 import {
   clearReviewWorktreeLease,
   clearReviewWorktreeLeaseIfOwned,
@@ -397,15 +396,6 @@ vi.mock('./lib/worktree.js', async (importOriginal) => ({
 vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: producerMocks.resolveMergeBase,
 }));
-
-// One test below needs the seam oracle unresolvable (#10136 R18-2). The
-// mock delegates EVERYTHING to the real module — the seam scan, the
-// widening and the corpus all run for real in every other test — and the
-// one test flips `loadTypeScript` alone.
-vi.mock('./lib/import-graph.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./lib/import-graph.js')>();
-  return { ...actual, loadTypeScript: vi.fn(actual.loadTypeScript) };
-});
 
 // The ledger append is the wiring under test here, not the ledger itself
 // (run-ledger.test.ts owns that): a silently unwritten ledger would make a
@@ -1703,7 +1693,7 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toContain('b/b.ts');
   });
 
-  it('resolves the critical posture from the side file and seam-bounds the widening (#10104)', async () => {
+  it('resolves the critical posture from the side file (#10104)', async () => {
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1714,25 +1704,19 @@ describe('fetch-pr report assembly', () => {
       if (String(path).endsWith('b.ts')) return { isFile: () => true };
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
-    // `b.ts` imports the changed file, but on lines its own single hunk
-    // (new-side 1-2) does not display — the seam-bounded widening keeps the
-    // file with none of its hunks.
     const B_SOURCE =
       '//x\n//y\nconst pad = 1;\n' +
       "import { added } from './a.js';\nadded();\n";
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (String(path).endsWith('b.ts')) return B_SOURCE;
       if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        // The previous posted round: round 7, so this round is 8 — past the
-        // auto floor's round schedule. The base its POSTED marker carried
-        // matches this round's base, so the seam bound's continuity gate
-        // (#10136 R18-3) is satisfied and the bound actually runs.
+        // The previous posted round: round 7, so this round is 8 — past
+        // the auto floor's round schedule.
         return JSON.stringify({
           round: 7,
           findings: [],
           posted: 1,
           floor: 'c',
-          mb: BASE,
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1742,203 +1726,16 @@ describe('fetch-pr report assembly', () => {
 
     expect(report.incremental.posture).toBe('critical');
     expect(report.incremental.postureCause).toBe('round');
+    // The widening is unchanged by the posture: the interaction file
+    // re-enters with its full-range section, exactly as on any other
+    // incremental round.
     expect(report.incremental.scope.interaction).toEqual([
-      { path: 'b.ts', importsChanged: ['a.ts'], seam: { kept: 0, total: 1 } },
+      { path: 'b.ts', importsChanged: ['a.ts'] },
     ]);
-    // The file publishes header-only: still in scope (a chunk holds it, its
-    // brief asks the seam question), none of its cleared hunks re-shown.
-    const diff = writtenDiff() ?? '';
-    expect(diff).toContain('diff --git a/b.ts b/b.ts');
-    expect(diff).not.toContain('+y2');
-    expect(diff).toContain('+added');
-    // The recorded round cap prices the territory tier the posture flips to,
-    // not the small tier the narrowed sizes would read.
+    expect(writtenDiff() ?? '').toContain('+y2');
+    // The recorded round cap prices the territory tier the posture flips
+    // to, not the small tier the narrowed sizes would read.
     expect(report.budget.reverseAuditRounds).toBe(5);
-  });
-
-  it('a moved merge base keeps the seam bound off — the interaction file republishes whole (#10136 R18-3)', async () => {
-    // The bound sheds hunks on the premise a prior round published them,
-    // which holds only while the merge base holds still. The side file's
-    // stamp names a DIFFERENT base than this round resolved — a retarget
-    // moved the base between rounds — so hunks the move smuggled into the
-    // full-range slice were never published. The bound stays off: no seam
-    // record, and the published diff carries the file's non-seam hunk.
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
-    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return { isFile: () => true };
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-    const B_SOURCE =
-      '//x\n//y\nconst pad = 1;\n' +
-      "import { added } from './a.js';\nadded();\n";
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return B_SOURCE;
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({
-          round: 7,
-          findings: [],
-          posted: 1,
-          floor: 'c',
-          // The previous round POSTED over a DIFFERENT base.
-          mb: 'c'.repeat(40),
-        });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-
-    const report = await reportFor({ since: ANCHOR });
-
-    // The posture still resolves — the roster, the round-cap tier and the
-    // wave narrowing all follow it. Only the seam bound is gated.
-    expect(report.incremental.posture).toBe('critical');
-    expect(report.incremental.postureCause).toBe('round');
-    expect(report.incremental.scope.interaction).toEqual([
-      { path: 'b.ts', importsChanged: ['a.ts'] },
-    ]);
-    // …and the PLAN records why, so the posted round-shape sentence can
-    // say it too — the same treatment `seamOracle` gets for the bound's
-    // other deployment condition (#10136 R18-3).
-    expect(report.incremental.scope.baseContinuity).toBe('unproven');
-    const diff = writtenDiff() ?? '';
-    expect(diff).toContain('diff --git a/b.ts b/b.ts');
-    expect(diff).toContain('+y2');
-    // The disclosure names why the bound stayed off, instead of reading as
-    // "no interaction file needed seam-bounding".
-    const err = producerMocks.writeStderrLine.mock.calls
-      .map((c) => String(c[0]))
-      .join('\n');
-    expect(err).toContain(
-      'merge-base continuity with the previous round is unproven',
-    );
-    expect(err).not.toContain('no interaction file needed seam-bounding');
-  });
-
-  it('no recorded merge base keeps the seam bound off until continuity is provable (#10136 R18-3)', async () => {
-    // Today's state: side files predate the stamp. The gate resolves false
-    // and whole-section republication remains the floor — the bound never
-    // engages on a premise it cannot prove, even with the posture on.
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
-    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return { isFile: () => true };
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-    const B_SOURCE =
-      '//x\n//y\nconst pad = 1;\n' +
-      "import { added } from './a.js';\nadded();\n";
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return B_SOURCE;
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({
-          round: 7,
-          findings: [],
-          posted: 1,
-          floor: 'c',
-        });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-
-    const report = await reportFor({ since: ANCHOR });
-
-    expect(report.incremental.posture).toBe('critical');
-    expect(report.incremental.scope.interaction).toEqual([
-      { path: 'b.ts', importsChanged: ['a.ts'] },
-    ]);
-    expect(writtenDiff() ?? '').toContain('+y2');
-  });
-
-  it('records and names the seam oracle as unavailable when no parser resolves (#10136 R18-2)', async () => {
-    // The review workflow's deployment: the CLI is installed globally,
-    // whose published dependency set is empty, and the base-branch
-    // checkout's devDependencies were never installed — so no
-    // `typescript` resolves at run time. Every interaction file
-    // republishes in full (the pre-bound behaviour), and the plan plus
-    // the capture note SAY the bound never ran, instead of reading as
-    // "no interaction file needed seam-bounding".
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
-    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return { isFile: () => true };
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-    const B_SOURCE =
-      '//x\n//y\nconst pad = 1;\n' +
-      "import { added } from './a.js';\nadded();\n";
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('b.ts')) return B_SOURCE;
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({
-          round: 7,
-          findings: [],
-          posted: 1,
-          floor: 'c',
-          mb: BASE,
-        });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-    vi.mocked(loadTypeScript).mockReturnValueOnce(null);
-
-    const report = await reportFor({ since: ANCHOR });
-
-    expect(report.incremental.posture).toBe('critical');
-    expect(report.incremental.scope.seamOracle).toBe('unavailable');
-    expect(report.incremental.scope.interaction).toEqual([
-      { path: 'b.ts', importsChanged: ['a.ts'] },
-    ]);
-    // Full republication — the file's non-seam hunk is still published.
-    expect(writtenDiff() ?? '').toContain('+y2');
-    const err = producerMocks.writeStderrLine.mock.calls
-      .map((c) => String(c[0]))
-      .join('\n');
-    expect(err).toContain('could not resolve a TypeScript parser');
-    expect(err).not.toContain('no interaction file needed seam-bounding');
-  });
-
-  it('a capture writes no continuity stamp — the base rides the posted marker (#10136 R18-3)', async () => {
-    // A stamp written by the CAPTURE proves only that a diff was published:
-    // the anchor-recovery path runs `fetch-pr` twice in one round, and the
-    // second run read back the first run's stamp, so `prevMergeBase ===
-    // mergeBaseSha` was a tautology about this round's own discarded
-    // capture. An `upToDate` or `emptyDiff` stop published and stamped
-    // without launching an agent at all. The base now rides the marker the
-    // POSTING boundary writes, so a capture vouches nothing and creates no
-    // side file — which is also what kept a contentless `{mergeBaseSha}`
-    // stub from diverting `pr-context`'s ledger recovery (#10136 R20-1).
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({ round: 7, findings: [], posted: 1 });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-
-    await reportFor({ since: ANCHOR });
-
-    expect(
-      producerMocks.writeFileSync.mock.calls.filter(([path]) =>
-        String(path).includes('qwen-review-pr-42-prev-ledger.json'),
-      ),
-    ).toEqual([]);
   });
 
   // The capture-time recovery of the operator's RECORDED floor (#10136
@@ -1952,7 +1749,6 @@ describe('fetch-pr report assembly', () => {
         findings: [],
         posted: 1,
         floor: 'c',
-        mb: BASE,
       });
     }
     return null;

@@ -1413,18 +1413,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // the side file is the same one compose's recovery reads next to this
     // plan, so the prediction and the resolution share their facts.
     let postureCause: CriticalPostureCause | null = null;
-    // The previous round's merge base, carried by the same side file the
-    // posture reads (#10136 R18-3). The seam bound sheds an interaction
-    // file's hunks on the premise that a prior round published them —
-    // which holds only while the merge base holds still between rounds:
-    // a backward base move smuggles hunks NO round ever published into
-    // the full-range slice, and the bound would drop them from every
-    // agent's view. `roster.ts` rules its own skip by the same premise
-    // ("the skip is off until the anchor can prove base continuity").
-    // Null — no recorded base, or a malformed one — resolves the gate to
-    // false: the bound stays off until continuity is provable, and
-    // whole-section republication remains the floor.
-    let prevMergeBase: string | null = null;
     if (anchor?.diffBase) {
       let sideLedger: unknown = null;
       try {
@@ -1436,21 +1424,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       } catch {
         sideLedger = null;
-      }
-      if (
-        sideLedger !== null &&
-        typeof sideLedger === 'object' &&
-        !Array.isArray(sideLedger)
-      ) {
-        // `mb` — the marker field the previous round POSTED and
-        // `pr-context`'s recovery persisted here (#10136 R18-3). A stamp
-        // written by a capture would prove only that a diff was published;
-        // this one exists exactly when a round posted a marker certifying
-        // the range it reviewed, and it survives the `.qwen/` wipe every
-        // CI run begins with, because it lives on the pull request.
-        const carried = (sideLedger as Record<string, unknown>)['mb'];
-        prevMergeBase =
-          typeof carried === 'string' && carried !== '' ? carried : null;
       }
       postureCause = resolveCriticalPosture({
         recordedFloor: recordedSeverityFloor({
@@ -1574,21 +1547,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           anchor: anchor.diffBase ?? anchor.incremental.since,
           selection,
           readWorktree: containedWorktreeReader(wt),
-          // The bound's second gate (#10136 R18-3): base continuity. The
-          // posture alone does not prove the hunks it would shed were
-          // ever published — only a merge base that held still since the
-          // previous round does. Resolved here at capture, never by a
-          // later reader (incremental-scope.ts:100-101).
-          seamBound:
-            postureCause !== null &&
-            prevMergeBase !== null &&
-            prevMergeBase === mergeBaseSha,
         })),
-        (narrowed = assembleSections(
-          selection,
-          widened.paths,
-          widened.hunkKeep,
-        )) === null)
+        (narrowed = assembleSections(selection, widened.paths)) === null)
       ) {
         // `assembleSections` selects nothing only when the widened set names
         // no section the full capture carries, which the guards above already
@@ -1602,44 +1562,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           if (postureCause !== null) {
             anchor.incremental.posture = 'critical';
             anchor.incremental.postureCause = postureCause;
-            const bounded = widened.scope.interaction.filter(
-              (e) => e.seam !== undefined,
-            );
-            const kept = bounded.reduce((n, e) => n + (e.seam?.kept ?? 0), 0);
-            const total = bounded.reduce((n, e) => n + (e.seam?.total ?? 0), 0);
-            const continuityProven =
-              prevMergeBase !== null && prevMergeBase === mergeBaseSha;
-            // Named in the PLAN, not only on stderr (#10136 R18-3): the
-            // posted round-shape sentence reads the plan, and a bound that
-            // did not run because no previous round vouched a base is not
-            // "no interaction file needed seam-bounding" — the same
-            // distinction `seamOracle` draws for the other deployment
-            // condition. Recorded only where the bound was actually asked
-            // for and had something to bound.
-            if (
-              !continuityProven &&
-              widened.scope.seamOracle === undefined &&
-              widened.scope.interaction.length > 0
-            ) {
-              anchor.incremental.scope.baseContinuity = 'unproven';
-            }
             writeStderrLine(
               `Critical posture (${postureCause}): fix-audit round shape — ` +
-                `territory fan-out over the delta, ` +
-                (bounded.length > 0
-                  ? `interaction files seam-bounded to ${kept} of ${total} hunk(s).`
-                  : widened.scope.seamOracle === 'unavailable'
-                    ? `interaction files republished in full — the seam ` +
-                      `oracle could not resolve a TypeScript parser at run ` +
-                      `time, so the bound never ran.`
-                    : continuityProven || widened.scope.interaction.length === 0
-                      ? `no interaction file needed seam-bounding.`
-                      : `interaction files republished in full — merge-base ` +
-                        `continuity with the previous round is unproven (${
-                          prevMergeBase === null
-                            ? 'no base recorded yet'
-                            : 'the base moved'
-                        }), so the seam bound stayed off.`),
+                `territory fan-out over the delta and its import-seam ` +
+                `interaction files, with the reverse-audit waves narrowed ` +
+                `to the territories the previous waves could not certify ` +
+                `dry.`,
             );
           }
           // The published hunks are byte-identical hunks of

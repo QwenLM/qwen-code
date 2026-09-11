@@ -310,28 +310,25 @@ export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
 }
 
 /**
- * One admission for a plan's `incremental.scope.interaction[]` entry, shared
- * by every reader of the census (#10136): the brief builder (which renders
- * the entry's scope class and seam bound) and `compose-review`'s
- * round-shape disclosure. Two readers with two bars let the body count a
- * seam census on an entry the briefs never rendered. (The roster reads the
- * plan through `isFixAuditRound` alone and never opens the entries.)
+ * One admission for a plan's `incremental.scope.interaction[]` entry,
+ * shared by every reader of it (#10136): the brief builder (which renders
+ * the entry's scope class) and `compose-review`'s round-shape disclosure.
+ * Two readers with two bars let the body count an entry the briefs never
+ * rendered. (The roster reads the plan through `isFixAuditRound` alone and
+ * never opens the entries.)
  *
  * `null` for anything the briefs would not render: no path, no surviving
  * `importsChanged` edge (an entry IS its edge — "because it imports ,
- * which changed" is a seam pointing at nothing). The seam census rides
- * along only when it can be true: integers, `0 <= kept <= total`; a census
- * that cannot be ("5 of 2 republished") is dropped, the entry kept. Lives
- * here beside `isFixAuditRound` for the same reason it does: this module is
+ * which changed" is a seam pointing at nothing). Lives here beside
+ * `isFixAuditRound` for the same reason it does: this module is
  * import-free, so every reader can reach it without a cycle.
  */
 export function interactionEntryOf(raw: unknown): {
   path: string;
   importsChanged: string[];
-  seam?: { kept: number; total: number };
 } | null {
   if (typeof raw !== 'object' || raw === null) return null;
-  const e = raw as { path?: unknown; importsChanged?: unknown; seam?: unknown };
+  const e = raw as { path?: unknown; importsChanged?: unknown };
   if (typeof e.path !== 'string' || e.path === '') return null;
   const importsChanged = Array.isArray(e.importsChanged)
     ? e.importsChanged.filter(
@@ -339,21 +336,7 @@ export function interactionEntryOf(raw: unknown): {
       )
     : [];
   if (importsChanged.length === 0) return null;
-  const rawSeam = e.seam;
-  const seam =
-    typeof rawSeam === 'object' &&
-    rawSeam !== null &&
-    Number.isInteger((rawSeam as { kept?: unknown }).kept) &&
-    Number.isInteger((rawSeam as { total?: unknown }).total) &&
-    ((rawSeam as { kept: number }).kept as number) >= 0 &&
-    ((rawSeam as { total: number }).total as number) >=
-      ((rawSeam as { kept: number }).kept as number)
-      ? {
-          kept: (rawSeam as { kept: number }).kept,
-          total: (rawSeam as { total: number }).total,
-        }
-      : undefined;
-  return { path: e.path, importsChanged, ...(seam ? { seam } : {}) };
+  return { path: e.path, importsChanged };
 }
 
 /**

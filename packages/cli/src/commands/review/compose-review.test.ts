@@ -1823,43 +1823,6 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(parseLedger(r.body)?.sha).toBeUndefined();
   });
 
-  it("the marker carries the round's merge base, and withholds it with the anchor (#10136 R18-3)", () => {
-    // The seam-bounded widening's continuity gate reads the base a PRIOR
-    // round captured over. Written here, at the posting boundary, so the
-    // stamp belongs to a round that actually reviewed the range — and it
-    // survives the `.qwen/` wipe every CI run begins with, because the
-    // marker lives on the pull request. It rides the anchor's rung: a round
-    // that withholds its own sha vouches no base either.
-    const anchored = composeReview({
-      planPath: coveredPlan(['verify', 'reverse-audit'], {
-        prNumber: 8255,
-        fetchedSha: 'deadbeef00112233',
-        mergeBaseSha: 'b'.repeat(40),
-      }),
-      env: ENV,
-      modelId: MODEL,
-      criticalsInline: 0,
-      suggestionsInline: 0,
-    });
-    expect(parseLedger(anchored.body)?.sha).toBe('deadbeef00112233');
-    expect(parseLedger(anchored.body)?.mb).toBe('b'.repeat(40));
-
-    const withheld = composeReview({
-      planPath: coveredPlan(['verify', 'reverse-audit'], {
-        prNumber: 8255,
-        fetchedSha: 'deadbeef00112233',
-        mergeBaseSha: 'b'.repeat(40),
-      }),
-      env: ENV,
-      modelId: MODEL,
-      criticalsInline: 0,
-      suggestionsInline: 0,
-      unreviewedDimensions: ['security — the relaunch returned no evidence'],
-    });
-    expect(parseLedger(withheld.body)?.sha).toBeUndefined();
-    expect(parseLedger(withheld.body)?.mb).toBeUndefined();
-  });
-
   it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
     // The budget entry claims the subject `reverse audit`; the caller-echo
     // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
@@ -2942,7 +2905,6 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
         {
           path: 'src/b.ts',
           importsChanged: ['src/a.ts'],
-          seam: { kept: 2, total: 7 },
         },
       ],
     },
@@ -3172,7 +3134,6 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       'fix-audit round under the critical posting posture',
     );
     expect(r.body).toContain('engaged by the round schedule');
-    expect(r.body).toContain('1 seam-bounded: 2 of 7 hunk(s) republished');
     // The wave sentence states the scheduler's INCLUSION rule (#10136
     // R12-2) — true of delta ∪ non-dry ∪ stale-dry ∪ no-history on every
     // wave, engaged narrowing or not — never the past-tense "only delta
@@ -3215,7 +3176,6 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.body).toContain(
       '出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据若没有证据表明见过此前的发现或未认证收据',
     );
-    expect(r.body).toContain('1 个按接缝收窄：重发 2/7 个 hunk');
     expect(r.body).not.toContain('上一波出过发现的 chunk');
 
     // The zh engaged arms: a Critical-only deferral list names the
@@ -3294,170 +3254,6 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
   it('renders the explicit-floor cause by name', () => {
     const r = composeReview(rcInput({ ...POSTURE, postureCause: 'explicit' }));
     expect(r.body).toContain('engaged by the operator-set critical floor');
-  });
-
-  it('names a seam oracle that never ran instead of describing a bound that kept everything (#10136 R18-2)', () => {
-    // The capture recorded `seamOracle: 'unavailable'` — no TypeScript
-    // parser resolvable at run time, so the bound never executed and
-    // every interaction file republished in full. The round-shape
-    // sentence must say THAT; the plain reading ("plus their import-seam
-    // interaction files" with no census clause) is exactly what a round
-    // where the bound ran and kept everything renders.
-    const r = composeReview(
-      rcInput({
-        ...POSTURE,
-        scope: {
-          ...POSTURE.scope,
-          seamOracle: 'unavailable',
-          interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
-        },
-      }),
-    );
-    expect(r.body).toContain(
-      'the seam oracle could not resolve a TypeScript parser at run time, so every interaction file republished in full',
-    );
-    expect(r.body).not.toContain('seam-bounded:');
-    expect(r.body).not.toContain('republished whole');
-    // The zh twin of the same clause, through the same bilingual switch.
-    const hanBody = (() => {
-      const input = base({ criticalsInline: 1 });
-      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
-        han: true,
-        incremental: {
-          ...POSTURE,
-          scope: {
-            ...POSTURE.scope,
-            seamOracle: 'unavailable',
-            interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
-          },
-        } as never,
-      });
-      return composeReview(input).body;
-    })();
-    expect(hanBody).toContain(
-      '接缝 oracle 在运行时无法解析到 TypeScript 解析器，所有 interaction 文件均按全量重新发布',
-    );
-  });
-
-  it('names an unproven merge base instead of a bound that kept everything (#10136 R18-3)', () => {
-    // The seam bound has two deployment conditions, and both must be
-    // legible in the POSTED body, not only on the capture's stderr: an
-    // oracle that never resolved (above), and a base no previous posted
-    // round vouched. Silent, this round renders exactly what a round where
-    // the bound ran and kept everything renders.
-    const r = composeReview(
-      rcInput({
-        ...POSTURE,
-        scope: {
-          ...POSTURE.scope,
-          baseContinuity: 'unproven',
-          interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
-        },
-      }),
-    );
-    expect(r.body).toContain(
-      'merge-base continuity with the previous posted round could not be proven, so the bound never ran and every interaction file republished in full',
-    );
-    expect(r.body).not.toContain('seam-bounded:');
-    expect(r.body).not.toContain('republished whole');
-    const hanBody = (() => {
-      const input = base({ criticalsInline: 1 });
-      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
-        han: true,
-        incremental: {
-          ...POSTURE,
-          scope: {
-            ...POSTURE.scope,
-            baseContinuity: 'unproven',
-            interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
-          },
-        } as never,
-      });
-      return composeReview(input).body;
-    })();
-    expect(hanBody).toContain(
-      '无法证明与上一轮已发布轮次之间的 merge base 连续性，限宽未运行，所有 interaction 文件均按全量重新发布',
-    );
-  });
-
-  it('a census that kept every hunk is named as kept whole, never as a shed (#10136 R1-7)', () => {
-    const r = composeReview(
-      rcInput({
-        ...POSTURE,
-        scope: {
-          ...POSTURE.scope,
-          interaction: [
-            {
-              path: 'src/b.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 3, total: 3 },
-            },
-            {
-              path: 'src/c.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 1, total: 4 },
-            },
-          ],
-        },
-      }),
-    );
-    expect(r.body).toContain(
-      '1 seam-bounded: 1 of 4 hunk(s) republished; 1 republished whole, nothing shed',
-    );
-    expect(r.body).not.toContain('4 of 7');
-    // Every file kept whole: no seam-bounded count at all.
-    const whole = composeReview(
-      rcInput({
-        ...POSTURE,
-        scope: {
-          ...POSTURE.scope,
-          interaction: [
-            {
-              path: 'src/b.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 3, total: 3 },
-            },
-          ],
-        },
-      }),
-    );
-    expect(whole.body).toContain('(1 republished whole, nothing shed)');
-    expect(whole.body).not.toContain('seam-bounded:');
-    // Two seam-bounded files ACCUMULATE: 1 of 4 plus 2 of 3 is 3 of 7 —
-    // an assignment in place of the `+=` posts the last file alone.
-    const two = composeReview(
-      rcInput({
-        ...POSTURE,
-        scope: {
-          ...POSTURE.scope,
-          interaction: [
-            {
-              path: 'src/b.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 1, total: 4 },
-            },
-            {
-              path: 'src/c.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 2, total: 3 },
-            },
-            {
-              path: 'src/d.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 2, total: 2 },
-            },
-            {
-              path: 'src/e.ts',
-              importsChanged: ['src/a.ts'],
-              seam: { kept: 5, total: 5 },
-            },
-          ],
-        },
-      }),
-    );
-    expect(two.body).toContain(
-      '2 seam-bounded: 3 of 7 hunk(s) republished; 2 republished whole, nothing shed',
-    );
   });
 
   it('an engaged floor whose only deferrals are axes-Criticals claims no below-Critical deferral (#10136 R16-1)', () => {
@@ -3547,12 +3343,10 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
             {
               path: 'src/b.ts',
               importsChanged: [],
-              seam: { kept: 1, total: 9 },
             },
             {
               path: '',
               importsChanged: ['src/a.ts'],
-              seam: { kept: 0, total: 5 },
             },
           ],
         },

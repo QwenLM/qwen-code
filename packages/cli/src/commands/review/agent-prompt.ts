@@ -201,12 +201,7 @@ interface PlanReport {
 interface IncrementalScope {
   anchor: string;
   deltaFiles: string[];
-  interaction: Array<{
-    path: string;
-    importsChanged: string[];
-    /** The fix-audit seam bound's census, when the capture recorded one. */
-    seam?: { kept: number; total: number };
-  }>;
+  interaction: Array<{ path: string; importsChanged: string[] }>;
 }
 
 /**
@@ -257,17 +252,7 @@ function chunkScopeBullets(
       (e) =>
         `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
         `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
-        `Review that seam, not the rest of its diff.` +
-        // The shed clause renders only where a shed happened (#10136): a
-        // census with `kept === total` republished the section whole, and
-        // telling the agent a remainder was withheld sent it hunting for
-        // hunks that were never hidden.
-        (e.seam && e.seam.kept < e.seam.total
-          ? ` (seam-bounded: ${e.seam.kept} of ${e.seam.total} hunk(s) republished; ` +
-            `the rest were cleared by an earlier round and are not re-shown)`
-          : e.seam
-            ? ` (seam scan: all ${e.seam.total} hunk(s) republished, none shed)`
-            : ''),
+        `Review that seam, not the rest of its diff.`,
     ),
   ];
 }
@@ -811,18 +796,7 @@ export function buildChunkAgentPrompt(
             `still hold — signatures, argument contracts, invariants, error behaviour — ` +
             `now that the imported side moved? Read the changed side from the worktree to ` +
             `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
-            `do not report defects in it that the change it imports does not affect.` +
-            (e.seam && e.seam.kept < e.seam.total
-              ? ` Its diff here is SEAM-BOUNDED: ${e.seam.kept} of ${e.seam.total} hunk(s) ` +
-                `republished — the ones displaying a line that imports or uses what ` +
-                `changed, and the ones whose REMOVED text does (a removed line has no ` +
-                `post-image to match, so its own text is read instead); the rest were ` +
-                `cleared by an earlier round and are not re-shown. ` +
-                `The seam question above is still yours in full, from the worktree.`
-              : e.seam
-                ? ` The seam scan shed none of its ${e.seam.total} hunk(s), so its diff ` +
-                  `here is complete.`
-                : ''),
+            `do not report defects in it that the change it imports does not affect.`,
         ),
       );
       lines.push(
