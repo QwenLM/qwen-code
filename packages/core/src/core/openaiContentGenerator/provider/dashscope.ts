@@ -444,7 +444,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
-        ...(this.buildMetadata(userPromptId) || {}),
+        ...this.buildRequestMetadata(request.model, userPromptId),
         ...dashscopeExtras,
       };
       // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -473,7 +473,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
-      ...(this.buildMetadata(userPromptId) || {}),
+      ...this.buildRequestMetadata(request.model, userPromptId),
       ...dashscopeExtras,
     };
     // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -711,6 +711,32 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private conflictingKnobDropWarned = false;
+
+  /**
+   * DashScope is an aggregating gateway: a non-qwen model (e.g. `ZHIPU/GLM-...`)
+   * reached through the same endpoint has its request forwarded to that vendor's
+   * own backend, `metadata` object included. Those backends type `metadata` as a
+   * string, so the object fails to deserialize and the request is rejected with a
+   * flat 400, making the model unusable through Qwen Code. `metadata` is a
+   * platform-private tracing field (sessionId / promptId / channel) that only
+   * means anything to DashScope's own inference path, so gate it on the wire model
+   * the same way `buildQwenEffortConfig` gates the qwen-only thinking knobs, for
+   * the same stated reason: qwen-specific fields must not leak to a non-qwen model
+   * sharing the endpoint.
+   *
+   * This is orthogonal to which *origins* count as DashScope-compatible, so the
+   * `*.alicloudapi.com` recognition added in #9103 is untouched: a qwen model
+   * behind such a gateway still ships metadata.
+   */
+  private buildRequestMetadata(
+    model: string | undefined,
+    userPromptId: string,
+  ): Record<string, unknown> {
+    if (!isQwenFamilyWireModel(this.resolveWireModel(model))) {
+      return {};
+    }
+    return this.buildMetadata(userPromptId) || {};
+  }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
     const channel = this.cliConfig.getChannel?.();
