@@ -13673,6 +13673,151 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
+  describe('direct-call hook events through the hook execution bridge', () => {
+    const dispatch = async (
+      method: string,
+      fire: ReturnType<typeof vi.fn>,
+      eventName: string,
+      input: Record<string, unknown>,
+    ) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { [method]: fire };
+      return config
+        .getMessageBus()!
+        .request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >({ type: MessageBusType.HOOK_EXECUTION_REQUEST, eventName, input }, MessageBusType.HOOK_EXECUTION_RESPONSE);
+    };
+
+    it.each([
+      {
+        eventName: 'SessionStart',
+        method: 'fireSessionStartEvent',
+        input: {
+          source: 'resume',
+          model: 'qwen-max',
+          permission_mode: 'plan',
+          agent_type: 'general-purpose',
+        },
+        args: ['resume', 'qwen-max', 'plan', 'general-purpose'],
+      },
+      {
+        eventName: 'SessionEnd',
+        method: 'fireSessionEndEvent',
+        input: { reason: 'clear' },
+        args: ['clear'],
+      },
+      {
+        eventName: 'SessionDelete',
+        method: 'fireSessionDeleteEvent',
+        input: { deleted_session_id: 'old-session' },
+        args: ['old-session'],
+      },
+      {
+        eventName: 'PreCompact',
+        method: 'firePreCompactEvent',
+        input: { trigger: 'manual', custom_instructions: 'keep todos' },
+        args: ['manual', 'keep todos'],
+      },
+      {
+        eventName: 'PostCompact',
+        method: 'firePostCompactEvent',
+        input: { trigger: 'auto', compact_summary: 'summary' },
+        args: ['auto', 'summary'],
+      },
+      {
+        eventName: 'InstructionsLoaded',
+        method: 'fireInstructionsLoadedEvent',
+        input: {
+          file_path: '/repo/QWEN.md',
+          memory_type: 'project',
+          load_reason: 'session_start',
+          trigger_file_path: '/repo/src/a.ts',
+          parent_file_path: '/repo/QWEN.md',
+        },
+        args: [
+          '/repo/QWEN.md',
+          'project',
+          'session_start',
+          {
+            triggerFilePath: '/repo/src/a.ts',
+            parentFilePath: '/repo/QWEN.md',
+          },
+        ],
+      },
+    ])(
+      'forwards $eventName to $method',
+      async ({ eventName, method, input, args }) => {
+        const output = { systemMessage: `${eventName} ran` };
+        const fire = vi.fn().mockResolvedValue(output);
+
+        const response = await dispatch(method, fire, eventName, input);
+
+        expect(fire).toHaveBeenCalledWith(...args, undefined);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(output);
+      },
+    );
+
+    it.each([
+      {
+        eventName: 'StopFailure',
+        method: 'fireStopFailureEvent',
+        input: {
+          error: 'rate_limit',
+          error_details: '429 Too Many Requests',
+          last_assistant_message: 'partial',
+        },
+        args: ['rate_limit', '429 Too Many Requests', 'partial'],
+      },
+      {
+        eventName: 'TodoCreated',
+        method: 'fireTodoCreatedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          todo_status: 'pending',
+          all_todos: [],
+          phase: 'validation',
+        },
+        args: ['1', 'write tests', 'pending', [], 'validation'],
+      },
+      {
+        eventName: 'TodoCompleted',
+        method: 'fireTodoCompletedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          previous_status: 'in_progress',
+          all_todos: [],
+          phase: 'postWrite',
+        },
+        args: ['1', 'write tests', 'in_progress', [], 'postWrite'],
+      },
+    ])(
+      'forwards $eventName to $method and returns its final output',
+      async ({ eventName, method, input, args }) => {
+        const finalOutput = { decision: 'block', reason: 'not yet' };
+        const fire = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [finalOutput],
+          errors: [],
+          totalDuration: 1,
+          finalOutput,
+        });
+
+        const response = await dispatch(method, fire, eventName, input);
+
+        expect(fire).toHaveBeenCalledWith(...args, undefined);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(finalOutput);
+      },
+    );
+  });
+
   describe('Stop dispatch through the hook execution bridge', () => {
     // The goal-specific half of this suite went with the two response fields
     // it asserted. What remains is the only exercise of the surviving
