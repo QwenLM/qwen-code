@@ -572,9 +572,7 @@ function benchmarkDescendantPids(pid: number): number[] {
 }
 
 function benchmarkDescendants(pid: number) {
-  return countDescendants(pid, {
-    acpFilter: '(^|[[:space:]])--acp([[:space:]]|$)',
-  });
+  return countDescendants(pid);
 }
 
 function rememberDescendantPids(
