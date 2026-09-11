@@ -1060,6 +1060,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
           // manager — and reconcile the panel with what it then achieves,
           // because nothing else derives the status from its outcome.
           pendingRevokeRef.current = async () => {
+            // Read before the first await: a connect started while this
+            // arbitration settles resets the per-connect flags at its start,
+            // and this reconcile describes the connect whose finally handed
+            // it here.
+            const handedOffWroteStatus = connectWroteStatusRef.current;
             const { cleared: clearedNow, declined: declinedNow } =
               await arbitratedRevoke();
             // A newer disconnect owns the status; leave its writes alone.
@@ -1085,7 +1090,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
             // An unbound connect can still have committed the authoritative
             // status itself (needs-gesture/failed/unavailable); only a
             // connect that wrote nothing gets the pre-click panel back.
-            if (!clearedNow && connectWroteStatusRef.current) {
+            if (!clearedNow && handedOffWroteStatus) {
               return clearedNow;
             }
             setStatus(
@@ -1207,17 +1212,20 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (!visible) {
           return { cleared: await revoke(), declined: false };
         }
-        let free = false;
+        let granted: boolean | undefined;
         await locks.request(
           LOCAL_FILES_LOCK_NAME,
           { ifAvailable: true },
           async (lock) => {
             if (lock === null || lock === undefined) return;
-            free = true;
+            // Hold the lock across the read-decide-delete: a peer waking
+            // from its retry budget inside revoke()'s awaits must decline
+            // instead of starting a bridge over the record being released.
+            granted = await revoke();
           },
         );
-        if (free) {
-          return { cleared: await revoke(), declined: false };
+        if (granted !== undefined) {
+          return { cleared: granted, declined: false };
         }
         // Fall through: a peer holds the freshly freed lock.
       }

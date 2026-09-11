@@ -4898,6 +4898,183 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('holds the owner lock across the delete when a peer wakes inside revoke', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    let releaseGateB!: () => void;
+    const gateB = new Promise<void>((resolve) => {
+      releaseGateB = resolve;
+    });
+    const lock = { held: false, settling: 0 };
+    const locks: LockManagerLike = settlingLocks(lock);
+    const common = {
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+    };
+    const a = render({ ...common, delay: async () => {} });
+    await a.flush();
+    await a.flush();
+    expect(a.sockets).toHaveLength(1);
+    const b = render({
+      ...common,
+      sessionId: 'session-2',
+      delay: () => gateB,
+    });
+    await b.flush();
+    expect(b.sockets).toHaveLength(0);
+
+    // Park revoke() inside its first store read, then admit B: the probe
+    // must still hold the lock, so B declines and never bridges the record
+    // being released.
+    const realLoad = store.load.bind(store);
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    let parked = false;
+    store.load = () => {
+      if (!parked) {
+        parked = true;
+        return loadGate.then(() => realLoad());
+      }
+      return realLoad();
+    };
+    const disconnecting = a.get().disconnect();
+    await a.flush();
+    releaseGateB();
+    await b.flush();
+    await b.flush();
+    expect(b.sockets).toHaveLength(0);
+    releaseLoad();
+    await act(async () => {
+      await disconnecting;
+    });
+    await a.flush();
+    await b.flush();
+
+    expect(b.get().status.phase).toBe('held-elsewhere');
+    expect(b.sockets).toHaveLength(0);
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+
+    await act(async () => {
+      b.get().disconnect();
+    });
+    await b.flush();
+    a.unmount();
+    b.unmount();
+  });
+
+  it('keeps the handing-off connect status across a deferred reconcile', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    // Grants exactly once (D's arbitration, so revoke() itself runs and
+    // defers), then declines forever (the deferred closure's re-arbitration).
+    let grants = 1;
+    const locks: LockManagerLike = {
+      // The grant must land on a microtask boundary: a synchronous grant
+      // would run revoke() inside the disconnect() call, before the
+      // in-window connect can stamp its generation.
+      request: (_name, options, callback) =>
+        Promise.resolve().then(async () => {
+          if (grants > 0) {
+            grants -= 1;
+            await callback({});
+            return undefined;
+          }
+          return callback(null);
+        }),
+    };
+    let delayStep = 0;
+    let releaseGateF!: () => void;
+    const gateF = new Promise<void>((resolve) => {
+      releaseGateF = resolve;
+    });
+    // The deferred closure's first retry parks here, keeping its guard
+    // reachable while a third click resets the per-connect flags.
+    const delay = async () => {
+      const step = delayStep++;
+      if (step === 0) await gateF;
+    };
+    let releaseGateB!: (err: Error) => void;
+    const gateB = new Promise<FileSystemDirectoryHandle>((_r, reject) => {
+      releaseGateB = reject;
+    });
+    let releaseGateC!: (err: Error) => void;
+    const gateC = new Promise<FileSystemDirectoryHandle>((_r, reject) => {
+      releaseGateC = reject;
+    });
+    let pickCalls = 0;
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => {
+        pickCalls += 1;
+        if (pickCalls === 1) return gateB;
+        if (pickCalls === 2) return gateC;
+        throw new DOMException('Blocked by policy', 'SecurityError');
+      }),
+      store,
+      locks,
+      delay,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'ai_coding',
+    });
+
+    // B clicks inside D's arbitration window, so D's revoke defers to B's
+    // outcome; B leaves through the picker-failed arm, writing the
+    // authoritative status, and its finally hands the closure here.
+    const disconnecting = h.get().disconnect();
+    const connectingB = h.get().connect();
+    await h.flush();
+    await act(async () => {
+      await disconnecting;
+    });
+    await act(async () => {
+      releaseGateB(
+        Object.assign(new Error('SecurityError: Blocked by policy'), {
+          name: 'SecurityError',
+        }),
+      );
+    });
+    await h.flush();
+    // B's finally awaits the deferred closure, which parks on gateF; a
+    // third click inside that window resets the per-connect flags.
+    const connectingC = h.get().connect();
+    await h.flush();
+    await act(async () => {
+      releaseGateF();
+      await Promise.resolve();
+    });
+    await connectingB;
+    await h.flush();
+    // The reconcile must still honour the handing-off connect's verdict.
+    expect(h.get().status).toEqual({
+      phase: 'failed',
+      blocker: null,
+      message: 'SecurityError: Blocked by policy',
+      rootName: 'ai_coding',
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+
+    await act(async () => {
+      releaseGateC(
+        Object.assign(new Error('dismissed'), { name: 'AbortError' }),
+      );
+    });
+    await connectingC;
+    await h.flush();
+    h.unmount();
+  });
+
   it('keeps a withhold that lands while restore is parked in the query', async () => {
     const mine = fakeHandle('ai_coding', { query: 'prompt' });
     const store = fakeStore(mine);
