@@ -3,7 +3,7 @@
   "info": {
     "title": "Qwen Code Daemon REST API",
     "version": "v1",
-    "description": "The supported 25-operation REST/SSE integration surface for qwen serve. Other daemon routes primarily serve first-party UI or conditional features and are not part of this compatibility promise.",
+    "description": "The supported 25-operation REST/SSE integration surface for qwen serve. The daemon registers a wider route surface, including other public, capability-gated routes that are not part of this compatibility promise.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -46,7 +46,7 @@
         "operationId": "getHealth",
         "tags": ["Discovery"],
         "summary": "Probe daemon health",
-        "description": "Returns a cheap listener probe by default. Set deep to aggregate informational daemon-wide runtime counters. Anonymous probes are accepted only on a loopback bind without --require-auth; every other bind requires bearer auth.",
+        "description": "Returns a cheap listener probe by default. Set deep to aggregate informational daemon-wide runtime counters. Bearer authentication is required except on an ordinary loopback bind without --require-auth, where the probe is also served anonymously; non-loopback and hardened loopback binds answer 401 without a token.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-health"
         },
@@ -390,7 +390,7 @@
           }
         ],
         "x-qwen-capability": "session_load",
-        "x-qwen-scope": "persisted-workspace",
+        "x-qwen-scope": "selected-runtime",
         "x-qwen-stability": "stable",
         "x-qwen-sdk-method": "DaemonClient.loadSession",
         "parameters": [
@@ -524,7 +524,7 @@
           }
         ],
         "x-qwen-capability": "session_resume",
-        "x-qwen-scope": "persisted-workspace",
+        "x-qwen-scope": "selected-runtime",
         "x-qwen-stability": "stable",
         "x-qwen-sdk-method": "DaemonClient.resumeSession",
         "parameters": [
@@ -1034,7 +1034,7 @@
         "operationId": "submitPrompt",
         "tags": ["Prompts and events"],
         "summary": "Submit a prompt",
-        "description": "Admits a prompt to the per-session FIFO. A 202 response is admission, not completion; correlate terminal SSE events by promptId.",
+        "description": "Admits a prompt to the per-session FIFO. A 202 response is admission, not completion; correlate terminal SSE events by promptId. When the prompt_absolute_deadline capability is advertised, deadlineMs bounds the turn: expiry is reported in band as a turn_error event with code prompt_deadline_exceeded, never as a 504 response.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-sessionidprompt"
         },
@@ -1265,7 +1265,7 @@
         "operationId": "subscribeSessionEvents",
         "tags": ["Prompts and events"],
         "summary": "Subscribe to session events",
-        "description": "Opens a resumable Server-Sent Events stream. The data line contains the complete BridgeEvent envelope.",
+        "description": "Opens a resumable Server-Sent Events stream. The data line contains the complete BridgeEvent envelope. When the replay cursor or epoch can no longer be honored (the ring buffer evicted the frames, the daemon restarted, or the replay budget was exhausted) the stream stays open and the daemon emits an in-band state_resync_required event; clients drop local state and resync from a fresh cursor instead of expecting an error status.",
         "externalDocs": {
           "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#get-sessionidevents-sse"
         },
@@ -1307,7 +1307,7 @@
               "type": "integer",
               "minimum": 0
             },
-            "description": "Replay events with an id greater than this cursor. A malformed value is ignored: the stream opens live-only with no replay."
+            "description": "Replay events with an id greater than this cursor. A malformed value is ignored: the stream opens live-only with no replay. A cursor the daemon can no longer replay is refused in band with a state_resync_required event on the 200 stream, not a 4xx."
           },
           {
             "name": "X-Qwen-Event-Epoch",
@@ -1317,7 +1317,7 @@
               "type": "string",
               "minLength": 1
             },
-            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. A stale token is answered with 200 plus an id-less state_resync_required frame before replay."
+            "description": "Epoch paired with Last-Event-ID to detect daemon restarts. A stale token is answered with 200 plus an id-less state_resync_required frame before replay; a malformed value is treated as not provided and never fails the request."
           },
           {
             "name": "maxQueued",
@@ -1399,7 +1399,7 @@
             }
           },
           "400": {
-            "description": "The maxQueued queue bound is invalid.",
+            "description": "The maxQueued queue bound is outside 16-2048.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1486,7 +1486,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Continuation cursor from the previous page's nextCursor. Omit for a first page. Cannot be combined with direction or with any anchor (beforeRecordId, atRecordId, snapshot). Requires the session_transcript_pagination capability."
           },
           {
             "name": "limit",
@@ -1497,7 +1498,8 @@
               "minimum": 1,
               "maximum": 500,
               "default": 100
-            }
+            },
+            "description": "Maximum number of records in the page. Defaults to 100; values outside 1-500 return 400 invalid_transcript_limit."
           },
           {
             "name": "direction",
@@ -1507,7 +1509,7 @@
               "type": "string",
               "enum": ["backward"]
             },
-            "description": "Paging direction. Only backward is accepted; omitting direction pages forward from the cursor."
+            "description": "backward is the only accepted value: the page ends at the newest records. Omit the parameter to page forward on a first page, or to continue the direction frozen in cursor. Cannot be combined with cursor, beforeRecordId, atRecordId, or snapshot."
           },
           {
             "name": "beforeRecordId",
@@ -1515,7 +1517,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Start a backward page before this persisted record id. Implies backward, so do not also send direction. Cannot be combined with cursor or atRecordId; may be paired with snapshot to pin the page to a frozen transcript snapshot."
           },
           {
             "name": "atRecordId",
@@ -1523,7 +1526,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Return the forward page containing this persisted record id. Requires snapshot; cannot be combined with direction, cursor, or beforeRecordId."
           },
           {
             "name": "snapshot",
@@ -1531,7 +1535,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Frozen transcript snapshot the anchors read from. Required when atRecordId is present; otherwise may only accompany beforeRecordId. Cannot be combined with direction or cursor."
           }
         ],
         "responses": {
@@ -1687,7 +1692,7 @@
           }
         ],
         "x-qwen-capability": "session_export",
-        "x-qwen-scope": "persisted-workspace",
+        "x-qwen-scope": "legacy-primary",
         "x-qwen-stability": "stable",
         "x-qwen-sdk-method": "DaemonClient.exportSession",
         "parameters": [
@@ -1963,7 +1968,7 @@
             }
           },
           "403": {
-            "description": "The active permission policy rejected this voter.",
+            "description": "The active permission policy rejected this voter, or the session's owning workspace is registered but not trusted (untrusted_workspace).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1983,7 +1988,7 @@
             }
           },
           "500": {
-            "description": "The permission contract is invalid.",
+            "description": "The permission contract is invalid, or more than one workspace claims the session (ambiguous_session_owner).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2097,7 +2102,7 @@
             }
           },
           "403": {
-            "description": "The active permission policy rejected this voter.",
+            "description": "The active permission policy rejected this voter, or the session's owning workspace is registered but not trusted (untrusted_workspace).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2117,7 +2122,7 @@
             }
           },
           "500": {
-            "description": "The permission contract is invalid.",
+            "description": "The permission contract is invalid, or more than one workspace claims the session (ambiguous_session_owner).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2275,7 +2280,8 @@
             "schema": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "description": "Requires the workspace_file_read_cursor capability; an older daemon ignores the parameter and returns the first window."
           }
         ],
         "responses": {
@@ -3555,6 +3561,21 @@
                 },
                 "multiSelect": {
                   "type": "boolean"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
                 }
               },
               "additionalProperties": true
