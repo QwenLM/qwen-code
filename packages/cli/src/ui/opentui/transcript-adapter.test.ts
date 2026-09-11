@@ -25,47 +25,50 @@ function userLine(subtype: string, text: string): string {
 }
 
 describe('transcriptToEvents subtyped user records', () => {
-  it('does not count failed memory reads on resume', () => {
-    const projectRoot = '/tmp/focus-resume-project';
-    const events = transcriptToEvents(
-      [
-        JSON.stringify({
-          type: 'assistant',
-          message: {
-            parts: [
-              {
-                functionCall: {
-                  id: 'memory1',
-                  name: 'read_file',
-                  args: {
-                    file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
+  it.each(['error', 'cancelled'])(
+    'does not count %s memory reads on resume',
+    (status) => {
+      const projectRoot = '/tmp/focus-resume-project';
+      const events = transcriptToEvents(
+        [
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'memory1',
+                    name: 'read_file',
+                    args: {
+                      file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
+                    },
                   },
                 },
-              },
-            ],
-          },
-        }),
-        JSON.stringify({
-          type: 'tool_result',
-          toolCallResult: {
-            callId: 'memory1',
-            status: 'error',
-            resultDisplay: 'READ_FAILED',
-          },
-        }),
-      ].join('\n'),
-      { projectRoot },
-    );
-    const result = events.find((event) => event.type === 'tool-result');
-    expect(result).toBeDefined();
-    expect(result).not.toHaveProperty('isMemoryOp');
-    expect(events).toContainEqual({
-      type: 'tool-end',
-      id: 'memory1',
-      success: false,
-      summary: 'error',
-    });
-  });
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'memory1',
+              status,
+              resultDisplay: 'READ_FAILED',
+            },
+          }),
+        ].join('\n'),
+        { projectRoot },
+      );
+      const result = events.find((event) => event.type === 'tool-result');
+      expect(result).toBeDefined();
+      expect(result).not.toHaveProperty('isMemoryOp');
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'memory1',
+        success: false,
+        summary: status,
+      });
+    },
+  );
   it('preserves file arguments and detailed responses when resuming', () => {
     const events = transcriptToEvents(
       [

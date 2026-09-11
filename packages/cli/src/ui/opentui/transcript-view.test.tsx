@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, fireEvent } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
@@ -31,7 +31,12 @@ const mocks = vi.hoisted(() => {
     const React = await import('react');
     const jsx = (
       type: unknown,
-      props: { children?: unknown; key?: React.Key } | null,
+      props: {
+        children?: unknown;
+        key?: React.Key;
+        onMouseUp?: React.MouseEventHandler;
+        paddingLeft?: number;
+      } | null,
       key?: React.Key,
     ) => {
       const config = key === undefined ? props : { ...props, key };
@@ -39,7 +44,11 @@ const mocks = vi.hoisted(() => {
       if (type === 'box' || type === 'text') {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            key,
+            onMouseUp: props?.onMouseUp,
+            'data-padding-left': props?.paddingLeft,
+          },
           children,
         );
       }
@@ -58,6 +67,8 @@ vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
 import type { LiveToolItem } from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
@@ -71,6 +82,97 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('omits the whole memory suffix when the compact row is narrow', () => {
+    const items = [
+      toolItem({ done: true, success: true, isMemoryOp: 'write' }),
+    ];
+    const view = render(
+      <OpenTuiTranscriptView focusMode availableWidth={30} items={items} />,
+    );
+    expect(view.container.textContent).not.toContain(' · ');
+    expect(view.container.textContent).not.toContain('Memory');
+    view.rerender(
+      <OpenTuiTranscriptView focusMode availableWidth={100} items={items} />,
+    );
+    expect(view.container.textContent).toContain('Memory: 0 read, 1 written');
+  });
+  it('does not parse focus-only arguments while focus is off', () => {
+    const args = '{"file_path":"src/main.ts","content":"BODY"}';
+    const spy = vi.spyOn(JSON, 'parse');
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={[toolItem({ args, description: 'src/main.ts' })]}
+        />,
+      );
+      expect(spy).not.toHaveBeenCalledWith(args);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('preserves manual thought expansion through full detail clicks', () => {
+    const items = [
+      {
+        kind: 'thinking' as const,
+        id: 'thought',
+        text: 'PRIVATE_REASONING',
+        done: true,
+      },
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    fireEvent.mouseUp(view.getByText(/Thought/));
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+    view.rerender(<OpenTuiTranscriptView items={items} fullDetail />);
+    fireEvent.mouseUp(view.getByText(/Thought/));
+    view.rerender(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+  });
+
+  it('indents image and vision disclosure rows with tool output', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        items={[
+          toolItem({
+            imageMimeTypes: ['image/png'],
+            omittedImageCount: 2,
+            visionBridgeNotice: 'VISION_NOTICE',
+          }),
+        ]}
+      />,
+    );
+    for (const text of [
+      '[inline image: image/png]',
+      'VISION_NOTICE',
+      formatInlineImageOverflow(2),
+    ]) {
+      expect(
+        view
+          .getByText(text)
+          .closest('[data-padding-left]')
+          ?.getAttribute('data-padding-left'),
+      ).toBe(String(STATUS_INDICATOR_WIDTH));
+    }
+  });
+
+  it('keeps ANSI grid columns truncated in full detail', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        fullDetail
+        availableWidth={40}
+        items={[
+          toolItem({
+            ansi: {
+              grid: [[{ text: 'A'.repeat(40) + 'OVERFLOW_MARKER' }]],
+              totalLines: 1,
+              totalBytes: 55,
+            },
+          }),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).not.toContain('OVERFLOW_MARKER');
+  });
   it('retroactively summarizes completed tools and hides reasoning without losing history', () => {
     const items = [
       {
@@ -135,6 +237,7 @@ describe('OpenTuiTranscriptView', () => {
     { isSubagent: true },
     { imageMimeTypes: ['image/png'] },
     { omittedImageCount: 2 },
+    { visionBridgeNotice: 'VISION_NOTICE' },
   ])('keeps exceptional tools visible: %j', (override) => {
     const view = render(
       <OpenTuiTranscriptView

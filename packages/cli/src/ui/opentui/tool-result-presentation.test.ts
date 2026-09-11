@@ -5,10 +5,58 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import path from 'node:path';
 import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { toolResultPresentation } from './tool-result-presentation.js';
 
 describe('toolResultPresentation', () => {
+  it('recognizes legacy tool aliases', () => {
+    expect(
+      toolResultPresentation(
+        '',
+        [
+          {
+            functionResponse: {
+              name: 'grep_search',
+              response: { output: 'HITS' },
+            },
+          },
+        ],
+        { name: 'search_file_content' },
+      ),
+    ).toEqual({ detailedDisplay: 'HITS' });
+    const root = '/tmp/focus-presentation-project';
+    expect(
+      toolResultPresentation(
+        '',
+        undefined,
+        {
+          name: 'replace',
+          args: { file_path: `${getAutoMemoryRoot(root)}/MEMORY.md` },
+        },
+        root,
+      ).isMemoryOp,
+    ).toBe('write');
+    expect(
+      toolResultPresentation('', undefined, { name: 'constructor' }),
+    ).toEqual({});
+  });
+
+  it('resolves relative memory paths from the tool working directory', () => {
+    const root = '/tmp/focus-presentation-project';
+    const file_path = path.relative(
+      process.cwd(),
+      `${getAutoMemoryRoot(root)}/MEMORY.md`,
+    );
+    expect(
+      toolResultPresentation(
+        '',
+        undefined,
+        { name: 'read_file', args: { file_path } },
+        root,
+      ).isMemoryOp,
+    ).toBe('read');
+  });
   it.each(['read_file', 'write_file'])(
     'does not count a failed %s as a completed memory operation',
     (name) => {

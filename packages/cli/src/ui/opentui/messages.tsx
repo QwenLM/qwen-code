@@ -642,22 +642,20 @@ export function AnsiRows({
       )}
       {windowed.visible.map((line, i) => (
         <box key={`${i}`} flexDirection="row">
-          {(fullDetail ? line : truncateTokenLine(line, maxWidth)).map(
-            (token, j) => {
-              const style = ansiTokenProps(token);
-              return (
-                <text
-                  key={`${j}`}
-                  fg={style.fg ?? C.text}
-                  bg={style.bg}
-                  attributes={style.attributes}
-                  {...selectionProps()}
-                >
-                  {token.text}
-                </text>
-              );
-            },
-          )}
+          {truncateTokenLine(line, maxWidth).map((token, j) => {
+            const style = ansiTokenProps(token);
+            return (
+              <text
+                key={`${j}`}
+                fg={style.fg ?? C.text}
+                bg={style.bg}
+                attributes={style.attributes}
+                {...selectionProps()}
+              >
+                {token.text}
+              </text>
+            );
+          })}
         </box>
       ))}
       {stats.length > 0 && (

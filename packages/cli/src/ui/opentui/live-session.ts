@@ -972,12 +972,13 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
+      const failed = call.status === 'error' || call.status === 'cancelled';
       const presentation = toolResultPresentation(
         resp?.resultDisplay,
         resp?.responseParts,
         call.request,
         config.getTargetDir(),
-        call.status === 'error',
+        failed,
       );
       // FileDiff results ride as structured payloads so the tool card renders
       // colored diff lines (ink DiffResultRenderer parity) instead of the
@@ -1001,7 +1002,6 @@ export async function* livePromptEvents(
             ...presentation,
           };
       }
-      const failed = call.status === 'error' || call.status === 'cancelled';
       yield {
         type: 'tool-end',
         id: call.request.callId,

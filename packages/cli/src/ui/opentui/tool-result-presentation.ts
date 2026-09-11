@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { Part } from '@google/genai';
 import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
 import { isAnyAutoMemPath } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 export interface ToolResultPresentation {
@@ -26,10 +27,11 @@ export function toolResultPresentation(
   isError = false,
 ): ToolResultPresentation {
   const result: ToolResultPresentation = {};
+  const canonicalName = canonicalToolName(request?.name ?? '');
+  const name =
+    typeof canonicalName === 'string' ? canonicalName : request?.name;
   if (
-    ['read_file', 'grep_search', 'glob', 'list_directory'].includes(
-      request?.name ?? '',
-    )
+    ['read_file', 'grep_search', 'glob', 'list_directory'].includes(name ?? '')
   ) {
     const detailed = getToolResponseDisplayText(responseParts);
     if (detailed) result.detailedDisplay = detailed;
@@ -54,10 +56,10 @@ export function toolResultPresentation(
     typeof args === 'object' &&
     'file_path' in args &&
     typeof args.file_path === 'string' &&
-    isAnyAutoMemPath(path.resolve(projectRoot, args.file_path), projectRoot)
+    isAnyAutoMemPath(path.resolve(args.file_path), projectRoot)
   ) {
-    if (request?.name === 'read_file') result.isMemoryOp = 'read';
-    else if (request?.name === 'write_file' || request?.name === 'edit')
+    if (name === 'read_file') result.isMemoryOp = 'read';
+    else if (name === 'write_file' || name === 'edit')
       result.isMemoryOp = 'write';
   }
   return result;

@@ -306,31 +306,35 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
-  it('does not count scheduler memory failures as completed writes', async () => {
-    const projectRoot = '/tmp/focus-test-project';
-    const config = createFakeConfig(
-      oneToolBatchStream({
-        callId: 'memory1',
-        name: 'write_file',
-        args: {
-          file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
-          __error: true,
-        },
-      }),
-    );
-    const events = (await drain(
-      livePromptEvents(config, 'start'),
-    )) as OpenTuiStreamEvent[];
-    const result = events.find((event) => event.type === 'tool-result');
-    expect(result).toBeDefined();
-    expect(result).not.toHaveProperty('isMemoryOp');
-    expect(events).toContainEqual({
-      type: 'tool-end',
-      id: 'memory1',
-      success: false,
-      summary: 'error',
-    });
-  });
+  it.each(['error', 'cancelled'])(
+    'does not count scheduler memory %s as completed writes',
+    async (status) => {
+      const projectRoot = '/tmp/focus-test-project';
+      const config = createFakeConfig(
+        oneToolBatchStream({
+          callId: 'memory1',
+          name: 'write_file',
+          args: {
+            file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
+            __error: status === 'error',
+            __cancelled: status === 'cancelled',
+          },
+        }),
+      );
+      const events = (await drain(
+        livePromptEvents(config, 'start'),
+      )) as OpenTuiStreamEvent[];
+      const result = events.find((event) => event.type === 'tool-result');
+      expect(result).toBeDefined();
+      expect(result).not.toHaveProperty('isMemoryOp');
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'memory1',
+        success: false,
+        summary: status,
+      });
+    },
+  );
   /** A `@path` read as the expander reports it (ink's tool_group entry). */
   const readDisplay = (
     overrides: Partial<IndividualToolCallDisplay> = {},

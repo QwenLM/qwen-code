@@ -135,7 +135,7 @@ export function transcribeSession(
         r.responseParts ?? (parts as Part[]),
         requests.get(id),
         opts.projectRoot,
-        r.status === 'error',
+        r.status === 'error' || r.status === 'cancelled',
       );
       requests.delete(id);
       if (r.resultDisplay || Object.keys(presentation).length) {

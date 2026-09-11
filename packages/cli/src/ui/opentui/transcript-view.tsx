@@ -261,7 +261,7 @@ function ThinkingRow({
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (done) setExpanded((v) => !v);
+        if (done && !fullDetail) setExpanded((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -299,16 +299,22 @@ function ToolCard({
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
   let args: Record<string, unknown> | undefined;
-  try {
-    const parsed: unknown = JSON.parse(item.args ?? '{}');
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-      args = parsed as Record<string, unknown>;
-  } catch {
-    // Legacy replay may have only a display description.
-  }
-  const memory = item.isMemoryOp
-    ? ` · ${t('Memory: {{read}} read, {{written}} written', { read: item.isMemoryOp === 'read' ? '1' : '0', written: item.isMemoryOp === 'write' ? '1' : '0' })}`
-    : '';
+  if (focusMode)
+    try {
+      const parsed: unknown = JSON.parse(item.args ?? '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        args = parsed as Record<string, unknown>;
+    } catch {
+      // Legacy replay may have only a display description.
+    }
+  const memoryLabel =
+    focusMode && item.isMemoryOp
+      ? ` · ${t('Memory: {{read}} read, {{written}} written', { read: item.isMemoryOp === 'read' ? '1' : '0', written: item.isMemoryOp === 'write' ? '1' : '0' })}`
+      : '';
+  const memory =
+    width - STATUS_INDICATOR_WIDTH - getCachedStringWidth(memoryLabel) >= 20
+      ? memoryLabel
+      : '';
   const compact = focusMode
     ? getFocusToolSummary(
         [
@@ -331,6 +337,7 @@ function ToolCard({
             hasImages: Boolean(
               item.imageMimeTypes?.length || item.omittedImageCount,
             ),
+            hasNotice: Boolean(item.visionBridgeNotice),
           },
         ],
         {
@@ -412,20 +419,24 @@ function ToolCard({
         width={width}
         fullDetail={fullDetail}
       />
-      {item.imageMimeTypes?.map((mimeType, index) => (
-        <text
-          key={index}
-          fg={C.dim}
-        >{`[inline image: ${sanitizeTerminalText(mimeType)}]`}</text>
-      ))}
-      {item.omittedImageCount ? (
-        <text fg={C.dim}>
-          {formatInlineImageOverflow(item.omittedImageCount)}
-        </text>
-      ) : null}
-      {item.visionBridgeNotice ? (
-        <text fg={C.dim}>{sanitizeTerminalText(item.visionBridgeNotice)}</text>
-      ) : null}
+      <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
+        {item.imageMimeTypes?.map((mimeType, index) => (
+          <text
+            key={index}
+            fg={C.dim}
+          >{`[inline image: ${sanitizeTerminalText(mimeType)}]`}</text>
+        ))}
+        {item.omittedImageCount ? (
+          <text fg={C.dim}>
+            {formatInlineImageOverflow(item.omittedImageCount)}
+          </text>
+        ) : null}
+        {item.visionBridgeNotice ? (
+          <text fg={C.dim}>
+            {sanitizeTerminalText(item.visionBridgeNotice)}
+          </text>
+        ) : null}
+      </box>
     </box>
   );
 }
