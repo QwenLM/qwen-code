@@ -19,6 +19,10 @@ const OPENAPI = path.join(
   REPO_ROOT,
   'docs/developers/daemon-rest-api.openapi.json',
 );
+const REFERENCE = path.join(
+  REPO_ROOT,
+  'docs/developers/daemon-rest-api-reference.md',
+);
 const SERVE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** Operations the guide presents as the supported integration surface. */
@@ -54,6 +58,7 @@ const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
 
 interface OpenApiOperation {
   operationId?: string;
+  requestBody?: unknown;
   responses?: Record<string, unknown>;
   security?: unknown[];
   externalDocs?: { url?: string };
@@ -70,6 +75,7 @@ interface OpenApiDocument {
     Partial<Record<(typeof HTTP_METHODS)[number], OpenApiOperation>>
   >;
   components?: { schemas?: Record<string, unknown> };
+  servers?: Array<{ url?: string }>;
 }
 
 function guideOperations(): string[] {
@@ -124,6 +130,37 @@ function openApiOperations(
     }
   }
   return found;
+}
+
+function resolveRef(
+  document: OpenApiDocument,
+  ref: string,
+): Record<string, unknown> {
+  let node: unknown = document;
+  for (const step of ref.replace(/^#\//, '').split('/')) {
+    node = (node as Record<string, unknown>)[step];
+  }
+  return node as Record<string, unknown>;
+}
+
+/** One reference-page index row: `METHOD /path` -> its metadata cells. */
+function referenceOperations(): Map<string, string[]> {
+  const rows = new Map<string, string[]>();
+  for (const line of readFileSync(REFERENCE, 'utf8').split('\n')) {
+    const cells = line.split('|').map((cell) => cell.trim());
+    const match = cells[1]?.match(
+      /^\[`((?:GET|POST|PATCH|DELETE) \/[^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9-]+)\)$/,
+    );
+    if (match) {
+      rows.set(match[1], [
+        match[2],
+        cells[2] ?? '',
+        cells[3] ?? '',
+        cells[4] ?? '',
+      ]);
+    }
+  }
+  return rows;
 }
 
 /** GitHub/Nextra heading slug, so anchor links can be checked. */
@@ -199,12 +236,42 @@ describe('REST integration documentation contract', () => {
       }
       expect(operation.security?.length).toBeGreaterThan(0);
       expect(
-        Object.keys(operation.responses ?? {}).some((code) =>
-          /^2\d\d$/.test(code),
+        operation.security?.some(
+          (requirement) =>
+            Object.keys(requirement as Record<string, unknown>).length === 0,
         ),
-      ).toBe(true);
+      ).toBe(false);
+      const successCodes = Object.keys(operation.responses ?? {}).filter(
+        (code) => /^2\d\d$/.test(code),
+      );
+      expect(successCodes.length).toBeGreaterThan(0);
+      for (const code of successCodes) {
+        if (code === '204' || code === '205') {
+          continue;
+        }
+        const response = operation.responses?.[code] as
+          | { content?: Record<string, unknown> }
+          | undefined;
+        expect(Object.keys(response?.content ?? {}).length).toBeGreaterThan(0);
+      }
     }
     expect(new Set(operationIds).size).toBe(operationIds.length);
+
+    const responseContent = (path: string): string[] => {
+      const response = openApi.paths?.[path]?.get?.responses?.['200'] as
+        | { content?: Record<string, unknown> }
+        | undefined;
+      return Object.keys(response?.content ?? {}).sort();
+    };
+    expect(responseContent('/session/{id}/events')).toContain(
+      'text/event-stream',
+    );
+    expect(responseContent('/session/{id}/export')).toEqual([
+      'application/json',
+      'application/jsonl',
+      'text/html',
+      'text/markdown',
+    ]);
 
     const refs = new Set<string>();
     collectRefs(openApi, refs);
@@ -254,6 +321,77 @@ describe('REST integration documentation contract', () => {
     expect(GUIDE_OPERATIONS.filter((entry) => !headings.has(entry))).toEqual(
       [],
     );
+  });
+
+  it('republishes the OpenAPI metadata on the reference index', () => {
+    const openApi = JSON.parse(
+      readFileSync(OPENAPI, 'utf8'),
+    ) as OpenApiDocument;
+    const operations = openApiOperations(openApi);
+    const rows = referenceOperations();
+    expect([...rows.keys()].sort()).toEqual([...operations.keys()].sort());
+    const protocolAnchors = new Set(
+      [...readFileSync(PROTOCOL, 'utf8').matchAll(/^#{1,6} (.+)$/gm)].map(
+        (match) => slug(match[1]),
+      ),
+    );
+    for (const [key, [anchor, capability, scope, sdk]] of rows) {
+      const operation = operations.get(key) as OpenApiOperation;
+      expect(protocolAnchors.has(anchor)).toBe(true);
+      expect(capability.replace(/`/g, '')).toBe(
+        operation['x-qwen-capability'] ?? '—',
+      );
+      expect(scope.replace(/`/g, '')).toBe(operation['x-qwen-scope']);
+      expect(sdk.replace(/`/g, '')).toBe(operation['x-qwen-sdk-method']);
+    }
+  });
+
+  it('keeps the resume request contract to the fields resume reads', () => {
+    const openApi = JSON.parse(
+      readFileSync(OPENAPI, 'utf8'),
+    ) as OpenApiDocument;
+    const requestFields = (
+      operation: OpenApiOperation | undefined,
+    ): string[] => {
+      const ref = (
+        operation?.requestBody as
+          | { content?: Record<string, { schema?: { $ref?: string } }> }
+          | undefined
+      )?.content?.['application/json']?.schema?.$ref;
+      expect(ref).toBeTruthy();
+      const schema = resolveRef(openApi, ref as string);
+      return Object.keys(
+        (schema['properties'] ?? {}) as Record<string, unknown>,
+      ).sort();
+    };
+    expect(
+      requestFields(openApi.paths?.['/session/{id}/resume']?.post),
+    ).toEqual(['approvalMode', 'cwd', 'sourceId', 'sourceType']);
+    const loadPost = openApi.paths?.['/session/{id}/load']?.post;
+    expect(requestFields(loadPost)).toContain('historyPageSize');
+    const loadSchema = resolveRef(
+      openApi,
+      (
+        loadPost?.requestBody as
+          | { content?: Record<string, { schema?: { $ref?: string } }> }
+          | undefined
+      )?.content?.['application/json']?.schema?.$ref as string,
+    ) as { properties?: Record<string, { maximum?: number }> };
+    expect(loadSchema.properties?.['historyPageSize']?.maximum).toBe(500);
+  });
+
+  it('keeps the quickstart on the published base URL', () => {
+    const openApi = JSON.parse(
+      readFileSync(OPENAPI, 'utf8'),
+    ) as OpenApiDocument;
+    const origins = new Set(
+      [...readFileSync(GUIDE, 'utf8').matchAll(/http:\/\/[^/\s"')]+/g)].map(
+        (match) => match[0],
+      ),
+    );
+    const baseUrl = openApi.servers?.[0]?.url;
+    expect(baseUrl).toBeTruthy();
+    expect([...origins]).toEqual([new URL(baseUrl as string).origin]);
   });
 
   it('still sees the bulk of the route surface', () => {
