@@ -504,10 +504,10 @@ describe('WebTerminalRegistry', () => {
       workspaceCwd: '/workspace',
     });
 
-    // node-pty can deliver queued onData callbacks after onExit; the release
-    // is deferred one tick precisely so this tail still lands. With a
-    // synchronous dispose the fake's disposable detaches the listener and the
-    // tail is lost, so this test fails if the defer is removed.
+    // The release is deferred one tick after onExit so a trailing onData
+    // queued in the same turn still lands in the scrollback first. The fake
+    // detaches the listener on dispose, so with a synchronous release the
+    // tail is lost — this test fails if the defer is removed.
     onExit({ exitCode: 0 });
     onData('trailing');
     await new Promise<void>((resolve) => setImmediate(resolve));
