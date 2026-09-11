@@ -5823,9 +5823,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain(
       'followed by the retirement and posture-narrowing notes, when there are any',
     );
-    // The reverse-auditor's territory bullet for chunk 15's interaction
-    // file: a census that kept every hunk is named as such, never as a
-    // shed (#10136 R1-7).
+    // The reverse auditor's brief for chunk 15's interaction file.
     const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
       k.startsWith('reverse-audit--chunk-15--round-3--'),
     );

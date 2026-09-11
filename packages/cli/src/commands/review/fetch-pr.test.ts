@@ -1887,15 +1887,13 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
-  it('keeps a heavy interaction file unbounded so its invariant agents launch (#10136)', async () => {
-    // Heaviness is classified from the PUBLISHED slice. If the seam bound
-    // trimmed a file whose FULL-RANGE slice clears the heavy bar, the plan
-    // would flip it to non-heavy, `heavyFiles()` would drop it, and the
-    // invariant agents that read it whole from the worktree — the only
-    // auditors of hunks a backward base move smuggles in — would never
-    // launch, on exactly the rounds the bound runs. The bound therefore
-    // lifts wholesale for a heavy full-range slice: no seam record, every
-    // hunk republished, and the roster still owes the invariant agents.
+  it('a heavy interaction file keeps its invariant agents on a fix-audit round (#10136)', async () => {
+    // The fix-audit roster drops Agent 0's siblings but NOT the whole-file
+    // invariant agents, and heaviness is classified from the published
+    // slice — so a still-clean file the widening pulls back in, heavy in
+    // its own right, must republish whole and must still roster the three
+    // agents that read it from the worktree. They are the only auditors of
+    // hunks a backward base move smuggles into a full-range slice.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1953,9 +1951,6 @@ describe('fetch-pr report assembly', () => {
         return B_SOURCE;
       }
       if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        // Continuity proven (#10136 R18-3): the stamp matches this round's
-        // base, so the seam bound engages and the HEAVY exemption — not
-        // the continuity gate — is what lifts it.
         return JSON.stringify({
           round: 7,
           findings: [],
@@ -1970,7 +1965,6 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
 
     expect(report.incremental.posture).toBe('critical');
-    // No seam record: the bound was lifted, so both hunks republish.
     expect(report.incremental.scope.interaction).toEqual([
       { path: 'b.ts', importsChanged: ['a.ts'] },
     ]);
