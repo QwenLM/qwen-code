@@ -16,19 +16,19 @@ import {
 
 const fixture = `## Citation preview acceptance
 
-Adjacent sources[^source-tourism][^source-ticket] [^source-tourism][^source-plain]. Separated sources[^source-tourism], text[^source-ticket].
+Adjacent sources[^1][^ticket] [^1][^说明]. Separated sources[^1], text[^ticket].
 
 | Dimension | Conclusion |
 | --- | --- |
-| Official news | Current tour information[^source-tourism][^source-ticket][^source-plain] |
-| Public appearances | Single source[^source-ticket] |
+| Official news | Current tour information[^1][^ticket][^说明] |
+| Public appearances | Single source[^ticket] |
 
 Ordinary explanation[^note].
 
-[^source-tourism]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](https://images.example.test/concert.png)
-[^source-ticket]: [Official ticket website](https://tickets.example.test/show) Tickets and venue information.
-[^source-plain]: **Plain source** This is a plain note without a link or image.
-[^note]: This ordinary footnote keeps its footer and return link.
+[^1]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](https://images.example.test/concert.png)
+[^ticket]: [Official ticket website](https://tickets.example.test/show) Tickets and venue information.
+[^说明]: This is a plain note without a link or image.
+[^note]: This ordinary footnote also has a preview.
 `;
 
 const triggerSelector = '[data-web-shell-footnote-trigger]';
@@ -87,7 +87,7 @@ async function openFixture(
         ? [
             userTextEvent('Another message with the same note ID.', { id: 4 }),
             assistantTextEvent(
-              'Second message source[^source-tourism].\n\n[^source-tourism]: **Second source** Second definition.',
+              'Second message source[^1].\n\n[^1]: **Second source** Second definition.',
               { id: 5 },
             ),
             turnCompleteEvent('prompt-footnotes-second', { id: 6 }),
@@ -158,12 +158,12 @@ test.describe('footnote source previews', () => {
   }, testInfo) => {
     const { errors } = await openFixture(page, testInfo);
     const triggers = page.locator(triggerSelector);
-    await expect(triggers).toHaveCount(5);
-    await expect(triggers).toHaveText(['3', '', '', '3', '']);
-    await expect(page.locator('[data-footnotes] li')).toHaveCount(1);
+    await expect(triggers).toHaveCount(6);
+    await expect(triggers).toHaveText(['3', '', '', '3', '', '']);
+    await expect(page.locator('[data-footnotes] li')).toHaveCount(0);
     await expect(
       page.locator('[data-web-shell-footnote-sources-trigger]'),
-    ).toHaveText('3 citations');
+    ).toHaveText('4 citations');
     await triggers.first().hover();
     const card = page.locator(cardSelector);
     await expect(card).toBeVisible();
@@ -198,7 +198,7 @@ test.describe('footnote source previews', () => {
     await expect(card).not.toContainText('Macao Government Tourism Office');
     await expect(card.locator('img')).toHaveCount(0);
     await card.getByRole('button', { name: /Next/i }).click();
-    await expect(card).toContainText('Plain source');
+    await expect(card).toContainText('Footnote 3');
     await expect(card).toContainText(
       'This is a plain note without a link or image.',
     );
@@ -231,14 +231,14 @@ test.describe('footnote source previews', () => {
     expect(errors).toEqual([]);
   });
 
-  test('keyboard opening, source footers and ordinary return links stay isolated', async ({
+  test('keyboard opening and message citation lists stay isolated', async ({
     page,
   }, testInfo) => {
     const { errors } = await openFixture(page, testInfo, {
       secondMessage: true,
     });
     const triggers = page.locator(triggerSelector);
-    await expect(triggers).toHaveCount(6);
+    await expect(triggers).toHaveCount(7);
     await triggers.first().focus();
     const card = page.locator(cardSelector);
     await expect(card).toBeVisible();
@@ -255,7 +255,7 @@ test.describe('footnote source previews', () => {
     const sourceFooters = page.locator(
       '[data-web-shell-footnote-sources-trigger]',
     );
-    await expect(sourceFooters).toHaveText(['3 citations', '1 citation']);
+    await expect(sourceFooters).toHaveText(['4 citations', '1 citation']);
     const assistantFooter = sourceFooters.first().locator('..');
     await expect(assistantFooter).toHaveCSS('opacity', '0');
     await sourceFooters.first().hover();
@@ -294,16 +294,10 @@ test.describe('footnote source previews', () => {
     );
     expect(new Set(ids).size).toBe(ids.length);
 
-    const footer = page.locator('[data-footnotes]');
-    await expect(footer).toHaveCount(1);
-    const backlink = footer.locator('[data-footnote-backref]');
-    await expect(backlink).toHaveCount(1);
-    const href = await backlink.getAttribute('href');
-    expect(href).toBeTruthy();
-    const target = page.locator(`[id="${href!.slice(1)}"]`);
-    await backlink.click();
-    await expect(target).toBeFocused();
-    expect(await target.getAttribute('id')).not.toBe(ids.at(-1));
+    await expect(page.locator('[data-footnotes]')).toHaveCount(0);
+    await triggers.last().click();
+    await expect(card).toContainText('Second definition.');
+    await expect(card).not.toContainText('Official concert details');
     expect(errors).toEqual([]);
   });
 
@@ -483,7 +477,7 @@ test.describe('footnote source previews', () => {
     await next.click();
     await expect(card).toContainText('Official ticket website');
     await next.click();
-    await expect(card).toContainText('Plain source');
+    await expect(card).toContainText('脚注 3');
     await expect(card).toContainText(
       'This is a plain note without a link or image.',
     );
@@ -493,6 +487,37 @@ test.describe('footnote source previews', () => {
       fullPage: true,
       animations: 'disabled',
     });
+    expect(errors).toEqual([]);
+  });
+
+  test('plain multiline notes preserve complete scrollable descriptions', async ({
+    page,
+  }, testInfo) => {
+    const explanation =
+      'A complete explanation with additional context. '.repeat(100);
+    const { errors } = await openFixture(page, testInfo, {
+      text: `## Citation preview acceptance\n\nDetails[^说明].\n\n[^说明]: First paragraph.\n\n    ${explanation}End of the explanation.`,
+    });
+    const trigger = page.locator(triggerSelector);
+    await trigger.click();
+    const card = page.locator(cardSelector);
+    await expect(card).toContainText('Footnote 1');
+    await expect(card.locator('a')).toHaveCount(0);
+    const summary = card.locator('[data-web-shell-footnote-summary]');
+    await expect(summary).toContainText('First paragraph.');
+    await expect(summary).toContainText('End of the explanation.');
+    await expect(summary).toHaveCSS('overflow-y', 'auto');
+    expect(
+      await summary.evaluate(
+        (element) => element.scrollHeight > element.clientHeight,
+      ),
+    ).toBe(true);
+    await summary.focus();
+    await page.keyboard.press('End');
+    await expect
+      .poll(() => summary.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    await expectInsideViewport(page, card);
     expect(errors).toEqual([]);
   });
 
@@ -575,9 +600,8 @@ test('source locator demo delegates the card link to its host panel', async ({
   await expect(triggers).toHaveCount(2);
   await expect(triggers.first()).toHaveText('2');
   await expect(triggers.nth(1)).toHaveText('');
-  const footerTrigger = page.locator(
-    '[data-web-shell-footnote-sources-trigger]',
-  );
+  const footerSelectorForDemo = '[data-web-shell-footnote-sources-trigger]';
+  const footerTrigger = page.locator(footerSelectorForDemo);
   await expect(footerTrigger).toHaveText('3 个引用');
   const assistantFooter = footerTrigger.locator('..');
   await expect(assistantFooter).toHaveCSS('opacity', '0');
@@ -612,7 +636,7 @@ test('source locator demo delegates the card link to its host panel', async ({
     copyIconWidth: 14,
     timeFontSize: '11px',
   });
-  expect(footerMetrics.iconCenterOffset).toBe(-1);
+  expect(footerMetrics.iconCenterOffset).toBe(0);
   expect(footerMetrics.textCenterDelta).toBeLessThan(0.1);
   const inlineMetrics = await triggers.nth(1).evaluate((element) => {
     const icon = element.querySelector<HTMLElement>('[aria-hidden="true"]')!;
@@ -628,6 +652,25 @@ test('source locator demo delegates the card link to its host panel', async ({
     };
   });
   expect(inlineMetrics).toEqual({ centerDelta: 0, verticalAlign: 'middle' });
+  const iconResources = await page
+    .locator(`${triggerSelector} > span, ${footerSelectorForDemo} > span`)
+    .evaluateAll(async (elements) =>
+      Promise.all(
+        elements.map(async (element) => {
+          const mask = getComputedStyle(element).maskImage;
+          const image = new Image();
+          const width = await new Promise<number>((resolve) => {
+            image.onload = () => resolve(image.naturalWidth);
+            image.onerror = () => resolve(0);
+            image.src = mask.slice(4, -1).replace(/^"|"$/g, '');
+          });
+          return { mask, width };
+        }),
+      ),
+    );
+  expect(iconResources).toHaveLength(3);
+  expect(new Set(iconResources.map((icon) => icon.mask)).size).toBe(3);
+  expect(iconResources.every((icon) => icon.width > 0)).toBe(true);
   await page.screenshot({
     path: testInfo.outputPath('source-footnote-host-demo-idle.png'),
     fullPage: true,

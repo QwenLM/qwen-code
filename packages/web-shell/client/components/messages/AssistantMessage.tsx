@@ -144,6 +144,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           <FootnoteSources
             notes={footnoteSources}
             linkComponent={markdown?.components?.a}
+            iconResolver={markdown?.getAssistantFootnoteIcon}
           />
           {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">

@@ -1,68 +1,74 @@
-# Markdown 来源脚注卡片
+# 通用 Markdown 脚注卡片与宿主图标选择
 
 [English](./markdown-footnote-cards.md)
 
-## 问题
+## 问题与方案
 
-报告中的一条结论可能同时引用网页、文件、附件或私有知识。标准 GFM 脚注会把这些引用显示为分散数字和很长的文末列表，读者需要离开正文才能逐个查看。私有来源还可能只有稳定定位字段，没有长期可用的 URL。
-
-## 决策
-
-使用 identifier 以 `source-` 开头的标准 GFM footnote 作为可复制的来源格式。Web Shell 将相邻来源脚注聚合成知识库图标，每页预览一个来源，并显示本条消息的唯一来源数。其他脚注继续保留标准数字、文末定义和返回导航。
-
-来源 definition 中的第一个链接同时提供标题和打开目标。普通 HTTP(S) 地址按原逻辑打开；宿主也可以把稳定字段编码到固定 HTTPS sentinel 中，只在用户点击后解析。Web Shell 不理解 provider 字段，也不拼接业务 URL。
+报告引用网页、文件、附件、知识库记录，也可能包含纯文字说明。所有可解析的标准 Markdown 脚注均使用同一套聚合机制，不要求特殊 ID 或内容格式。数字、命名、中文 ID，以及无链接、无加粗的脚注均可聚合。保留当前默认知识图标，宿主通过两个独立函数返回图片资源 URL，分别决定正文和 Assistant 操作栏图标，无须提供 React 组件。
 
 ```markdown
-订单遵循统一业务口径。[^source-1][^source-2]
+订单遵循统一口径。[^a][^b]
 
-这句话还有一个普通说明脚注。[^note-1]
+资源组影响并发。[^c]
 
-[^source-1]: [订单定义](https://example.com/orders) — 定义和适用范围。
+[^a]: [订单定义](https://example.com/orders '知识库') — 业务定义。
 
-[^source-2]: [订单规范](https://citation.invalid/dataworks-knowledge#v=1&kind=content&kbInstanceId=INSTANCE&sourceFileId=FILE&citationId=CITATION&relativePath=docs%2Forder.md&anchor=definition 'DataWorks Knowledge') — 对应原文片段。
+[^b]: 这里是一条没有链接的补充说明。
 
-[^note-1]: 这里仍是普通脚注。
+    第二段说明也完整保留。
+
+[^c]: [资源组规格](https://example.com/resources) — 规格说明。
 ```
 
-## 展示行为
+## 公开接口
 
-- 只将 definition 完整的 `source-*` 脚注变成来源卡片。definition 缺失或格式不合法时安全降级，不删除回答正文。
-- 在同一个行内父节点中聚合相邻来源脚注，允许中间只有空白。正文、标点、普通脚注、块和表格单元格都会中断聚合。
-- 按首次引用顺序用 definition ID 去重。单来源 marker 只显示 SVG；多来源 marker 同时显示唯一来源数。
-- Hover、聚焦或点击打开卡片。仅由 Hover 打开的卡片在指针离开后关闭；点击入口或分页器后保持打开，直到按 Escape 或点击外部。每个 definition 对应一页，键盘、触屏、首尾按钮、流式更新、主题、窄屏和 portal 沿用 Web Shell 现有交互规则。
-- 有链接的 definition 取第一个安全链接文字作为标题、可选 link title 作为来源标签，其余文本作为摘要；无链接时取第一个 strong text 作为标题。第一个安全图片仍可作为缩略图。
-- 只有某个来源的全部引用都已转成卡片时，才从文末列表移除该 definition；仍被标准引用指向的来源、普通脚注及其返回链接继续保留。没有这些内容时移除整个 footer。
-- 消息底部显示 `N 个引用`，只统计该 assistant message 正文实际引用的唯一来源 definition。入口位于复制、分支和时间所在的 assistant 操作栏，沿用整条消息 Hover/聚焦时显示、触屏设备常驻的行为；Hover、聚焦或点击引用入口时复用同一个分页卡片查看本条消息全部引用。没有 assistant 操作栏的独立 Markdown 界面继续使用正文后的聚合入口作为降级。
-- 静态文档导出保留标准 Markdown 脚注；高级表格提取文本时保留原始引用数字，来源 Markdown 本身保持不变。
+`WebShellMarkdownCustomization` 新增可选的 `getInlineFootnoteIcon` 和 `getAssistantFootnoteIcon`。两者使用导出的 `WebShellFootnoteIconResolver` 类型，必须同步、无副作用，返回现有 `WebShellIconSource` 资源 URL 或 null/undefined。SolidJS 宿主编写普通 JavaScript 函数即可，无须 React 依赖或挂载桥接。
 
-## 宿主链接接入
+每个函数收到只读的 `WebShellFootnote` 列表：
 
-卡片内的来源标题使用宿主已有的 Markdown `components.a` renderer。正文 footnote reference、普通 definition 和 backreference 始终使用 Web Shell 内建锚点逻辑，不交给宿主 renderer。
+| 字段                         | 含义                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `id: string`                 | definition 中写出的脚注逻辑标识，不包含消息 DOM 前缀或 URL 编码。                                                   |
+| `number: number`             | 按首次引用顺序得到的脚注编号。                                                                                      |
+| `definitionMarkdown: string` | 包含 `[^id]:`、多行内容和原始链接的完整 definition；按 AST 位置直接截取 `transformMarkdown` 后实际渲染的 Markdown。 |
+| `title?: string`             | 首个安全链接的文字。                                                                                                |
+| `summary: string`            | 其余文字；没有链接时为完整脚注说明。                                                                                |
+| `href?: string`              | 首个安全链接的地址，沿用现有 Markdown URL 转换。                                                                    |
+| `source?: string`            | 首个安全链接的可选 title 属性。                                                                                     |
+| `image?: string`             | 首张安全缩略图的地址。                                                                                              |
 
-这样嵌入宿主无需新增 provider 专用的 Web Shell API，即可接管来源定位：
+公开列表不含 HAST、DOM 或 React 对象。示例中正文分别收到 `[a,b]`、`[c]`，操作栏收到 `[a,b,c]`。每组和消息总列表均按首次引用顺序、脚注 ID 去重；不同 ID 即使 URL 相同也不合并。翻页不改变图标判断函数的完整列表。React 可能重复渲染，不承诺生命周期内函数总共只执行两次。
 
-```text
-Footnote 来源链接
-→ 宿主 components.a
-→ 宿主校验并解析 locator
-→ 宿主打开自己的预览区域
+```ts
+const markdown = {
+  getInlineFootnoteIcon: (notes) =>
+    notes.every((note) => note.href?.startsWith('https://citation.invalid/'))
+      ? '/icons/knowledge.svg'
+      : '/icons/web.svg',
+  getAssistantFootnoteIcon: () => '/icons/references.svg',
+};
 ```
 
-Demo 使用 `https://citation.invalid/dataworks-knowledge#...` 作为 sentinel。provider 字段放在 fragment 中，不会发送到网络。宿主必须在普通 HTTP(S) 分支前消费整个 `citation.invalid` namespace，把受控操作渲染为 `href="#"` 或 button，不能把 sentinel 留成可导航 DOM URL。版本、path、重复或未知字段、必填字段和长度校验失败时均保持不可打开。
+两个函数互不代替。未传入、返回空值、无效地址或抛出异常，均回退到默认知识图标。自定义图标沿用输入框标签的单色 mask 和图片 URL 策略（包括拒绝 SVG data URL）。正文 16px，操作栏 14px；只有默认操作栏知识图标上移 1px，自定义图标正常居中。宿主仅决定图标，数量、按钮、Hover、翻页、键盘与点击行为由 Qwen 负责。
 
-开发态 Demo 只使用一个固定的合法 fixture，用于证明链接交接和右侧面板打开。生产 locator 校验及最终 URL 拼接由嵌入宿主实现。
+## 展示与生命周期
 
-Locator 是不可信 Markdown，不能决定 BFF host、endpoint、凭证或最终 URL。宿主始终使用当前会话凭证及固定 builder 或受鉴权 resolver。某种 locator 尚无 resolver 时，卡片仍可阅读，但打开入口禁用。
+- 同一行内父节点中，相邻脚注允许空白间隔并聚合；正文、标点、块和表格单元格边界中断聚合。单个脚注也构成一组。
+- 纯文本脚注使用“脚注 n”作为标题，完整说明可滚动查看并支持键盘滚动；无链接则无跳转。
+- Hover、聚焦或点击可打开预览。点击分页器或触发器后卡片保持打开，Escape 或外部点击关闭；仅 Hover 打开的卡片移出后关闭。一个 definition 对应一页。
+- Assistant 操作栏在复制、分支和时间旁显示“N 个引用”，取本条消息实际引用的去重列表；沿用消息 Hover/聚焦和触屏展示规则。独立 Markdown 渲染保留聚合入口回退。
+- 缺失 definition 时保留引用原文。只有所有引用均已转换的 definition 才从普通文末列表移除；不能转换的引用（例如链接内脚注）仍有有效文末目标与返回正文链接。
+- 在现有 AST 管线中提取原文，不二次解析 Markdown。保持现有稳定的引用上报和组件身份，流式更新不重挂已打开的卡片；消息之间的 DOM 锚点互相隔离。
+- 复制 Markdown 和静态文档导出保留标准脚注。宿主自定义 `components.sup` 时继续退出聚合，表格复制保留原脚注编号。
 
-## 边界
+## 宿主链接与范围
 
-- Footnote marker 只表示最终 Markdown 声称引用了该来源，不证明来源来自某次工具调用，也不证明来源内容必然支持结论。
-- 一个 definition 只能保存一个 locator。复用来源 ID 会复用同一位置；需要不同 anchor 时使用不同 ID，或以后升级结构化 Citation。
-- Session Sources 是独立的会话参考资料目录，其数量不能作为消息引用数。
-- 本方案不引入 MCP server、Extension tool 协议、provider metadata store，也不抓取网页 metadata。
+卡片标题继续通过宿主现有 `components.a` 渲染。内部脚注和返回正文链接沿用内建导航。普通 HTTP(S) 链接正常打开；宿主也可使用 `https://citation.invalid/dataworks-knowledge#...` 等 sentinel 携带私有定位字段，点击后校验、解析并打开自己的面板。Web Shell 不解析业务字段，也不拼接 OpenCode 业务 URL。没有宿主解析器时 sentinel 不可导航。Demo 使用固定数据、普通脚注 ID、两种正文资源图标、独立操作栏资源图标和示意右侧面板。
 
-## 验证
+聚合不依赖 sentinel 或业务来源格式。脚注表达报告声称引用的内容，不证明执行过检索或结论已获证据支持。Session Sources 是独立的会话来源目录。本次不增加 MCP、Core 引用协议、网页元数据请求或业务 URL 解析器。
 
-单元测试覆盖来源范围、聚合、去重、来源 footer 隐藏、普通脚注导航、strong 标题、宿主链接接管、不安全链接、流式更新、静态导出和表格复制。浏览器测试用固定报告分别回放开发构建与生产构建，覆盖 SVG、单/多来源 marker、分页卡片、消息 footer、键盘/触屏、主题、窄屏和 portal 隔离。
+## 实现与验收
 
-宿主侧最终 URL builder 不属于本 PR。Qwen Demo 负责证明完整 sentinel 会到达宿主 renderer；普通脚注导航保持隔离由单元测试和浏览器测试分别验证。
+修改范围为 Web Shell 公开类型/导出、现有 Markdown AST 转换、脚注卡片、Assistant 操作栏接线、Demo 和测试。没有待定设计问题。
+
+定向测试覆盖各种 ID、多行原文及 transform 后内容、安全字段、分组/消息完整列表、同 URL 不合并、两个函数独立与回退、默认/自定义尺寸、流式更新、缺失 definition、部分转换、宿主链接、复制及静态导出。开发和生产浏览器 E2E 覆盖聚合、长说明滚动、翻页保持打开、消息 Hover、键盘/触屏、主题、视口/Portal 和跨消息隔离。开发 Demo 额外验证自定义 SVG 资源和宿主面板，生产验收使用构建产物。完成构建和类型检查。

@@ -1,13 +1,7 @@
 import type { Element, ElementContent, Root, RootContent } from 'hast';
+import type { WebShellFootnote } from '../../customization';
 
-export interface FootnotePreview {
-  id: string;
-  number: string;
-  title: string;
-  summary: string;
-  source?: string;
-  href?: string;
-  image?: string;
+export interface FootnotePreview extends WebShellFootnote {
   linkNode?: Element;
 }
 
@@ -54,12 +48,9 @@ function reference(node: RootContent): Element | undefined {
     : undefined;
 }
 
-function isSourceDefinition(id: string): boolean {
-  return id.toLowerCase().startsWith('user-content-fn-source-');
-}
-
 export function rehypeFootnoteCards(options: FootnoteOptions) {
-  return (tree: Root) => {
+  return (tree: Root, file: { value: unknown }) => {
+    const markdown = String(file.value);
     const definitions = new Map<string, FootnotePreview>();
     const anchors = new Map<string, string>();
     let footer: Element | undefined;
@@ -89,9 +80,16 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
       number += 1;
       const id = String(node.properties.id);
       definitionNumbers.set(id, number);
-      if (!isSourceDefinition(id)) continue;
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start === undefined || end === undefined) continue;
+      const definitionMarkdown = markdown.slice(start, end);
+      // Read the already-parsed marker: decoding a DOM ID would conflate a and %61.
+      const logicalId = definitionMarkdown.match(
+        /^\[\^((?:\\.|[^\]])+)\]:/,
+      )?.[1];
+      if (!logicalId) continue;
       let link: Element | undefined;
-      let strong: Element | undefined;
       let source: string | undefined;
       let href: string | undefined;
       let image: string | undefined;
@@ -112,26 +110,17 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
               typeof title === 'string' ? title.trim() || undefined : undefined;
           }
         }
-        if (
-          child.tagName === 'strong' &&
-          !strong &&
-          child.properties.dataFootnoteBackref === undefined
-        ) {
-          strong = child;
-        }
         if (child.tagName === 'img' && !image && child.properties.src) {
           const url = options.transformUrl(String(child.properties.src));
           if (options.safeImage(url)) image = url;
         }
       });
-      const titleNode = link ?? strong;
-      const title = titleNode ? noteText(titleNode).trim() : '';
-      if (!title) continue;
       definitions.set(`#${id}`, {
-        id,
-        number: String(number),
-        title,
-        summary: noteText(node, titleNode).replace(/\s+/g, ' ').trim(),
+        id: logicalId,
+        number,
+        definitionMarkdown,
+        title: link ? noteText(link).trim() || undefined : undefined,
+        summary: noteText(node, link).replace(/\s+/g, ' ').trim(),
         source,
         href,
         image,
@@ -141,6 +130,7 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
 
     const referencedSources = new Map<string, FootnotePreview>();
     const convertedReferences = new Set<Element>();
+    const convertedDefinitions = new Set<string>();
 
     function group(parent: Element) {
       if (parent === footer || parent.tagName === 'a') return;
@@ -170,7 +160,7 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
         for (const item of refs) {
           const preview = definitions.get(String(item.properties.href))!;
           previews.set(preview.id, preview);
-          referencedSources.set(preview.id, preview);
+          convertedDefinitions.add(preview.id);
           convertedReferences.add(item);
           anchors.set(String(item.properties.id), options.prefix + id);
         }
@@ -194,6 +184,14 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
     }
     if (options.group) {
       for (const child of tree.children) {
+        if (child === footer) continue;
+        visit(child, (node) => {
+          if (node.properties.dataFootnoteRef === undefined) return;
+          const preview = definitions.get(String(node.properties.href));
+          if (preview) referencedSources.set(preview.id, preview);
+        });
+      }
+      for (const child of tree.children) {
         if (child.type === 'element') group(child);
       }
       if (referencedSources.size > 0 && list) {
@@ -209,12 +207,13 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
           if (definition) definitionsWithVisibleReferences.add(definition.id);
         });
         const enhancedIds = new Set(
-          [...referencedSources.values()]
+          [...definitions.entries()]
             .filter(
-              (definition) =>
+              ([, definition]) =>
+                convertedDefinitions.has(definition.id) &&
                 !definitionsWithVisibleReferences.has(definition.id),
             )
-            .map((definition) => definition.id),
+            .map(([href]) => href.slice(1)),
         );
         list.children = list.children.filter(
           (child) =>

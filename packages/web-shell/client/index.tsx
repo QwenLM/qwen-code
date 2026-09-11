@@ -227,6 +227,8 @@ export type {
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
+  WebShellFootnote,
+  WebShellFootnoteIconResolver,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,

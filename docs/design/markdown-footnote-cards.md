@@ -1,68 +1,74 @@
-# Markdown source footnote cards
+# Generic Markdown footnote cards and host icons
 
 [中文](./markdown-footnote-cards.zh-CN.md)
 
-## Problem
+## Problem and decision
 
-Reports can cite several web pages, files, attachments, or private knowledge records for one claim. Standard GFM footnotes render those citations as separate numbers and a long footer, so readers must leave the claim to inspect each source. Private sources may also have stable locator fields without a durable URL.
-
-## Decision
-
-Use standard GFM footnotes whose identifier starts with `source-` as the portable source format. Web Shell groups adjacent source footnotes into a knowledge icon, previews one source per page, and shows the unique source count for the message. Other footnotes keep standard numbering, footer definitions, and return navigation.
-
-The first link in a source definition is its title and open target. A normal HTTP(S) target opens normally. A host can instead encode stable provider fields in a fixed HTTPS sentinel and resolve it only after the user clicks. Web Shell does not understand provider fields or construct business URLs.
+Reports cite web pages, files, attachments, knowledge records, and explanatory notes. All resolved Markdown footnotes use the same aggregation mechanism, regardless of ID or content. Numeric, named, Chinese, linked and plain-text notes are supported. The existing knowledge icon remains the default. Hosts can independently select an image resource for each inline group and the Assistant action footer without supplying React components.
 
 ```markdown
-Orders follow a shared business definition.[^source-1][^source-2]
+Orders follow a shared definition.[^a][^b]
 
-This sentence has an ordinary explanatory note.[^note-1]
+Resource group specifications affect concurrency.[^c]
 
-[^source-1]: [Order definition](https://example.com/orders) — Definition and scope.
+[^a]: [Order definition](https://example.com/orders 'Knowledge') — Business definition.
 
-[^source-2]: [Order policy](https://citation.invalid/dataworks-knowledge#v=1&kind=content&kbInstanceId=INSTANCE&sourceFileId=FILE&citationId=CITATION&relativePath=docs%2Forder.md&anchor=definition 'DataWorks Knowledge') — Relevant source excerpt.
+[^b]: An explanation without a link.
 
-[^note-1]: This remains a normal footnote.
+    More detail, preserved in the original definition.
+
+[^c]: [Resource specifications](https://example.com/resources) — Specification details.
 ```
 
-## Rendering behavior
+## Public contract
 
-- Only resolved `source-*` definitions become source cards. Missing or malformed definitions fall back without removing answer text.
-- Group adjacent source references, including intervening whitespace, within the same inline parent. Text, punctuation, ordinary footnotes, blocks, and table-cell boundaries stop a group.
-- Deduplicate by definition ID in first-reference order. A single-source marker shows only the SVG; a multi-source marker also shows the unique count.
-- Hover, focus, or click opens the card. A hover-only card closes after the pointer leaves; clicking the trigger or a pagination control keeps it open until Escape or an outside click. Each definition is one page. Keyboard, touch, boundary controls, streaming updates, themes, narrow viewports, and portal placement follow the existing Web Shell interaction rules.
-- A linked definition uses the first safe link text as its title, the optional link title as its source label, and the remaining text as its summary. An unlinked definition uses its first strong text as the title. The first safe image remains an optional thumbnail.
-- Remove a source definition only when every reference to it became a card. Keep definitions still targeted by a standard reference, ordinary footnotes, and their return links. Remove the footer container when none of those remain.
-- Show a message-level `N citations` control derived only from unique source definitions referenced by that assistant message. Place it in the assistant action footer beside copy, branch, and time. The footer appears with the existing message hover/focus behavior and remains visible on touch devices; hovering, focusing, or clicking the citation control opens the same paginated preview over the complete message citation set. Standalone Markdown surfaces without an assistant footer keep the inline aggregate fallback.
-- Static document export keeps standard Markdown footnotes. Advanced-table text extraction retains the original reference numbers; the source Markdown remains unchanged.
+`WebShellMarkdownCustomization` exposes two optional synchronous, side-effect-free functions: `getInlineFootnoteIcon` and `getAssistantFootnoteIcon`. Both use the exported `WebShellFootnoteIconResolver` type and return the existing `WebShellIconSource` resource URL, or null/undefined for the default. The host needs no React dependency to write these functions.
 
-## Host link integration
+Each function receives a readonly list of `WebShellFootnote` values:
 
-The source title inside the card uses the host's existing Markdown `components.a` renderer. Internal footnote references, ordinary definitions, and backreferences always use Web Shell's built-in anchor handling and never pass through the host renderer.
+| Field                        | Meaning                                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id: string`                 | Logical footnote ID as written in its definition, without the message DOM prefix or URL encoding.                                                                   |
+| `number: number`             | Footnote number in first-reference order.                                                                                                                           |
+| `definitionMarkdown: string` | Complete definition, including `[^id]:`, multiline content and original URLs. Read directly from the AST source position in the Markdown after `transformMarkdown`. |
+| `title?: string`             | Text of the first safe link.                                                                                                                                        |
+| `summary: string`            | Remaining textual content; the whole note for an unlinked definition.                                                                                               |
+| `href?: string`              | First safe link target, using the existing Markdown URL transformation.                                                                                             |
+| `source?: string`            | The first safe link's optional title attribute.                                                                                                                     |
+| `image?: string`             | First safe thumbnail URL.                                                                                                                                           |
 
-This lets an embedding host intercept a provider locator without adding a provider-specific Web Shell API:
+No HAST, DOM or React objects enter the public list. The example produces inline calls with `[a,b]` and `[c]`, and an Assistant call with `[a,b,c]`. Each list is deduplicated by ID in first-reference order; distinct IDs sharing a URL remain distinct. Pagination selects content within the group without changing the resolver input. React may render more than once; total callback invocation counts are not guaranteed.
 
-```text
-Footnote source link
-→ host components.a
-→ host validates and resolves the locator
-→ host opens its own preview surface
+```ts
+const markdown = {
+  getInlineFootnoteIcon: (notes) =>
+    notes.every((note) => note.href?.startsWith('https://citation.invalid/'))
+      ? '/icons/knowledge.svg'
+      : '/icons/web.svg',
+  getAssistantFootnoteIcon: () => '/icons/references.svg',
+};
 ```
 
-The demo sentinel is `https://citation.invalid/dataworks-knowledge#...`. Provider fields live in the fragment so they are not sent over the network. The host must consume the complete `citation.invalid` namespace before its normal HTTP(S) branch, render the controlled action with `href="#"` or button semantics, and never expose the sentinel as a navigable DOM URL. Invalid versions, paths, duplicate or unknown fields, missing required fields, and oversized locators remain non-navigable.
+The callbacks are independent. Missing callbacks, empty/null results, invalid URLs and thrown exceptions fall back to the default knowledge icon. Custom assets use the composer's monochrome mask and image URL policy (including rejection of SVG data URLs). Inline icons are 16px; footer icons are 14px. Only the default footer knowledge glyph receives the existing 1px optical lift. The host controls only the icon; Qwen owns counts, buttons, hover, keyboard, pagination and links.
 
-The development demo uses one fixed valid fixture and only demonstrates link handoff and panel opening. Production locator validation and final URL construction belong to the embedding host.
+## Rendering and lifecycle
 
-The locator is untrusted Markdown. It cannot choose the BFF host, endpoint, credentials, or final URL. The host uses current session credentials and a fixed builder or authorized resolver. Until that resolver exists for a locator kind, the card remains readable and its open action stays disabled.
+- Adjacent references, allowing whitespace, form one group within their inline parent. Text, punctuation, block and table-cell boundaries break groups. A single reference also forms a group.
+- Pure-text notes have a localized “Footnote n” title, the full explanation and no navigation. Long descriptions are scrollable, including with the keyboard.
+- Hover, focus and click open the preview. Paging or clicking the trigger pins it until Escape or an outside click. Hover-only previews close after leaving. A page represents one definition.
+- The Assistant footer shows “N citations” beside copy, branch and time, using the message's unique referenced definitions. It follows existing message hover/focus and touch visibility rules. Standalone Markdown keeps its aggregate footer fallback.
+- Unresolved definitions keep literal references. A definition is removed from the ordinary footer only when every occurrence was converted. References that cannot be converted (for example inside a link) retain their ordinary target and return navigation.
+- Definition extraction shares the existing AST pipeline; it does not reparse Markdown. Existing stable source reporting and component identities preserve open cards through streaming updates. Message instances keep isolated DOM anchor namespaces.
+- Markdown copy and static document export preserve standard footnotes. Custom `components.sup` continues to opt out of aggregation. Advanced-table copy keeps original reference text.
 
-## Boundaries
+## Host links and scope
 
-- A footnote marker records what the final Markdown claims to cite; it does not prove that a tool returned the source or that the evidence entails the claim.
-- One definition stores one locator. Reusing a source ID reuses the same location. Claims that require different anchors need different IDs or a future structured citation model.
-- Session Sources remain an independent session reference directory. Their count is not the message citation count.
-- No MCP server, Extension tool protocol, provider metadata store, or webpage metadata fetch is introduced.
+Card titles use the existing host `components.a` renderer. Internal reference/backreference navigation stays built in. A normal HTTP(S) link opens normally. A host may encode private locator fields in a sentinel such as `https://citation.invalid/dataworks-knowledge#...`, validate and resolve it on click, and open its own panel. Web Shell neither interprets these fields nor builds OpenCode business URLs. Without a host resolver, the sentinel remains non-navigable. The demo uses fixed fixtures, ordinary IDs, two different inline asset icons, an independent footer asset and an illustrative host panel.
 
-## Validation
+Aggregation is not limited to sentinel links or any business source format. A footnote records what the report cites, not proof of retrieval or entailment. Session Sources remain a separate session directory. This change adds no MCP, Core citation protocol, metadata fetches or provider-specific resolver.
 
-Unit tests cover source scoping, grouping, deduplication, source footer removal, ordinary footnote navigation, strong titles, host link interception, unsafe links, streaming, static export, and table copy. Browser tests replay a fixed report in development and production builds and cover SVG rendering, single- and multi-source markers, paginated cards, the message footer, keyboard/touch interaction, themes, narrow layouts, and portal isolation.
+## Implementation and verification
 
-The host-specific URL builder is outside this PR. The Qwen demo proves that the complete sentinel reaches the host renderer. Unit and browser tests separately prove that ordinary footnote navigation remains isolated.
+Changes are limited to Web Shell customization types/exports, the existing Markdown AST transform, footnote cards, Assistant footer wiring, demo and tests. There are no open design questions.
+
+Focused tests verify IDs, multiline original text after transforms, safe parsed fields, exact group/message lists, same-URL distinct notes, callback independence/fallback, default/custom sizing, streaming, incomplete definitions, partial conversion, host links, copy and static export. Development and production browser E2E cover grouping, scrollable descriptions, paging persistence, message hover, keyboard/touch, themes, viewport/portal boundaries and cross-message isolation. The development demo additionally verifies custom SVG assets and host panel handoff; production acceptance uses the built app. Build and typecheck must pass.

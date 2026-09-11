@@ -32,3 +32,9 @@
 
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
+export type {
+  WebShellFootnote,
+  WebShellFootnoteIconResolver,
+  WebShellIconSource,
+  WebShellMarkdownCustomization,
+} from './customization';

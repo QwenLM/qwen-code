@@ -68,7 +68,25 @@ export interface WebShellMarkdownChartCustomization {
   chartStyle?: CSSProperties;
 }
 
+export interface WebShellFootnote {
+  readonly id: string;
+  readonly number: number;
+  readonly definitionMarkdown: string;
+  readonly title?: string;
+  readonly summary: string;
+  readonly href?: string;
+  readonly source?: string;
+  readonly image?: string;
+}
+
+/** Synchronous, side-effect-free selection for a complete group of footnotes. */
+export type WebShellFootnoteIconResolver = (
+  footnotes: readonly WebShellFootnote[],
+) => WebShellIconSource | null | undefined;
+
 export interface WebShellMarkdownCustomization {
+  getInlineFootnoteIcon?: WebShellFootnoteIconResolver;
+  getAssistantFootnoteIcon?: WebShellFootnoteIconResolver;
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
@@ -85,7 +103,7 @@ export interface WebShellMarkdownCustomization {
    * `components.code` replaces the default code renderer, so `renderCodeBlock`
    * will not be called for that source. Internal footnote references and
    * backreferences keep the built-in link behavior. Providing `components.sup`
-   * disables source-footnote grouping.
+   * disables footnote grouping.
    */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];

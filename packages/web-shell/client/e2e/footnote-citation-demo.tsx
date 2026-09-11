@@ -3,18 +3,29 @@ import { createRoot } from 'react-dom/client';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ExtraProps } from 'react-markdown';
 import { WebShellTranscript } from '../components/WebShellTranscript';
+import type { WebShellFootnoteIconResolver } from '../customization';
+import knowledgeIconUrl from '../assets/icons/knowledge.svg?url&no-inline';
+import fileIconUrl from '../assets/icons/at-file.svg?url&no-inline';
+import referencesIconUrl from '../assets/icons/at-extension.svg?url&no-inline';
+
+const getInlineFootnoteIcon: WebShellFootnoteIconResolver = (footnotes) =>
+  footnotes.every((note) => note.href?.startsWith(sentinelPrefix))
+    ? knowledgeIconUrl
+    : fileIconUrl;
+const getAssistantFootnoteIcon: WebShellFootnoteIconResolver = () =>
+  referencesIconUrl;
 
 const sentinelPrefix = 'https://citation.invalid/dataworks-knowledge#';
 
 const report = `## 订单主题分析
 
-订单表需要遵循统一的业务定义和状态口径。[^source-1][^source-2]
+订单表需要遵循统一的业务定义和状态口径。[^a][^b]
 
-资源组规格会影响任务可用并发，需要结合运行规模选择。[^source-3]
+资源组规格会影响任务可用并发，需要结合运行规模选择。[^c]
 
-[^source-1]: [订单业务定义](<https://citation.invalid/dataworks-knowledge#v=1&kind=semantic&kbInstanceId=instance-a&docId=kb%3Aorder> "DataWorks Knowledge") — 用户提交交易后形成的业务订单定义。
-[^source-2]: [订单规范原文](<https://citation.invalid/dataworks-knowledge#v=1&kind=content&kbInstanceId=instance-a&sourceFileId=file-order&citationId=citation-order&relativePath=docs%2Forder.md&anchor=markdown%3Ablock%3A7> "DataWorks Knowledge") — 订单状态字段及约束说明。
-[^source-3]: [资源组规格说明](https://example.com/resource-groups) — 不同规格对应不同并发上限。
+[^a]: [订单业务定义](<https://citation.invalid/dataworks-knowledge#v=1&kind=semantic&kbInstanceId=instance-a&docId=kb%3Aorder> "DataWorks Knowledge") — 用户提交交易后形成的业务订单定义。
+[^b]: [订单规范原文](<https://citation.invalid/dataworks-knowledge#v=1&kind=content&kbInstanceId=instance-a&sourceFileId=file-order&citationId=citation-order&relativePath=docs%2Forder.md&anchor=markdown%3Ablock%3A7> "DataWorks Knowledge") — 订单状态字段及约束说明。
+[^c]: [资源组规格说明](https://example.com/resource-groups) — 不同规格对应不同并发上限。
 `;
 
 function block(
@@ -53,6 +64,8 @@ function App() {
   const [resolved, setResolved] = useState<ResolvedLocator>();
   const markdown = useMemo(
     () => ({
+      getInlineFootnoteIcon,
+      getAssistantFootnoteIcon,
       components: {
         a({ href, children, className }: ComponentProps<'a'> & ExtraProps) {
           if (href?.startsWith(sentinelPrefix)) {

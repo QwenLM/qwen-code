@@ -1,6 +1,7 @@
 import {
   createElement,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
@@ -14,6 +15,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
 import type { FootnoteElement, FootnotePreview } from './rehype-footnote-cards';
+import type { WebShellFootnoteIconResolver } from '../../customization';
+import { isSafeImageSrc } from './Markdown';
 
 export type FootnoteSourcesChangeHandler = (notes: FootnotePreview[]) => void;
 
@@ -21,11 +24,21 @@ export function FootnoteSup({
   node,
   children,
   linkComponent,
+  iconResolver,
   ...props
-}: ComponentProps<'sup'> & ExtraProps & { linkComponent?: Components['a'] }) {
+}: ComponentProps<'sup'> &
+  ExtraProps & {
+    linkComponent?: Components['a'];
+    iconResolver?: WebShellFootnoteIconResolver;
+  }) {
   const notes = (node as FootnoteElement | undefined)?.data?.footnoteCards;
   return notes ? (
-    <FootnoteCard id={props.id} notes={notes} linkComponent={linkComponent} />
+    <FootnoteCard
+      id={props.id}
+      notes={notes}
+      linkComponent={linkComponent}
+      iconResolver={iconResolver}
+    />
   ) : (
     <sup {...props}>{children}</sup>
   );
@@ -37,12 +50,14 @@ export function FootnoteSection({
   linkComponent,
   onSourcesChange,
   sectionComponent,
+  iconResolver,
   ...props
 }: ComponentProps<'section'> &
   ExtraProps & {
     linkComponent?: Components['a'];
     onSourcesChange?: FootnoteSourcesChangeHandler;
     sectionComponent?: Components['section'];
+    iconResolver?: WebShellFootnoteIconResolver;
   }) {
   const data = (node as FootnoteElement | undefined)?.data;
   const notes = data?.footnoteSourcesFooter ? data.footnoteCards : undefined;
@@ -71,6 +86,7 @@ export function FootnoteSection({
           notes={notes}
           variant="footer"
           linkComponent={linkComponent}
+          iconResolver={iconResolver}
         />
       </div>
     </>
@@ -80,9 +96,11 @@ export function FootnoteSection({
 export function FootnoteSources({
   notes,
   linkComponent,
+  iconResolver,
 }: {
   notes: FootnotePreview[];
   linkComponent?: Components['a'];
+  iconResolver?: WebShellFootnoteIconResolver;
 }) {
   if (!notes.length) return null;
   return (
@@ -90,6 +108,7 @@ export function FootnoteSources({
       notes={notes}
       variant="footer"
       linkComponent={linkComponent}
+      iconResolver={iconResolver}
     />
   );
 }
@@ -99,11 +118,13 @@ function FootnoteCard({
   notes,
   variant = 'inline',
   linkComponent,
+  iconResolver,
 }: {
   id?: string;
   notes: FootnotePreview[];
   variant?: 'inline' | 'footer';
   linkComponent?: Components['a'];
+  iconResolver?: WebShellFootnoteIconResolver;
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
@@ -114,6 +135,18 @@ function FootnoteCard({
   const content = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pinned = useRef(false);
+  const customIcon = useMemo(() => {
+    try {
+      const icon = iconResolver?.(
+        notes.map(({ linkNode: _linkNode, ...footnote }) => footnote),
+      );
+      return typeof icon === 'string' && isSafeImageSrc(icon)
+        ? icon.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [iconResolver, notes]);
   const index = Math.max(
     0,
     notes.findIndex((note) => note.id === selectedId),
@@ -202,12 +235,13 @@ function FootnoteCard({
           <span
             aria-hidden="true"
             className={`inline-block shrink-0 bg-current ${
-              variant === 'footer' ? 'size-3.5 -translate-y-px' : 'size-4'
-            }`}
+              variant === 'footer' ? 'size-3.5' : 'size-4'
+            } ${variant === 'footer' && !customIcon ? '-translate-y-px' : ''}`}
             style={{
-              maskImage: cssUrlValue(knowledgeIcon),
+              maskImage: cssUrlValue(customIcon ?? knowledgeIcon),
               maskSize: 'contain',
               maskRepeat: 'no-repeat',
+              maskPosition: 'center',
             }}
           />
           {variant === 'footer'
@@ -290,7 +324,11 @@ function FootnoteCard({
               </div>
             )}
             {note.summary && (
-              <p className="mt-1 line-clamp-3 text-sm break-words text-muted-foreground">
+              <p
+                data-web-shell-footnote-summary=""
+                tabIndex={0}
+                className="mt-1 max-h-48 overflow-y-auto overscroll-contain text-sm break-words text-muted-foreground"
+              >
                 {note.summary}
               </p>
             )}
