@@ -861,19 +861,7 @@ function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   return [...mentions];
 }
 
-function extractLocalControlText(
-  data: DingTalkMessageData,
-  text: string,
-): string | undefined {
-  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
-    return undefined;
-  }
-  const includesBot = data.atUsers.some(
-    (user) => user?.dingtalkId === data.chatbotUserId,
-  );
-  if (!includesBot || collectNonBotMentionIds(data).length > 0) {
-    return undefined;
-  }
+function extractLocalControlText(text: string): string | undefined {
   return text.match(/^\s*@[^\s\p{Cf}]+\s+([\s\S]*)$/u)?.[1]?.trim();
 }
 
@@ -3358,7 +3346,7 @@ export class DingtalkChannel extends ChannelBase {
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const localControlText =
         isGroup && isMentioned
-          ? extractLocalControlText(data, content.text)
+          ? extractLocalControlText(content.text)
           : undefined;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';

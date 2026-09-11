@@ -256,10 +256,9 @@ describe('DingTalk mention body preservation', () => {
     expect(envelope.text).toBe('@Qwen第一段\n第二段');
   });
 
-  it('keeps the body while projecting a verified bot-only mention for local controls', () => {
+  it('keeps the body while projecting a bounded leading mention for local controls', () => {
     const envelope = receive({
       text: { content: '@Qwen 查看记忆' },
-      atUsers: [{ dingtalkId: 'test-bot' }],
     });
 
     expect(envelope.text).toBe('@Qwen 查看记忆');

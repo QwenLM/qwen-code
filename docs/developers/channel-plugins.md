@@ -108,7 +108,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `chatId`           | string       | Yes      | Must distinguish DMs from groups                                           |
 | `chatName`         | string       | No       | Group/conversation name when supplied by the platform                      |
 | `text`             | string       | Yes      | Message body; bot @mention handling is adapter-specific                    |
-| `localControlText` | string       | No       | Body after a verified routing mention, for memory and `!` controls only    |
+| `localControlText` | string       | No       | Body after a bounded routing mention, for memory and `!` controls only     |
 | `threadId`         | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`        | string       | No       | Platform message ID — useful for response correlation                      |
 | `isGroup`          | boolean      | Yes      | GroupGate relies on this                                                   |
@@ -119,7 +119,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `imageMimeType`    | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
 | `attachments`      | Attachment[] | No       | Structured media attachments (see below)                                   |
 
-Adapters may retain a leading bot mention in `text`. In that case local slash-command parsing still uses the complete body, so `/command` behind the mention remains ordinary message text. An adapter that can verify the routing mention and its boundary may additionally provide `localControlText` so channel-memory controls and the group/shared-session `!` safety gate still recognize the body.
+Adapters may retain a leading bot mention in `text`. In that case local slash-command parsing still uses the complete body, so `/command` behind the mention remains ordinary message text. An adapter that has already confirmed mention-based routing and can identify a whitespace-delimited leading mention may additionally provide `localControlText` so channel-memory controls and the group/shared-session `!` safety gate still recognize the body.
 
 ### Attachments
 

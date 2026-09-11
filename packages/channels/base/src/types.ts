@@ -93,10 +93,10 @@ export interface Envelope {
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
   /**
-   * Adapter-provided text after removing a platform-verified routing mention.
-   * Used only for channel-memory controls and the group/shared-session `!`
-   * safety gate. Slash commands, display, history, and model prompting continue
-   * to use `text`.
+   * Adapter-provided text after a routing-gated, whitespace-delimited leading
+   * mention. Used only for channel-memory controls and the group/shared-session
+   * `!` safety gate. Slash commands, display, history, and model prompting
+   * continue to use `text`.
    */
   localControlText?: string;
   /**

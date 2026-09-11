@@ -337,7 +337,7 @@ interface Envelope {
   chatId: string; // distinguishes DMs from groups
   chatName?: string; // inbound group display name, when provided
   text: string; // message text; adapters decide whether to retain @mentions
-  localControlText?: string; // text after a verified routing mention, for memory/! controls
+  localControlText?: string; // text after a bounded routing mention, for memory/! controls
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions
   isGroup: boolean; // true for group chats
