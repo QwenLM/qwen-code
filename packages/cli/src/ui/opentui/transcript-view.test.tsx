@@ -16,6 +16,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -82,6 +83,24 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('localizes the Focus memory counter in Portuguese', async () => {
+    await setLanguageAsync('pt');
+    try {
+      const view = render(
+        <OpenTuiTranscriptView
+          focusMode
+          availableWidth={160}
+          items={[toolItem({ done: true, success: true, isMemoryOp: 'write' })]}
+        />,
+      );
+      expect(view.container.textContent).toContain(
+        'Memória: 0 leituras, 1 gravações',
+      );
+      view.unmount();
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
   it('omits the whole memory suffix when the compact row is narrow', () => {
     const items = [
       toolItem({ done: true, success: true, isMemoryOp: 'write' }),

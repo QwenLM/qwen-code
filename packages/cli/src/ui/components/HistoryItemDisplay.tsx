@@ -14,6 +14,7 @@ import {
   truncateToWidth,
 } from '../utils/textUtils.js';
 import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
+import { formatMemorySummary } from '../utils/memory-summary.js';
 import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
@@ -72,7 +73,6 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useFocusModeEnabled } from '../contexts/FocusModeContext.js';
-import { t } from '../../i18n/index.js';
 import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
@@ -426,10 +426,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const memoryLabel =
     item.type === 'tool_group' &&
     ((item.memoryReadCount ?? 0) > 0 || (item.memoryWriteCount ?? 0) > 0)
-      ? ` · ${t('Memory: {{read}} read, {{written}} written', {
-          read: String(item.memoryReadCount ?? 0),
-          written: String(item.memoryWriteCount ?? 0),
-        })}`
+      ? ` · ${formatMemorySummary(item.memoryReadCount, item.memoryWriteCount)}`
       : '';
   const memorySummary =
     contentWidth - 2 - getCachedStringWidth(memoryLabel) >= 20

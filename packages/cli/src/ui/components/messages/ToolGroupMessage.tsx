@@ -26,6 +26,7 @@ import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
+import { formatMemorySummary } from '../../utils/memory-summary.js';
 
 function isAgentWithPendingConfirmation(
   rd: IndividualToolCallDisplay['resultDisplay'],
@@ -432,7 +433,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // mode (fullDetail), and under `ui.showToolCallArgs`, so each memory op
   // renders as its own full ToolMessage — otherwise "Wrote 1 memory" would
   // hide the very parameters the setting exists to surface — rather than
-  // collapsing to the "Recalled/Wrote N memories" badge.
+  // collapsing to the memory badge.
   const allMemOpsComplete =
     !fullDetail &&
     !hasRenderableToolCallArgs &&
@@ -444,19 +445,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     const writeCount = memoryWriteCount ?? 0;
     return (
       <Box flexDirection="column" width={contentWidth}>
-        {readCount > 0 && (
+        {(readCount > 0 || writeCount > 0) && (
           <Box paddingLeft={1}>
             <Text dimColor>
               {ICON.CIRCLE_FILLED + ' '}
-              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
-            </Text>
-          </Box>
-        )}
-        {writeCount > 0 && (
-          <Box paddingLeft={1}>
-            <Text dimColor>
-              {ICON.CIRCLE_FILLED + ' '}
-              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
+              {formatMemorySummary(readCount, writeCount)}
             </Text>
           </Box>
         )}
@@ -513,14 +506,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     <Box paddingLeft={1}>
       <Text dimColor>
         {ICON.CIRCLE_FILLED + ' '}
-        {[
-          (memoryReadCount ?? 0) > 0 &&
-            `Recalled ${memoryReadCount} ${memoryReadCount === 1 ? 'memory' : 'memories'}`,
-          (memoryWriteCount ?? 0) > 0 &&
-            `Wrote ${memoryWriteCount} ${memoryWriteCount === 1 ? 'memory' : 'memories'}`,
-        ]
-          .filter(Boolean)
-          .join(', ')}
+        {formatMemorySummary(memoryReadCount, memoryWriteCount)}
       </Text>
     </Box>
   ) : null;

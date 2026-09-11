@@ -64,8 +64,8 @@ import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
 import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
+import { formatMemorySummary } from '../utils/memory-summary.js';
 import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
-import { t } from '../../i18n/index.js';
 
 const GOAL_COLOR: Record<GoalCardColor, string> = {
   secondary: C.dim,
@@ -345,7 +345,7 @@ function ToolCard({
     }
   const memoryLabel =
     focusMode && item.isMemoryOp
-      ? ` · ${t('Memory: {{read}} read, {{written}} written', { read: item.isMemoryOp === 'read' ? '1' : '0', written: item.isMemoryOp === 'write' ? '1' : '0' })}`
+      ? ` · ${formatMemorySummary(item.isMemoryOp === 'read' ? 1 : 0, item.isMemoryOp === 'write' ? 1 : 0)}`
       : '';
   const memory =
     width - STATUS_INDICATOR_WIDTH - getCachedStringWidth(memoryLabel) >= 20

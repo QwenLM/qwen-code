@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type React from 'react';
 import { Text } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
 import { SessionStatsProvider } from '../contexts/SessionContext.js';
@@ -684,6 +685,29 @@ describe('<HistoryItemDisplay />', () => {
         expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
       },
     );
+
+    it('localizes the Focus memory counter in Portuguese', async () => {
+      await setLanguageAsync('pt');
+      try {
+        const view = renderInFocusMode(
+          <HistoryItemDisplay
+            item={{
+              id: 1,
+              type: 'tool_group',
+              tools: [successTool('shell')],
+              memoryReadCount: 2,
+              memoryWriteCount: 1,
+            }}
+            terminalWidth={160}
+            isPending={false}
+          />,
+        );
+        expect(view.lastFrame()).toContain('Memória: 2 leituras, 1 gravações');
+        view.unmount();
+      } finally {
+        await setLanguageAsync('en');
+      }
+    });
 
     it.each([
       ToolCallStatus.Pending,
