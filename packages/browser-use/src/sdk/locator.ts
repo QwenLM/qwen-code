@@ -13,6 +13,7 @@ import {
   type LocatorStep,
 } from '../core/primitives.js';
 import type { BrowserSdkContext } from './context.js';
+import { serializeJson } from '../core/serialize-json.js';
 import type {
   BrowserFrameLocator,
   BrowserLocator,
@@ -24,6 +25,8 @@ import type {
   LocatorTextOptions,
   LocatorWaitOptions,
   PageWaitForURLOptions,
+  JsonEvaluationResult,
+  JsonSerializable,
   TimeoutOptions,
 } from './types.js';
 
@@ -66,8 +69,7 @@ function actionOptions(options?: LocatorCheckOptions): Args {
 function evaluateArg(value: unknown): string {
   if (value === undefined) return 'undefined';
   try {
-    const serialized = JSON.stringify(value);
-    if (serialized !== undefined) return serialized;
+    return 'JSON.parse(' + JSON.stringify(serializeJson(value)) + ')';
   } catch (error) {
     const wrapped = new TypeError(
       'playwright.evaluate arg must be JSON-serializable',
@@ -75,7 +77,6 @@ function evaluateArg(value: unknown): string {
     wrapped.cause = error;
     throw wrapped;
   }
-  throw new TypeError('playwright.evaluate arg must be JSON-serializable');
 }
 
 export function pageEvaluateScript(
@@ -287,14 +288,17 @@ export class LocatorProxy implements BrowserLocator {
   count(): Promise<number> {
     return this.context.call<number>('locator.count', this.args());
   }
-  evaluate<Result = unknown, Arg = unknown>(
+  evaluate<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction:
       | string
       | ((element: Element, arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result> {
-    return this.context.call<Result>(
+  ): Promise<JsonEvaluationResult<Result>> {
+    return this.context.call<JsonEvaluationResult<Result>>(
       'locator.evaluate',
       this.args({
         script: locatorEvaluateScript(pageFunction, arg, 'one'),
@@ -302,14 +306,17 @@ export class LocatorProxy implements BrowserLocator {
       }),
     );
   }
-  evaluateAll<Result = unknown, Arg = unknown>(
+  evaluateAll<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction:
       | string
       | ((elements: Element[], arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result> {
-    return this.context.call<Result>(
+  ): Promise<JsonEvaluationResult<Result>> {
+    return this.context.call<JsonEvaluationResult<Result>>(
       'locator.evaluateAll',
       this.args({
         script: locatorEvaluateScript(pageFunction, arg, 'all'),

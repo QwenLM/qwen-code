@@ -24,6 +24,21 @@ export type {
   TabInfo,
 } from '../core/primitives.js';
 
+export type JsonSerializable =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonSerializable[]
+  | { readonly [key: string]: JsonSerializable };
+
+export type JsonEvaluationResult<Result extends JsonSerializable | void> =
+  Result extends undefined
+    ? null
+    : Result extends void
+      ? JsonSerializable
+      : Result;
+
 export interface TimeoutOptions {
   timeoutMs?: number;
 }
@@ -95,20 +110,26 @@ export interface BrowserLocator {
   or(other: BrowserLocator): BrowserLocator;
   all(): Promise<BrowserLocator[]>;
   count(): Promise<number>;
-  evaluate<Result = unknown, Arg = unknown>(
+  evaluate<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction:
       | string
       | ((element: Element, arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result>;
-  evaluateAll<Result = unknown, Arg = unknown>(
+  ): Promise<JsonEvaluationResult<Result>>;
+  evaluateAll<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction:
       | string
       | ((elements: Element[], arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result>;
+  ): Promise<JsonEvaluationResult<Result>>;
   allTextContents(options?: TimeoutOptions): Promise<string[]>;
   innerText(options?: TimeoutOptions): Promise<string>;
   textContent(options?: TimeoutOptions): Promise<string | null>;
@@ -186,11 +207,14 @@ export interface BrowserPlaywright {
   ): BrowserLocator;
   getByTestId(testId: string): BrowserLocator;
   frameLocator(selector: string): BrowserFrameLocator;
-  evaluate<Result = unknown, Arg = unknown>(
+  evaluate<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction: string | ((arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result>;
+  ): Promise<JsonEvaluationResult<Result>>;
   domSnapshot(): Promise<string>;
   waitForEvent(
     event: 'download',

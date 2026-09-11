@@ -16,17 +16,14 @@ import {
 describe('evaluation deadlines', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('keeps a zero timeout unlimited', async () => {
+  it('rejects an unresolved evaluation when its deadline expires', async () => {
     vi.useFakeTimers();
-    let resolve: (value: number) => void = () => undefined;
-    const pending = new Promise<number>((done) => {
-      resolve = done;
-    });
-    const result = withTimeout(pending, 0);
+    const result = withTimeout(new Promise(() => {}), 100).catch(
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await result).toMatchObject({ code: 'OPERATION_TIMEOUT' });
     expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(120_000);
-    resolve(42);
-    await expect(result).resolves.toBe(42);
   });
 
   it('preserves early results and errors and clears their timers', async () => {

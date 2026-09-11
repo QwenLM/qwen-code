@@ -1,5 +1,7 @@
 # Browser Use with Playwright Core
 
+[English](browser-use.md) | [简体中文](browser-use.zh-CN.md)
+
 ## Goal
 
 Browser Use gives models a structured API for controlling the user's existing
@@ -99,9 +101,30 @@ completion value, including trailing semicolons, comments, and statements.
 String evaluation retains the SDK's lexical `arg`, `element`, and `elements`
 bindings. A function-valued string is not invoked. Use async function arguments
 for `await` and parenthesize object literals in strings. Evaluation deadlines
-cover the whole call, including element lookup, and report `OPERATION_TIMEOUT`;
-`timeoutMs: 0` disables the deadline. A deadline ends the caller's wait without
+cover the whole call, including element lookup, and report `OPERATION_TIMEOUT`.
+Explicit operation timeouts must be integers from 1 to 120,000 ms; zero is
+rejected with `INVALID_ARGUMENT`. Omitted timeouts retain each operation's
+default. The delay-only `waitForTimeout` accepts 0 to 120,000 ms, including a
+zero-delay no-op. A deadline ends the caller's wait without
 terminating JavaScript already running in the page.
+
+Evaluation accepts JSON data: finite numbers, strings, booleans, null, arrays,
+and plain records, including readonly TypeScript data. The public
+`JsonSerializable` type constrains arguments and results. Non-JSON arguments
+are rejected before dispatch; results are checked in the page before
+Playwright serializes them. The runtime transfers encoded JSON text so object
+keys such as `__proto__` retain their data meaning. Nested undefined values,
+non-finite numbers, Date, RegExp, functions, and cycles are rejected rather than
+silently converted. An omitted top-level argument remains undefined; a
+top-level undefined result becomes null, reflected in the return type. A callback
+typed as void may discard an actual return value, so its return type is the
+broader JsonSerializable rather than promising null.
+
+Locator plans support at most 32 steps per array and 32 plan levels, counting
+the top-level array as level one. The depth limit applies equally to `and`,
+`or`, `filter.has`, and `filter.hasNot`. Over-depth plans fail validation with
+`INVALID_ARGUMENT` before browser startup; normal locator composition remains
+supported.
 
 Input actions and navigation waits have separate deadlines. Locator clicks,
 locator key presses, and DOM CUA clicks disable Playwright's implicit
@@ -330,3 +353,13 @@ The adapter supplies a stable default-context id when CDP omits its optional
 browserContextId, preserving supplied ids and rejecting malformed values
 before Playwright receives the target. Direct message callback failures close
 the transport and release its attachments.
+
+## Contract validation
+
+Regression checks must reject zero operation timeouts while preserving zero
+delays, omitted defaults, and the 120,000 ms upper bound. Locator checks cover
+all four recursive edges, the depth boundary, flat 32-step plans, and ordinary
+composition in Chrome. Evaluation checks cover argument rejection, page-side
+result rejection for all three APIs, actual TypeScript consumers, valid JSON
+controls, repeated references, and top-level undefined normalization. Removing
+the corresponding guard must make the regression checks fail.

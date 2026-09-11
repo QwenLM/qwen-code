@@ -35,6 +35,8 @@ import type {
   NavigationExpectationOptions,
   PageWaitForURLOptions,
   TabScreenshotOptions,
+  JsonEvaluationResult,
+  JsonSerializable,
   TimeoutOptions,
 } from './types.js';
 
@@ -134,16 +136,22 @@ class PlaywrightProxy implements BrowserPlaywright {
       frameStep(selector),
     ]);
   }
-  evaluate<Result = unknown, Arg = unknown>(
+  evaluate<
+    Result extends JsonSerializable | void = JsonSerializable,
+    Arg extends JsonSerializable = JsonSerializable,
+  >(
     pageFunction: string | ((arg: Arg) => Result | Promise<Result>),
     arg?: Arg,
     options?: TimeoutOptions,
-  ): Promise<Result> {
-    return this.context.call<Result>('playwright.evaluate', {
-      tabId: this.tabId,
-      script: pageEvaluateScript(pageFunction, arg),
-      ...timeoutOptions(options),
-    });
+  ): Promise<JsonEvaluationResult<Result>> {
+    return this.context.call<JsonEvaluationResult<Result>>(
+      'playwright.evaluate',
+      {
+        tabId: this.tabId,
+        script: pageEvaluateScript(pageFunction, arg),
+        ...timeoutOptions(options),
+      },
+    );
   }
   domSnapshot(): Promise<string> {
     return this.context.call<string>('playwright.domSnapshot', {

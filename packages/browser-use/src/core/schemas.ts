@@ -13,7 +13,7 @@ import {
 } from './screenshot-budget.js';
 
 const id = z.string().min(1).max(200);
-const timeoutMs = z.number().int().nonnegative().max(120_000);
+const timeoutMs = z.number().int().positive().max(120_000);
 const waitUntil = z.enum(['commit', 'domcontentloaded', 'load', 'networkidle']);
 const loadState = z.enum(['domcontentloaded', 'load', 'networkidle']);
 const matcher = z.union([
@@ -32,8 +32,13 @@ const matcher = z.union([
     .strict(),
 ]);
 
-const locatorStepSchema: z.ZodType<LocatorStep> = z.lazy(() =>
-  z.discriminatedUnion('kind', [
+function locatorStepSchema(depth: number): z.ZodType<LocatorStep> {
+  if (depth > 32) return z.never();
+  const nestedSteps = z
+    .array(z.lazy(() => locatorStepSchema(depth + 1)))
+    .min(1)
+    .max(32);
+  return z.discriminatedUnion('kind', [
     z
       .object({
         kind: z.literal('locator'),
@@ -86,8 +91,8 @@ const locatorStepSchema: z.ZodType<LocatorStep> = z.lazy(() =>
         kind: z.literal('filter'),
         hasText: matcher.optional(),
         hasNotText: matcher.optional(),
-        has: z.array(locatorStepSchema).min(1).max(32).optional(),
-        hasNot: z.array(locatorStepSchema).min(1).max(32).optional(),
+        has: nestedSteps.optional(),
+        hasNot: nestedSteps.optional(),
         visible: z.boolean().optional(),
       })
       .strict(),
@@ -102,19 +107,19 @@ const locatorStepSchema: z.ZodType<LocatorStep> = z.lazy(() =>
     z
       .object({
         kind: z.literal('and'),
-        steps: z.array(locatorStepSchema).min(1).max(32),
+        steps: nestedSteps,
       })
       .strict(),
     z
       .object({
         kind: z.literal('or'),
-        steps: z.array(locatorStepSchema).min(1).max(32),
+        steps: nestedSteps,
       })
       .strict(),
-  ]),
-);
+  ]);
+}
 
-export const locatorStepsSchema = z.array(locatorStepSchema).min(1).max(32);
+export const locatorStepsSchema = z.array(locatorStepSchema(1)).min(1).max(32);
 
 const browserArgs = z.object({ browserId: id }).strict();
 const userTabInfo = z
@@ -403,7 +408,12 @@ export const commandSchemas = {
       timeoutMs: timeoutMs.optional(),
     })
     .strict(),
-  'playwright.waitForTimeout': z.object({ tabId: id, timeoutMs }).strict(),
+  'playwright.waitForTimeout': z
+    .object({
+      tabId: id,
+      timeoutMs: z.number().int().nonnegative().max(120_000),
+    })
+    .strict(),
 
   'locator.count': locatorArgs,
   'locator.evaluate': locatorEvaluateArgs,
