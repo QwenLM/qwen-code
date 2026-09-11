@@ -47,6 +47,9 @@ export interface AddMenuProps {
   onPrependSkill: (invocation: string) => void;
   getWorkspaceActions: () => AtMentionWorkspaceActions | undefined;
   skills: readonly SkillInfo[];
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
 }
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
@@ -213,6 +216,9 @@ export function AddMenu({
   onPrependSkill,
   getWorkspaceActions,
   skills,
+  onSkillsOpenChange,
+  skillsLoading,
+  skillsLoadError,
 }: AddMenuProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -258,9 +264,9 @@ export function AddMenu({
       referenceFile: Boolean(actions?.globWorkspace ?? actions?.listDirectory),
       extensions: Boolean(actions?.loadExtensionsStatus),
       mcp: Boolean(actions?.loadMcpStatus),
-      skills: skills.length > 0,
+      skills: Boolean(onSkillsOpenChange) || skills.length > 0,
     };
-  }, [open, getWorkspaceActions, skills.length]);
+  }, [open, getWorkspaceActions, onSkillsOpenChange, skills.length]);
   const anyAvailable =
     addFileAvailable ||
     uploadAvailable ||
@@ -317,6 +323,11 @@ export function AddMenu({
       },
     };
   }, [getWorkspaceActions, getCache, t]);
+
+  useEffect(() => {
+    if (!open) onSkillsOpenChange?.(false);
+    return () => onSkillsOpenChange?.(false);
+  }, [open, onSkillsOpenChange]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) {
@@ -506,7 +517,7 @@ export function AddMenu({
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
               <DropdownMenuSeparator />
-              <DropdownMenuSub>
+              <DropdownMenuSub onOpenChange={onSkillsOpenChange}>
                 <DropdownMenuSubTrigger
                   disabled={!availability.skills}
                   data-testid="composer-add-menu-skills"
@@ -524,6 +535,22 @@ export function AddMenu({
                   collisionPadding={8}
                   className="max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] w-52 max-w-[calc(100vw-1rem)] overflow-y-auto sm:max-h-80 sm:w-80"
                 >
+                  {(skillsLoading ||
+                    skillsLoadError ||
+                    skills.length === 0) && (
+                    <div
+                      role="status"
+                      className="px-2 py-1.5 text-xs text-muted-foreground"
+                    >
+                      {t(
+                        skillsLoading
+                          ? 'skills.loading'
+                          : skillsLoadError
+                            ? 'composerAdd.loadError'
+                            : 'composerAdd.noResults',
+                      )}
+                    </div>
+                  )}
                   {skills.map((skill) => {
                     const invocation = `/${skill.name}`;
                     return (

@@ -3260,6 +3260,36 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.skills).toEqual(['review', 'pdf']);
   });
 
+  it.each([false, true])(
+    'skips all Skill preparation when prefetch is disabled (runtime API: %s)',
+    async (splitRuntime) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: [
+          'workspace_acp_preheat',
+          'workspace_acp_status',
+          ...(splitRuntime ? ['workspace_skills_config_runtime'] : []),
+        ],
+      });
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        prefetchSkills: false,
+      });
+      expect(connection?.status).toBe('connected');
+      expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+      expect(sdkMocks.workspaceConfigSkills).not.toHaveBeenCalled();
+      expect(sdkMocks.workspaceRuntimeSkills).not.toHaveBeenCalled();
+      expect(sdkMocks.ensureRuntime).not.toHaveBeenCalled();
+      expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+      expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the Skills runtime API for a new task when advertised', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -15120,6 +15150,44 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it.each([undefined, 'session-a'])(
+    'skips Git prefetch when the UI owns loading (session: %s)',
+    async (sessionId) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      if (sessionId) {
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId,
+            events: async function* events(opts) {
+              yield {
+                v: 1,
+                type: 'git_branch_changed',
+                data: { branch: 'feature' },
+              };
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+      }
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId,
+        prefetchGitBranch: false,
+      });
+      expect(connection?.status).toBe('connected');
+      expect(sdkMocks.workspaceGit).not.toHaveBeenCalled();
+      if (sessionId) expect(connection?.gitBranch).toBe('feature');
+    },
+  );
+
   it('does not create a session when sessionId is undefined', async () => {
     let connection: DaemonConnectionState | undefined;
 
@@ -15142,6 +15210,96 @@ describe('DaemonSessionProvider', () => {
     });
     expect(connection).not.toHaveProperty('sessionId');
   });
+
+  it.each([true, false])(
+    'retains same-workspace custom commands after clearing (prefetch: %s)',
+    async (prefetchSkills) => {
+      const session = createMockSession({
+        sessionId: 'session-a',
+        supportedCommands: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-a',
+          availableCommands: [
+            {
+              name: 'custom-review',
+              description: 'Custom command',
+              input: null,
+              _meta: { source: 'custom-command' },
+            },
+          ],
+          availableSkills: [],
+        })),
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.workspaceSkills.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [],
+      });
+      let connection: DaemonConnectionState | undefined;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-a',
+        prefetchSkills,
+      });
+      expect(connection?.commands?.map((c) => c.name)).toContain(
+        'custom-review',
+      );
+      await act(async () => {
+        await actions?.clearSession();
+        await flushPromises();
+      });
+      expect(connection?.commands?.map((c) => c.name)).toEqual([
+        'custom-review',
+      ]);
+      act(() => {
+        root?.render(
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            autoConnect={true}
+            sessionId={undefined}
+            prefetchSkills={prefetchSkills}
+          >
+            <Harness />
+          </DaemonSessionProvider>,
+        );
+      });
+      await act(async () => {
+        await flushPromises();
+        await flushPromises();
+      });
+      expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.status).toBe('connected');
+      expect(connection?.commands?.map((c) => c.name)).toEqual([
+        'custom-review',
+      ]);
+      await act(async () => {
+        root?.render(
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            autoConnect={true}
+            sessionId={undefined}
+            workspaceCwd="/other-workspace"
+            prefetchSkills={prefetchSkills}
+          >
+            <Harness />
+          </DaemonSessionProvider>,
+        );
+        await flushPromises();
+        await flushPromises();
+      });
+      expect(connection?.commands?.map((c) => c.name)).not.toContain(
+        'custom-review',
+      );
+    },
+  );
 
   it('clears the current session when sessionId becomes undefined', async () => {
     const session = createMockSession({ sessionId: 'session-a' });

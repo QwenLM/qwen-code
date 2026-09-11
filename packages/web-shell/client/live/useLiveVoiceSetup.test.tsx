@@ -47,9 +47,56 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 afterEach(() => {
   document.body.replaceChildren();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe('useLiveVoiceSetup', () => {
+  it('loads on opening, polls only during installation, and stops when closed', async () => {
+    vi.useFakeTimers();
+    mocks.client.liveSetupStatus.mockResolvedValue(status(false));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let setup: UseLiveVoiceSetupResult | undefined;
+    function Harness({ active }: { active: boolean }) {
+      setup = useLiveVoiceSetup(true, active);
+      return null;
+    }
+    const render = async (active: boolean) => {
+      await act(async () => root.render(<Harness active={active} />));
+    };
+    await render(false);
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(setup?.supported).toBe(true);
+    expect(mocks.client.liveSetupStatus).not.toHaveBeenCalled();
+    await render(true);
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+    mocks.client.liveSetupStatus.mockResolvedValue({
+      ...status(true),
+      install: { state: 'installing' },
+    });
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(4);
+    await render(false);
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(4);
+    mocks.client.liveSetupStatus.mockResolvedValue(status(true));
+    await render(true);
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(5);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(5);
+    act(() => root.unmount());
+  });
+
   it('does not let an older status poll overwrite a completed mutation', async () => {
     let resolveStatus: ((value: DaemonLiveSetupStatus) => void) | undefined;
     mocks.client.liveSetupStatus.mockReturnValue(

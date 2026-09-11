@@ -691,6 +691,29 @@ describe('AddMenu', () => {
   });
 
   describe('skills submenu', () => {
+    it('opens unloaded Skills and keeps the submenu open when data arrives', async () => {
+      const onSkillsOpenChange = vi.fn();
+      const props = baseProps({ onSkillsOpenChange, skillsLoading: true });
+      renderWith(props);
+      await openMenu();
+      expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+      expect(
+        menuItem('composer-add-menu-skills')?.hasAttribute('data-disabled'),
+      ).toBe(false);
+      await openSubmenu('composer-add-menu-skills');
+      expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+      expect(portalRoot?.textContent).toContain('Loading skills...');
+      rerenderWith({
+        ...props,
+        skillsLoading: false,
+        skills: [{ name: 'review', description: 'Review' }],
+      });
+      expect(menuItem('composer-add-menu-skills-item')?.textContent).toContain(
+        '/review',
+      );
+      expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    });
+
     it('lists skills and prepends the invocation on select', async () => {
       const props = baseProps({
         skills: [

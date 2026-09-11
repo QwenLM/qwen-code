@@ -197,6 +197,10 @@ interface ChatEditorProps {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1172,6 +1176,8 @@ function ModelReasoningControls({
 
 function SlashCommandPanel({
   menu,
+  loading,
+  loadError,
   anchorRef,
   panelRef,
   detailRef,
@@ -1181,6 +1187,8 @@ function SlashCommandPanel({
   onAccept,
 }: {
   menu: SlashMenuState;
+  loading?: boolean;
+  loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
   detailRef: RefObject<HTMLDivElement | null>;
@@ -1189,6 +1197,7 @@ function SlashCommandPanel({
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
+  const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hoverAnchorRef = useRef<HTMLButtonElement>(null);
   const [collisionBoundary, setCollisionBoundary] =
@@ -1296,6 +1305,20 @@ function SlashCommandPanel({
           }}
         >
           <div className={styles.slashPanel}>
+            {menu.items.length === 0 && (
+              <div
+                role="status"
+                className="px-3 py-2 text-xs text-muted-foreground"
+              >
+                {t(
+                  loading
+                    ? 'skills.loading'
+                    : loadError
+                      ? 'composerAdd.loadError'
+                      : 'composerAdd.noResults',
+                )}
+              </div>
+            )}
             <div className={styles.slashPanelBody}>
               <div
                 className={styles.slashList}
@@ -1548,6 +1571,10 @@ export const ChatEditor = memo(
       placeholderText = 'Type a message...',
       commands,
       skills = [],
+      onSkillsOpenChange,
+      skillsLoading = false,
+      skillsLoadError = false,
+      skillsLoaded = false,
       slashCommandCategoryOrder,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
@@ -1757,6 +1784,9 @@ export const ChatEditor = memo(
       placeholderText,
       commands,
       skills,
+      allowEmptySlashMenu:
+        Boolean(onSkillsOpenChange) &&
+        (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
       autoSubmitSlashCommands,
       queuedMessages,
@@ -2130,6 +2160,12 @@ export const ChatEditor = memo(
     const atMenu = core.atMenu;
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
+    const [skillSubmenuOpen, setSkillSubmenuOpen] = useState(false);
+    const skillsOpen = hasSlashMenu || skillSubmenuOpen;
+    useEffect(() => {
+      onSkillsOpenChange?.(skillsOpen);
+      return () => onSkillsOpenChange?.(false);
+    }, [onSkillsOpenChange, skillsOpen]);
     const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
 
@@ -3152,6 +3188,8 @@ export const ChatEditor = memo(
             {core.slashMenu && (
               <SlashCommandPanel
                 menu={core.slashMenu}
+                loading={skillsLoading}
+                loadError={skillsLoadError}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
                 detailRef={slashDetailRef}
@@ -3255,7 +3293,7 @@ export const ChatEditor = memo(
                         Boolean(
                           core.workspaceActionsRef.current?.loadMcpStatus,
                         ),
-                        Boolean(skills?.length),
+                        Boolean(onSkillsOpenChange) || Boolean(skills?.length),
                       ])}
                       addFileAvailable={attachmentsEnabled}
                       uploadAvailable={uploadEnabled}
@@ -3265,6 +3303,11 @@ export const ChatEditor = memo(
                       onPrependSkill={handleAddMenuPrependSkill}
                       getWorkspaceActions={getAddMenuWorkspaceActions}
                       skills={skills ?? []}
+                      onSkillsOpenChange={
+                        onSkillsOpenChange ? setSkillSubmenuOpen : undefined
+                      }
+                      skillsLoading={skillsLoading}
+                      skillsLoadError={skillsLoadError}
                     />
                   )}
                   {workspaceSelectVisible &&

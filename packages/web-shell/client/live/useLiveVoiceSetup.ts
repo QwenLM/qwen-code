@@ -25,7 +25,10 @@ export interface UseLiveVoiceSetupResult {
   launchHost: () => Promise<void>;
 }
 
-export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
+export function useLiveVoiceSetup(
+  supported: boolean,
+  active = true,
+): UseLiveVoiceSetupResult {
   const workspace = useWorkspace();
   const [status, setStatus] = useState<DaemonLiveSetupStatus>();
   const [loading, setLoading] = useState(false);
@@ -48,7 +51,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!supported) return;
+    if (!supported || !active) return;
     const generation = generationRef.current;
     if (mutationRef.current === generation) return;
     if (requestRef.current?.generation === generation) {
@@ -79,7 +82,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     })();
     requestRef.current = { generation, promise: request };
     return await request;
-  }, [supported, workspace.client]);
+  }, [supported, active, workspace.client]);
 
   useEffect(() => {
     if (
@@ -95,22 +98,36 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     setMutating(false);
     setRefreshError(undefined);
     setMutationError(undefined);
-    if (!supported) return undefined;
+  }, [supported, workspace.client]);
+
+  useEffect(() => {
+    if (!supported || !active) return undefined;
     void refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh();
-    }, POLL_INTERVAL_MS);
     const onVisible = () => {
       if (document.visibilityState === 'visible') void refresh();
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported, workspace.client]);
+  }, [refresh, supported, active, workspace.client]);
+
+  const installationPending = [
+    'checking',
+    'downloading',
+    'verifying',
+    'installing',
+    'launching',
+  ].includes(status?.install.state ?? '');
+  useEffect(() => {
+    if (!supported || !active || !installationPending) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [supported, active, installationPending, refresh]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveSetupStatus>): Promise<void> => {

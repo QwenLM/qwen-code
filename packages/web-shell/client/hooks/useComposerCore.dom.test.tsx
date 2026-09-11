@@ -35,6 +35,7 @@ function Harness({
   composerScopeKey,
   disableLegacyHistoryFallback,
   commands,
+  allowEmptySlashMenu,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -56,6 +57,7 @@ function Harness({
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -64,6 +66,7 @@ function Harness({
   const composer = useComposerCore({
     onSubmit,
     commands: commands ?? [],
+    allowEmptySlashMenu,
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
@@ -103,6 +106,7 @@ async function mount({
   composerScopeKey,
   disableLegacyHistoryFallback,
   commands,
+  allowEmptySlashMenu,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -124,6 +128,7 @@ async function mount({
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -135,6 +140,8 @@ async function mount({
 
   let currentPortalRoot: HTMLElement | null = null;
   let currentSessionId = sessionId;
+  let currentCommands = commands;
+  let currentAllowEmptySlashMenu = allowEmptySlashMenu;
   let currentWorkspaceCwd = atWorkspaceCwd;
   let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
@@ -153,7 +160,8 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
-            commands={commands}
+            commands={currentCommands}
+            allowEmptySlashMenu={currentAllowEmptySlashMenu}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
@@ -169,6 +177,14 @@ async function mount({
   });
   return {
     onSubmit,
+    setCommands(next: UseComposerCoreOptions['commands']) {
+      currentCommands = next;
+      act(() => render());
+    },
+    setAllowEmptySlashMenu(next: boolean) {
+      currentAllowEmptySlashMenu = next;
+      act(() => render());
+    },
     setPortalRoot(portalRoot: HTMLElement | null) {
       currentPortalRoot = portalRoot;
       act(() => render());
@@ -289,6 +305,65 @@ describe('useComposerCore history and drafts', () => {
     act(() => view.dispatch({ selection: { anchor: 3 } }));
     mounted.rerender();
     expect(view.state.selection.main.head).toBe(3);
+  });
+
+  it('keeps a pasted unknown slash query open until its catalog arrives', async () => {
+    const commands: UseComposerCoreOptions['commands'] = [];
+    const mounted = await mount({ commands, allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu).toMatchObject({ query: 'review', items: [] });
+    mounted.setCommands([
+      { name: 'review', description: 'Review', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu?.items[0]?.label).toBe('/review');
+    act(() => latest!.closeSlashMenu());
+    mounted.setCommands([
+      { name: 'review-all', description: 'Review all', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it.each(['/skills ', '/skills rev'])(
+    'opens an unloaded skill catalog for pasted %s',
+    async (text) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText(text));
+      expect(latest!.slashMenu).toMatchObject({
+        kind: 'subcommand',
+        items: [],
+      });
+    },
+  );
+
+  it('closes an unmatched menu when catalog loading completes without new commands', async () => {
+    const mounted = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    mounted.setAllowEmptySlashMenu(false);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('submits a typed command even when its lazy catalog has no matches', async () => {
+    const { onSubmit } = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    await act(async () => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      '/review',
+      undefined,
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
   });
 
   it('does not serialize the whole document again for a slash menu refresh', async () => {
