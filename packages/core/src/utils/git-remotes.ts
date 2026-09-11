@@ -1123,7 +1123,9 @@ async function upstreamKeysToSweep(
   const keys: UpstreamKey[] = [];
   const seen = new Set<string>();
   const pushKey = (key: UpstreamKey): void => {
-    const id = `${key.scope} ${key.key}`;
+    // Escaped, not a literal byte: a raw NUL in the source makes grep
+    // and ripgrep treat the whole module as binary.
+    const id = `${key.scope}\u0000${key.key}`;
     if (!seen.has(id)) {
       seen.add(id);
       keys.push(key);

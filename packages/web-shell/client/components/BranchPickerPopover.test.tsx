@@ -3042,6 +3042,38 @@ describe('BranchPickerPopover remotes view', () => {
     expect(rowOf('\u{1a1}')?.textContent).toContain('(hidden characters)');
   });
 
+  it('marks both rows of a consumer-fold split the generator closes', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // U+1D52's prototype carried U+00BA — a table-ABSENT compatibility
+      // half the runtime NFKC-folds to `o`. Without the generator's
+      // consumer-fold closure `ᵒ` skeletons to `º` while a literal `º`
+      // skeletons to `o`: one ink, two skeletons, neither row marked.
+      // The group carries non-ASCII members, so the collision speaks
+      // the `(hidden characters)` arm (the all-ASCII `(lookalike name)`
+      // arm is pinned by the `main`/`rnain` pair below).
+      remotes: [remote('\u{1d52}'), remote('\u{ba}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{1d52}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{ba}')?.textContent).toContain('(hidden characters)');
+  });
+
   it('marks both rows of an all-ASCII expansion-prototype collision', async () => {
     const remote = (name: string) => ({
       name,
@@ -3627,6 +3659,18 @@ describe('BranchPickerPopover remotes view', () => {
     // never be restored onto workspace B's panel — carried by the view
     // reset plus the settle effect's view-exit clearing.
     mount({ gitCwd: '/repo2' });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    // The settle lands after the switch: it must not move focus ANYWHERE
+    // (search box, back button, a re-rendered row). The saved target was
+    // cleared at view-exit, and a ref-restore onto a detached node is a
+    // no-op by construction, so any movement at all is the bug — an
+    // equality on the pre-settle element falsifies every restore shape
+    // that could reach an attached node, where `not.toBe(one testid)`
+    // falsified none.
+    const activeBefore = document.activeElement;
     await act(async () => {
       release?.({ v: 1, workspaceCwd: '/repo2', remotes: [] });
     });
@@ -3634,8 +3678,7 @@ describe('BranchPickerPopover remotes view', () => {
     expect(
       document.body.querySelector('[data-testid="remotes-back"]'),
     ).toBeNull();
-    const active = document.activeElement as HTMLElement | null;
-    expect(active?.dataset.testid).not.toBe('remote-remove-origin');
+    expect(document.activeElement).toBe(activeBefore);
     // The cross-workspace staleness guard is what drops the late
     // response: workspace A's success must never reach workspace B's
     // footer, branches, or callback.

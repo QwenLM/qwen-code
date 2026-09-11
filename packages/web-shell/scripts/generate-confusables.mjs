@@ -101,7 +101,7 @@ const resolve = (targets, depth = 0) => {
   return changed ? resolve(out, depth + 1) : out;
 };
 
-const entries = [];
+const closed = new Map();
 for (const [src, targets] of raw) {
   // The consumer NFC-normalizes AFTER substitution, so an emitted value
   // whose NFC form is itself a table key would split one TR39 class
@@ -124,10 +124,66 @@ for (const [src, targets] of raw) {
     resolved = resolve(nfc);
   }
   if (resolved.length === 1 && resolved[0] === src) continue;
-  const key = String.fromCodePoint(src);
-  const value = String.fromCodePoint(...resolved);
-  entries.push([key, value]);
+  closed.set(String.fromCodePoint(src), String.fromCodePoint(...resolved));
 }
+
+// The consumer also folds TABLE-ABSENT halves through NFKC (with a
+// per-half table chance) before the final NFC, so a value carrying a
+// compatibility shape the table does not list is not a fixed point of
+// the runtime fold: a name holding the source char and a name holding
+// the value verbatim — ink-identical — would land in two skeletons
+// (`%` -> `º/₀`, whose halves NFKC to `o/O`). Close every value under
+// the consumer fold, map-wide (one value's fold reads another's entry),
+// until stable.
+const consumerFold = (value, table) => {
+  let out = '';
+  for (const ch of value) {
+    const direct = table.get(ch);
+    if (direct !== undefined) {
+      out += direct;
+      continue;
+    }
+    for (const folded of ch.normalize('NFKC')) {
+      out += table.get(folded) ?? folded;
+    }
+  }
+  return out.normalize('NFC');
+};
+for (let pass = 0; ; pass++) {
+  let changed = false;
+  for (const [src, value] of closed) {
+    const folded = consumerFold(value, closed);
+    if (folded === src) {
+      // The fold collapsed a value onto its own source char: a self-map
+      // is a semantic no-op, but it must leave the map HERE — a direct
+      // hit and an NFKC miss differ, so every other value's fixed point
+      // has to be recomputed against the map without it.
+      closed.delete(src);
+      changed = true;
+      continue;
+    }
+    if (folded !== value) {
+      closed.set(src, folded);
+      changed = true;
+    }
+  }
+  if (!changed) break;
+  if (pass >= 3) {
+    throw new Error(
+      'prototype closure did not converge under the consumer fold',
+    );
+  }
+}
+
+// The loop's !changed exit already implies the fixed point; checking it
+// directly keeps the invariant a verified fact, not a loop argument.
+for (const [src, value] of closed) {
+  if (consumerFold(value, closed) !== value) {
+    throw new Error(`emitted value not a consumer-fold fixed point: ${src}`);
+  }
+}
+
+const entries = [...closed];
 entries.sort((a, b) => a[0].codePointAt(0) - b[0].codePointAt(0));
 
 // A truncated/garbage source must never overwrite the committed table

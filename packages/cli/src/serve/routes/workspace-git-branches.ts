@@ -254,6 +254,10 @@ function readHead(
 ): { text: string; truncated: boolean } | null {
   let fd: number | null = null;
   try {
+    // A FIFO at a workspace-controlled path would block openSync until a
+    // writer appears — wedging the daemon event loop on the shared error
+    // path. Non-regular files answer null, like any unreadable target.
+    if (!fs.statSync(file).isFile()) return null;
     fd = fs.openSync(file, 'r');
     const buf = Buffer.alloc(cap + 1);
     const bytes = fs.readSync(fd, buf, 0, cap + 1, 0);

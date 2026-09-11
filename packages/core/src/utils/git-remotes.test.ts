@@ -877,7 +877,7 @@ describe('fetchGitRemotes config parsing', () => {
   });
 });
 
-describe('fetchGitRemotes repository scope', () => {
+describe('repository-scope listing and removal', () => {
   it('lists a remote an include.path in .git/config contributes', async () => {
     const dir = makeRepo();
     const inc = path.join(dir, 'included.gitconfig');

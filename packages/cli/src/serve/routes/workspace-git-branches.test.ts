@@ -691,6 +691,29 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
           '<workspace>/config',
         );
 
+        // A FIFO commondir must not wedge the daemon's synchronous head
+        // read on this shared error path: openSync on a FIFO blocks until
+        // a writer appears. The guard answers null as for any unreadable
+        // target; the gitdir arm still redacts the admin dir itself (the
+        // main dir is simply unknowable in this shape — git's own error
+        // would name the commondir path, not the main gitdir).
+        if (process.platform !== 'win32') {
+          const fifoGit = path.join(root, 'fifo-admin');
+          fs.mkdirSync(fifoGit, { recursive: true });
+          execFileSync('mkfifo', [path.join(fifoGit, 'commondir')]);
+          const fifoWt = path.join(root, 'fifo-wt');
+          fs.mkdirSync(fifoWt, { recursive: true });
+          fs.writeFileSync(path.join(fifoWt, '.git'), `gitdir: ${fifoGit}\n`);
+          const outFifo = classifyAt(
+            fifoWt,
+            `error: could not lock config file ${fifoGit}/config\nerror: Could not remove config section 'remote.origin'`,
+          );
+          expect(String(outFifo.body['message'])).not.toContain(fifoGit);
+          expect(String(outFifo.body['message'])).toContain(
+            '<workspace>/config',
+          );
+        }
+
         // Deliberate over-redaction: the parser accepts forms beyond
         // git's same-line grammar, because over-redaction cannot leak.
         const nlWt = path.join(root, 'nl-wt');
