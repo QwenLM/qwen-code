@@ -434,6 +434,7 @@ export function EmbeddedApp() {
   const loadSessionHistory = useCallback(
     async (cursor?: string) => {
       if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) return;
+      const workspaceCwd = runtime.workspaceCwd;
       setSessionListLoading(true);
       setSessionListError(undefined);
       try {
@@ -472,7 +473,7 @@ export function EmbeddedApp() {
           const page = await (async () => {
             try {
               return await daemonClient
-                .workspaceByCwd(runtime.workspaceCwd)
+                .workspaceByCwd(workspaceCwd)
                 .listWorkspaceSessionsPage({
                   pageSize: HISTORY_PAGE_SIZE,
                   cursor: pageCursor,
@@ -529,11 +530,11 @@ export function EmbeddedApp() {
           if (
             runtime.sessionId &&
             !merged.has(runtime.sessionId) &&
-            runtime.workspaceCwd
+            workspaceCwd
           ) {
             merged.set(runtime.sessionId, {
               sessionId: runtime.sessionId,
-              workspaceCwd: runtime.workspaceCwd,
+              workspaceCwd,
               displayName: sessionTitle || undefined,
             });
           }
