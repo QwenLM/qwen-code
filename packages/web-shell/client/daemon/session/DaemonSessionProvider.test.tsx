@@ -7391,6 +7391,51 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('updates the cancellation marker from the terminal event', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        async *events() {
+          yield {
+            id: 11,
+            v: 1,
+            type: 'prompt_cancelled',
+            promptId: 'p1',
+            data: { sessionId: 'session-1' },
+          };
+          yield {
+            id: 12,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'p1',
+            data: {
+              sessionId: 'session-1',
+              promptId: 'p1',
+              stopReason: 'cancelled',
+              promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+            },
+          };
+        },
+      }),
+    );
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'prompt_cancelled',
+        promptId: 'p1',
+        elapsedMs: 10999,
+        serverTimestamp: 12000,
+      }),
+    ]);
+  });
+
   it('keeps forward-failed prompt cancellations out of blocks', async () => {
     const session = createMockSession({
       events: async function* forwardFailedPromptCancelledEvents(
@@ -9916,69 +9961,87 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
-  it('keeps local prompts active when a restored prompt is cancelled', async () => {
-    const accepted = createDeferred<NonBlockingPromptAccepted>();
-    const releaseRestoredCancel = createDeferred<void>();
-    const restoredCancelDelivered = createDeferred<void>();
-    const releaseLocalComplete = createDeferred<void>();
-    const localCompleteDelivered = createDeferred<void>();
-    const session = createMockSession({
-      hasActivePrompt: true,
-      submitPrompt: vi.fn(() => accepted.promise),
-      events: async function* restoredPromptCancelDuringLocalPrompt() {
-        await releaseRestoredCancel.promise;
-        yield {
-          id: 6,
-          v: 1,
-          type: 'prompt_cancelled',
-          originatorClientId: 'client-2',
-          data: { sessionId: 'session-1', reason: 'user_cancel' },
-        } satisfies DaemonEvent;
-        restoredCancelDelivered.resolve();
-        await releaseLocalComplete.promise;
-        yield {
-          id: 7,
-          v: 1,
-          type: 'turn_complete',
-          data: { promptId: 'local-prompt', stopReason: 'end_turn' },
-        } satisfies DaemonEvent;
-        localCompleteDelivered.resolve();
-      },
-    });
-    sdkMocks.sessions.push(session);
-    let actions: DaemonUiSessionActions | undefined;
-    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+  it.each([false, true])(
+    'keeps local prompts active when a restored prompt is cancelled (timed terminal: %s)',
+    async (timedTerminal) => {
+      const accepted = createDeferred<NonBlockingPromptAccepted>();
+      const releaseRestoredCancel = createDeferred<void>();
+      const restoredCancelDelivered = createDeferred<void>();
+      const releaseLocalComplete = createDeferred<void>();
+      const localCompleteDelivered = createDeferred<void>();
+      const session = createMockSession({
+        hasActivePrompt: true,
+        submitPrompt: vi.fn(() => accepted.promise),
+        events: async function* restoredPromptCancelDuringLocalPrompt() {
+          await releaseRestoredCancel.promise;
+          yield {
+            id: 6,
+            v: 1,
+            type: 'prompt_cancelled',
+            promptId: 'restored-prompt',
+            originatorClientId: 'client-2',
+            data: { sessionId: 'session-1', reason: 'user_cancel' },
+          } satisfies DaemonEvent;
+          if (timedTerminal) {
+            yield {
+              id: 7,
+              v: 1,
+              type: 'turn_complete',
+              promptId: 'restored-prompt',
+              originatorClientId: 'client-2',
+              data: {
+                promptId: 'restored-prompt',
+                stopReason: 'cancelled',
+                promptCancelled: { cancelledAt: 12000, elapsedMs: 11000 },
+              },
+            } satisfies DaemonEvent;
+          }
+          restoredCancelDelivered.resolve();
+          await releaseLocalComplete.promise;
+          yield {
+            id: 8,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'local-prompt', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          localCompleteDelivered.resolve();
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
 
-    function Harness() {
-      actions = useDaemonActions();
-      promptStatus = useDaemonPromptStatus();
-      return null;
-    }
+      function Harness() {
+        actions = useDaemonActions();
+        promptStatus = useDaemonPromptStatus();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-    let promptResult: Promise<unknown> | undefined;
-    await act(async () => {
-      promptResult = requireActions(actions).sendPrompt('local prompt');
-      accepted.resolve({ promptId: 'local-prompt', lastEventId: 10 });
-      await flushPromises();
-      releaseRestoredCancel.resolve();
-      await restoredCancelDelivered.promise;
-      await flushPromises();
-    });
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      let promptResult: Promise<unknown> | undefined;
+      await act(async () => {
+        promptResult = requireActions(actions).sendPrompt('local prompt');
+        accepted.resolve({ promptId: 'local-prompt', lastEventId: 10 });
+        await flushPromises();
+        releaseRestoredCancel.resolve();
+        await restoredCancelDelivered.promise;
+        await flushPromises();
+      });
 
-    expect(promptStatus).not.toBe('idle');
+      expect(promptStatus).not.toBe('idle');
 
-    await act(async () => {
-      releaseLocalComplete.resolve();
-      await localCompleteDelivered.promise;
-      await flushPromises();
-    });
-    await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
-  });
+      await act(async () => {
+        releaseLocalComplete.resolve();
+        await localCompleteDelivered.promise;
+        await flushPromises();
+      });
+      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+    },
+  );
 
   it('does not revive settled restored active prompts after SSE reconnect', async () => {
     const turnCompleted = createDeferred<void>();
@@ -17899,6 +17962,116 @@ describe('DaemonSessionProvider', () => {
       paginationError: true,
     });
   });
+
+  it.each([true, false])(
+    'merges cancellation markers in overlapping history pages (timed: %s)',
+    async (timed) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      const cancelled = (promptId: string, recordId: string): DaemonEvent => ({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              'qwen.session.recordId': recordId,
+              qwenTranscript: { sourceRecordIds: [recordId] },
+              promptCancelled: {
+                promptId,
+                cancelledAt: 12000,
+                elapsedMs: 11000,
+              },
+            },
+          },
+        },
+      });
+      const session = createMockSession({
+        sessionId: 'session-cancellation-history-dedup',
+        historyHasMore: true,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              v: 1,
+              type: 'history_truncated',
+              data: { recordId: 'newer-anchor', fullTranscriptAvailable: true },
+            },
+          ],
+          liveJournal: [
+            {
+              v: 1,
+              type: timed ? 'turn_complete' : 'prompt_cancelled',
+              promptId: 'current-cancel',
+              data: {
+                promptId: 'current-cancel',
+                stopReason: 'cancelled',
+                ...(timed
+                  ? {
+                      promptCancelled: { cancelledAt: 12000, elapsedMs: 11000 },
+                    }
+                  : {}),
+              },
+            },
+          ],
+        },
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [
+          cancelled('older-cancel', 'older-record'),
+          cancelled('current-cancel', 'current-record'),
+        ],
+        hasMore: false,
+      });
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      let retainedBytes = 0;
+      function Harness() {
+        history = useDaemonTranscriptHistory();
+        blocks = useDaemonTranscriptBlocks();
+        retainedBytes = useDaemonTranscriptState().retainedBytes;
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 25,
+      });
+      const live = blocks.find((block) => block.kind === 'prompt_cancelled');
+      expect(live).toMatchObject({
+        promptId: 'current-cancel',
+        ...(timed ? { elapsedMs: 11000 } : {}),
+      });
+      if (!timed) expect(live).not.toHaveProperty('elapsedMs');
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      const cancellations = blocks.filter(
+        (block) => block.kind === 'prompt_cancelled',
+      );
+      expect(cancellations.map((block) => block.promptId)).toEqual([
+        'older-cancel',
+        'current-cancel',
+      ]);
+      expect(cancellations[1]).toMatchObject({
+        id: live?.id,
+        elapsedMs: 11000,
+        serverTimestamp: 12000,
+        sourceRecordIds: ['current-record'],
+      });
+      expect(retainedBytes).toBe(
+        blocks.reduce(
+          (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+          0,
+        ),
+      );
+    },
+  );
 
   it('drops fetched transcript events whose records are already displayed', async () => {
     // The pagination anchor can sit inside the retained window (e.g. the
