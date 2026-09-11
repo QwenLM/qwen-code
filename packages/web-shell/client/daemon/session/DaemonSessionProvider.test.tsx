@@ -6,6 +6,8 @@
 
 // @vitest-environment jsdom
 
+import { webcrypto } from 'node:crypto';
+import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19682,73 +19684,144 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it('keeps initial history quiet and notifies once after a live terminal is projected', async () => {
-    const terminal: DaemonEvent = {
-      id: 2,
-      v: 1,
-      type: 'turn_complete',
-      data: {
-        sessionId: 'session-1',
-        promptId: 'live',
-        stopReason: 'end_turn',
-      },
-    };
-    const go = createDeferred<void>();
-    let store: DaemonTranscriptStore | undefined;
-    let snapshotAtNotification: unknown;
-    const notify = vi.fn(() => {
-      snapshotAtNotification = store?.getSnapshot();
-    });
-    const observer = createTurnNotificationObserver(notify);
-    sdkMocks.sessions.push(
-      createMockSession({
-        replaySnapshot: {
-          compactedReplay: [
+  it.each([
+    {
+      displayName: 'Renamed session',
+      sessionContext: { kind: 'workspace' as const, cwd: '/mock-workspace' },
+    },
+    {
+      displayName: '',
+      sessionContext: { kind: 'workspace' as const, cwd: '/mock-workspace' },
+    },
+    {
+      displayName: 'Standalone title',
+      sessionContext: { kind: 'standalone' as const },
+    },
+    { displayName: 'Live title', sessionContext: { kind: 'live' as const } },
+  ])(
+    'captures $sessionContext.kind target and current metadata ($displayName) after a live terminal',
+    async ({ displayName, sessionContext }) => {
+      if (sessionContext.kind === 'live') {
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/primary',
+          features: ['multi_workspace_sessions'],
+          workspaces: [
+            { id: 'primary', cwd: '/primary', primary: true, trusted: true },
             {
-              ...terminal,
-              data: { ...(terminal.data as object), promptId: 'history' },
+              id: 'live',
+              cwd: '/mock-workspace',
+              kind: 'live',
+              primary: false,
+              trusted: true,
             },
           ],
-          liveJournal: [],
+        });
+      }
+      const terminal: DaemonEvent = {
+        id: 2,
+        v: 1,
+        type: 'turn_complete',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'live',
+          stopReason: 'end_turn',
         },
-        async *events(opts) {
-          await go.promise;
-          yield {
-            id: 3,
-            v: 1,
-            type: 'session_update',
+      };
+      const go = createDeferred<void>();
+      let store: DaemonTranscriptStore | undefined;
+      let actions: DaemonUiSessionActions | undefined;
+      let snapshotAtNotification: unknown;
+      const notify = vi.fn(() => {
+        snapshotAtNotification = store?.getSnapshot();
+      });
+      const observer = createTurnNotificationObserver(notify);
+      sdkMocks.sessions.push(
+        createMockSession({
+          state: { displayName: 'Original title' },
+          submitPrompt: vi.fn(async () => ({
             promptId: 'live',
-            data: {
-              sessionId: 'session-1',
-              promptId: 'live',
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'final answer' },
+            lastEventId: 2,
+          })),
+          replaySnapshot: {
+            compactedReplay: [
+              {
+                ...terminal,
+                data: { ...(terminal.data as object), promptId: 'history' },
               },
-            },
-          };
-          yield { ...terminal, id: 4 };
-          yield { ...terminal, id: 5 };
-          yield* createIdleEvents()(opts);
-        },
-      }),
-    );
-    function Harness() {
-      store = useDaemonTranscriptStore();
-      return null;
-    }
-    await renderWithProvider(<Harness />, { autoConnect: true }, observer);
-    expect(notify).not.toHaveBeenCalled();
-    await act(async () => {
-      go.resolve();
-      await flushPromises();
-    });
-    expect(notify).toHaveBeenCalledOnce();
-    expect(notify).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: 'completed' }),
-    );
-    expect(JSON.stringify(snapshotAtNotification)).toContain('final answer');
-  });
+            ],
+            liveJournal: [],
+          },
+          async *events(opts) {
+            await go.promise;
+            yield {
+              id: 3,
+              v: 1,
+              type: 'session_update',
+              promptId: 'live',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'live',
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'final answer' },
+                },
+              },
+            };
+            yield {
+              id: 4,
+              v: 1,
+              type: 'session_metadata_updated',
+              data: { sessionId: 'session-1', displayName },
+            };
+            yield { ...terminal, id: 5 };
+            yield { ...terminal, id: 6 };
+            yield* createIdleEvents()(opts);
+          },
+        }),
+      );
+      function Harness() {
+        store = useDaemonTranscriptStore();
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(
+        <Harness />,
+        { autoConnect: true, suppressOwnUserEcho: true, sessionContext },
+        observer,
+      );
+      expect(notify).not.toHaveBeenCalled();
+      let submitted: Promise<unknown> | undefined;
+      await act(async () => {
+        submitted = requireActions(actions).sendPrompt(
+          'Local request\nExtra context',
+        );
+        await flushPromises();
+      });
+      expect(
+        store?.getSnapshot().blocks.find((block) => block.kind === 'user')
+          ?.promptId,
+      ).toBeUndefined();
+      await act(async () => {
+        go.resolve();
+        await flushPromises();
+      });
+      await submitted;
+      expect(notify).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: 'completed',
+          sessionTitle: displayName || 'Local request',
+          promptText: 'Local request\nExtra context',
+          responseText: 'final answer',
+          target: {
+            sessionId: 'session-1',
+            sessionContext,
+          },
+        }),
+      );
+      expect(JSON.stringify(snapshotAtNotification)).toContain('final answer');
+    },
+  );
 
   it('retains a live admitted prompt across epoch reset and settles it from replay', async () => {
     const reloaded = createDeferred<void>();
@@ -19756,6 +19829,7 @@ describe('DaemonSessionProvider', () => {
     const observer = createTurnNotificationObserver(notify);
     sdkMocks.sessions.push(
       createMockSession({
+        state: { displayName: 'Previous title' },
         hasActivePrompt: true,
         async *events() {
           yield {
@@ -19777,8 +19851,23 @@ describe('DaemonSessionProvider', () => {
         },
       }),
       createMockSession({
+        state: { displayName: 'Restored title' },
         replaySnapshot: {
           compactedReplay: [
+            {
+              id: 2,
+              v: 1,
+              type: 'session_update',
+              promptId: 'known',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'known',
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Recovered answer' },
+                },
+              },
+            },
             {
               id: 3,
               v: 1,
@@ -19816,12 +19905,92 @@ describe('DaemonSessionProvider', () => {
     });
     expect(notify).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: 'completed' }),
+      expect.objectContaining({
+        outcome: 'completed',
+        sessionTitle: 'Restored title',
+        promptText: 'request',
+        responseText: 'Recovered answer',
+      }),
     );
     expect(notify.mock.calls[0]?.[0].key).toContain('known');
     expect(notify.mock.calls[0]?.[0].key).not.toContain('unknown');
   });
 
+  it('toggles browser notifications without restarting the session stream', async () => {
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('crypto', webcrypto);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const notifications = vi.fn();
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(notifications, { permission: 'granted' }),
+    );
+    localStorage.setItem('qwen-code-web-shell-browser-notifications', 'true');
+    const offGate = createDeferred<void>(),
+      onGate = createDeferred<void>();
+    const events = vi.fn(async function* (opts: { signal?: AbortSignal } = {}) {
+      yield {
+        type: 'replay_complete',
+        data: { sessionId: 'active-toggle' },
+      } as DaemonEvent;
+      await offGate.promise;
+      yield {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'active-toggle',
+          promptId: 'off',
+          stopReason: 'end_turn',
+        },
+      } as DaemonEvent;
+      await onGate.promise;
+      yield {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'active-toggle',
+          promptId: 'on',
+          stopReason: 'end_turn',
+        },
+      } as DaemonEvent;
+      yield* createIdleEvents()(opts);
+    });
+    const session = createMockSession({ sessionId: 'active-toggle', events });
+    sdkMocks.sessions.push(session);
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const show = async (enabled: boolean) => {
+      await act(async () => {
+        root!.render(
+          <BrowserTurnNotifications active={enabled} language="en">
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect
+              sessionId="active-toggle"
+            >
+              <span>child</span>
+            </DaemonSessionProvider>
+          </BrowserTurnNotifications>,
+        );
+        await flushPromises();
+      });
+    };
+    await show(true);
+    await show(false);
+    await act(async () => {
+      offGate.resolve();
+      await flushPromises();
+    });
+    expect(notifications).not.toHaveBeenCalled();
+    await show(true);
+    await act(async () => {
+      onGate.resolve();
+      await vi.waitFor(() => expect(notifications).toHaveBeenCalledOnce());
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+    expect(events).toHaveBeenCalledTimes(1);
+    expect(session.detach).not.toHaveBeenCalled();
+    localStorage.removeItem('qwen-code-web-shell-browser-notifications');
+  });
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
