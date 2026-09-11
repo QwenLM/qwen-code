@@ -66,24 +66,27 @@ export function resetLegacyTimeoutWarnings(): void {
  * Missing or unusable values fall back to `defaultSeconds`.
  */
 export function resolveCommandHookTimeoutMs(
-  timeout: number | undefined,
+  timeout: unknown,
   hookLabel: string,
   defaultSeconds: number = DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
 ): number {
-  if (
-    typeof timeout !== 'number' ||
-    !Number.isFinite(timeout) ||
-    timeout <= 0
-  ) {
+  // Settings files are not type-checked, so a numeric string such as
+  // "60000" can arrive here. The timer used to coerce it, so keep honouring
+  // it rather than silently replacing it with the default.
+  const value =
+    typeof timeout === 'string' && timeout.trim() !== ''
+      ? Number(timeout)
+      : timeout;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     return defaultSeconds * 1000;
   }
-  if (isLegacyMillisecondHookTimeout(timeout)) {
-    const key = `${hookLabel}\0${timeout}`;
+  if (isLegacyMillisecondHookTimeout(value)) {
+    const key = `${hookLabel}\0${value}`;
     if (!warnedLegacyTimeouts.has(key)) {
       warnedLegacyTimeouts.add(key);
-      debugLogger.warn(formatLegacyHookTimeoutWarning(timeout, hookLabel));
+      debugLogger.warn(formatLegacyHookTimeoutWarning(value, hookLabel));
     }
-    return timeout;
+    return value;
   }
-  return timeout * 1000;
+  return value * 1000;
 }

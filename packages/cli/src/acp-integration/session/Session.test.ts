@@ -32068,6 +32068,8 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+            undefined,
+            expect.any(AbortSignal),
           );
         });
 
@@ -32389,6 +32391,8 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+            undefined,
+            expect.any(AbortSignal),
           );
           expect(mockClient.extNotification).toHaveBeenCalledWith(
             'qwen/notify/session/artifact-event',
@@ -32477,6 +32481,8 @@ describe('Session', () => {
               eventName: 'PostToolUse',
             }),
             expect.anything(),
+            undefined,
+            expect.any(AbortSignal),
           );
           // The stop must produce an observable error result
           expect(
@@ -32571,6 +32577,8 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+            undefined,
+            expect.any(AbortSignal),
           );
           expect(
             mockChatRecordingService.recordToolResult,

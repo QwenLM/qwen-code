@@ -63,6 +63,31 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePreToolUseHook', () => {
+    it('passes the abort signal in the payload and as the request signal', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+      const controller = new AbortController();
+
+      await firePreToolUseHook(
+        mockMessageBus,
+        'run_shell_command',
+        {},
+        'toolu_signal',
+        'default',
+        controller.signal,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({ signal: controller.signal }),
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        undefined,
+        controller.signal,
+      );
+    });
+
     it('should return shouldProceed: true when no messageBus is provided', async () => {
       const result = await firePreToolUseHook(
         undefined,
@@ -274,6 +299,32 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePostToolUseHook', () => {
+    it('passes the abort signal in the payload and as the request signal', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+      const controller = new AbortController();
+
+      await firePostToolUseHook(
+        mockMessageBus,
+        'run_shell_command',
+        {},
+        {},
+        'toolu_signal',
+        'default',
+        controller.signal,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({ signal: controller.signal }),
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        undefined,
+        controller.signal,
+      );
+    });
+
     it('should return shouldStop: false when no messageBus is provided', async () => {
       const result = await firePostToolUseHook(
         undefined,
@@ -679,6 +730,33 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePostToolUseFailureHook', () => {
+    it('passes the abort signal in the payload and as the request signal', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+      const controller = new AbortController();
+
+      await firePostToolUseFailureHook(
+        mockMessageBus,
+        'toolu_signal',
+        'run_shell_command',
+        {},
+        'boom',
+        false,
+        'default',
+        controller.signal,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({ signal: controller.signal }),
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        undefined,
+        controller.signal,
+      );
+    });
+
     it('should return empty object when no messageBus is provided', async () => {
       const result = await firePostToolUseFailureHook(
         undefined,

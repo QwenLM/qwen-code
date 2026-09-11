@@ -13172,7 +13172,9 @@ Other open files:
               },
             ),
           ),
-        ).rejects.toThrow('cancelled during hook');
+          // The send was cancelled during the hook await, so it ends as an abort
+          // rather than surfacing the hook transport error.
+        ).rejects.toMatchObject({ name: 'AbortError' });
 
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(accept).not.toHaveBeenCalled();
@@ -13460,6 +13462,93 @@ Other open files:
           errorMessage: 'UserPromptSubmit hook failed',
           errorType: 'Error',
         });
+      });
+
+      it('passes the send signal to the UserPromptSubmit hook and stops as an abort when it fires', async () => {
+        vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
+          {} as never,
+        );
+        const endSpanSpy = vi
+          .spyOn(telemetryIndex, 'endInteractionSpan')
+          .mockImplementation(() => {});
+        const controller = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn(
+            (
+              _message: unknown,
+              _responseType: unknown,
+              _timeoutMs: unknown,
+              signal?: AbortSignal,
+            ) =>
+              new Promise((_resolve, reject) => {
+                signal?.addEventListener('abort', () =>
+                  reject(new Error('Request aborted')),
+                );
+              }),
+          ),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        const run = fromAsync(
+          client.sendMessageStream(
+            [{ text: 'hello' }],
+            controller.signal,
+            'prompt-user-prompt-submit-abort',
+          ),
+        );
+        await vi.waitFor(() =>
+          expect(mockMessageBus.request).toHaveBeenCalled(),
+        );
+        controller.abort();
+
+        await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+        expect(mockMessageBus.request).toHaveBeenCalledWith(
+          expect.objectContaining({
+            eventName: 'UserPromptSubmit',
+            signal: controller.signal,
+          }),
+          expect.anything(),
+          undefined,
+          controller.signal,
+        );
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(endSpanSpy.mock.calls[0]?.[0]).toBe('cancelled');
+      });
+
+      it('does not send the prompt when the UserPromptSubmit hook response arrives after an abort', async () => {
+        const controller = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn(() => {
+            controller.abort();
+            return Promise.resolve({ success: true, output: {} });
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'hello' }],
+              controller.signal,
+              'prompt-user-prompt-submit-late-response',
+            ),
+          ),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
       });
 
       it('forwards steerInput through the Steer continuation for early settling', async () => {

@@ -799,10 +799,6 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
-export {
-  formatLegacyHookTimeoutWarning,
-  isLegacyMillisecondHookTimeout,
-} from './hooks/hook-timeout.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,

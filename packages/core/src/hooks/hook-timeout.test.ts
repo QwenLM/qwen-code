@@ -93,15 +93,38 @@ describe('resolveCommandHookTimeoutMs', () => {
     expect(warn.mock.calls[0]?.[0]).toContain('Set it to 30');
   });
 
-  it('warns in the first test that resolves a legacy value', () => {
+  it('stays silent for a hook it already warned about until warnings are reset', () => {
+    resolveCommandHookTimeoutMs(45_000, 'shared-label');
     resolveCommandHookTimeoutMs(45_000, 'shared-label');
     expect(warn).toHaveBeenCalledTimes(1);
+
+    resolveCommandHookTimeoutMs(46_000, 'shared-label');
+    expect(warn).toHaveBeenCalledTimes(2);
+
+    resetLegacyTimeoutWarnings();
+    resolveCommandHookTimeoutMs(45_000, 'shared-label');
+    expect(warn).toHaveBeenCalledTimes(3);
   });
 
-  it('warns again in a later test that resolves the same legacy value', () => {
-    resolveCommandHookTimeoutMs(45_000, 'shared-label');
-    expect(warn).toHaveBeenCalledTimes(1);
-  });
+  it.each([
+    ['60000', 60_000],
+    ['8', 8_000],
+    [' 30 ', 30_000],
+  ])(
+    'reads the numeric string %j like the number it holds',
+    (timeout, expectedMs) => {
+      expect(resolveCommandHookTimeoutMs(timeout, 'string-hook')).toBe(
+        expectedMs,
+      );
+    },
+  );
+
+  it.each(['', '   ', 'soon'])(
+    'falls back to the default for the non-numeric string %j',
+    (timeout) => {
+      expect(resolveCommandHookTimeoutMs(timeout, 'string-hook')).toBe(600_000);
+    },
+  );
 });
 
 describe('formatLegacyHookTimeoutWarning', () => {

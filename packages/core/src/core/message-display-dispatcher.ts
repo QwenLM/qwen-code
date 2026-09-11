@@ -174,14 +174,24 @@ export class MessageDisplayDispatcher {
           signal: this.signal,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
+        undefined,
+        this.signal,
       )
-      .then(() => undefined)
+      .then((response) => {
+        if (response.success === false) {
+          throw response.error ?? new Error('hook execution failed');
+        }
+      })
       .catch((err) => {
+        if (this.signal.aborted) {
+          // The turn was cancelled: the abort released this delivery, and a
+          // cancelled message is expected to go quiet rather than warn.
+          return;
+        }
         if (this.finished && !isFinal) {
           // This delivery was superseded by the final payload before it
-          // settled; its outcome no longer matters, so a late failure (e.g.
-          // the bus request's own timeout) must not alarm anyone about a
-          // turn that completed correctly.
+          // settled; its outcome no longer matters, so a late failure must
+          // not alarm anyone about a turn that completed correctly.
           return;
         }
         this.emitWarning(

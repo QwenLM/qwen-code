@@ -255,7 +255,7 @@ describe('MessageBus', () => {
       ).rejects.toThrow('Request timed out');
     });
 
-    it('waits past the default deadline for a hook execution response', async () => {
+    it('waits past the default deadline for a hook execution request that carries a signal', async () => {
       vi.useFakeTimers();
       try {
         let correlationId = '';
@@ -272,6 +272,7 @@ describe('MessageBus', () => {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'PreToolUse',
               input: {},
+              signal: new AbortController().signal,
             },
             MessageBusType.HOOK_EXECUTION_RESPONSE,
           )
@@ -288,6 +289,34 @@ describe('MessageBus', () => {
           success: true,
         });
         await expect(response).resolves.toMatchObject({ success: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the default deadline for a hook execution request without a signal', async () => {
+      vi.useFakeTimers();
+      try {
+        let error: unknown;
+        const response = bus
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'UserPromptSubmit',
+              input: {},
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          )
+          .catch((caught: unknown) => {
+            error = caught;
+          });
+
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(error).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        await response;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('Request timed out');
       } finally {
         vi.useRealTimers();
       }

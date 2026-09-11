@@ -95,14 +95,18 @@ export class MessageBus extends EventEmitter {
     signal?: AbortSignal,
   ): Promise<TResponse> {
     const correlationId = randomUUID();
-    // Hook execution requests have no bus deadline unless the caller sets
-    // one: every hook is already bounded by its own timeout, and a shorter
-    // bus deadline would give up on a hook that is still allowed to run.
+    // A hook execution request that carries an abort signal has no bus
+    // deadline unless the caller sets one: the hook is bounded by its own
+    // timeout and cancelled through that signal, and a shorter bus deadline
+    // would give up on a hook that is still allowed to run. A request without
+    // a signal cannot be cancelled, so it keeps the default deadline.
+    const isCancellableHookRequest =
+      request.type === MessageBusType.HOOK_EXECUTION_REQUEST &&
+      'signal' in request &&
+      request.signal instanceof AbortSignal;
     const effectiveTimeoutMs =
       timeoutMs ??
-      (request.type === MessageBusType.HOOK_EXECUTION_REQUEST
-        ? undefined
-        : DEFAULT_REQUEST_TIMEOUT_MS);
+      (isCancellableHookRequest ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
 
     return new Promise<TResponse>((resolve, reject) => {
       // Check if already aborted

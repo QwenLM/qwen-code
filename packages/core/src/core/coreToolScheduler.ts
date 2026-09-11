@@ -508,6 +508,7 @@ async function safelyFirePostToolUseFailureHook(
   permissionMode?: string,
   tool_call_id?: string,
   durationMs?: number,
+  signal?: AbortSignal,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
     return await firePostToolUseFailureHook(
@@ -518,7 +519,7 @@ async function safelyFirePostToolUseFailureHook(
       errorMessage,
       isInterrupt,
       permissionMode,
-      undefined,
+      signal,
       tool_call_id,
       durationMs,
     );
@@ -4990,7 +4991,7 @@ export class CoreToolScheduler {
             toolInput,
             toolUseId,
             permissionMode,
-            undefined, // signal
+            signal,
             callId, // Original API call ID (e.g., call_xxx)
           ),
         (r) =>
@@ -5626,7 +5627,7 @@ export class CoreToolScheduler {
                 toolResponse,
                 toolUseId,
                 permissionMode,
-                undefined, // signal
+                signal,
                 callId, // Original API call ID (e.g., call_xxx)
                 elapsedExecutionMs(),
               ),
@@ -6084,6 +6085,9 @@ export class CoreToolScheduler {
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
+                // Interrupt reports above pass no signal: it is already
+                // aborted there and would cancel the report itself.
+                signal,
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -6415,6 +6419,9 @@ export class CoreToolScheduler {
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
+                // Interrupt reports above pass no signal: it is already
+                // aborted there and would cancel the report itself.
+                signal,
               ),
             this.postToolUseFailureEndMeta,
           );
