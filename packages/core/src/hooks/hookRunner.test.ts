@@ -1463,7 +1463,7 @@ describe('HookRunner', () => {
         });
 
       const resultPromise = hookRunner.executeHook(
-        { ...hookConfig, timeout: 100 },
+        { ...hookConfig, timeout: 0.1 },
         HookEventName.PreToolUse,
         createMockInput(),
       );
@@ -1471,8 +1471,76 @@ describe('HookRunner', () => {
       mockProcess.emit('close', null);
       const result = await resultPromise;
 
-      expect(result.error?.message).toBe('Hook timed out after 100ms');
+      expect(result.error?.message).toBe('Hook timed out after 0.1s');
       expect(killSpy.mock.calls).toContainEqual([-mockProcess.pid, 'SIGTERM']);
+    });
+
+    it('reads timeout in seconds with a 600 second default', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      vi.useFakeTimers();
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === -mockProcess.pid && signal === 0) {
+          throw createNoSuchProcessError();
+        }
+        return true;
+      });
+      const configWithoutTimeout: HookConfig = {
+        type: HookType.Command,
+        command: 'long-running-command',
+        source: HooksConfigSource.Project,
+      };
+
+      let settled = false;
+      const resultPromise = hookRunner
+        .executeHook(
+          configWithoutTimeout,
+          HookEventName.PreToolUse,
+          createMockInput(),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      // The previous 60 second default has passed without a timeout.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(540_000);
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.error?.message).toBe('Hook timed out after 600s');
+    });
+
+    it('reads a timeout of 1000 or more as legacy milliseconds', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      vi.useFakeTimers();
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === -mockProcess.pid && signal === 0) {
+          throw createNoSuchProcessError();
+        }
+        return true;
+      });
+
+      let settled = false;
+      const resultPromise = hookRunner
+        .executeHook(
+          { ...hookConfig, timeout: 2000 },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.error?.message).toBe('Hook timed out after 2s');
     });
 
     it('shares one termination when timeout and abort race, with abort taking precedence', async () => {
@@ -1498,7 +1566,7 @@ describe('HookRunner', () => {
       const controller = new AbortController();
 
       const resultPromise = hookRunner.executeHook(
-        { ...hookConfig, timeout: 100 },
+        { ...hookConfig, timeout: 0.1 },
         HookEventName.PreToolUse,
         createMockInput(),
         controller.signal,

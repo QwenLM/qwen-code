@@ -243,7 +243,8 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in seconds for the hook execution.',
+            description:
+              'Timeout in seconds for the hook execution. Defaults to 600 for command and http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.',
           },
           env: {
             type: 'object',

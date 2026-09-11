@@ -937,7 +937,9 @@ setInterval(() => {}, 1000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS}ms` },
+          error: {
+            message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS / 1000}s`,
+          },
         });
         await waitFor(
           () => !isRunning(descendantPid as number),
