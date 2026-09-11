@@ -32,6 +32,12 @@ export interface WebSearchBackendConfig {
 export interface WebSearchSource {
   url: string;
   /**
+   * Page title, present only when the backend actually learned one. The tool
+   * decides whether it is usable as link text and lists the bare URL when it
+   * is not.
+   */
+  title?: string;
+  /**
    * True when the backend's extractor opened the page and did not report
    * failure — treated as stronger evidence.
    */
@@ -81,4 +87,39 @@ export interface WebSearchBackendRequest {
  */
 export interface WebSearchBackend {
   search(request: WebSearchBackendRequest): Promise<WebSearchBackendResult>;
+}
+
+/**
+ * Identity of a page for matching, title lookup and de-duplication. Scheme,
+ * host case, trailing slashes, percent-encoding in the path and the fragment
+ * do not distinguish pages; the port and the query string do. Every
+ * comparison between URLs from different places goes through this one
+ * function, so no code path mixes exact and normalized keys.
+ */
+export function sourceKey(url: string): string {
+  try {
+    const parsed = new URL(url.trim());
+    let path = parsed.pathname.replace(/\/+$/, '');
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // An undecodable escape still identifies the page as written.
+    }
+    return `${parsed.host.toLowerCase()}${path}${parsed.search}`;
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * `String#slice` counts UTF-16 code units and can cut a surrogate pair in
+ * half, leaving a lone surrogate that breaks serialization of the next model
+ * request. Back off one unit when the cut lands after a high surrogate.
+ */
+export function sliceAtCharBoundary(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let end = limit;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  return text.slice(0, end);
 }

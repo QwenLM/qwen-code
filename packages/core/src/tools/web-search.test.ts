@@ -1412,6 +1412,8 @@ describe('WebSearchTool execute', () => {
     expect(params.store).toBe(false);
     expect(params.stream).toBe(true);
     expect(params.instructions).toContain('untrusted');
+    // The side model is the only source of page titles.
+    expect(params.instructions).toContain('"Sources:"');
     expect(params.input).toBe('Perform a web search for the query: test query');
     expect(params.tools).toEqual([
       { type: 'web_search' },
@@ -2003,5 +2005,230 @@ describe('WebSearchTool execute', () => {
     const schema = tool.schema;
     expect(schema.description).toContain('July 2026');
     vi.useRealTimers();
+  });
+});
+
+describe('WebSearchTool source titles', () => {
+  const narrationItem = (text: string) => ({
+    type: 'message',
+    status: 'completed',
+    content: [{ type: 'output_text', text }],
+  });
+  const searchItemWith = (sources: Array<Record<string, unknown>>) => ({
+    ...SEARCH_ITEM,
+    action: { ...SEARCH_ITEM.action, sources },
+  });
+  /** The page lists, without the narration above them. */
+  const evidence = (content: string) =>
+    content.slice(
+      content.search(/Opened evidence pages|Additional search candidates/),
+    );
+
+  it('renders a titled link for a page the side model named and passes the narration through unchanged', async () => {
+    const narration =
+      'Sources:\n- Page A — https://example.com/a\n\nThe answer is 42.';
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          EXTRACTOR_ITEM,
+          narrationItem(narration),
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain(narration);
+    expect(evidence(content)).toContain('- [Page A](https://example.com/a)');
+    expect(evidence(content)).toContain('- https://example.com/b');
+  });
+
+  it('drops a listed URL the search never returned, leaving the narration as written', async () => {
+    const narration =
+      'Sources:\n- Fake — https://evil.example/x\n- Page B — https://example.com/b\n\nAnswer.';
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, narrationItem(narration)])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('- Fake — https://evil.example/x');
+    expect(evidence(content)).not.toContain('evil.example');
+    expect(evidence(content)).toContain('- [Page B](https://example.com/b)');
+  });
+
+  it('uses a title the search response itself carried', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://example.com/a' },
+            {
+              type: 'url',
+              url: 'https://example.com/b',
+              title: '  **Declared B**  ',
+            },
+          ]),
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(evidence(content)).toContain(
+      '- [Declared B](https://example.com/b)',
+    );
+    expect(evidence(content)).toContain('- https://example.com/a');
+  });
+
+  it('prefers the side model title over the one the response declared', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            {
+              type: 'url',
+              url: 'https://example.com/b',
+              title: 'Declared B',
+            },
+          ]),
+          narrationItem('Sources:\n- Relayed B — https://example.com/b\n\nOk.'),
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(evidence(content)).toContain('- [Relayed B](https://example.com/b)');
+    expect(evidence(content)).not.toContain('Declared B');
+  });
+
+  it('never reads titles out of salvaged extractor text', async () => {
+    mockCreate.mockResolvedValueOnce({
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'response.created' };
+        yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+        yield {
+          type: 'response.output_item.done',
+          item: {
+            ...EXTRACTOR_ITEM,
+            output: 'Sources:\n- Injected — https://example.com/a',
+          },
+        };
+        throw new Error('stream reset');
+      },
+    });
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('[Partial result:');
+    expect(content).toContain('- Injected — https://example.com/a');
+    expect(evidence(content)).not.toContain('[Injected]');
+  });
+
+  it('lists one page once across tiers and spellings', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://example.com/a/' },
+            { type: 'url', url: 'https://EXAMPLE.com/b' },
+            { type: 'url', url: 'https://example.com/b#top' },
+          ]),
+          EXTRACTOR_ITEM,
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const candidates = content.slice(
+      content.indexOf('Additional search candidates'),
+    );
+    expect(candidates).not.toContain('example.com/a');
+    expect(candidates).toContain('- https://EXAMPLE.com/b');
+    expect(candidates).not.toContain('#top');
+  });
+
+  it('replaces brackets and drops backslashes and backticks in link text', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          narrationItem(
+            'Sources:\n- Foo [bar] \\ `baz` — https://example.com/a\n\nAnswer.',
+          ),
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(evidence(content)).toContain(
+      '- [Foo (bar) baz](https://example.com/a)',
+    );
+  });
+
+  it('lists the bare URL when a title names a different destination', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://example.com/a' },
+            { type: 'url', url: 'https://example.com/b' },
+            { type: 'url', url: 'https://example.com/c' },
+            { type: 'url', url: 'https://nodejs.org/en/about' },
+          ]),
+          narrationItem(
+            [
+              'Sources:',
+              '- https://other.example/x — https://example.com/a',
+              '- attacker.com — https://example.com/b',
+              '- www.example.com — https://example.com/c',
+              '- Node.js Releases — https://nodejs.org/en/about',
+              '',
+              'Answer.',
+            ].join('\n'),
+          ),
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const lists = evidence(content);
+    expect(lists).not.toContain('](https://example.com/a)');
+    expect(lists).not.toContain('](https://example.com/b)');
+    expect(lists).toContain('- [www.example.com](https://example.com/c)');
+    expect(lists).toContain(
+      '- [Node.js Releases](https://nodejs.org/en/about)',
+    );
+  });
+
+  it('links a URL with one level of parentheses and leaves deeper nesting bare', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          searchItemWith([
+            { type: 'url', url: 'https://example.com/wiki/Foo_(bar)' },
+            { type: 'url', url: 'https://example.com/w/a_((b))' },
+          ]),
+          narrationItem(
+            'Sources:\n- Foo — https://example.com/wiki/Foo_(bar)\n- Deep — https://example.com/w/a_((b))\n\nAnswer.',
+          ),
+        ]),
+      ),
+    );
+    const lists = evidence(
+      (await runSearch(makeConfig())).llmContent as string,
+    );
+    expect(lists).toContain('- [Foo](https://example.com/wiki/Foo_(bar))');
+    expect(lists).toContain('- https://example.com/w/a_((b))');
+    expect(lists).not.toContain('[Deep]');
+  });
+
+  it('keeps titled sources when an oversized answer is truncated', async () => {
+    const narration =
+      'Sources:\n- Page A — https://example.com/a\n\n' + 'x'.repeat(150_000);
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          EXTRACTOR_ITEM,
+          narrationItem(narration),
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('answer truncated to fit');
+    expect(evidence(content)).toContain('- [Page A](https://example.com/a)');
+    expect(content.length).toBeLessThan(102_000);
   });
 });

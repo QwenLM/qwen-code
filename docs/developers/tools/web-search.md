@@ -7,7 +7,13 @@ Qwen Code provides web search two ways:
 
 ## Built-in `web_search`
 
-The built-in tool issues a self-contained search request to a small auxiliary model with DashScope's server-side `web_search` (and `web_extractor`) tools, and returns the narrated findings plus source URLs.
+The built-in tool issues a self-contained search request to a small auxiliary model with DashScope's server-side `web_search` (and `web_extractor`) tools, and returns the narrated findings plus the pages behind them.
+
+### What the model receives
+
+One tool result carries three parts: the search agent's narrated answer, the pages it opened and read in full, and the remaining search hits it did not open. The two page lists are kept apart so the model can tell strong evidence from weak. The narration is passed through unchanged and may open with the agent's own `Sources:` list.
+
+DashScope's search results carry URLs without page titles, so the agent is asked to name the pages it relied on. A named title is attached to a page only when that URL is one the search returned or the agent opened; each page is then listed as a markdown link when it has a usable title and as a bare URL otherwise. To read a returned page in full, the model can call [`web_fetch`](./web-fetch.md) with its URL.
 
 ### When it turns on by itself
 
