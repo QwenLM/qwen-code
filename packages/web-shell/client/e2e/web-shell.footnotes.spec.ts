@@ -638,6 +638,91 @@ test('source locator demo delegates the card link to its host panel', async ({
   });
   expect(footerMetrics.iconCenterOffset).toBe(0);
   expect(footerMetrics.textCenterDelta).toBeLessThan(0.1);
+  const painted = await assistantFooter.evaluate(async (footer) => {
+    const copy = footer.querySelector<SVGElement>(
+      'button[aria-label="复制"] svg',
+    )!;
+    const citation = footer.querySelector<HTMLElement>(
+      '[data-web-shell-footnote-sources-trigger] > span',
+    )!;
+    const mask = getComputedStyle(citation).maskImage;
+    const maskUrl = mask.slice(4, -1).replace(/^"|"$/g, '');
+    const measure = async (markup: string, element: Element) => {
+      const svg = new DOMParser().parseFromString(
+        markup,
+        'image/svg+xml',
+      ).documentElement;
+      const size = 512;
+      svg.setAttribute('width', String(size));
+      svg.setAttribute('height', String(size));
+      const url = URL.createObjectURL(
+        new Blob([new XMLSerializer().serializeToString(svg)], {
+          type: 'image/svg+xml',
+        }),
+      );
+      try {
+        const image = new Image();
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () =>
+            reject(new Error('Cannot rasterize footer icon'));
+          image.src = url;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const context = canvas.getContext('2d')!;
+        context.drawImage(image, 0, 0, size, size);
+        const pixels = context.getImageData(0, 0, size, size).data;
+        let minX = size,
+          minY = size,
+          maxX = -1,
+          maxY = -1,
+          alpha = 0,
+          momentY = 0;
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const opacity = pixels[(y * size + x) * 4 + 3];
+            if (opacity >= 16) {
+              minX = Math.min(minX, x);
+              minY = Math.min(minY, y);
+              maxX = Math.max(maxX, x);
+              maxY = Math.max(maxY, y);
+            }
+            alpha += opacity;
+            momentY += (y + 0.5) * opacity;
+          }
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          width: ((maxX - minX + 1) / size) * rect.width,
+          height: ((maxY - minY + 1) / size) * rect.height,
+          centerY: rect.y + ((minY + maxY + 1) / 2 / size) * rect.height,
+          centroidY: rect.y + (momentY / alpha / size) * rect.height,
+        };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    return {
+      copy: await measure(new XMLSerializer().serializeToString(copy), copy),
+      citation: await measure(await (await fetch(maskUrl)).text(), citation),
+    };
+  });
+  expect(painted.copy.width).toBeGreaterThan(0);
+  expect(painted.citation.width).toBeGreaterThan(0);
+  expect(Math.abs(painted.citation.width - painted.copy.width)).toBeLessThan(
+    0.5,
+  );
+  expect(Math.abs(painted.citation.height - painted.copy.height)).toBeLessThan(
+    0.5,
+  );
+  expect(
+    Math.abs(painted.citation.centerY - painted.copy.centerY),
+  ).toBeLessThan(0.4);
+  expect(
+    Math.abs(painted.citation.centroidY - painted.copy.centroidY),
+  ).toBeLessThan(0.4);
+
   const inlineMetrics = await triggers.nth(1).evaluate((element) => {
     const icon = element.querySelector<HTMLElement>('[aria-hidden="true"]')!;
     const triggerRect = element.getBoundingClientRect();

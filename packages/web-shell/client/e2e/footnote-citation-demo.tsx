@@ -6,7 +6,7 @@ import { WebShellTranscript } from '../components/WebShellTranscript';
 import type { WebShellFootnoteIconResolver } from '../customization';
 import knowledgeIconUrl from '../assets/icons/knowledge.svg?url&no-inline';
 import fileIconUrl from '../assets/icons/at-file.svg?url&no-inline';
-import referencesIconUrl from '../assets/icons/at-extension.svg?url&no-inline';
+import referencesIconUrl from './assets/citation-references.svg?url&no-inline';
 
 const getInlineFootnoteIcon: WebShellFootnoteIconResolver = (footnotes) =>
   footnotes.every((note) => note.href?.startsWith(sentinelPrefix))

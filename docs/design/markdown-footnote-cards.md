@@ -49,7 +49,7 @@ const markdown = {
 };
 ```
 
-The callbacks are independent. Missing callbacks, empty/null results, invalid URLs and thrown exceptions fall back to the default knowledge icon. Custom assets use the composer's monochrome mask and image URL policy (including rejection of SVG data URLs). Inline icons are 16px; footer icons are 14px. Only the default footer knowledge glyph receives the existing 1px optical lift. The host controls only the icon; Qwen owns counts, buttons, hover, keyboard, pagination and links.
+The callbacks are independent. Missing callbacks, empty/null results, invalid URLs and thrown exceptions fall back to the default knowledge icon. Custom assets use the composer's monochrome mask and image URL policy (including rejection of SVG data URLs). Inline icons are 16px; footer icons are 14px. Only the default footer knowledge glyph receives the existing 1px optical lift. The host controls only the icon; Qwen owns counts, buttons, hover, keyboard, pagination and links. Host assets must normalize their own viewBox padding, painted size, optical center and stroke weight: equal CSS boxes alone do not imply matching glyphs. The demo footer resource is sized against the Assistant copy glyph; browser acceptance checks painted bounds and visual centroids as well as element geometry.
 
 ## Rendering and lifecycle
 
