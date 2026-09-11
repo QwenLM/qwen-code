@@ -44,7 +44,8 @@ vi.mock('node:v8', async (importOriginal) => {
 });
 
 beforeEach(() => {
-  // Each case needs fresh memoized spawn arguments.
+  // getAcpMemoryArgs() memoizes its result into spawnChannel module state, so
+  // every case resets the registry and re-imports the module dynamically.
   vi.resetModules();
 });
 
@@ -78,29 +79,44 @@ describe('spawn-path constant parity', () => {
   });
 
   it.each([
-    ['cgroup v1 unlimited sentinel', 2 ** 63 - 4_096, 2_096, 3_632],
-    ['cgroup v2 unlimited sentinel', 2 ** 64, 2_096, 3_632],
-    ['cgroup limit above host memory', 8_192 * MB, 2_096, 3_632],
-    ['cgroup limit equal to host memory', 7_265 * MB, 2_096, 3_632],
-    ['unconstrained host', 0, 2_096, 3_632],
-    ['6 GiB cgroup limit', 6_144 * MB, 2_096, 3_072],
+    ['cgroup v1 unlimited sentinel', 7_265, 2 ** 63 - 4_096, 2_096, 3_632],
+    ['cgroup v2 unlimited sentinel', 7_265, 2 ** 64, 2_096, 3_632],
+    ['cgroup limit above host memory', 7_265, 8_192 * MB, 2_096, 3_632],
+    ['cgroup limit equal to host memory', 7_265, 7_265 * MB, 2_096, 3_632],
+    ['unconstrained host', 7_265, 0, 2_096, 3_632],
+    ['6 GiB cgroup limit', 7_265, 6_144 * MB, 2_096, 3_072],
     [
       '4 GiB cgroup limit below the current heap limit',
+      7_265,
       4_096 * MB,
       2_096,
       undefined,
     ],
     [
       '2 GiB cgroup limit below the current heap limit',
+      7_265,
       2_048 * MB,
       1_048,
       undefined,
     ],
-    ['target equal to the current heap limit', 6_144 * MB, 3_072, undefined],
+    [
+      'target equal to the current heap limit',
+      7_265,
+      6_144 * MB,
+      3_072,
+      undefined,
+    ],
+    ['saturated 64 GiB host', 65_536, 0, 4_096, 16_384],
   ] as const)(
     'preserves the host-derived policy for %s',
-    async (_name, constrainedBytes, currentLimitMb, expectedTargetMb) => {
-      mockedTotalMem.value = 7_265 * MB;
+    async (
+      _name,
+      hostMb,
+      constrainedBytes,
+      currentLimitMb,
+      expectedTargetMb,
+    ) => {
+      mockedTotalMem.value = hostMb * MB;
       mockedHeapSizeLimit.value = currentLimitMb * MB;
       vi.spyOn(process, 'constrainedMemory').mockReturnValue(constrainedBytes);
 
