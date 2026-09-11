@@ -130,9 +130,7 @@ export function buildReattachParts(
   if (recent.length === 0) return [];
   return [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        recent.map((img) => `Image #${img.id}`).join(', '),
+      text: reattachContextText(recent.map((img) => img.id)),
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
     ...recent.map(storedImageToPart),
@@ -156,9 +154,7 @@ export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
  * text marker + N inline images) converts to exactly one OpenAI content
  * block, so this equals the trailing reattach block count on the wire.
  */
-export function trailingReattachPartCount(
-  contents: ContentListUnion,
-): number {
+export function trailingReattachPartCount(contents: ContentListUnion): number {
   const last = Array.isArray(contents) ? contents.at(-1) : undefined;
   const parts =
     last && typeof last === 'object' && 'parts' in last
@@ -238,9 +234,7 @@ export function prepareImagePayloadsForRequest(
 
   const reattachParts: Part[] = [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
+      text: reattachContextText([...reattachById.keys()]),
     },
     ...[...reattachById.values()].map(storedImageToPart),
   ];
@@ -370,6 +364,13 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 
 function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function reattachContextText(ids: readonly string[]): string {
+  return (
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    ids.map((id) => `Image #${id}`).join(', ')
+  );
 }
 
 function safeImageMimeType(mimeType: string): string {

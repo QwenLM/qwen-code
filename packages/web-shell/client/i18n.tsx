@@ -1428,6 +1428,31 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'webPreview.title': 'Web preview',
+  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.address': 'Development URL',
+  'webPreview.open': 'Open',
+  'webPreview.refresh': 'Refresh preview',
+  'webPreview.desktop': 'Desktop width',
+  'webPreview.mobile': 'Mobile width (390 px)',
+  'webPreview.external': 'Open externally',
+  'webPreview.frame': 'Web preview frame',
+  'webPreview.saved': 'Saved version',
+  'webPreview.savedFrame': 'Saved webpage version',
+  'webPreview.savedUnavailable':
+    'This saved version is missing or has changed. It cannot be opened.',
+  'webPreview.savedLoadFailed': 'Could not load this saved version. Try again.',
+  'webPreview.page': 'Application preview',
+  'webPreview.empty':
+    'Start your development server, then enter its URL above.',
+  'webPreview.reachable':
+    'Use an address this browser can reach. For a remote server, use its accessible URL or an existing port forward.',
+  'webPreview.fallback':
+    'Blank page? Check the server or open externally. The address and refresh use the entry URL.',
+  'webPreview.live':
+    'Live page. Opening a link from an earlier message shows its current content, not a saved version.',
+  'webPreview.invalidUrl':
+    'Use a separate HTTP/HTTPS development address with a hostname or IPv4 address, without login credentials. Web Shell and daemon addresses cannot be previewed.',
   'terminal.title': 'Terminal',
   'terminal.open': 'Open a terminal',
   'terminal.notice.exited': (v) =>
@@ -5029,6 +5054,29 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'webPreview.title': '网页预览',
+  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.address': '开发地址',
+  'webPreview.open': '打开',
+  'webPreview.refresh': '刷新预览',
+  'webPreview.desktop': '桌面宽度',
+  'webPreview.mobile': '手机宽度（390 px）',
+  'webPreview.external': '外部打开',
+  'webPreview.frame': '网页预览容器',
+  'webPreview.saved': '当时保存的版本',
+  'webPreview.savedFrame': '历史网页版本',
+  'webPreview.savedUnavailable': '这份历史版本已丢失或被修改，无法打开。',
+  'webPreview.savedLoadFailed': '暂时无法加载这份历史版本，请重试。',
+  'webPreview.page': '应用预览',
+  'webPreview.empty': '启动开发服务器，然后在上方输入地址。',
+  'webPreview.reachable':
+    '使用当前浏览器可访问的地址。远程服务器请使用可访问的 URL 或已有的端口转发。',
+  'webPreview.fallback':
+    '页面空白？请检查服务器或外部打开。地址栏和刷新使用最初打开的地址。',
+  'webPreview.live':
+    '实时页面：从历史消息打开链接，也会显示当前内容，不是当时保存的版本。',
+  'webPreview.invalidUrl':
+    '请使用独立开发服务器的 HTTP/HTTPS 地址，主机名或 IPv4 均可，且不含登录凭据。不能预览 Web Shell 或 daemon 地址。',
   'terminal.title': '终端',
   'terminal.open': '打开终端',
   'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
