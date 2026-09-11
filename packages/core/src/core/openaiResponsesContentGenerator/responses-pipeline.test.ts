@@ -1218,6 +1218,70 @@ describe('ResponsesPipeline', () => {
     }
   });
 
+  it('preserves structured gateway diagnostics past 500 characters and safe response headers', async () => {
+    const message = `${'x'.repeat(700)} resource missing; test-key`;
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          routify_response: {
+            padding: 'x'.repeat(700),
+            trace_id: 'trace-after-500',
+            request_id: 'body-request',
+            model_name: 'test-model',
+            ak_quota: { api_key: 'never-log-this-upstream-key' },
+            error_detail: {
+              error: {
+                message,
+                code: 'not_found',
+                type: 'upstream_error',
+                param: 'model',
+              },
+            },
+          },
+        }),
+        {
+          status: 404,
+          headers: {
+            'x-request-id': 'header-request',
+            'retry-after': '3',
+            'x-should-retry': 'true',
+            'set-cookie': 'secret-cookie',
+            authorization: 'Bearer response-secret',
+          },
+        },
+      ),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const error = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      status: 404,
+      requestId: 'header-request',
+      code: 'not_found',
+      type: 'upstream_error',
+      param: 'model',
+    });
+    const rendered = `${inspect(error)} ${JSON.stringify(error)}`;
+    expect(rendered).toContain('trace-after-500');
+    expect(rendered).toContain('resource missing');
+    for (const secret of [
+      'test-key',
+      'never-log-this-upstream-key',
+      'secret-cookie',
+      'response-secret',
+    ]) {
+      expect(rendered).not.toContain(secret);
+    }
+    const headers = (error as { headers: Headers }).headers;
+    expect(headers.get('retry-after')).toBe('3');
+    expect(headers.get('x-should-retry')).toBe('true');
+    expect(headers.has('authorization')).toBe(false);
+  });
+
   it('connectStream rejects on a connection-time HTTP error so retry sees it', async () => {
     // A 5xx at request time must reject the awaited promise (which
     // generateContentStream returns into retryWithBackoff) rather than
