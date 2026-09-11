@@ -78,9 +78,26 @@ beforeEach(() => {
   };
 });
 
+// Windows can hold a handle on a just-touched tmp dir for a moment
+// (indexer, a git child exiting): retry the teardown rmdir instead of
+// failing a test whose assertions already passed.
+function rmRetry(dir: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (attempt >= 3 || (err as NodeJS.ErrnoException).code !== 'EBUSY') {
+        throw err;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+}
+
 afterEach(() => {
   while (tmpRoots.length > 0) {
-    fs.rmSync(tmpRoots.pop()!, { recursive: true, force: true });
+    rmRetry(tmpRoots.pop()!);
   }
 });
 
