@@ -72,8 +72,13 @@ interface PtySession {
   reclaimTimer?: ReturnType<typeof setTimeout>;
   dataDisposable?: { dispose(): void };
   exitDisposable?: { dispose(): void };
-  /** Set once the PTY-side resources are freed; guards the double release. */
-  ptyReleased?: boolean;
+  /**
+   * Set once the PTY-side resources above have been freed. The exit-time
+   * release frees them while the session stays in the map for scrollback
+   * replay, so a later `release()` — tab close, workspace drain, `dispose()`,
+   * idle reclaim — must not free them a second time. See #11353.
+   */
+  ptyResourcesReleased: boolean;
 }
 
 interface SpawnedWebTerminalPty extends WebTerminalPty {
@@ -272,18 +277,23 @@ export class WebTerminalRegistry {
       session.exited = true;
       session.exitCode = e.exitCode;
       for (const listener of [...session.exitListeners]) listener(e);
-      // Free the PTY's resources at exit time rather than at the idle
-      // reclaim: exited sessions do not count against the admission cap, so
-      // their accumulation inside the 15-minute reclaim window is unbounded.
-      // Nothing needs the PTY once the shell has exited — write()/resize()
-      // short-circuit on `exited`, and readSnapshot() replays the JS-side
-      // buffer — so the session itself stays in the map for scrollback
-      // replay. Deferred one tick because onExit can arrive slightly before
-      // trailing onData callbacks node-pty still has queued (the race the
-      // shell-tool path drains before finalizing); disposing dataDisposable
-      // synchronously here could truncate the tail of that replay. See
-      // #11353.
-      setImmediate(() => this.releasePtyResources(session)).unref?.();
+      // Nothing needs the PTY once the shell is gone: write() and resize()
+      // already short-circuit on `exited`, and readSnapshot() replays the
+      // JS-side `buffer`, not the console. Waiting for release() instead left
+      // every exited web terminal holding node-pty's conout worker — and,
+      // upstream, its conhost.exe — for up to IDLE_RECLAIM_MS, because the
+      // route keeps the session alive for scrollback and the client treats the
+      // 4000 close as non-retryable, so only a tab close releases it. Exited
+      // sessions also do not count against the admission cap, so accumulation
+      // inside that window was unbounded. See #11303 / #11353.
+      //
+      // Deferred one turn rather than run inline: onExit can arrive slightly
+      // before late PTY data is processed, the same race shellExecutionService
+      // drains before finalizing. setImmediate runs after the poll-phase
+      // callbacks already queued this tick, so trailing output still reaches
+      // `buffer` before the data listener is detached. handleData is fully
+      // synchronous, so one turn is enough — there is no chain to flush.
+      setImmediate(() => this.releasePtyResources(session));
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
@@ -361,6 +371,7 @@ export class WebTerminalRegistry {
       exitListeners: new Set(),
       dataDisposable,
       exitDisposable,
+      ptyResourcesReleased: false,
     };
     sessionRef.current = session;
     this.sessions.set(terminalId, session);
@@ -475,23 +486,16 @@ export class WebTerminalRegistry {
     session.outputListeners.clear();
     session.exitListeners.clear();
     if (!session.exited) {
+      // killPtyTree has to run before releasePtyResources: its pty.kill()
+      // defers the whole teardown while `_isReady` is false, so a terminal
+      // released before its shell's first output byte (tab closed during slow
+      // pwsh startup, or a workspace drain) still has a kill() queued in
+      // node-pty's `_deferreds`. The wrapper's kill() notes the close only when
+      // it really ran; releaseHost then disposes the worker a deferred kill
+      // would strand, and skips the native close so the queued kill() stays the
+      // single closer — never a second close.
       killPtyTree(session.pty);
-      // killPtyTree's pty.kill() defers its whole teardown while `_isReady` is
-      // false, so a terminal released before its shell's first output byte (tab
-      // closed during slow pwsh startup, or a workspace drain) still has a
-      // kill() queued in node-pty's `_deferreds`. The wrapper's kill() notes
-      // the close only when it really ran; releasePtyResources' releaseHost
-      // then disposes the worker a deferred kill would strand, and skips the
-      // native close so the queued kill() stays the single closer — never a
-      // second close.
     }
-    // On the exited arm the shell is already gone, so nothing may signal its
-    // (possibly recycled) pid — but node-pty does not release its conout
-    // worker thread on a natural exit, so without releaseHost every terminal
-    // the user exits leaks one for the life of the CLI. Same defect as the
-    // shell-tool path in shellExecutionService. The conhost.exe half is not
-    // freed here (the native baton is already gone); see releaseConPtyHost.
-    // See #11303.
     this.releasePtyResources(session);
     return true;
   }
@@ -515,14 +519,27 @@ export class WebTerminalRegistry {
   }
 
   /**
-   * Dispose a session's PTY-side resources exactly once, keeping the session
-   * and its buffer for scrollback replay. An exited session reaches this
-   * twice — handleExit's deferred release at exit time, then release() on tab
-   * close, reclaim, workspace drain, or dispose() — hence the flag.
+   * Free a session's PTY-side resources exactly once: detach the data/exit
+   * listeners, then release the ConPTY host / conout worker that node-pty
+   * strands on a natural exit. Without the second half every terminal the user
+   * exits leaks a worker for the life of the CLI — the same defect the
+   * shell-tool path has. The conhost.exe half is not freed on that path (the
+   * native baton is already gone); see releaseConPtyHost. See #11303.
+   *
+   * Deliberately leaves the session's map entry and its `buffer` alone, and
+   * never signals the pid: on the exited path the shell is gone and its pid may
+   * be recycled, which is why #11313 added `releaseHost` instead of reusing
+   * `kill()`. Keeping the entry is what lets `readSnapshot()` still replay the
+   * scrollback after an exit-time release.
+   *
+   * Called from `handleExit` (deferred one turn, so an exited web terminal
+   * stops holding the worker for the whole idle-reclaim window — #11353) and
+   * from `release()` on both of its arms, where the flag keeps a release that
+   * follows an exit-time release from disposing anything twice.
    */
   private releasePtyResources(session: PtySession): void {
-    if (session.ptyReleased) return;
-    session.ptyReleased = true;
+    if (session.ptyResourcesReleased) return;
+    session.ptyResourcesReleased = true;
     session.dataDisposable?.dispose();
     session.exitDisposable?.dispose();
     session.pty.releaseHost?.();

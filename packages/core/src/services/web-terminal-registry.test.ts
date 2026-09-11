@@ -423,71 +423,77 @@ describe('WebTerminalRegistry', () => {
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
-      terminalId: 'terminal:exit-release',
+      terminalId: 'terminal:exit-time-release',
       workspaceCwd: '/workspace',
     });
 
     onExit({ exitCode: 0 });
-    // Real timers and no clock advance, so the 15-minute idle reclaim cannot
-    // have fired: anything released now was released at exit time. See #11353.
+    // One turn of the event loop, on real timers: the 15-minute idle reclaim
+    // cannot have run, and nothing below calls release(). A live exit closes
+    // the route's socket with 4000, which the client treats as non-retryable,
+    // so no tab close follows either — that window is what #11353 is about.
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // Nothing may signal the exited shell's possibly-recycled pid: no
-    // taskkill, no process-group kill, no ptyProcess.kill().
-    expect(spawnSync).not.toHaveBeenCalled();
-    expect(kill).not.toHaveBeenCalled();
-    expect(nativeKill).toHaveBeenCalledOnce();
+    // node-pty strands its conout worker on a natural exit, so that worker is
+    // the resource an exited web terminal held for up to IDLE_RECLAIM_MS — and
+    // exited sessions do not count against the admission cap, so accumulation
+    // inside the window was unbounded. See #11303 / #11353.
     expect(conoutDispose).toHaveBeenCalledOnce();
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
-    // The session itself stays in the map for scrollback replay — release()
-    // did not run.
-    expect(registry.readSnapshot('terminal:exit-release')).toMatchObject({
-      exited: true,
-      exitCode: 0,
-    });
+    // Nothing may signal an exited shell's possibly-recycled pid.
+    expect(kill).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    // The session itself survives the release, for scrollback replay.
+    expect(registry.readSnapshot('terminal:exit-time-release')).toBeDefined();
   });
 
   it('still replays buffered scrollback after the exit-time release', async () => {
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
-      terminalId: 'terminal:exit-replay',
+      terminalId: 'terminal:replay-after-exit-release',
       workspaceCwd: '/workspace',
     });
-    onData('final output');
+
+    onData('boot\r\n');
     onExit({ exitCode: 3 });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // Both halves matter: the release ran at exit time, AND the reconnect
-    // replay it must not break still returns the buffered scrollback.
+    // The exit-time release frees PTY handles only. The session and its buffer
+    // stay in the map, so a second tab attaching to this terminal id still gets
+    // the scrollback plus the exit state — which is what terminal.ts's
+    // releaseAfterReplay path depends on.
     expect(conoutDispose).toHaveBeenCalledOnce();
-    expect(registry.readSnapshot('terminal:exit-replay')).toMatchObject({
-      output: 'final output',
-      exited: true,
-      exitCode: 3,
-    });
+    expect(registry.readSnapshot('terminal:replay-after-exit-release')).toEqual(
+      {
+        output: 'boot\r\n',
+        exited: true,
+        exitCode: 3,
+        workspaceCwd: '/workspace',
+      },
+    );
   });
 
-  it('releases an exited session exactly once across exit and release()', async () => {
+  it('does not free an exited session twice when release follows', async () => {
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
-      terminalId: 'terminal:exit-then-release',
+      terminalId: 'terminal:exit-release-once',
       workspaceCwd: '/workspace',
     });
+
     onExit({ exitCode: 0 });
     await new Promise<void>((resolve) => setImmediate(resolve));
+    // The tab close, a workspace drain, dispose() or the reclaim all still run
+    // release() on a session whose PTY was already freed at exit time.
+    expect(registry.release('terminal:exit-release-once')).toBe(true);
 
-    // A later release() — tab close, workspace drain, or dispose() — must not
-    // repeat the exit-time release. disposeData/disposeExit pin the flag:
-    // nativeKill/conoutDispose alone could not, since releaseConPtyHost
-    // already self-dedupes on the pty object.
-    expect(registry.release('terminal:exit-then-release')).toBe(true);
-    expect(nativeKill).toHaveBeenCalledOnce();
     expect(conoutDispose).toHaveBeenCalledOnce();
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
+    expect(kill).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
   });
 
   it('lets output queued behind onExit reach the scrollback before the release', async () => {
