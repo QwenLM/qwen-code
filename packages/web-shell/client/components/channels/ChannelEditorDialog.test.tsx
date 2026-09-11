@@ -156,6 +156,31 @@ const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// The shared `instructions` control the channel registry injects into every
+// manageable channel (channel-registry.ts), plus a plain string sibling. The
+// descriptor label and description for `instructions` intentionally differ from
+// the i18n values so a missing i18n key surfaces the untranslated fallback
+// instead of passing the assertions below.
+const MULTILINE_INSTRUCTIONS: DaemonChannelTypeDescriptor = {
+  type: 'example',
+  displayName: 'Example',
+  manageable: true,
+  fields: [
+    {
+      key: 'instructions',
+      label: 'Session instructions (descriptor)',
+      description: 'DESCRIPTOR FALLBACK COPY',
+      kind: 'string',
+      multiline: true,
+    },
+    {
+      key: 'apiEndpoint',
+      label: 'API endpoint (descriptor)',
+      kind: 'string',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -202,12 +227,15 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderDialog(
-  props: Partial<React.ComponentProps<typeof ChannelEditorDialog>> = {},
-) {
+async function renderDialog({
+  language = 'en',
+  ...props
+}: Partial<React.ComponentProps<typeof ChannelEditorDialog>> & {
+  language?: 'en' | 'zh-CN';
+} = {}) {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChannelEditorDialog
           open
           descriptor={DINGTALK}
@@ -276,6 +304,28 @@ function setInputValue(input: HTMLInputElement, value: string) {
     'value',
   )?.set?.call(input, value);
   input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+  Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set?.call(textarea, value);
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function sectionHeadingOf(element: HTMLElement | null): string | null {
+  const heading = element
+    ?.closest('section')
+    ?.querySelector('h3')
+    ?.textContent?.trim();
+  return heading ?? null;
+}
+
+// FieldShell renders the field description as the first <p> inside the field
+// wrapper that also holds the control, after the label header.
+function descriptionOf(element: HTMLElement | null): string {
+  return element?.parentElement?.querySelector('p')?.textContent?.trim() ?? '';
 }
 
 beforeEach(() => {
@@ -473,6 +523,135 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('Conversation management');
     expect(document.body.textContent).toContain('Conversation isolation');
     expect(document.body.textContent).toContain('By user');
+  });
+
+  it('renders a multiline string field as a textarea and leaves a plain one as an input', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    const instructions = fieldByLabel('Instructions');
+    const endpoint = fieldByLabel('API endpoint (descriptor)');
+
+    expect(instructions?.tagName).toBe('TEXTAREA');
+    expect(endpoint?.tagName).toBe('INPUT');
+  });
+
+  it('groups the shared instructions control with conversation management', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    // `instructions` is not a credential: it is stored in clear text and
+    // injected into the session context, so it belongs with the other shared
+    // session controls rather than in the catch-all credentials panel.
+    expect(sectionHeadingOf(fieldByLabel('Instructions'))).toBe(
+      'Conversation management',
+    );
+    expect(sectionHeadingOf(fieldByLabel('API endpoint (descriptor)'))).toBe(
+      'Credentials',
+    );
+  });
+
+  it('renders the localized instructions copy above the textarea instead of the descriptor literal', async () => {
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+
+    // `instructions` is the only multiline field in the fixture, so the single
+    // textarea anchors the field. fieldDescription resolves
+    // `${labelKey}.description` and returns the i18n value whenever the key
+    // translates, so this — not the registry literal the catalog serves — is
+    // what an operator reads. It is also the only place the replace-not-append
+    // behaviour is documented: an additive promise would have a DingTalk
+    // operator save over the default identity block that DingtalkAdapter.ts
+    // installs only when config.instructions is falsy.
+    const description = descriptionOf(document.querySelector('textarea'));
+    expect(description).toContain('replace their own default guidance');
+    expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
+  });
+
+  it('localizes the instructions copy for zh-CN operators', async () => {
+    await renderDialog({
+      descriptor: MULTILINE_INSTRUCTIONS,
+      language: 'zh-CN',
+    });
+
+    // getTranslator resolves `messages[key] ?? EN[key] ?? key`, so an assertion
+    // phrased only as "not the raw key", or as an English substring, still
+    // passes on the EN fallback once the ZH entry is deleted. `替换` occurs only
+    // in the ZH value, so this goes red on that mutation.
+    const description = descriptionOf(document.querySelector('textarea'));
+    expect(description).toContain('替换');
+    expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
+  });
+
+  it('saves a multi-line instructions value with the newline intact', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS, onSave });
+
+    const instructions = fieldByLabel('Instructions');
+    expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setTextareaValue(
+        instructions as HTMLTextAreaElement,
+        '  line one\nline two  ',
+      );
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    // assignField trims the outer whitespace but must not flatten the
+    // embedded newline, or the control cannot carry multi-line guidance.
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          instructions: 'line one\nline two',
+        }),
+      }),
+    );
+  });
+
+  it('loads a stored multi-line instructions value into the textarea and saves it unchanged', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // Edit mode: createChannelEditorDraft loads a stored string untrimmed
+    // (channel-editor-state.ts:110) while assignField trims on save
+    // (channel-editor-state.ts:249), so the fixture carries no outer
+    // whitespace and the round trip must be exact. Without the draft value
+    // threaded into the Textarea, an operator editing a configured channel
+    // sees an empty box and their first keystroke replaces the whole block.
+    await renderDialog({
+      descriptor: MULTILINE_INSTRUCTIONS,
+      instance: {
+        ...INSTANCE,
+        config: { ...INSTANCE.config, instructions: 'line one\nline two' },
+      },
+      onSave,
+    });
+
+    const instructions = fieldByLabel('Instructions');
+    expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
+    expect((instructions as HTMLTextAreaElement).value).toBe(
+      'line one\nline two',
+    );
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          instructions: 'line one\nline two',
+        }),
+      }),
+    );
   });
 
   it('submits a new instance with typed fields and the current revision', async () => {

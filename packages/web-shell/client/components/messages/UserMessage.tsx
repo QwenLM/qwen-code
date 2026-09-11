@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -11,6 +10,7 @@ import {
 } from 'react';
 import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   getComposerTagDisplay,
@@ -25,6 +25,7 @@ import {
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
+import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -158,7 +159,9 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
       <div className={styles.scheduledTaskId}>
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
-      <div className={styles.scheduledTaskPrompt}>{run.prompt}</div>
+      <div className={styles.scheduledTaskPrompt}>
+        <LinkifiedText text={run.prompt} />
+      </div>
     </div>
   );
 }
@@ -190,7 +193,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <Fragment key={index}>{segment.text}</Fragment>
+          <LinkifiedText key={index} text={segment.text} />
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -288,9 +291,11 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return content;
+    if (!parts) return <LinkifiedText text={content} />;
     return parts.map((part, index) => {
-      if (part.type === 'text') return part.text;
+      if (part.type === 'text') {
+        return <LinkifiedText key={index} text={part.text} />;
+      }
       return (
         <ReadonlyComposerTag
           key={`${part.tag.id}-${index}`}
@@ -416,14 +421,10 @@ export const UserMessage = memo(function UserMessage({
                     }
                   }}
                 >
-                  <FileTypeIcon
+                  <FileAttachmentContent
                     name={file.name}
                     mimeType={file.mimeType}
-                    size={16}
-                    className={styles.chatFileIcon}
-                    aria-hidden="true"
                   />
-                  <span className={styles.chatFileName}>{file.name}</span>
                 </span>
               );
             })}
@@ -559,7 +560,7 @@ export function ReadonlyComposerTag({
       : undefined;
   return (
     <span
-      className={`${styles.messageTag}${
+      className={`${styles.messageTag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}${
         clickable ? ` ${styles.messageTagClickable}` : ''
       }`}
       role={clickable ? 'button' : undefined}
@@ -585,13 +586,22 @@ export function ReadonlyComposerTag({
     >
       {custom ?? (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.messageTagIcon}
               style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && (
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}

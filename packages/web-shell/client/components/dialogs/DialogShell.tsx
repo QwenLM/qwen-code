@@ -6,7 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon, XIcon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
 import { Button } from '../ui/button';
@@ -243,7 +243,7 @@ export function DialogShell({
                   fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
                 )}
               >
-                {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
+                {fullscreen ? <ShrinkIcon /> : <ExpandIcon />}
               </Button>
             )}
             {dismissible && (

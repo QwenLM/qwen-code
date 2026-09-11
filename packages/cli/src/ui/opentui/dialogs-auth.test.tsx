@@ -204,7 +204,10 @@ function createMockSettings(): LoadedSettings {
   } as unknown as LoadedSettings;
 }
 
-function renderDialog(overrides?: { authType?: AuthType }) {
+function renderDialog(overrides?: {
+  authType?: AuthType;
+  initialError?: string;
+}) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
@@ -215,6 +218,7 @@ function renderDialog(overrides?: { authType?: AuthType }) {
       settings={settings}
       onClose={onClose}
       notify={notify}
+      initialError={overrides?.initialError}
     />,
   );
   return { onClose, notify, config };
@@ -273,6 +277,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('closes via Esc when the error was seeded from boot (R2-1)', async () => {
+    // A startup login failure seeds the message before mount; the swallow is
+    // for errors the dialog arms itself, so Esc must still close.
+    const { onClose } = renderDialog({
+      authType: AuthType.QWEN_OAUTH,
+      initialError: 'Failed to login',
+    });
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes via Esc when boot failed before any auth type existed (R2-1)', async () => {
+    // With no auth type the unauthenticated arm would overwrite the boot
+    // diagnostic with the must-connect message and wedge the dialog shut:
+    // Esc must close instead.
+    const { onClose } = renderDialog({ initialError: 'Boot failed' });
+    const consumed = await pressEsc();
+    expect(consumed).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/You must connect a provider/)).toBeNull();
+  });
+
   it('navigates main → sub-menu and back with Esc', async () => {
     const { onClose } = renderDialog();
     await press('return'); // main: Alibaba ModelStudio → alibaba-select
@@ -299,6 +325,36 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     );
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining('Successfully configured'),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers and saves OpenAI Responses through the custom-provider protocol filter', async () => {
+    const { onClose } = renderDialog();
+    await press('down');
+    await press('down');
+    await press('return');
+    expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
+    expect(screen.getByText('OpenAI Responses')).toBeTruthy();
+    expect(screen.getByText('Anthropic-compatible')).toBeTruthy();
+    expect(screen.getByText('Gemini-compatible')).toBeTruthy();
+    await press('down');
+    await press('return');
+    await typeText('https://api.example.com/v1');
+    await press('return');
+    await typeText('sk-test');
+    await press('return');
+    await typeText('responses-model');
+    await press('return');
+    await press('return');
+    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    await press('return');
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+      expect.anything(),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });

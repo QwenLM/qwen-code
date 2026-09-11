@@ -25,7 +25,7 @@ jobs:
     name: 'Resolve version'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    timeout-minutes: 100
     outputs:
       version: '${{ steps.version.outputs.version }}'
     steps:
@@ -36,12 +36,11 @@ jobs:
           # npm publishes asynchronously: `npm publish --provenance` returns
           # "Your package is being processed and may take a few minutes to
           # become available", and release.yml dispatches this workflow as soon
-          # as it returns. For v0.22.3 the gap was ~16 minutes (published
-          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
-          # step used to run 404'd on 3 of the 4 pools and left the fleet split
-          # across two CLI versions until a maintainer noticed. Wait the
-          # registry out rather than losing the race.
-          RESOLVE_TIMEOUT_SECONDS: '1500'
+          # as it returns. v0.23.0 took 55m22s to become resolvable, so the
+          # previous 25-minute budget expired while the package was still in
+          # flight. Wait up to 90 minutes and treat anything longer as an
+          # anomalous publish.
+          RESOLVE_TIMEOUT_SECONDS: '5400'
           RESOLVE_INTERVAL_SECONDS: '30'
         run: |-
           set -euo pipefail
@@ -75,7 +74,14 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner: ['ecs-update-hk-1', 'ecs-update-hk-2', 'ecs-update-hk-3', 'ecs-update-hk-4', 'ecs-update-hk-5']
+        runner:
+          [
+            'ecs-update-hk-1',
+            'ecs-update-hk-2',
+            'ecs-update-hk-3',
+            'ecs-update-hk-4',
+            'ecs-update-hk-5',
+          ]
       fail-fast: false
     runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
     concurrency:
@@ -150,7 +156,7 @@ jobs:
       issues: 'write'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
 

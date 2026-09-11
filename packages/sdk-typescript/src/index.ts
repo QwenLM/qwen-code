@@ -142,6 +142,7 @@ export {
   type DaemonWorkspaceRemovalActivity,
   type DaemonWorkspaceRemovalResult,
   type DaemonAvailableCommand,
+  type DaemonBrand,
   type DaemonCapabilities,
   type DaemonEnvCell,
   type DaemonEnvKind,
@@ -391,6 +392,7 @@ export {
   type SetUserLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './daemon/index.js';
 
 export {

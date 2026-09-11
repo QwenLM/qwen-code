@@ -21,8 +21,16 @@ export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
  * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+
+/**
+ * How many consecutive autonomous turns a Goal may make no progress on before
+ * it stops. Same three as the checkpoint stall bound, and for the same
+ * reason: one quiet turn is a pause for thought, two is a pattern, three is
+ * the loop.
+ */
+export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
@@ -60,25 +68,101 @@ export function isGoalTokenBudgetSpent(
   return goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
 }
 
+/** The `lastReason` a Goal stops with when `turnCount` reaches its budget. */
+export function goalTurnBudgetReason(turnBudget: number): string {
+  return `The Goal ran its Goal-turn budget (${turnBudget.toLocaleString('en-US')} ${turnBudget === 1 ? 'turn' : 'turns'}). Resume the Goal to authorize another window of turns, or clear it.`;
+}
+
+/**
+ * Whether the Goal has finished as many turns as its budget allows. Shaped
+ * like `isGoalTokenBudgetSpent` and used the same way: one predicate serves
+ * the runtime's stop condition and the reducer's re-arm condition.
+ */
+export function isGoalTurnBudgetSpent(
+  goal: Pick<GoalRecord, 'turnCount' | 'turnBudget'>,
+): goal is Pick<GoalRecord, 'turnCount' | 'turnBudget'> & {
+  turnBudget: number;
+} {
+  return goal.turnBudget !== undefined && goal.turnCount >= goal.turnBudget;
+}
+
+/**
+ * The budget as the setting spells it. Minutes are the unit the setting takes
+ * and the unit a stop is worth reporting in; a sub-minute budget only arises
+ * in tests, and reporting one as `0 minutes` would read as unbounded.
+ */
+function formatGoalActiveTimeBudget(activeTimeBudgetMs: number): string {
+  const minutes = activeTimeBudgetMs / 60_000;
+  if (minutes >= 1) {
+    const rounded = Math.round(minutes);
+    return `${rounded.toLocaleString('en-US')} ${rounded === 1 ? 'minute' : 'minutes'}`;
+  }
+  const seconds = Math.max(1, Math.round(activeTimeBudgetMs / 1_000));
+  return `${seconds.toLocaleString('en-US')} ${seconds === 1 ? 'second' : 'seconds'}`;
+}
+
+/** The `lastReason` a Goal stops with when its active time reaches its budget. */
+export function goalActiveTimeBudgetReason(activeTimeBudgetMs: number): string {
+  return `The Goal ran its active-time budget (${formatGoalActiveTimeBudget(activeTimeBudgetMs)}). Resume the Goal to authorize another window of time, or clear it.`;
+}
+
+/**
+ * Whether the Goal has been active for as long as its budget allows.
+ *
+ * Takes the elapsed figure rather than computing it: active time keeps
+ * accruing while the Goal is `active`, so the caller holds the clock (see
+ * `elapsedActiveTime`). A stopped Goal's elapsed time is its committed
+ * `activeTimeMs`, which is what makes the re-arm on resume well defined.
+ */
+export function isGoalActiveTimeBudgetSpent(
+  goal: Pick<GoalRecord, 'activeTimeBudgetMs'>,
+  elapsedActiveMs: number,
+): goal is Pick<GoalRecord, 'activeTimeBudgetMs'> & {
+  activeTimeBudgetMs: number;
+} {
+  return (
+    goal.activeTimeBudgetMs !== undefined &&
+    elapsedActiveMs >= goal.activeTimeBudgetMs
+  );
+}
+
 /**
  * Which bound a `usage_limited` Goal ran into.
  *
  * Only the enumerated bounds are typed: they are the ones a caller has to
  * branch on. The evidence kinds mark a window a plain resume cannot simply
- * re-enter; `token_budget` marks a spent authorization that a resume re-arms.
+ * re-enter; the budget kinds mark a spent authorization that a resume re-arms.
  * Every other route to `usage_limited` is an operational failure that carries
  * prose in `lastReason` and nothing to key off.
  */
 export type GoalLimitKind =
   | 'evidence_catalog'
   | 'checkpoint_request'
-  | 'token_budget';
+  | 'token_budget'
+  | 'turn_budget'
+  | 'time_budget';
 
 export function isGoalLimitKind(value: unknown): value is GoalLimitKind {
   return (
     value === 'evidence_catalog' ||
     value === 'checkpoint_request' ||
-    value === 'token_budget'
+    isGoalBudgetLimitKind(value)
+  );
+}
+
+/**
+ * Whether the bound is a spent authorization rather than a wall the Goal ran
+ * into. Resuming a Goal stopped by one of these is the user granting another
+ * window, so the resume clears the stop prose and re-arms the ceiling; the
+ * evidence kinds instead need a fresh evidence window to make progress.
+ */
+export function isGoalBudgetLimitKind(
+  value: unknown,
+): value is 'token_budget' | 'turn_budget' | 'time_budget' {
+  return (
+    value === 'token_budget' ||
+    value === 'turn_budget' ||
+    value === 'time_budget'
   );
 }
 
@@ -173,6 +257,22 @@ export interface GoalRecord {
    */
   tokenBudget?: number;
   /**
+   * The count `turnCount` may reach before autonomous continuation stops and
+   * the Goal waits for the user. Every finished Goal turn contributes to the
+   * count, including user-driven turns, although those turns are not rejected
+   * at the ceiling. Armed and re-armed exactly like `tokenBudget` (`turnCount
+   * + grant` on the resume of a spent Goal), and absent by default.
+   */
+  turnBudget?: number;
+  /**
+   * The ceiling on `activeTimeMs` -- wall time while this Goal stays `active`,
+   * including waits and idle time between turns -- before autonomous
+   * continuation stops. Armed and re-armed like the other budgets, and absent
+   * by default. Time paused, blocked, stopped, or outside a running process
+   * does not count against it.
+   */
+  activeTimeBudgetMs?: number;
+  /**
    * The turn that delivered this spend window's wind-down hand-off. A spent
    * budget grants one more continuation before it stops the Goal, so the
    * model can hand off instead of being cut mid-thought; this marks that
@@ -188,14 +288,26 @@ export interface GoalRecord {
   /**
    * Consecutive checkpoint checks that failed to relieve an overflowing
    * evidence window: the checkpoint came back full (see
-   * `isGoalCheckpointStalled`) or the verifier result could not be folded
-   * into claims at all. Persisted on the record rather than held in memory
-   * so a daemon restart or session resume cannot launder the count; absent
-   * means zero. Reset by any checkpoint check that finds room, and by every
-   * control action that starts a different evidence window: edit, replace,
-   * and the resume of an evidence-limited Goal.
+   * `isGoalCheckpointStalled`), the verifier result could not be folded
+   * into claims at all, or the check itself failed -- a provider error or
+   * a verifier that never answered before its timeout. Persisted on the
+   * record rather than held in memory so a daemon restart or session
+   * resume cannot launder the count; absent means zero. Reset by any
+   * checkpoint check that finds room, and by every control action that
+   * starts a different evidence window: edit, replace, and the resume of
+   * an evidence-limited Goal.
    */
   checkpointStalls?: number;
+  /**
+   * Consecutive autonomous turns that recorded neither a tool result nor a
+   * terminal proposal. A model that only restates status never reaches the
+   * verifier and never spends a checkpoint, so nothing else bounds it short
+   * of the token budget. Persisted like `checkpointStalls` so a restart
+   * cannot launder the count; absent means zero. Reset by any turn that
+   * records a tool result or a proposal, by a turn the user's own text
+   * drove, and by edit, replace, and resume.
+   */
+  noProgressTurns?: number;
   lastReason?: string;
   /**
    * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
@@ -388,6 +500,19 @@ export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
  */
 export const GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED =
   'The headless run finished before the Goal did. Resume the Goal in a later run.';
+/**
+ * A Goal whose autonomous turns stopped producing anything to judge. The
+ * next step is the user's: resume to try the same objective again, or edit
+ * it into one the model can act on and then resume it -- editing alone
+ * leaves a paused Goal paused.
+ *
+ * Runtime-emitted and headless-reachable, so it names no slash command; and
+ * it says "nothing to judge" rather than "no tool results", because
+ * `get_goal` and `update_goal` results are recorded but deliberately do not
+ * count as progress.
+ */
+export const GOAL_PAUSE_REASON_NO_PROGRESS =
+  'Three Goal turns in a row recorded nothing to judge and no proposal. Resume the Goal to try again, or edit its objective into one the model can act on and then resume it.';
 
 function truncateGoalPauseReason(reason: string): string {
   const codePoints = [...reason];

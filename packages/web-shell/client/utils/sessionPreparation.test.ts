@@ -24,7 +24,7 @@ function createActions(
 function prepareSession(
   args: Omit<CreateSessionArgs, 'getCurrentSessionId'> &
     Partial<Pick<CreateSessionArgs, 'getCurrentSessionId'>>,
-): Promise<void> {
+) {
   return createAndAttachSessionForPrompt({
     getCurrentSessionId: () => sessionResult.sessionId,
     ...args,
@@ -64,6 +64,77 @@ describe('createAndAttachSessionForPrompt', () => {
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
+  });
+
+  it('enables Plan with the selected execution permission after attach', async () => {
+    const order: string[] = [];
+    const actions = createActions({
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setApprovalMode: vi.fn(async () => {
+        order.push('plan');
+        return { mode: 'plan' };
+      }),
+    });
+    await prepareSession({
+      sessionActions: actions,
+      modeId: 'yolo',
+      planMode: true,
+    });
+    expect(actions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'yolo' }),
+    );
+    expect(actions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+    expect(order).toEqual(['attach', 'plan']);
+  });
+
+  it.each(['rejected', 'unconfirmed'])(
+    'releases the new session if Plan is %s',
+    async (failure) => {
+      const actions = createActions({
+        setApprovalMode: vi.fn(async () => {
+          if (failure === 'rejected') throw new Error('Denied');
+          return { mode: 'yolo' };
+        }),
+      });
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modeId: 'yolo',
+          planMode: true,
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow();
+      expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+      expect(actions.clearSession).toHaveBeenCalled();
+    },
+  );
+
+  it('does not enable Plan on a session selected during model preparation', async () => {
+    let currentSession = 'session-1';
+    const actions = createActions({
+      setModel: vi.fn(async () => {
+        currentSession = 'session-2';
+        return modelResult;
+      }),
+      setApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+    });
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modeId: 'yolo',
+        modelId: 'qwen3',
+        planMode: true,
+        getCurrentSessionId: () => currentSession,
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow('Session changed');
+    expect(actions.setApprovalMode).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).not.toHaveBeenCalled();
   });
 
   it('creates standalone sessions without workspace-only fields', async () => {

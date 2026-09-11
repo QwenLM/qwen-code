@@ -100,6 +100,63 @@ function createTerminalGoalStatusEvent(
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('session overview', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            displayName: 'Review release approval',
+            isWaitingForPermission: true,
+          },
+          {
+            displayName: 'Choose the export format',
+            isWaitingForUserQuestion: true,
+          },
+          { displayName: 'Run the browser tests', hasActivePrompt: true },
+          { displayName: 'Update session documentation' },
+        ].map((session, index) => ({
+          ...session,
+          sessionId: `overview-${index}`,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-session-panel]'),
+      ).toContainText('Review release approval');
+      await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -186,6 +243,23 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `goal-blocked-${theme}`);
     });
 
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const scenario = createTerminalTurnErrorScenario(
@@ -209,14 +283,12 @@ for (const theme of THEMES) {
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
 
       await page.setViewportSize({ width: 720, height: 800 });
       await page.mouse.move(0, 0);
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
 
       const touchContext = await browser.newContext({
         ...devices['Pixel 7'],
@@ -249,10 +321,12 @@ for (const theme of THEMES) {
           touchErrorRow.locator('[data-web-shell-message-actions]'),
         ).toHaveCSS('opacity', '1');
         await expect(touchCopyButton).toBeVisible();
-        await captureScreenshot(
-          touchPage,
-          `terminal-turn-error-copy-touch-${theme}`,
-        );
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
       } finally {
         await touchContext.close();
       }

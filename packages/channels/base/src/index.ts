@@ -39,13 +39,7 @@ export type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedEvent,
 } from './DaemonChannelBridge.js';
-export { BlockStreamer } from './BlockStreamer.js';
-export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
-export {
-  startsWithMessagePrefix,
-  stripMessagePrefix,
-} from './message-prefix.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
@@ -108,8 +102,6 @@ export {
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {
   Attachment,
-  BlockStreamingChunkConfig,
-  BlockStreamingCoalesceConfig,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
@@ -127,6 +119,8 @@ export type {
   ChannelMemoryScopeMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,
