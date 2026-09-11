@@ -651,7 +651,7 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
-const TRANSPORT_STREAM_RETRY_CONFIG = {
+const STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
   /**
@@ -3391,7 +3391,7 @@ export class LlmChat {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
         };
-        let transportStreamRetryCount = 0;
+        let streamReplayRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -3533,6 +3533,7 @@ export class LlmChat {
         let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptParts = [];
+          let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -3549,7 +3550,7 @@ export class LlmChat {
             } else if (
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
-              transportStreamRetryCount > 0 ||
+              streamReplayRetryCount > 0 ||
               transportContinuationCount > 0
             ) {
               // A fresh-restart retry reaching this point means a branch that
@@ -3578,6 +3579,7 @@ export class LlmChat {
                 : undefined,
               acceptQuietToolResultCompletion,
             );
+            streamEstablished = true;
 
             // The processor now owns cancellation persistence for this prefix.
             pendingTransportPrefix = [];
@@ -3731,8 +3733,23 @@ export class LlmChat {
               });
             }
 
-            // Replay only curated socket-level failures before any
-            // content (non-thought output) has reached callers.
+            // HTTP establishment failures already exhausted retryWithBackoff;
+            // only server errors raised while reading the stream join replay.
+            const isServerStreamError =
+              streamEstablished &&
+              !isRateLimit &&
+              (classification.kind === 'http' ||
+                classification.kind === 'sse-provider') &&
+              classification.diagnosis === 'retryable' &&
+              classification.statusCode !== undefined &&
+              classification.statusCode >= 500 &&
+              classification.statusCode < 600;
+            const isReplayableStreamError =
+              isRetryableStreamTransportError(classification) ||
+              isServerStreamError;
+
+            // Replay transient server errors and curated socket-level failures
+            // before any content (non-thought output) has reached callers.
             // Thinking-only output does not block the replay: such an
             // attempt persists nothing (error-path persistence
             // requires a delivered functionCall, which this gate
@@ -3742,7 +3759,7 @@ export class LlmChat {
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamTransportError(classification) &&
+              isReplayableStreamError &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3753,24 +3770,31 @@ export class LlmChat {
               // consulted here because this branch is checked before the
               // continuation one below.
               transportContinuationText.trim().length === 0 &&
-              transportStreamRetryCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
-              transportStreamRetryCount++;
+              streamReplayRetryCount++;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportStreamRetryCount;
-              debugLogger.warn('Transport stream retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                retryDelayMs: delayMs,
-                yieldedNonContentChunks: streamYieldedChunk,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+                STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry scheduled'
+                  : 'Transport stream retry scheduled',
+                {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
+                  attempt: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  retryDelayMs: delayMs,
+                  yieldedNonContentChunks: streamYieldedChunk,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                    providerCode: classification.providerCode,
+                  }),
+                },
+              );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. The gate above now admits
@@ -3808,7 +3832,7 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
@@ -3820,14 +3844,12 @@ export class LlmChat {
               transportContinuationPrefix = transportContinuationParts;
               pendingTransportPrefix = transportContinuationPrefix;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportContinuationCount;
+                STREAM_RETRY_CONFIG.initialDelayMs * transportContinuationCount;
               debugLogger.warn('Transport stream continuation scheduled', {
                 retryPath: 'stream',
                 retryDecision: 'continue',
                 attempt: transportContinuationCount,
-                maxRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
+                maxRetries: STREAM_RETRY_CONFIG.maxContinuationRetries,
                 retryDelayMs: delayMs,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
@@ -3843,25 +3865,36 @@ export class LlmChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError(classification)) {
+            if (isReplayableStreamError) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
               // (function-call cut, no text to anchor on, or its own budget
               // exhausted).
-              debugLogger.warn('Transport stream retry not taken', {
-                retryPath: 'stream',
-                retryDecision: streamYieldedContentChunk
-                  ? 'skipped_after_content'
-                  : 'exhausted',
-                attempts: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                continuationAttempts: transportContinuationCount,
-                maxContinuationRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry not taken'
+                  : 'Transport stream retry not taken',
+                {
+                  retryPath: 'stream',
+                  retryDecision:
+                    streamYieldedContentChunk ||
+                    transportContinuationText.trim().length > 0
+                      ? 'skipped_after_content'
+                      : 'exhausted',
+                  attempts: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  continuationAttempts: transportContinuationCount,
+                  maxContinuationRetries:
+                    STREAM_RETRY_CONFIG.maxContinuationRetries,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                    providerCode: classification.providerCode,
+                  }),
+                },
+              );
             }
 
             const contextOverflow = getContextLengthExceededInfo(error);
