@@ -10,6 +10,7 @@ import {
   SessionService,
   SessionOrganizationError,
   Storage,
+  readCronTasks,
   readWorktreeSession,
   canonicalSessionPrUrl,
   readSessionPrs,
@@ -294,12 +295,36 @@ interface SessionMetadataFilter {
   conversationKind?: 'standalone-top-level';
 }
 
+async function loadPersistentScheduledTaskControllers(
+  workspaceCwd: string,
+  filter: Pick<SessionMetadataFilter, 'sourceType' | 'sourceId'>,
+): Promise<ReadonlyMap<string, string> | undefined> {
+  if (filter.sourceType !== 'default' || filter.sourceId !== undefined) {
+    return undefined;
+  }
+  try {
+    const tasks = await readCronTasks(workspaceCwd);
+    return new Map(
+      tasks.flatMap((task) =>
+        task.sessionMode !== 'per_run' && task.sessionId
+          ? [[task.id, task.sessionId] as const]
+          : [],
+      ),
+    );
+  } catch {
+    // A task-store failure must not break the ordinary session catalog. Fixed
+    // task controllers remain hidden until the task store is readable again.
+    return new Map();
+  }
+}
+
 function matchesSessionMetadataSource(
   session: BridgeSessionSummary,
   filter: Pick<
     SessionMetadataFilter,
     'sourceType' | 'sourceId' | 'conversationKind'
   >,
+  persistentScheduledTaskControllers?: ReadonlyMap<string, string>,
 ): boolean {
   if (
     filter.conversationKind === 'standalone-top-level' &&
@@ -310,8 +335,16 @@ function matchesSessionMetadataSource(
   const sourceTypeMatches =
     filter.sourceType === undefined ||
     session.sourceType === filter.sourceType ||
-    // Legacy sessions without source metadata belong to the default catalog.
-    (filter.sourceType === 'default' && session.sourceType === undefined);
+    // The default catalog is the user-facing Tasks catalog: it includes
+    // legacy sessions and the dedicated controller behind a fixed-session
+    // scheduled task. Exact source-id lookups keep exact type semantics.
+    (filter.sourceType === 'default' &&
+      filter.sourceId === undefined &&
+      (session.sourceType === undefined ||
+        (session.sourceType === 'scheduled_task' &&
+          session.sourceId !== undefined &&
+          persistentScheduledTaskControllers?.get(session.sourceId) ===
+            session.sessionId)));
   return (
     sourceTypeMatches &&
     // sourceId remains exact; only the default source type has legacy fallback.
@@ -930,6 +963,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
+  const persistentScheduledTaskControllers =
+    await loadPersistentScheduledTaskControllers(workspaceCwd, options);
   const sessionService = new SessionService(workspaceCwd);
   const organizationService = createSessionOrganizationService(workspaceCwd);
   readOptions.signal?.throwIfAborted();
@@ -1051,7 +1086,14 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
-    if (!matchesSessionMetadataSource(session, options)) return false;
+    if (
+      !matchesSessionMetadataSource(
+        session,
+        options,
+        persistentScheduledTaskControllers,
+      )
+    )
+      return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
     if (group === 'ungrouped')
@@ -1145,6 +1187,8 @@ async function listWorkspaceSessionsByMetadataForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
+  const persistentScheduledTaskControllers =
+    await loadPersistentScheduledTaskControllers(workspaceCwd, filter);
   const sessionService = new SessionService(workspaceCwd);
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
@@ -1245,7 +1289,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
       (session) =>
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
-        matchesSessionMetadataSource(session, filter),
+        matchesSessionMetadataSource(
+          session,
+          filter,
+          persistentScheduledTaskControllers,
+        ),
     )
     .sort((a, b) =>
       compareLiveSessionCursorKeys(

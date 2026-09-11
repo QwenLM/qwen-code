@@ -33,7 +33,6 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
-  DaemonSessionSummary,
   DaemonSessionGroup,
   DaemonSessionGroupPresetColor,
 } from '@qwen-code/sdk/daemon';
@@ -45,6 +44,19 @@ import { cssUrlValue } from '../../utils/cssUrlVar';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
+import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from '../ui/alert-dialog';
+import { Spinner } from '../ui/spinner';
 import {
   buildCron,
   describeCron,
@@ -57,6 +69,7 @@ import {
   type TranslateFn,
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
+import { buildScheduledTaskRunContent } from '../../utils/scheduledTaskRunContent';
 
 /** Localized absolute timestamp, resilient to a bad epoch value. */
 function safeLocaleString(ms: number): string {
@@ -114,8 +127,6 @@ interface ScheduledTasksDialogProps {
   workspaces?: DaemonWorkspaceCapability[];
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
-  currentSession?: DaemonSessionSummary;
-  currentSessionSchedulingAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -555,8 +566,6 @@ export function ScheduledTasksDialog({
   onOpenSession,
   workspaces,
   lockedWorkspace,
-  currentSession,
-  currentSessionSchedulingAvailable,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -596,6 +605,9 @@ export function ScheduledTasksDialog({
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DaemonScheduledTask | null>(
+    null,
+  );
   // The task whose manual "run now" is mid-flight (switching to its session +
   // enqueuing). Serialized to one at a time so overlapping runs can't drop a
   // prompt on the App's single bound-run latch.
@@ -613,9 +625,9 @@ export function ScheduledTasksDialog({
   );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [runDestination, setRunDestination] = useState<
-    'per_run' | 'dedicated' | 'current'
-  >('per_run');
+  const [runDestination, setRunDestination] = useState<'per_run' | 'dedicated'>(
+    'per_run',
+  );
   const [modelServiceId, setModelServiceId] = useState('');
   const [groupChoice, setGroupChoice] = useState('');
   const [newGroupName, setNewGroupName] = useState('');
@@ -642,13 +654,6 @@ export function ScheduledTasksDialog({
     (!formWorkspace || (!formWorkspace.primary && !formWorkspace.trusted));
   const formWorkspaceCwd = formWorkspace?.cwd;
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
-  useEffect(() => {
-    if (!currentSessionSchedulingAvailable) {
-      setRunDestination((current) =>
-        current === 'current' ? 'per_run' : current,
-      );
-    }
-  }, [currentSessionSchedulingAvailable]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
@@ -870,38 +875,6 @@ export function ScheduledTasksDialog({
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
-  const currentSessionDisabledReason = (() => {
-    if (!currentSessionSchedulingAvailable) {
-      return t('scheduledTasks.session.currentUnsupported');
-    }
-    if (!currentSession?.sessionId) {
-      return t('scheduledTasks.session.currentUnavailable');
-    }
-    if (
-      currentSession.hasActivePrompt ||
-      (currentSession.pendingInteractionCount ?? 0) > 0
-    ) {
-      return t('scheduledTasks.session.currentBusy');
-    }
-    if (
-      currentSession.parentSessionId !== undefined ||
-      currentSession.sourceId !== undefined ||
-      (currentSession.sourceType !== undefined &&
-        currentSession.sourceType !== 'default')
-    ) {
-      return t('scheduledTasks.session.currentIneligible');
-    }
-    if (
-      formWorkspace?.cwd !== undefined &&
-      currentSession.workspaceCwd !== formWorkspace.cwd
-    ) {
-      return t('scheduledTasks.session.currentWorkspaceMismatch');
-    }
-    if (tasks?.some((task) => task.sessionId === currentSession.sessionId)) {
-      return t('scheduledTasks.session.currentAlreadyBound');
-    }
-    return null;
-  })();
 
   const updateReferencePickerPosition = useCallback(() => {
     const anchor = referencePopoverRef.current;
@@ -1133,15 +1106,6 @@ export function ScheduledTasksDialog({
       );
       return;
     }
-    if (!editingId && runDestination === 'current') {
-      if (currentSessionDisabledReason || !currentSession?.sessionId) {
-        setFormError(
-          currentSessionDisabledReason ??
-            t('scheduledTasks.session.currentUnavailable'),
-        );
-        return;
-      }
-    }
     if (
       runDestination === 'per_run' &&
       groupChoice === CREATE_GROUP_VALUE &&
@@ -1201,9 +1165,6 @@ export function ScheduledTasksDialog({
             ...(runDestination === 'per_run' && resolvedGroupId
               ? { groupId: resolvedGroupId }
               : {}),
-            ...(runDestination === 'current' && currentSession?.sessionId
-              ? { sessionId: currentSession.sessionId }
-              : {}),
           },
           formWorkspaceId,
         );
@@ -1220,8 +1181,6 @@ export function ScheduledTasksDialog({
   }, [
     actions,
     builder,
-    currentSession,
-    currentSessionDisabledReason,
     editingId,
     formWorkspaceCwd,
     formWorkspaceId,
@@ -1290,12 +1249,23 @@ export function ScheduledTasksDialog({
           await reload();
           return;
         }
+        const runPrompt = fresh.sessionId
+          ? buildScheduledTaskRunContent({
+              id: fresh.id,
+              name: fresh.name,
+              cron: fresh.cron,
+              triggeredAt: Date.now(),
+              trigger: 'manual',
+              sessionMode: 'persistent',
+              prompt: fresh.prompt,
+            })
+          : fresh.prompt;
         if (fresh.recurring) {
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
           // history still catches up on the next refresh.
-          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          await onRunPrompt(runPrompt, fresh.sessionId);
           try {
             await actions.runScheduledTask(fresh.id, task.workspaceId);
             await reload();
@@ -1312,7 +1282,7 @@ export function ScheduledTasksDialog({
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
-            await onRunPrompt(fresh.prompt, fresh.sessionId);
+            await onRunPrompt(runPrompt, fresh.sessionId);
           } catch (err) {
             onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
             return;
@@ -1329,17 +1299,11 @@ export function ScheduledTasksDialog({
 
   const handleDelete = useCallback(
     async (task: DaemonScheduledTask) => {
-      // Truncate: an unnamed task falls back to its prompt, which can be up to
-      // MAX_PROMPT_LENGTH — too long for a confirm() dialog.
-      const raw = task.name || task.prompt;
-      const label = raw.length > 60 ? `${raw.slice(0, 57)}…` : raw;
-      if (!window.confirm(t('scheduledTasks.deleteConfirm', { name: label }))) {
-        return;
-      }
       setBusyId(taskKey(task));
       try {
         await actions.deleteScheduledTask(task.id, task.workspaceId);
         await reload();
+        if (mountedRef.current) setDeleteTarget(null);
       } catch (err) {
         onError(err, t('scheduledTasks.error.deleteFailed'));
       } finally {
@@ -1412,6 +1376,16 @@ export function ScheduledTasksDialog({
         )
       : null;
 
+  const deleteTargetRawLabel = deleteTarget
+    ? (deleteTarget.name || deleteTarget.prompt || deleteTarget.id)
+        .replace(/\s+/g, ' ')
+        .trim()
+    : '';
+  const deleteTargetLabel =
+    deleteTargetRawLabel.length > 80
+      ? `${deleteTargetRawLabel.slice(0, 77)}…`
+      : deleteTargetRawLabel;
+
   return (
     <div className={styles.root}>
       <div className={styles.intro}>{t('scheduledTasks.subtitle')}</div>
@@ -1452,11 +1426,12 @@ export function ScheduledTasksDialog({
           title={t(
             editingId ? 'scheduledTasks.editTitle' : 'scheduledTasks.new',
           )}
-          size="md"
+          size="lg"
+          maxHeight="viewport"
           onClose={resetForm}
           dismissible={!submitting}
         >
-          <div className={styles.formFields}>
+          <div className={`${styles.formFields} ${styles.compactForm}`}>
             {isMultiWorkspace && (
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>
@@ -1549,48 +1524,79 @@ export function ScheduledTasksDialog({
               </div>
             </div>
 
-            <label className={styles.field}>
-              <span className={styles.fieldLabel}>
+            <fieldset className={styles.runDestinationField}>
+              <legend
+                id="scheduled-task-run-destination-label"
+                className={styles.fieldLabel}
+              >
                 {t('scheduledTasks.runIn')}
-              </span>
-              <select
-                className={styles.select}
+              </legend>
+              <RadioGroup
+                className={styles.runDestinationGrid}
+                aria-labelledby="scheduled-task-run-destination-label"
                 value={runDestination}
-                onChange={(event) => {
-                  const value = event.target.value;
+                onValueChange={(value) => {
                   setRunDestination(
-                    value === 'current' || value === 'dedicated'
-                      ? value
-                      : 'per_run',
+                    value === 'dedicated' ? 'dedicated' : 'per_run',
                   );
                 }}
               >
-                <option value="per_run">
-                  {t('scheduledTasks.sessionMode.perRun')}
-                </option>
-                <option value="dedicated">
-                  {t('scheduledTasks.sessionMode.persistent')}
-                </option>
-                {!editingId && currentSessionSchedulingAvailable && (
-                  <option
-                    value="current"
-                    disabled={currentSessionDisabledReason !== null}
+                <div
+                  className={styles.runDestinationOption}
+                  data-selected={runDestination === 'per_run'}
+                >
+                  <RadioGroupItem
+                    id="scheduled-task-run-per-run"
+                    value="per_run"
+                    className={styles.runDestinationRadio}
+                    data-web-shell-run-destination="per_run"
+                  />
+                  <label
+                    className={styles.runDestinationLabel}
+                    htmlFor="scheduled-task-run-per-run"
                   >
-                    {t('scheduledTasks.session.current')}
-                  </option>
-                )}
-              </select>
-              <span className={styles.fieldHint}>
-                {runDestination === 'current'
-                  ? (currentSessionDisabledReason ??
-                    t('scheduledTasks.session.currentHint'))
-                  : t(
-                      runDestination === 'per_run'
-                        ? 'scheduledTasks.sessionMode.perRun.hint'
-                        : 'scheduledTasks.sessionMode.persistent.hint',
-                    )}
-              </span>
-            </label>
+                    <span className={styles.runDestinationIcon} aria-hidden>
+                      <MessageSquarePlusIcon />
+                    </span>
+                    <span className={styles.runDestinationCopy}>
+                      <span className={styles.runDestinationTitle}>
+                        {t('scheduledTasks.sessionMode.perRun')}
+                      </span>
+                      <span className={styles.runDestinationDescription}>
+                        {t('scheduledTasks.sessionMode.perRun.description')}
+                      </span>
+                    </span>
+                  </label>
+                </div>
+                <div
+                  className={styles.runDestinationOption}
+                  data-selected={runDestination === 'dedicated'}
+                >
+                  <RadioGroupItem
+                    id="scheduled-task-run-dedicated"
+                    value="dedicated"
+                    className={styles.runDestinationRadio}
+                    data-web-shell-run-destination="dedicated"
+                  />
+                  <label
+                    className={styles.runDestinationLabel}
+                    htmlFor="scheduled-task-run-dedicated"
+                  >
+                    <span className={styles.runDestinationIcon} aria-hidden>
+                      <MessagesSquareIcon />
+                    </span>
+                    <span className={styles.runDestinationCopy}>
+                      <span className={styles.runDestinationTitle}>
+                        {t('scheduledTasks.sessionMode.persistent')}
+                      </span>
+                      <span className={styles.runDestinationDescription}>
+                        {t('scheduledTasks.sessionMode.persistent.description')}
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </RadioGroup>
+            </fieldset>
 
             {runDestination === 'per_run' && (
               <div className={styles.routingFields}>
@@ -1929,7 +1935,7 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.iconAction}
-                    onClick={() => void handleDelete(task)}
+                    onClick={() => setDeleteTarget(task)}
                     disabled={busy}
                     title={t('scheduledTasks.delete')}
                     aria-label={t('scheduledTasks.delete')}
@@ -2076,6 +2082,45 @@ export function ScheduledTasksDialog({
           );
         })}
       </div>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && busyId === null) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-destructive/10 text-destructive">
+              <Trash2Icon />
+            </AlertDialogMedia>
+            <AlertDialogTitle>
+              {t('scheduledTasks.deleteConfirmTitle')}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('scheduledTasks.deleteConfirm', {
+                name: deleteTargetLabel,
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busyId !== null}>
+              {t('scheduledTasks.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busyId !== null}
+              onClick={(event) => {
+                event.preventDefault();
+                if (deleteTarget) void handleDelete(deleteTarget);
+              }}
+            >
+              {busyId !== null ? <Spinner data-icon="inline-start" /> : null}
+              {t('scheduledTasks.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

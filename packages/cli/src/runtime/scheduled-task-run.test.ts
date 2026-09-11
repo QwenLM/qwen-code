@@ -48,6 +48,21 @@ describe('scheduled task run metadata', () => {
     expect(prompt).toMatch(/\n\nline one\nline two$/);
   });
 
+  it('marks a persistent run as reusing the task conversation', () => {
+    const prompt = buildScheduledTaskRunPrompt({
+      id: 'task-3',
+      name: 'Daily restart',
+      cron: '0 9 * * *',
+      prompt: 'restart the server',
+      triggeredAt: 0,
+      trigger: 'scheduled',
+      sessionMode: 'persistent',
+    });
+
+    expect(prompt).toContain('Session: reuse the task conversation\n');
+    expect(prompt).toMatch(/\n\nrestart the server$/);
+  });
+
   it('titles a run session with the task label and local trigger time', () => {
     const at = new Date(2026, 7, 26, 16, 0);
     expect(

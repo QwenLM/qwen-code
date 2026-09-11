@@ -35,7 +35,9 @@ export function sessionMatchesGitQuery(
 /**
  * The sidebar's session-source scope: the "channel" tab lists only
  * channel-source sessions, the "default" tab lists unattributed (legacy)
- * and default-source ones, and no filter lists everything.
+ * and default-source ones plus fixed scheduled-task controllers, and no filter
+ * lists everything. Callers merging persisted search hits must separately
+ * require catalog proof for a scheduled-task controller.
  */
 export function sessionMatchesSource(
   session: DaemonSessionSummary,
@@ -43,7 +45,11 @@ export function sessionMatchesSource(
 ): boolean {
   if (source === 'channel') return session.sourceType === 'channel';
   if (source === 'default') {
-    return session.sourceType === undefined || session.sourceType === 'default';
+    return (
+      session.sourceType === undefined ||
+      session.sourceType === 'default' ||
+      session.sourceType === 'scheduled_task'
+    );
   }
   return true;
 }
@@ -75,7 +81,12 @@ export function mergeSessionContentHits(
   for (const [sessionId, hit] of hits) {
     if (seen.has(sessionId)) continue;
     const catalogEntry = catalogById.get(sessionId);
-    if (!catalogEntry && !sessionMatchesSource(hit.session, source)) continue;
+    if (!catalogEntry) {
+      if (source === 'default' && hit.session.sourceType === 'scheduled_task') {
+        continue;
+      }
+      if (!sessionMatchesSource(hit.session, source)) continue;
+    }
     merged.push(catalogEntry ?? mapSession?.(hit.session) ?? hit.session);
   }
   return merged;

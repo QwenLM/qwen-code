@@ -4685,16 +4685,33 @@ describe('WebShellSidebar session source switch', () => {
         workspaceCwd: '/tmp/project',
         sourceType: 'channel',
       },
+      {
+        sessionId: 'scheduled-task-session',
+        displayName: 'Daily restart',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      },
     );
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
     expect(container.textContent).toContain('Task session');
+    expect(container.textContent).toContain('Daily restart');
     expect(container.textContent).not.toContain('Channel session');
+    const scheduledTaskTitle = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((title) => title.textContent === 'Daily restart');
+    expect(
+      scheduledTaskTitle
+        ?.closest('[data-web-shell-session-row]')
+        ?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).not.toBeNull();
 
     await switchSessionSource('Channels');
 
     expect(container.textContent).not.toContain('Task session');
+    expect(container.textContent).not.toContain('Daily restart');
     expect(container.textContent).toContain('Channel session');
   });
 

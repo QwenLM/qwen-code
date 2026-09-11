@@ -17815,19 +17815,6 @@ export function App({
                           : ordinaryWorkspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
-                      currentSession={
-                        currentSessionSummary
-                          ? {
-                              ...currentSessionSummary,
-                              hasActivePrompt:
-                                currentSessionSummary.hasActivePrompt === true ||
-                                sessionHasActivePrompt,
-                            }
-                          : undefined
-                      }
-                      currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
-                        'scheduled_task_session_reuse',
-                      )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current

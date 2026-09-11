@@ -106,6 +106,12 @@ describe('sessionMatchesSource', () => {
       sessionMatchesSource(session({ sourceType: 'default' }), 'default'),
     ).toBe(true);
     expect(
+      sessionMatchesSource(
+        session({ sourceType: 'scheduled_task' }),
+        'default',
+      ),
+    ).toBe(true);
+    expect(
       sessionMatchesSource(session({ sourceType: 'channel' }), 'default'),
     ).toBe(false);
   });
@@ -164,6 +170,24 @@ describe('mergeSessionContentHits', () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0]).toBe(catalogEntry);
+  });
+
+  it('trusts catalogued fixed-task controllers but drops uncatalogued ones', () => {
+    const fixedController = session({
+      sessionId: 'fixed',
+      sourceType: 'scheduled_task',
+    });
+    const hits = new Map([
+      ['fixed', hit('fixed', { sourceType: 'scheduled_task' })],
+      ['stale', hit('stale', { sourceType: 'scheduled_task' })],
+    ]);
+    const merged = mergeSessionContentHits(
+      [fixedController],
+      [],
+      hits,
+      'default',
+    );
+    expect(merged).toEqual([fixedController]);
   });
 
   it('renders a session matched by both paths exactly once', () => {

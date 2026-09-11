@@ -1529,6 +1529,7 @@ interface CronFire {
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   sessionMode?: 'persistent' | 'per_run';
+  boundSessionId?: string;
   modelServiceId?: string;
   groupId?: string;
   name?: string;
@@ -9030,8 +9031,26 @@ export class Session implements SessionContext {
         void this.#dispatchCronToFreshSession(job);
         return;
       }
+      const prompt =
+        !job.missed &&
+        (job.sessionMode === 'persistent' ||
+          (job.sessionMode === undefined &&
+            job.boundSessionId !== undefined)) &&
+        job.id &&
+        job.cronExpr !== '@wakeup' &&
+        !detectAutonomousSentinel(job.prompt)
+          ? buildScheduledTaskRunPrompt({
+              id: job.id,
+              name: job.name,
+              cron: job.cronExpr ?? '',
+              prompt: job.prompt,
+              triggeredAt: job.lastFiredAt ?? Date.now(),
+              trigger: 'scheduled',
+              sessionMode: 'persistent',
+            })
+          : job.prompt;
       this.#enqueueCronPrompt({
-        prompt: job.prompt,
+        prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),

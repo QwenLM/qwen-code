@@ -711,6 +711,7 @@ describe('scheduled-tasks routes', () => {
     expect(unsafeGroup.status).toBe(400);
     expect(unsafeGroup.body.code).toBe('invalid_group_id');
 
+    h.bridge.markSessionCatalogChanged.mockClear();
     const persistent = await request(h.app)
       .patch(`/scheduled-tasks/${created.body.id}`)
       .send({ sessionMode: 'persistent' });
@@ -720,6 +721,15 @@ describe('scheduled-tasks routes', () => {
       modelServiceId: null,
       groupId: null,
     });
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+
+    h.bridge.markSessionCatalogChanged.mockClear();
+    const perRun = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ sessionMode: 'per_run' });
+    expect(perRun.status).toBe(200);
+    expect(perRun.body.sessionMode).toBe('per_run');
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
   });
 
   it('restores a per-run one-shot when fresh-session admission fails', async () => {

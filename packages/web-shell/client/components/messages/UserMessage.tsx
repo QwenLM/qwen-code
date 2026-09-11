@@ -38,6 +38,10 @@ import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
+import {
+  parseScheduledTaskRunContent,
+  type ScheduledTaskRunContent,
+} from '../../utils/scheduledTaskRunContent';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -67,51 +71,6 @@ interface UserMessageProps {
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
-}
-
-interface ScheduledTaskRunContent {
-  name: string;
-  id: string;
-  cron: string;
-  triggeredAt: string;
-  trigger: 'scheduled' | 'manual';
-  prompt: string;
-}
-
-// Mirrors `SCHEDULED_TASK_RUN_INSTRUCTION` in cli/src/runtime/scheduled-task-run.ts
-// (the client cannot import that package): the header `buildScheduledTaskRunPrompt`
-// puts ahead of the task's own instructions. Change both together.
-const SCHEDULED_TASK_RUN_INSTRUCTION =
-  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
-
-function parseScheduledTaskRunContent(
-  content: string,
-): ScheduledTaskRunContent | null {
-  const separator = `\n\n${SCHEDULED_TASK_RUN_INSTRUCTION}\n\n`;
-  const separatorIndex = content.indexOf(separator);
-  if (separatorIndex < 0) return null;
-  const lines = content.slice(0, separatorIndex).split('\n');
-  if (lines.length !== 6 || lines[5] !== 'Session: new chat for this run') {
-    return null;
-  }
-  const values = [
-    ['Scheduled task: ', lines[0]],
-    ['Task ID: ', lines[1]],
-    ['Schedule: ', lines[2]],
-    ['Triggered at: ', lines[3]],
-    ['Trigger: ', lines[4]],
-  ] as const;
-  if (values.some(([prefix, line]) => !line?.startsWith(prefix))) return null;
-  const trigger = lines[4]!.slice('Trigger: '.length);
-  if (trigger !== 'scheduled' && trigger !== 'manual') return null;
-  return {
-    name: lines[0]!.slice('Scheduled task: '.length),
-    id: lines[1]!.slice('Task ID: '.length),
-    cron: lines[2]!.slice('Schedule: '.length),
-    triggeredAt: lines[3]!.slice('Triggered at: '.length),
-    trigger,
-    prompt: content.slice(separatorIndex + separator.length),
-  };
 }
 
 function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
@@ -153,7 +112,11 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
           )}
         </span>
         <span className={styles.scheduledTaskBadge}>
-          {t('scheduledTasks.sessionMode.perRun')}
+          {t(
+            run.sessionMode === 'persistent'
+              ? 'scheduledTasks.sessionMode.persistent'
+              : 'scheduledTasks.sessionMode.perRun',
+          )}
         </span>
       </div>
       <div className={styles.scheduledTaskId}>

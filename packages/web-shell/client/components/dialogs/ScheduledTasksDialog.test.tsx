@@ -78,16 +78,6 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
-    currentSession?: {
-      sessionId: string;
-      workspaceCwd: string;
-      parentSessionId?: string;
-      sourceType?: string;
-      sourceId?: string;
-      hasActivePrompt?: boolean;
-      pendingInteractionCount?: number;
-    };
-    currentSessionSchedulingAvailable?: boolean;
     lockedWorkspace?: {
       id: string;
       cwd: string;
@@ -127,10 +117,6 @@ async function mount(
               onRunPrompt={nextOpts.onRunPrompt ?? vi.fn()}
               onCreateViaChat={vi.fn()}
               onOpenSession={nextOpts.onOpenSession}
-              currentSession={nextOpts.currentSession}
-              currentSessionSchedulingAvailable={
-                nextOpts.currentSessionSchedulingAvailable
-              }
               lockedWorkspace={nextOpts.lockedWorkspace}
               onError={nextOpts.onError ?? vi.fn()}
             />
@@ -196,10 +182,10 @@ function findFrequencySelect(): HTMLSelectElement | undefined {
   );
 }
 
-function findSessionModeSelect(): HTMLSelectElement | undefined {
-  return Array.from(document.querySelectorAll('select')).find(
-    (select) => !!select.querySelector('option[value="per_run"]'),
-  );
+function findRunDestination(
+  value: 'per_run' | 'dedicated',
+): HTMLButtonElement | null {
+  return document.querySelector(`[data-web-shell-run-destination="${value}"]`);
 }
 
 function deferred<T = unknown>() {
@@ -250,12 +236,6 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
-  const currentSession = {
-    sessionId: '10000000-0000-4000-8000-000000000001',
-    workspaceCwd: '/repo/main',
-    sourceType: 'default',
-  };
-
   async function enterPromptAndCreate(value: string) {
     const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
     if (!prompt) throw new Error('prompt editor not found');
@@ -267,26 +247,17 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
   }
 
-  it('hides session binding without the daemon capability', async () => {
-    await mount([], { currentSession });
+  it('offers only per-run and dedicated destinations', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
 
     click(findButton('New scheduled task'));
-
+    expect(
+      document.querySelectorAll('[data-web-shell-run-destination]'),
+    ).toHaveLength(2);
+    expect(findRunDestination('per_run')?.dataset['state']).toBe('checked');
+    expect(findRunDestination('dedicated')).not.toBeNull();
     expect(document.body.textContent).not.toContain('Current conversation');
-  });
-
-  it('defaults to a fresh conversation per run and omits sessionId', async () => {
-    actions.createScheduledTask.mockResolvedValue(baseTask({}));
-    await mount([], {
-      currentSession,
-      currentSessionSchedulingAvailable: true,
-    });
-
-    click(findButton('New scheduled task'));
-    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
-      (select) => select.querySelector('option[value="current"]'),
-    );
-    expect(sessionSelect?.value).toBe('per_run');
     await enterPromptAndCreate('continue later');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
@@ -298,136 +269,22 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
-  it('sends the outer current session only after an explicit selection', async () => {
+  it('creates a dedicated destination as a persistent task', async () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
-    await mount([], {
-      currentSession,
-      currentSessionSchedulingAvailable: true,
-    });
+    await mount([]);
 
     click(findButton('New scheduled task'));
-    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
-      (select) => select.querySelector('option[value="current"]'),
-    );
-    act(() => {
-      sessionSelect!.value = 'current';
-      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    await enterPromptAndCreate('continue later');
+    click(findRunDestination('dedicated') ?? undefined);
+    await enterPromptAndCreate('continue together');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: currentSession.sessionId,
-        sessionMode: 'persistent',
-      }),
-      undefined,
-    );
-  });
-
-  it('returns to a fresh session per run when the capability disappears', async () => {
-    actions.createScheduledTask.mockResolvedValue(baseTask({}));
-    const { rerender } = await mount([], {
-      currentSession,
-      currentSessionSchedulingAvailable: true,
-    });
-
-    click(findButton('New scheduled task'));
-    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
-      (select) => select.querySelector('option[value="current"]'),
-    );
-    act(() => {
-      sessionSelect!.value = 'current';
-      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    await rerender({ currentSession });
-    expect(document.querySelector('option[value="current"]')).toBeNull();
-    await enterPromptAndCreate('continue later');
-
-    expect(actions.createScheduledTask).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionMode: 'per_run' }),
+      expect.objectContaining({ sessionMode: 'persistent' }),
       undefined,
     );
     expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
       'sessionId',
     );
   });
-
-  it('reenables the current conversation when its interaction resolves', async () => {
-    const { rerender } = await mount([], {
-      currentSession: { ...currentSession, pendingInteractionCount: 1 },
-      currentSessionSchedulingAvailable: true,
-    });
-
-    click(findButton('New scheduled task'));
-    expect(
-      document.querySelector<HTMLOptionElement>('option[value="current"]')
-        ?.disabled,
-    ).toBe(true);
-    await rerender({
-      currentSession: { ...currentSession, pendingInteractionCount: 0 },
-      currentSessionSchedulingAvailable: true,
-    });
-    expect(
-      document.querySelector<HTMLOptionElement>('option[value="current"]')
-        ?.disabled,
-    ).toBe(false);
-  });
-
-  it.each([
-    ['missing', undefined, [], undefined],
-    ['busy', { ...currentSession, hasActivePrompt: true }, [], undefined],
-    [
-      'pending interaction',
-      { ...currentSession, pendingInteractionCount: 1 },
-      [],
-      undefined,
-    ],
-    [
-      'child session',
-      { ...currentSession, parentSessionId: 'parent-1' },
-      [],
-      undefined,
-    ],
-    [
-      'channel source',
-      { ...currentSession, sourceType: 'channel' },
-      [],
-      undefined,
-    ],
-    [
-      'workspace mismatch',
-      currentSession,
-      [],
-      {
-        id: 'other',
-        cwd: '/repo/other',
-        primary: false,
-        trusted: true,
-        kind: 'ordinary' as const,
-      },
-    ],
-    [
-      'existing task binding',
-      currentSession,
-      [baseTask({ sessionId: currentSession.sessionId })],
-      undefined,
-    ],
-  ])(
-    'disables current-session binding for %s',
-    async (_name, session, tasks, lockedWorkspace) => {
-      await mount(tasks, {
-        currentSession: session,
-        currentSessionSchedulingAvailable: true,
-        lockedWorkspace,
-      });
-
-      click(findButton('New scheduled task'));
-      const option = document.querySelector<HTMLOptionElement>(
-        'option[value="current"]',
-      );
-      expect(option?.disabled).toBe(true);
-    },
-  );
 
   it('uses flat icons for task actions and session mode status', async () => {
     await mount([baseTask({ sessionMode: 'per_run' })]);
@@ -465,7 +322,7 @@ describe('ScheduledTasksDialog editing', () => {
     await mount([]);
     click(findButton('New scheduled task'));
 
-    expect(findSessionModeSelect()?.value).toBe('per_run');
+    expect(findRunDestination('per_run')?.dataset['state']).toBe('checked');
     const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
     act(() => {
       prompt.textContent = 'review pull requests';
@@ -1225,7 +1082,12 @@ describe('ScheduledTasksDialog run now', () => {
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
     expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
-    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^Scheduled task: Digest\nTask ID: t1\nSchedule: 30 12 \* \* 1-5\nTriggered at: .+\nTrigger: manual\nSession: reuse the task conversation\n\nThis is a scheduled task run\. Execute the instructions below now\. Do not create or modify a schedule unless the instructions explicitly ask you to\.\n\ndo it$/,
+      ),
+      'sess-9',
+    );
   });
 
   it('passes a null sessionId through for an unbound task', async () => {
@@ -1266,7 +1128,10 @@ describe('ScheduledTasksDialog run now', () => {
     });
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      expect.stringContaining('\n\ndo it'),
+      'sess-9',
+    );
     expect(actions.runScheduledTask).not.toHaveBeenCalled(); // no phantom record
     expect(onError).toHaveBeenCalled();
   });
@@ -1333,7 +1198,10 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
-    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      expect.stringContaining('\n\ndo it'),
+      'sess-9',
+    );
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.stringContaining('never ran'),
@@ -2033,11 +1901,29 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       'id-other',
     );
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     click(document.querySelector('[aria-label="Delete"]'));
+    const alertDialog = document.querySelector('[role="alertdialog"]');
+    expect(alertDialog?.textContent).toContain('Delete scheduled task');
+    expect(alertDialog?.textContent).toContain('Second task');
+    expect(actions.deleteScheduledTask).not.toHaveBeenCalled();
+    click(
+      Array.from(alertDialog?.querySelectorAll('button') ?? []).find(
+        (button) => button.textContent?.trim() === 'Cancel',
+      ),
+    );
+    await flush();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(actions.deleteScheduledTask).not.toHaveBeenCalled();
+
+    click(document.querySelector('[aria-label="Delete"]'));
+    const reopenedDialog = document.querySelector('[role="alertdialog"]');
+    click(
+      Array.from(reopenedDialog?.querySelectorAll('button') ?? []).find(
+        (button) => button.textContent?.trim() === 'Delete',
+      ),
+    );
     await flush();
     expect(actions.deleteScheduledTask).toHaveBeenCalledWith('s1', 'id-other');
-    confirmSpy.mockRestore();
   });
 
   it('pins the workspace picker read-only while editing', async () => {

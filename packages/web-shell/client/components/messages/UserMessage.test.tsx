@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { buildScheduledTaskRunContent } from '../../utils/scheduledTaskRunContent';
 import { UserMessage } from './UserMessage';
 
 (
@@ -117,6 +118,32 @@ describe('UserMessage', () => {
       'Do not create or modify a schedule',
     );
     expect(renderUserMessageContent).not.toHaveBeenCalled();
+  });
+
+  it('renders persistent scheduled-task context with a fixed-session badge', () => {
+    const content = buildScheduledTaskRunContent({
+      id: 'task-3',
+      name: 'Daily\n\u001b[31mrestart\u001b[0m',
+      cron: '0 9 * * *',
+      triggeredAt: Date.parse('2026-09-11T01:00:00.000Z'),
+      trigger: 'scheduled',
+      sessionMode: 'persistent',
+      prompt: 'restart the server',
+    });
+    const container = render(
+      <I18nProvider language="zh-CN">
+        <UserMessage content={content} />
+      </I18nProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-run-message]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('定时任务运行');
+    expect(container.textContent).toContain('固定会话');
+    expect(container.textContent).not.toContain('每次新会话');
+    expect(container.textContent).toContain('Daily restart');
+    expect(container.textContent).toContain('restart the server');
   });
 
   it('linkifies URLs inside a scheduled-task prompt', () => {

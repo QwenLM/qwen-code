@@ -4428,6 +4428,122 @@ describe('Session', () => {
     expect(observedStops).toEqual([runtimeDir]);
   });
 
+  it.each([
+    {
+      label: 'an explicit persistent task',
+      mode: { sessionMode: 'persistent' as const },
+    },
+    {
+      label: 'a legacy bound task',
+      mode: { boundSessionId: 'test-session-id' },
+    },
+  ])('renders $label with its task context', async ({ mode }) => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            name: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode?: 'persistent';
+            boundSessionId?: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            name: 'Daily restart',
+            prompt: 'restart the server',
+            cronExpr: '0 9 * * *',
+            lastFiredAt: 123,
+            ...mode,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    session.startCronScheduler();
+
+    const expected =
+      'Scheduled task: Daily restart\n' +
+      'Task ID: task-1\n' +
+      'Schedule: 0 9 * * *\n' +
+      'Triggered at: 1970-01-01T00:00:00.123Z\n' +
+      'Trigger: scheduled\n' +
+      'Session: reuse the task conversation\n\n' +
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
+      'restart the server';
+    await vi.waitFor(() => {
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: expected },
+          _meta: { source: 'cron' },
+        },
+      });
+    });
+    await vi.waitFor(() => {
+      const sentToModel = textParts(firstSentMessage()).join('');
+      expect(sentToModel).toContain(expected);
+    });
+  });
+
+  it('keeps a legacy unbound scheduled fire as a plain prompt', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            name: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+          }) => void,
+        ) => {
+          callback({
+            id: 'legacy-task',
+            name: 'Legacy task',
+            prompt: 'run the legacy task',
+            cronExpr: '0 9 * * *',
+            lastFiredAt: 123,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'run the legacy task' },
+          _meta: { source: 'cron' },
+        },
+      });
+    });
+    expect(textParts(firstSentMessage()).join('')).not.toContain(
+      'Scheduled task:',
+    );
+  });
+
   it('dispatches a per-run scheduled task into a fresh daemon session', async () => {
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
     const scheduler = {

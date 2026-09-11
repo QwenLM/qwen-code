@@ -26,6 +26,7 @@ interface DialogShellProps {
   title: string;
   subtitle?: string;
   size?: DialogSize;
+  maxHeight?: 'default' | 'viewport';
   allowFullscreen?: boolean;
   dismissible?: boolean;
   onClose: () => void;
@@ -80,6 +81,7 @@ export function DialogShell({
   title,
   subtitle,
   size = 'md',
+  maxHeight = 'default',
   allowFullscreen = false,
   dismissible = true,
   onClose,
@@ -190,10 +192,14 @@ export function DialogShell({
           }}
           className={`${themeClass} ${
             theme === WebShellThemeId.Dark ? 'dark' : ''
-          } flex max-h-[min(80vh,calc(100vh-48px))] flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
+          } flex flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
             fullscreen
               ? 'h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
-              : sizeClass[size]
+              : `${
+                  maxHeight === 'viewport'
+                    ? 'max-h-[calc(100vh-32px)]'
+                    : 'max-h-[min(80vh,calc(100vh-48px))]'
+                } ${sizeClass[size]}`
           }`}
           aria-label={title}
           data-keyboard-scope

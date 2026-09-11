@@ -1497,6 +1497,7 @@ function registerScheduledTaskCrudRoutes(
       let blockedSessionModeUnavailable = false;
       let blockedSessionModeUnbound = false;
       let blockedGroupNotFound = false;
+      let sessionCatalogMembershipChanged = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -1573,6 +1574,9 @@ function registerScheduledTaskCrudRoutes(
                 blockedSessionModeDelivery = true;
                 return tasks;
               }
+              sessionCatalogMembershipChanged =
+                (current.sessionMode !== 'per_run') !==
+                (next.sessionMode !== 'per_run');
               // Re-seat the task's schedule anchor to "now" whenever an edit would
               // otherwise let the scheduler retroactively fire an already-past slot.
               const justReEnabled =
@@ -1727,6 +1731,9 @@ function registerScheduledTaskCrudRoutes(
           .status(404)
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
+      }
+      if (sessionCatalogMembershipChanged) {
+        bridge?.markSessionCatalogChanged?.();
       }
       // Keep the bound session's display name in sync with the task's effective
       // label (its name, or its prompt when unnamed) — the session was named
