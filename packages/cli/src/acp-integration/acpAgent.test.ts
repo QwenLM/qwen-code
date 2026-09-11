@@ -2285,6 +2285,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue('test-model'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
         syncAfterAuthRefresh: vi.fn(),
@@ -17460,6 +17461,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('qwen/settings getCore and setCoreValue resolve the active target dir when cwd is omitted', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/worktree/.qwen');
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/worktree/.qwen',
+    );
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'workspace',
+      key: 'model.name',
+      value: 'qwen3.7-max',
+    });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/worktree/.qwen',
+    );
+
+    // An explicit cwd still wins over the target dir.
+    await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith('/explicit');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('qwen/permissions/getSettings returns user workspace merged and trust state', async () => {
     const settings = makeCoreSettings();
