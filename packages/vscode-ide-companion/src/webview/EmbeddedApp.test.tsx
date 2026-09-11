@@ -170,9 +170,9 @@ afterEach(() => {
 describe('EmbeddedApp host wiring', () => {
   it('attributes its sessions to the VS Code channel', async () => {
     const props = await renderApp();
-    // The daemon is shared with the CLI and the browser Web Shell for this
-    // workspace; without a distinct source type the panel cannot tell its own
-    // conversations apart from theirs.
+    // The stamp records creator attribution only; the panel's history list
+    // does not filter on it. The stamp still keeps panel-created sessions out
+    // of the browser Web Shell's 'default'-scoped lists.
     expect(props['sessionSourceType']).toBe('vscode');
   });
 
@@ -822,6 +822,9 @@ describe('EmbeddedApp host wiring', () => {
     // sessions, and pre-attribution conversations all persist under the same
     // workspace. Scoping the history query to the vscode source hid
     // everything else, including the entire pre-upgrade history (#11574).
+    // Machine-owned rows — channel conversations, scheduled-task keepalives,
+    // and sub-agent children — must be dropped from the rendered list so they
+    // are never offered the panel's rename/permanent-delete actions.
     sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [
         {
@@ -850,6 +853,27 @@ describe('EmbeddedApp host wiring', () => {
           sourceType: 'default',
           updatedAt: '2026-08-03T12:00:00.000Z',
         },
+        {
+          sessionId: 'channel-1',
+          workspaceCwd: '/workspace',
+          displayName: 'DingTalk channel',
+          sourceType: 'channel',
+          updatedAt: '2026-09-08T12:00:00.000Z',
+        },
+        {
+          sessionId: 'scheduled-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Scheduled task',
+          sourceType: 'scheduled_task',
+          updatedAt: '2026-09-07T12:00:00.000Z',
+        },
+        {
+          sessionId: 'subagent-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Sub-agent child',
+          parentSessionId: 'cli-1',
+          updatedAt: '2026-09-06T12:00:00.000Z',
+        },
       ],
       nextCursor: undefined,
     });
@@ -877,11 +901,71 @@ describe('EmbeddedApp host wiring', () => {
     expect(document.querySelector('[data-session-id="cli-1"]')).not.toBeNull();
     expect(document.querySelector('[data-session-id="web-1"]')).not.toBeNull();
 
+    // Machine-owned rows must never render as ordinary chats.
+    expect(
+      document.querySelector('[data-session-id="channel-1"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-session-id="scheduled-1"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-session-id="subagent-1"]'),
+    ).toBeNull();
+
     // The request itself must not scope by source — that filter is what hid
     // the CLI and pre-attribution sessions.
     for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
       expect((options as { sourceType?: string }).sourceType).toBeUndefined();
       expect(options).toMatchObject({ archiveState: 'active' });
+    }
+  });
+
+  it('ignores a legacy conversation allowlist without re-scoping the query', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [],
+      nextCursor: undefined,
+    });
+    await renderApp();
+    // A pre-#11574 host shipped `legacyConversationIds` on bootstrap and the
+    // panel scanned them with a source-scoped (`sourceType: 'default'`)
+    // query. That machinery is removed; even a bootstrap that still carries
+    // the field must not re-wire a source-scoped scan.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              workspaceCwd: '/workspace',
+              sessionId: 'session-1',
+              hostKind: 'panel',
+              legacyConversationIds: ['conversation-legacy-1'],
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    // Open/close three times: a reverted once-per-bootstrap scan guard would
+    // only fire the source-scoped query on the first open, so assert across
+    // all three.
+    for (let i = 0; i < 3; i += 1) {
+      await act(async () => {
+        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+      await act(async () => {
+        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+    }
+    for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
+      expect((options as { sourceType?: string }).sourceType).toBeUndefined();
     }
   });
 });

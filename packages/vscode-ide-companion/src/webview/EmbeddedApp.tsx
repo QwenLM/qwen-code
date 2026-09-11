@@ -50,6 +50,23 @@ const COMPOSER_TOOLBAR_ACTIONS = [
 const isVsCodeModelVisible = (model: { id: string }) =>
   !isDiscontinuedModel(model.id);
 
+/**
+ * Whether a catalog row may render as an ordinary chat in the history list.
+ * The unfiltered workspace catalog also returns machine-owned rows — channel
+ * conversations, scheduled-task keepalives, side-task branches, and
+ * sub-agent children — that must never surface here: the panel's
+ * rename/permanent-delete would otherwise reach rows another surface owns,
+ * with no source-ownership check on the daemon side.
+ */
+function isPresentableHistorySession(session: DaemonSessionSummary): boolean {
+  return (
+    session.parentSessionId === undefined &&
+    session.sourceType !== 'scheduled_task' &&
+    session.sourceType !== 'side_task' &&
+    session.sourceType !== 'channel'
+  );
+}
+
 /** Host-only slash entries. Built per language so the menu is not half-English. */
 function buildVsCodeSlashCommands(t: ChromeStrings) {
   return [
@@ -417,23 +434,49 @@ export function EmbeddedApp() {
       setSessionListLoading(true);
       setSessionListError(undefined);
       try {
-        const page = await daemonClient
-          .workspaceByCwd(runtime.workspaceCwd)
-          .listWorkspaceSessionsPage({
-            pageSize: 20,
-            cursor,
-            archiveState: 'active',
-            // Unfiltered on purpose: the daemon is shared with the CLI and
-            // the browser Web Shell for this workspace, and pre-attribution
-            // transcripts carry no source at all — a source-scoped query
-            // hides exactly the history an upgrade must not lose (#11574).
-          });
-        const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
+        // Unfiltered on purpose: the daemon is shared with the CLI and the
+        // browser Web Shell for this workspace, and pre-attribution
+        // transcripts carry no source at all — a source-scoped query hides
+        // exactly the history an upgrade must not lose (#11574).
+        //
+        // Dropping the source scope also moves this request off the daemon's
+        // metadata list path and onto `SessionService.listSessions`, whose
+        // cursor is a strict `mtime <` keyset that can silently skip rows
+        // sharing an mtime with a page boundary (e.g. a bulk-copied chats
+        // directory). The tie-safe alternative is the `organized` view, which
+        // full-scans the catalog on every open — a worse tradeoff for a
+        // history dropdown than that narrow edge case, so the weaker cursor is
+        // accepted here deliberately.
+        //
+        // The unfiltered catalog also returns machine-owned rows (channel
+        // conversations, scheduled-task keepalives, side-task branches, and
+        // sub-agent children). Those must not render as ordinary chats, so
+        // they are dropped before they reach the dropdown; client-side
+        // filtering shortens each page while the raw cursor still advances,
+        // so fetch until a full page of presentable rows is collected or the
+        // cursor is exhausted.
+        const HISTORY_PAGE_SIZE = 20;
+        let nextCursor = cursor;
+        const collected: DaemonSessionSummary[] = [];
+        do {
+          const page = await daemonClient
+            .workspaceByCwd(runtime.workspaceCwd)
+            .listWorkspaceSessionsPage({
+              pageSize: HISTORY_PAGE_SIZE,
+              cursor: nextCursor,
+              archiveState: 'active',
+            });
+          const pageSessions = Array.isArray(page.sessions)
+            ? page.sessions.filter(isPresentableHistorySession)
+            : [];
+          collected.push(...pageSessions);
+          nextCursor = page.nextCursor;
+        } while (nextCursor && collected.length < HISTORY_PAGE_SIZE);
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),
           );
-          for (const session of pageSessions) {
+          for (const session of collected) {
             merged.set(session.sessionId, session);
           }
           if (
@@ -449,7 +492,7 @@ export function EmbeddedApp() {
           }
           return Array.from(merged.values());
         });
-        setSessionCursor(page.nextCursor);
+        setSessionCursor(nextCursor);
       } catch (error) {
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),

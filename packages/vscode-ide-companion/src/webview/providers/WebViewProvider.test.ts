@@ -2396,6 +2396,33 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     });
   });
 
+  it('ships a bootstrap payload without the removed legacy allowlist', async () => {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+    // Scope the assertion to the bootstrap itself: any store read that a
+    // reverted #11495 scan would perform must not fire on `webShellReady`.
+    conversationStoreMocks.getAllConversations.mockClear();
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const bootstrap = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as {
+            type?: string;
+            data?: Record<string, unknown>;
+          },
+      )
+      .find((message) => message.type === 'webShellBootstrap');
+    expect(bootstrap).toBeDefined();
+    // The #11495 legacy allowlist was removed; the payload must not re-ship
+    // the ids that no consumer reads.
+    expect(bootstrap?.data?.legacyConversationIds).toBeUndefined();
+    // And the bootstrap must not re-read the host's local conversation store.
+    expect(conversationStoreMocks.getAllConversations).not.toHaveBeenCalled();
+  });
+
   it('restores a session id persisted under the pre-canonicalization key', async () => {
     await withSymlinkedWorkspace(async ({ alias, canonical }) => {
       // Someone who chatted in this folder before the state key was
