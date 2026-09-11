@@ -105,7 +105,10 @@ function selectInteractiveNodes(
   for (const node of nodes) {
     const keep =
       node.role === 'iframe' ||
-      (node.role !== undefined && INTERACTIVE_ROLES.has(node.role));
+      (node.role !== undefined && INTERACTIVE_ROLES.has(node.role)) ||
+      // AI mode marks clickable non-semantic elements with [cursor=pointer];
+      // without this the filter drops the ref the model is told to act on.
+      node.line.includes('[cursor=pointer]');
     if (keep) {
       selected.push({
         ...node,

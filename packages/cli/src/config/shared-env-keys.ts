@@ -66,6 +66,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // from repository content at all. prebuild.test.ts pins the membership
   // with both real symbols.
   'QWEN_REVIEW_PREBUILD',
+  // The automatic-review marker (commands/review/lib/docs-nav-profile.ts
+  // `automaticReviewRequested`) is an operator decision in the same class:
+  // it selects the reduced docs-nav profile, so a repository must not
+  // declare its own — possibly manual — review automatic and shrink the
+  // review of its own change to one reviewer with no reverse audit. CI
+  // welds it as a real step env, never a file.
+  'QWEN_REVIEW_AUTOMATIC',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -215,6 +222,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  'QWEN_SERVE_MAX_WORKSPACES',
   // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
   // every workspace's session attachments. A project `.env` redirecting it
   // would capture uploads for ALL workspaces the daemon serves — and reads

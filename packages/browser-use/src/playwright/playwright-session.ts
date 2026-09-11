@@ -400,9 +400,10 @@ export class PlaywrightSession {
     page.on('dialog', (dialog) => {
       tab.dialog = dialog;
     });
-    page.on('framenavigated', () => {
-      // Chrome resolves any open dialog when the page navigates away.
-      tab.dialog = undefined;
+    page.on('framenavigated', (frame) => {
+      // Chrome resolves any open dialog when the main frame navigates away;
+      // Playwright also emits framenavigated for subframes.
+      if (frame === page.mainFrame()) tab.dialog = undefined;
     });
     page.on('console', (message) => {
       const location = message.location();

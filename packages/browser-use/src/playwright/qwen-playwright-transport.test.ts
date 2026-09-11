@@ -24,6 +24,7 @@ import type {
   BridgeEventListener,
   ChromeBridge,
 } from '../bridge/index.js';
+import type { CdpMessage } from './browser-model.js';
 import {
   playwrightTransportAdapter,
   QwenPlaywrightTransport,
@@ -136,6 +137,45 @@ describe('QwenPlaywrightTransport', () => {
       'tabs.detach',
     ]);
     expect(transport.providerTabId('target-7')).toBeUndefined();
+  });
+
+  it('aborts the attachment when the tab is removed mid-attach', async () => {
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    const attached = deferred();
+    const releaseAttach = deferred();
+    vi.spyOn(bridge, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      if (method === 'tabs.attach') {
+        attached.resolve();
+        await releaseAttach.promise;
+      }
+      return result;
+    });
+    const transport = new QwenPlaywrightTransport(bridge);
+    const delivered: CdpMessage[] = [];
+    transport.onmessage = (message) => {
+      delivered.push(message as CdpMessage);
+    };
+    const registration = transport.registerTab(7).catch((error) => error);
+    await attached.promise;
+    bridge.emit({
+      type: 'event',
+      tabId: 7,
+      method: 'qwenBrowser.tabRemoved',
+      params: {},
+    });
+    releaseAttach.resolve();
+    expect(await registration).toMatchObject({
+      message: 'Tab 7 was removed during attachment',
+    });
+    expect(
+      delivered.filter(
+        (message) => message.method === 'Target.attachedToTarget',
+      ),
+    ).toEqual([]);
+    expect(transport.providerTabId('target-7')).toBeUndefined();
+    await transport.close();
   });
 
   it('waits for a pending release before reattaching the same tab', async () => {

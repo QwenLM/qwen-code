@@ -22,6 +22,7 @@ class ScreenshotBridge implements ChromeBridge {
   viewport = { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 };
   content = { x: 0, y: 0, width: 800, height: 1200 };
   pixelRatio = 2;
+  probeError: Error | undefined;
   captureData = jpeg(800, 600).toString('base64');
   onStart: () => void | Promise<void> = () => this.frame();
   onCapture: () => void | Promise<void> = () => undefined;
@@ -53,6 +54,7 @@ class ScreenshotBridge implements ChromeBridge {
             cssContentSize: this.content,
           };
         case 'Runtime.evaluate':
+          if (this.probeError !== undefined) throw this.probeError;
           return { result: { value: this.pixelRatio } };
         case 'Page.startScreencast':
           await this.onStart();
@@ -166,8 +168,8 @@ describe('Chrome screenshot acquisition', () => {
       origin: { x: 0, y: 0 },
     });
     expect(bridge.methods()).toEqual([
-      'Page.getLayoutMetrics',
       'Runtime.evaluate',
+      'Page.getLayoutMetrics',
       'Page.startScreencast',
       'Page.stopScreencast',
       'Page.screencastFrameAck',
@@ -209,6 +211,77 @@ describe('Chrome screenshot acquisition', () => {
         .filter(([, args]) => args?.method === 'Page.screencastFrameAck')
         .map(([, args]) => args?.params),
     ).toEqual([{ sessionId: 2 }, { sessionId: 3 }]);
+  });
+
+  it('falls back when a fresh frame disagrees with the measured origin', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.viewport.pageY = 700;
+    bridge.onStart = () =>
+      bridge.frame({
+        metadata: { timestamp: Date.now() / 1000, scrollOffsetY: 200 },
+      });
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    // The scrolled frame is acknowledged, not published: the fallback
+    // capture pins the document region the envelope reports.
+    expect(bridge.methods()).toContain('Page.screencastFrameAck');
+    expect(bridge.methods()).toContain('Page.captureScreenshot');
+    expect(image.origin).toEqual({ x: 0, y: 700 });
+    expect(bridge.listeners.size).toBe(0);
+  });
+
+  it('keeps the fast path when the frame matches the measured origin', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.viewport.pageY = 700;
+    bridge.onStart = () =>
+      bridge.frame({
+        metadata: { timestamp: Date.now() / 1000, scrollOffsetY: 700 },
+      });
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
+    expect(image.origin).toEqual({ x: 0, y: 700 });
+  });
+
+  it('captures without page script when the settle probe fails', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.probeError = new Error('Execution context was destroyed');
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    expect(bridge.methods()).not.toContain('Page.captureScreenshot');
+    expect(image).toMatchObject({
+      width: 800,
+      height: 600,
+      devicePixelRatio: 1,
+    });
+    expect(bridge.listeners.size).toBe(0);
+  });
+
+  it('measures the ratio from Chrome pixels when the probe fails on HiDPI', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.probeError = new Error('Execution context was destroyed');
+    bridge.onStart = () => {
+      throw new Error('Screencast unavailable');
+    };
+    bridge.captureData = jpeg(1600, 1200).toString('base64');
+    let captures = 0;
+    bridge.onCapture = () => {
+      // The mock reads captureData after this hook, so flip it only for the
+      // re-capture that follows the measurement.
+      captures += 1;
+      if (captures === 2)
+        bridge.captureData = jpeg(800, 600).toString('base64');
+    };
+    const image = await captureTabScreenshot(tab(), {}, bridge);
+    expect(image).toMatchObject({
+      width: 800,
+      height: 600,
+      devicePixelRatio: 2,
+    });
+    const scales = bridge.request.mock.calls
+      .filter(([, args]) => args?.method === 'Page.captureScreenshot')
+      .map(
+        ([, args]) => (args?.params as { clip: { scale: number } }).clip.scale,
+      );
+    expect(scales).toEqual([1, 0.5]);
+    expect(bridge.listeners.size).toBe(0);
   });
 
   it('stops an idle screencast after two seconds, then uses bounded capture', async () => {

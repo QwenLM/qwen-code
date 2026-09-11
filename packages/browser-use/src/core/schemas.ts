@@ -475,7 +475,10 @@ export const commandSchemas = {
   'locator.type': z
     .object({
       ...locatorFields,
-      value: z.string().max(1_000_000),
+      // pressSequentially pays a CDP round trip per character, so past this
+      // length the per-character budget cannot fit inside the 120s ceiling
+      // and typing would abort mid-string; fill has no per-character cost.
+      value: z.string().max(60_000),
       timeoutMs: timeoutMs.optional(),
     })
     .strict(),

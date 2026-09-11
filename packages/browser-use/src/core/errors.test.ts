@@ -54,12 +54,11 @@ describe('operation error classification', () => {
         new Error('locator.fill: Element is not an <input> element'),
       ),
     ).toMatchObject({ code: 'OPERATION_FAILED' });
-    expect(
-      sanitizeOperationError(
-        'locator.click',
-        new Error('locator.click: Timeout 5000ms exceeded'),
-      ),
-    ).toMatchObject({ code: 'OPERATION_TIMEOUT' });
+    const timeout = new Error('locator.click: Timeout 5000ms exceeded');
+    timeout.name = 'TimeoutError';
+    expect(sanitizeOperationError('locator.click', timeout)).toMatchObject({
+      code: 'OPERATION_TIMEOUT',
+    });
     expect(
       sanitizeOperationError(
         'locator.click',
@@ -72,8 +71,44 @@ describe('operation error classification', () => {
     expect(
       sanitizeOperationError(
         'locator.waitFor',
-        new Error('Unexpected token ">>>" while parsing css selector'),
+        new Error('locator.waitFor: frame was detached'),
       ),
     ).toMatchObject({ code: 'INVALID_LOCATOR' });
+  });
+
+  it('reports a crashed target as STALE_TAB', () => {
+    expect(
+      sanitizeOperationError('locator.click', new Error('Target crashed ')),
+    ).toMatchObject({ code: 'STALE_TAB' });
+    expect(
+      sanitizeOperationError('tab.screenshot', new Error('Page crashed')),
+    ).toMatchObject({ code: 'STALE_TAB' });
+    // ...even when the appended browser log quotes a selector.
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error('Target crashed {"method":"DOM.querySelector"}'),
+      ),
+    ).toMatchObject({ code: 'STALE_TAB' });
+  });
+
+  it('prefers Playwright error names over page-influenced message text', () => {
+    const closed = new Error('locator.click: watch out, no selector here');
+    closed.name = 'TargetClosedError';
+    expect(sanitizeOperationError('locator.click', closed)).toMatchObject({
+      code: 'STALE_TAB',
+    });
+    const timeout = new Error('locator.click: waiting for selector "button"');
+    timeout.name = 'TimeoutError';
+    expect(sanitizeOperationError('locator.click', timeout)).toMatchObject({
+      code: 'OPERATION_TIMEOUT',
+    });
+    // Page-authored text must not pick the reported code.
+    expect(
+      sanitizeOperationError(
+        'locator.evaluate',
+        new Error('page threw: invalid selector, timeout imminent'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
   });
 });

@@ -68,42 +68,54 @@ async function capture(
         timeoutMs,
       ),
     );
+  // A fresh screencast timestamp can still carry pre-scroll compositor
+  // pixels. Let painting catch up before measuring the page, but do not wait
+  // indefinitely in background tabs, and never let a broken page world take
+  // the capture down with it: the ratio is then measured from the captured
+  // pixels instead.
+  let probedRatio: number | undefined;
+  try {
+    const pixelRatio = record(
+      (
+        await send(
+          'Runtime.evaluate',
+          {
+            expression: `new Promise(resolve => {
+              let first = 0, second = 0;
+              const timer = setTimeout(finish, 250);
+              function finish() {
+                clearTimeout(timer);
+                cancelAnimationFrame(first);
+                cancelAnimationFrame(second);
+                resolve(window.devicePixelRatio);
+              }
+              first = requestAnimationFrame(() => {
+                second = requestAnimationFrame(finish);
+              });
+            })`,
+            awaitPromise: true,
+            returnByValue: true,
+          },
+          FRAME_TIMEOUT_MS,
+        )
+      ).result,
+    ).value;
+    if (
+      typeof pixelRatio === 'number' &&
+      Number.isFinite(pixelRatio) &&
+      pixelRatio > 0
+    )
+      probedRatio = pixelRatio;
+  } catch {
+    probedRatio = undefined;
+  }
+  let devicePixelRatio = probedRatio ?? 1;
   const layout = await send('Page.getLayoutMetrics');
   const viewport = record(layout.cssVisualViewport);
   const content = record(layout.cssContentSize);
   const viewportWidth = numberArg(viewport, 'clientWidth');
   const viewportHeight = numberArg(viewport, 'clientHeight');
   assertScreenshotDimensions(viewportWidth, viewportHeight, 'Viewport');
-  // A fresh screencast timestamp can still carry pre-scroll compositor pixels.
-  // Let painting catch up, but do not wait indefinitely in background tabs.
-  const pixelRatio = record(
-    (
-      await send('Runtime.evaluate', {
-        expression: `new Promise(resolve => {
-          let first = 0, second = 0;
-          const timer = setTimeout(finish, 250);
-          function finish() {
-            clearTimeout(timer);
-            cancelAnimationFrame(first);
-            cancelAnimationFrame(second);
-            resolve(window.devicePixelRatio);
-          }
-          first = requestAnimationFrame(() => {
-            second = requestAnimationFrame(finish);
-          });
-        })`,
-        awaitPromise: true,
-        returnByValue: true,
-      })
-    ).result,
-  ).value;
-  const devicePixelRatio =
-    typeof pixelRatio === 'number' &&
-    Number.isFinite(pixelRatio) &&
-    pixelRatio > 0
-      ? pixelRatio
-      : 1;
-  const scale = 1 / devicePixelRatio;
   const clip = isClip(args.clip) ? args.clip : undefined;
   const fullPage = args.fullPage === true;
   const constrained = fullPage || clip !== undefined;
@@ -125,27 +137,48 @@ async function capture(
     assertScreenshotBudget(width, height, fullPage ? 'Full-page' : 'Clip');
 
   let data: string | undefined;
-  if (!constrained && scale <= 1)
-    data = await viewportFrame(tab.providerTabId, bridge, send, width, height);
+  if (!constrained && devicePixelRatio >= 1)
+    data = await viewportFrame(
+      tab.providerTabId,
+      bridge,
+      send,
+      width,
+      height,
+      origin,
+    );
   if (data === undefined) {
-    const result = await send('Page.captureScreenshot', {
-      format: 'jpeg',
-      quality: 80,
-      captureBeyondViewport: constrained,
-      clip: {
-        x: origin.x,
-        y: origin.y,
-        width,
-        height,
-        scale,
-      },
-    });
-    if (typeof result.data !== 'string' || result.data.length === 0)
-      throw new BrowserRuntimeError(
-        'OPERATION_FAILED',
-        'Chrome returned no screenshot data',
-      );
-    data = result.data;
+    data = await captureRegion(
+      send,
+      constrained,
+      origin,
+      width,
+      height,
+      1 / devicePixelRatio,
+    );
+    if (probedRatio === undefined) {
+      // The settle probe failed, so the capture above assumed a ratio of 1;
+      // measure what Chrome actually produced and re-capture on HiDPI hosts
+      // instead of failing the capture or shipping rescaled pixels.
+      const measured = jpegDimensions(Buffer.from(data, 'base64'));
+      const implied = measured.width / width;
+      if (
+        (Math.abs(measured.width - Math.round(width)) > 1 ||
+          Math.abs(measured.height - Math.round(height)) > 1) &&
+        Number.isFinite(implied) &&
+        implied > 0 &&
+        Math.abs(implied - 1) > 0.01
+      ) {
+        devicePixelRatio = implied;
+        data = await captureRegion(
+          send,
+          constrained,
+          origin,
+          width,
+          height,
+          1 / implied,
+        );
+      }
+    }
   }
 
   const buffer = Buffer.from(data, 'base64');
@@ -182,12 +215,35 @@ async function capture(
   };
 }
 
+async function captureRegion(
+  send: SendCdp,
+  constrained: boolean,
+  origin: { x: number; y: number },
+  width: number,
+  height: number,
+  scale: number,
+): Promise<string> {
+  const result = await send('Page.captureScreenshot', {
+    format: 'jpeg',
+    quality: 80,
+    captureBeyondViewport: constrained,
+    clip: { x: origin.x, y: origin.y, width, height, scale },
+  });
+  if (typeof result.data !== 'string' || result.data.length === 0)
+    throw new BrowserRuntimeError(
+      'OPERATION_FAILED',
+      'Chrome returned no screenshot data',
+    );
+  return result.data;
+}
+
 async function viewportFrame(
   tabId: number,
   bridge: ChromeBridge,
   send: SendCdp,
   width: number,
   height: number,
+  origin: { x: number; y: number },
 ): Promise<string | undefined> {
   type Frame = { data: string; sessionId: number };
   let settle: (frame: Frame | undefined) => void = () => undefined;
@@ -209,22 +265,35 @@ async function viewportFrame(
     if (event.method !== 'Page.screencastFrame') return;
     const sessionId = params.sessionId;
     if (typeof sessionId !== 'number') return;
-    const timestamp = record(params.metadata).timestamp;
-    if (
+    const metadata = record(params.metadata);
+    const timestamp = metadata.timestamp;
+    const fresh =
       typeof timestamp === 'number' &&
       Number.isFinite(timestamp) &&
-      timestamp >= startedAt &&
+      timestamp >= startedAt;
+    // The origin was measured before this frame existed; a frame whose
+    // scroll offsets disagree with it depicts a different document region,
+    // so fall back to a capture whose clip pins the published region.
+    const moved =
+      (typeof metadata.scrollOffsetX === 'number' &&
+        Math.abs(metadata.scrollOffsetX - origin.x) > 1) ||
+      (typeof metadata.scrollOffsetY === 'number' &&
+        Math.abs(metadata.scrollOffsetY - origin.y) > 1);
+    if (
+      fresh &&
+      !moved &&
       typeof params.data === 'string' &&
       params.data.length > 0
     ) {
       settle({ data: params.data, sessionId });
-    } else {
-      void send(
-        'Page.screencastFrameAck',
-        { sessionId },
-        CLEANUP_TIMEOUT_MS,
-      ).catch(() => undefined);
+      return;
     }
+    void send(
+      'Page.screencastFrameAck',
+      { sessionId },
+      CLEANUP_TIMEOUT_MS,
+    ).catch(() => undefined);
+    if (fresh && moved) settle(undefined);
   });
   let frame: Frame | undefined;
   try {

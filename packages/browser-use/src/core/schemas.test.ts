@@ -187,6 +187,32 @@ describe('browser command schemas', () => {
     ).toBe(false);
   });
 
+  it('caps locator.type at the length its per-character budget can deliver', () => {
+    const steps = [{ kind: 'locator', selector: '#field' }];
+    expect(
+      commandSchemas['locator.type'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(60_000),
+      }).success,
+    ).toBe(true);
+    expect(
+      commandSchemas['locator.type'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(60_001),
+      }).success,
+    ).toBe(false);
+    // fill sets the value atomically and keeps the larger budget.
+    expect(
+      commandSchemas['locator.fill'].safeParse({
+        tabId: 'tab-1',
+        steps,
+        value: 'a'.repeat(100_000),
+      }).success,
+    ).toBe(true);
+  });
+
   it('accepts Playwright AI snapshot refs only', () => {
     for (const nodeId of ['e12', 'f1e3']) {
       expect(

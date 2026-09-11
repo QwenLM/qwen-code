@@ -14,6 +14,7 @@ import {
   clickOptions,
   jsonResult,
   matcher,
+  releaseChordModifiers,
   selectOptions,
   stringArg,
   timeoutArg,
@@ -139,10 +140,16 @@ export async function executeLocatorOperation(
       return null;
     }
     case 'locator.press':
-      await locator.press(stringArg(args, 'value'), {
-        ...options,
-        noWaitAfter: true,
-      });
+      try {
+        await locator.press(stringArg(args, 'value'), {
+          ...options,
+          noWaitAfter: true,
+        });
+      } catch (error) {
+        // An invalid later chord token leaves earlier modifiers held.
+        await releaseChordModifiers(tab.page);
+        throw error;
+      }
       return null;
     case 'locator.selectOption':
       await locator.selectOption(selectOptions(args.value), options);
