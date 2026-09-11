@@ -487,11 +487,13 @@ function runScenario(
         // dir is never exported, so the wait discovers it by listing
         // RUNNER_TEMP (pinned private per replay below — a shared one
         // hands the glob stale records), the same discovery
-        // supersede_forged_kill_record makes. The race itself has no
-        // deterministic committed witness — the harness offers no hook
-        // between the watcher's two writes — so it is probed by injecting
-        // a delay there: green with this wait, the release's
-        // `expected 1 to be +0` without it.
+        // supersede_forged_kill_record makes. The race's committed
+        // witness is the delayed-mv arm of the 'cedes a killed attempt'
+        // test below: write_signal renames through
+        // "${QWEN_CI_REAL_MV:-mv}", the replay leaves that pin unset, so
+        // bare mv resolves through proxyBin and a plant there separates
+        // the watcher's two writes deterministically — green with this
+        // wait, the release's `expected 1 to be +0` without it.
         '  cede_revert_ff_kill) if [ "$n" -eq 1 ]; then i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 400 ]; do /bin/sleep 0.05; i=$((i+1)); done; i=0; while [ "$i" -lt 200 ]; do hit=0; for d in "${RUNNER_TEMP:-/tmp}"/qwen-review-supersede-kill.*; do [ -f "$d/killed" ] && { hit=1; break; }; done; [ "$hit" -eq 1 ] && break; /bin/sleep 0.05; i=$((i+1)); done; exit 143; else r success false "attempt 2 must not run"; fi ;;',
         // R4-1 agent-side forgery: the kill dir is never exported, but it
         // is minted under the enumerable RUNNER_TEMP with a fixed prefix —
@@ -4589,9 +4591,11 @@ describe('review supersede salvage (#10110)', () => {
     expect(run).toContain('supersede_watcher &');
     // The revert cede's kill-record dir is minted at arming and NEVER
     // exported — an exported path would be agent-derivable like every
-    // SALVAGE_DIR signal (R4-1).
+    // SALVAGE_DIR signal (R4-1). The needle runs through the template
+    // prefix: the replay stubs glob RUNNER_TEMP for it, so a rename must
+    // land in both places or their kill-record wait no-ops green.
     expect(run).toContain(
-      'SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d',
+      'SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX"',
     );
     expect(run).not.toContain('export SUPERSEDE_KILL_DIR');
     // Defined and armed before the retry loop starts.
@@ -6270,7 +6274,9 @@ describe('review supersede salvage (#10110)', () => {
       // between now and the loop start. The branch imposes no upper
       // bound on the event time, so a generous margin costs nothing —
       // the harness child's 30s timeout bounds the replay body long
-      // before the margin does. RUNNER_TEMP is pinned private per replay:
+      // before the margin does (the stub's wait ceilings sum past that
+      // bound deliberately — see the timedOut assertions below).
+      // RUNNER_TEMP is pinned private per replay:
       // the stub's kill-record wait globs it (see the stub), and a shared
       // one could hand the glob a stale record — the minted dir survives
       // the replay (no EXIT trap in the extraction window), so the far
@@ -6292,6 +6298,16 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(r.attempts).toBe(1);
+      // The stub's wait ceilings (20s + 10s) sum PAST runScenario's 30s
+      // child bound on purpose: a watcher that never writes either signal
+      // hangs the stub to the bound, and this assertion turns that into
+      // a named red — without it attempts/status pass vacuously on the
+      // empty stdout the catch leaves behind and only the toContain
+      // below fails, misreporting the hang as a missing cede. Cutting
+      // the ceilings to fit is NOT the fix: the stub then exits 143
+      // inside the bound, the loop's live-head cede fires on the
+      // scripted move, and that same regression goes green.
+      expect(r.timedOut).toBe(false);
       expect(r.status).toBe(0);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).not.toContain('FAIL ');
@@ -6299,15 +6315,21 @@ describe('review supersede salvage (#10110)', () => {
       // behaviour, not a text shape: an added ceiling — a sibling
       // `continue` line or a conjunct on the bound line — defeats any
       // needle, while an event beyond every plausible ceiling must still
-      // cede. 3600s, not an intermediate offset: the offset is measured
-      // from Date.now() here while START_TS is captured inside the
-      // harness, and a loaded shared runner's setup eats a tight margin
-      // (the flake class this suite keeps hitting). A fresh SUPERSEDE_FILE
-      // path too: reusing the one above cedes at the loop's pre-attempt
-      // check before the attempt runs.
+      // cede. The offset must clear EVERY plausible ceiling, not just
+      // the harness setup latency: the stamp is converted with Date.parse
+      // here while START_TS is captured later inside the harness, so
+      // at - START_TS never exceeds the offset, and an hour-scale one
+      // sails through any ceiling at or above it (production runs
+      // EFFECTIVE_TIMEOUT_MINUTES=180 — a genuine back-push can land ~3h
+      // into a run), pinning nothing. 86400s sits past every
+      // budget-scale ceiling, far inside JS Date's ±8.64e15 ms range (an
+      // unparseable stamp exits the date stub 1, sets at=0, and goes red
+      // for the wrong reason), and nothing derives a sleep or loop count
+      // from it. A fresh SUPERSEDE_FILE path too: reusing the one above
+      // cedes at the loop's pre-attempt check before the attempt runs.
       const rtFar = join(dir, 'rt-far');
       mkdirSync(rtFar);
-      const farNow = new Date(Date.now() + 3_600_000).toISOString();
+      const farNow = new Date(Date.now() + 86_400_000).toISOString();
       const far = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -6322,9 +6344,44 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(far.attempts).toBe(1);
+      expect(far.timedOut).toBe(false);
       expect(far.status).toBe(0);
       expect(far.raw).toContain('Superseded early:');
       expect(far.raw).not.toContain('FAIL ');
+      // The committed witness for the stub's kill-record wait (see the
+      // stub): the planted mv delays ONLY the */killed rename —
+      // write_signal's mv argv is -f <tmp> <target>, so $3 matches —
+      // landing SUPERSEDE_FILE 4s ahead of the record, the exact window
+      // between the watcher's two writes. Production pins
+      // QWEN_CI_REAL_MV to the real utility before the PATH prepend, so
+      // the plant is a replay affordance in the same class as
+      // forgedDateShim(), not a production-plausible state. The wait
+      // absorbs the delay green (arm ~4.1s, well inside the child's 30s
+      // bound); with the wait deleted this arm goes red with the
+      // release's `expected 1 to be +0`.
+      const rtDelay = join(dir, 'rt-delay');
+      mkdirSync(rtDelay);
+      const delayed = runScenario('cede_revert_ff_kill', {
+        armWatcher: true,
+        proxyPlants: {
+          mv: '#!/bin/bash\ncase "$3" in */killed) /bin/sleep 4 ;; esac\nexec /bin/mv "$@"\n',
+        },
+        extraEnv: {
+          SUPERSEDE_FILE: join(dir, 'superseded-delayed'),
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count-delayed'),
+          STUB_LIVE_HEAD_A1: 'head-b',
+          STUB_LIVE_HEAD: 'head-a',
+          REPO: 'o/r',
+          RUNNER_TEMP: rtDelay,
+          STUB_TIMELINE: `head-x head-a ${now}`,
+        },
+      });
+      expect(delayed.attempts).toBe(1);
+      expect(delayed.timedOut).toBe(false);
+      expect(delayed.status).toBe(0);
+      expect(delayed.raw).toContain('Superseded early:');
+      expect(delayed.raw).not.toContain('FAIL ');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
