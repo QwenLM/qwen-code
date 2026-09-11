@@ -772,6 +772,49 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['preserve_thinking']).toBe(true);
     });
 
+    it.each([['ZHIPU/GLM-5.3-Flash'], ['glm-5.2']] as const)(
+      'sends metadata for the non-qwen model %s when enableRequestMetadata is true',
+      (model) => {
+        // The client cannot tell a forwarded request from one DashScope serves
+        // itself, so an operator whose first-party non-qwen sessions still need
+        // sessionId/promptId correlation can force the field back on.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          mockContentGeneratorConfig,
+          {
+            ...mockCliConfig,
+            getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+          } as unknown as Config,
+        );
+
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it('omits metadata even for a qwen model when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
     it('still ships metadata for a qwen model reached through an alicloudapi gateway', () => {
       // #9103 widened which *origins* count as DashScope-compatible. Gating on the
       // wire model is orthogonal to that and must not walk it back.
