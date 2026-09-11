@@ -254,6 +254,7 @@ describe('source preview', () => {
     });
     await render(source({ type: 'attachment', attachmentId: 'data.bin' }));
     expect(mock.sessionActions.readAttachment).toHaveBeenCalledOnce();
+    expect(container.querySelectorAll('a[download]')).toHaveLength(1);
     const download = container.querySelector<HTMLAnchorElement>('a[download]');
     expect(download?.getAttribute('href')).toBe('blob:source-test');
     const sourceHeader = container.querySelector(
