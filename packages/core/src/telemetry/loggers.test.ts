@@ -45,6 +45,7 @@ import {
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_WORKFLOW_RUN,
 } from './constants.js';
 import {
   logApiRequest,
@@ -72,6 +73,7 @@ import {
   logApiRetry,
   logProtocolTagSanitized,
   logMemoryRecallDelivery,
+  logWorkflowRun,
   normalizeToolCallEvent,
 } from './loggers.js';
 import * as metrics from './metrics.js';
@@ -106,6 +108,7 @@ import {
   LoopDetectedEvent,
   LoopType,
   RepeatedToolFailureGuardEvent,
+  WorkflowRunEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -139,6 +142,36 @@ describe('loggers', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('publishes the workflow outcome and resume counters', () => {
+    const config = makeFakeConfig({ sessionId: 'test-session-id' });
+    logWorkflowRun(
+      config,
+      new WorkflowRunEvent({
+        status: 'completed',
+        agents_dispatched: 5,
+        agents_completed: 5,
+        agents_failed: 2,
+        agents_cached: 1,
+        agents_respawned: 3,
+        phase_count: 2,
+        tokens_spent: 900,
+        duration_ms: 1_200,
+      }),
+    );
+
+    expect(mockLogger.emit).toHaveBeenCalledWith({
+      body: 'Workflow run completed.',
+      attributes: expect.objectContaining({
+        'event.name': EVENT_WORKFLOW_RUN,
+        agents_dispatched: 5,
+        agents_completed: 5,
+        agents_failed: 2,
+        agents_cached: 1,
+        agents_respawned: 3,
+      }),
+    });
   });
 
   describe('logChatCompression', () => {
