@@ -5,16 +5,23 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pkg from '@xterm/headless';
 
-const { spawn, getPty, spawnSync, osPlatform } = vi.hoisted(() => ({
-  spawn: vi.fn(),
-  getPty: vi.fn(),
-  spawnSync: vi.fn(),
-  osPlatform: vi.fn(),
-}));
+const { Terminal } = pkg;
+
+const { spawn, getPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
+  () => ({
+    spawn: vi.fn(),
+    getPty: vi.fn(),
+    spawnSync: vi.fn(),
+    osPlatform: vi.fn(),
+    loadXtermHeadless: vi.fn(),
+  }),
+);
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
+vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
 // conpty-host reads os.platform() for its win32 release gate, and the
 // registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
 // branches on process.platform, so this steers both without touching it.
@@ -95,6 +102,7 @@ describe('WebTerminalRegistry', () => {
     osPlatform.mockReturnValue(process.platform);
     spawn.mockImplementation(() => createSpawnedPty());
     getPty.mockResolvedValue({ module: { spawn }, name: 'node-pty' });
+    loadXtermHeadless.mockResolvedValue({ Terminal });
   });
 
   afterEach(() => {
@@ -249,6 +257,35 @@ describe('WebTerminalRegistry', () => {
     });
 
     expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: true });
+  });
+
+  it('answers the bundled-backend DA probe and keeps it out of the scrollback', async () => {
+    // The bundled ConPTY backend answers no terminal queries itself, so
+    // PowerShell's startup DA probe would stall for its full timeout unless a
+    // terminal answers it server-side — and its query bytes, if recorded in the
+    // scrollback, would be re-answered by the client's xterm.js on reconnect
+    // and written back into the still-live shell as input. The forwarder must
+    // write the reply back to the PTY once, and the scrub must keep the query
+    // out of readSnapshot's replay.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:da-probe',
+      workspaceCwd: '/workspace',
+    });
+
+    onData('Microsoft Windows [Version 10.0.22631]\r\n');
+    onData('\x1b[c');
+    onData('C:\\work> ');
+
+    await vi.waitFor(() => {
+      expect(write).toHaveBeenCalledWith('\x1b[?1;2c');
+    });
+
+    const output = registry.readSnapshot('terminal:da-probe')?.output ?? '';
+    expect(output).toContain('Microsoft Windows');
+    expect(output).toContain('C:\\work> ');
+    expect(output).not.toContain('\x1b[c');
   });
 
   it('spawns non-Windows terminals without the bundled backend', async () => {

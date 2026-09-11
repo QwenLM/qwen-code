@@ -6,7 +6,9 @@
 
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
+import type { Terminal } from '@xterm/headless';
 import { getPty } from '../utils/getPty.js';
+import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
   disposeConoutWorker,
   noteConPtyHostReleased,
@@ -60,6 +62,26 @@ export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
 
+/**
+ * Terminal queries a probing shell emits — requests, not display content — are
+ * CSI sequences whose final byte is `c` (Device Attributes, e.g. PowerShell's
+ * startup DA probe) or `n` (Device Status Report, e.g. PSReadLine's
+ * cursor-position request). The bundled ConPTY backend answers none of them
+ * itself (see shellExecutionService.ts), so they reach this registry as
+ * ordinary PTY output. Recording them in the scrollback lets a reconnect that
+ * replays `session.buffer` make the client's xterm.js re-answer each query and
+ * write the fresh reply back into the still-live shell's stdin. Both final
+ * bytes are unambiguous requests, so stripping them can never drop rendered
+ * content. Only complete sequences within one chunk are stripped — node-pty
+ * delivers these 3-6 byte probes as a single chunk.
+ */
+function stripTerminalQueries(data: string): string {
+  // `no-control-regex` fires on the ESC byte, which is the whole point here:
+  // these are terminal CSI query sequences, not stray controls.
+  // eslint-disable-next-line no-control-regex
+  return data.replace(/\x1b\[[?0-9;>]*[cn]/g, '');
+}
+
 interface PtySession {
   pty: WebTerminalPty;
   workspaceCwd: string;
@@ -73,6 +95,8 @@ interface PtySession {
   reclaimTimer?: ReturnType<typeof setTimeout>;
   dataDisposable?: { dispose(): void };
   exitDisposable?: { dispose(): void };
+  queryTerminal?: Terminal;
+  queryReplyDisposable?: { dispose(): void };
   /**
    * Set once the PTY-side resources above have been freed. The exit-time
    * release frees them while the session stays in the map for scrollback
@@ -236,8 +260,34 @@ export class WebTerminalRegistry {
     delete env['FORCE_COLOR'];
     delete env['npm_config_prefix'];
     const useBundledConpty = os.platform() === 'win32';
+    // The bundled ConPTY backend answers no terminal queries itself (see
+    // shellExecutionService.ts), so a probing shell — PowerShell's startup DA
+    // probe under COMSPEC=powershell — would otherwise stall for its full
+    // timeout and leave its query bytes in the scrollback. Load a headless
+    // terminal up front (the import is cached, so only the first terminal pays
+    // it) to answer the probe server-side; handleData feeds it the PTY stream
+    // and strips the query bytes from the scrollback so a reconnect replay
+    // cannot make the client re-answer them into the still-live shell.
+    let queryTerminal: Terminal | undefined;
+    if (useBundledConpty) {
+      try {
+        const { Terminal: HeadlessTerminal } = await loadXtermHeadless();
+        queryTerminal = new HeadlessTerminal({
+          allowProposedApi: true,
+          cols: 80,
+          rows: 24,
+          logLevel: 'off',
+        });
+      } catch {
+        // No responder available: the query stays unanswered (a bounded ~2s
+        // stall), never injected — the strip below still keeps it out of the
+        // scrollback.
+        queryTerminal = undefined;
+      }
+    }
     let spawned: SpawnedWebTerminalPty;
     let proc: WebTerminalPty;
+    let queryReplyDisposable: { dispose(): void } | undefined;
     const sessionRef: { current?: PtySession } = {};
     const earlyOutput: string[] = [];
     let earlyExit: { exitCode: number; signal?: number } | undefined;
@@ -251,14 +301,30 @@ export class WebTerminalRegistry {
         0,
         session.unacknowledgedInputBytes - Buffer.byteLength(data),
       );
-      if (Buffer.byteLength(data) > MAX_BUFFER_BYTES) {
-        data = Buffer.from(data).subarray(-MAX_BUFFER_BYTES).toString('utf8');
-        while (Buffer.byteLength(data) > MAX_BUFFER_BYTES) data = data.slice(1);
+      // Feed the headless responder so a bundled-backend query is answered
+      // server-side (the browser is not guaranteed to be attached when the
+      // startup probe fires). Strip the query from the scrollback AND from
+      // what reaches the live listeners: the browser's xterm.js would also
+      // answer it, and a reconnect replay of `buffer` would re-emit it.
+      if (queryTerminal) {
+        try {
+          queryTerminal.write(data);
+        } catch {
+          // Terminal disposed mid-stream (release raced a trailing chunk).
+        }
+      }
+      let buffered = useBundledConpty ? stripTerminalQueries(data) : data;
+      if (Buffer.byteLength(buffered) > MAX_BUFFER_BYTES) {
+        buffered = Buffer.from(buffered)
+          .subarray(-MAX_BUFFER_BYTES)
+          .toString('utf8');
+        while (Buffer.byteLength(buffered) > MAX_BUFFER_BYTES)
+          buffered = buffered.slice(1);
         session.buffer = [];
         session.bufferBytes = 0;
       }
-      session.buffer.push(data);
-      session.bufferBytes += Buffer.byteLength(data);
+      session.buffer.push(buffered);
+      session.bufferBytes += Buffer.byteLength(buffered);
       while (
         session.buffer.length > MAX_BUFFER_CHUNKS ||
         session.bufferBytes > MAX_BUFFER_BYTES
@@ -268,7 +334,7 @@ export class WebTerminalRegistry {
           session.bufferBytes -= Buffer.byteLength(dropped);
         }
       }
-      for (const listener of session.outputListeners) listener(data);
+      for (const listener of session.outputListeners) listener(buffered);
     };
     const handleExit = (e: { exitCode: number; signal?: number }) => {
       const session = sessionRef.current;
@@ -379,6 +445,15 @@ export class WebTerminalRegistry {
           releaseConPtyHost(spawned);
         },
       };
+      if (queryTerminal) {
+        queryReplyDisposable = queryTerminal.onData((reply) => {
+          try {
+            proc.write(reply);
+          } catch {
+            // A reply racing shell exit finds a dead PTY — drop it.
+          }
+        });
+      }
     } catch {
       this.finishCreating(terminalId);
       return { error: 'Failed to spawn shell' };
@@ -395,6 +470,8 @@ export class WebTerminalRegistry {
       exitListeners: new Set(),
       dataDisposable,
       exitDisposable,
+      queryTerminal,
+      queryReplyDisposable,
       ptyResourcesReleased: false,
     };
     sessionRef.current = session;
@@ -544,11 +621,14 @@ export class WebTerminalRegistry {
 
   /**
    * Free a session's PTY-side resources exactly once: detach the data/exit
-   * listeners, then release the ConPTY host / conout worker that node-pty
-   * strands on a natural exit. Without the second half every terminal the user
-   * exits leaks a worker for the life of the CLI — the same defect the
-   * shell-tool path has. The conhost.exe half is not freed on that path (the
-   * native baton is already gone); see releaseConPtyHost. See #11303.
+   * listeners, dispose the bundled-backend query responder, then release the
+   * ConPTY host / conout worker that node-pty strands on a natural exit.
+   * Without the second half every terminal the user exits leaks a worker for
+   * the life of the CLI — the same defect the shell-tool path has. On the
+   * bundled ConPTY backend this registry spawns with, the host reference is
+   * already released at spawn, so only the conout worker is left to free here;
+   * the conhost.exe half survives solely on the inbox spawn-failure retry,
+   * where the native baton is already gone. See releaseConPtyHost and #11303.
    *
    * Deliberately leaves the session's map entry and its `buffer` alone, and
    * never signals the pid: on the exited path the shell is gone and its pid may
@@ -566,6 +646,8 @@ export class WebTerminalRegistry {
     session.ptyResourcesReleased = true;
     session.dataDisposable?.dispose();
     session.exitDisposable?.dispose();
+    session.queryReplyDisposable?.dispose();
+    session.queryTerminal?.dispose();
     session.pty.releaseHost?.();
   }
 
