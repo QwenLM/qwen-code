@@ -208,7 +208,7 @@ function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
 
 /**
  * Pure fold: returns the next items array for one event (input is never
- * mutated). Unknown tool ids in delta events are ignored.
+ * mutated). Unknown tool ids are ignored.
  */
 export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
@@ -322,8 +322,12 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
-        const delta = ev.type === 'tool-output' ? ev.delta : ev.display;
-        const next: LiveToolItem = { ...t, output: t.output + delta };
+        // Both events carry the whole display, so the card replaces rather than
+        // accumulates — appending would paint the streamed snapshot twice.
+        const next: LiveToolItem = {
+          ...t,
+          output: ev.type === 'tool-output' ? ev.output : ev.display,
+        };
         if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
         if (ev.type === 'tool-result' && ev.todos) next.todos = ev.todos;
         if (ev.type === 'tool-result' && ev.ansi) next.ansi = ev.ansi;

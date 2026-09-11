@@ -21,7 +21,6 @@ import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
   AnsiRows,
-  MESSAGE_ICON,
   TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
@@ -48,6 +47,7 @@ import {
   type GoalCardColor,
   type LiveGoalLegacyData,
   type LiveHistoryItem,
+  type LiveThinkingItem,
   type LiveToolItem,
   type LiveArenaSessionItem,
 } from './live-session-model.js';
@@ -77,24 +77,52 @@ export interface TranscriptViewProps {
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
   availableTerminalHeight?: number;
+  /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
+  thoughtsExpanded?: boolean;
+}
+
+/** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
+ * arena cards get a blank row above them, while status, tool and goal rows stay
+ * flush against whatever precedes them. `user` reaches the same total in ink by
+ * declaring the margin inside its own message component. `task` and `image`
+ * have no ink counterpart; both follow the tool rows they render beside. */
+function itemMarginTop(kind: LiveHistoryItem['kind']): number {
+  switch (kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+    case 'user-shell':
+    case 'arena-agent':
+    case 'arena-session':
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  thoughtsExpanded = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
-        <TranscriptItem
+        <box
           key={item.id}
-          item={item}
-          maxRows={maxRows}
-          terminalHeight={availableTerminalHeight}
-          width={availableWidth}
-        />
+          flexDirection="column"
+          marginTop={itemMarginTop(item.kind)}
+        >
+          <TranscriptItem
+            item={item}
+            maxRows={maxRows}
+            terminalHeight={availableTerminalHeight}
+            width={availableWidth}
+            thoughtsExpanded={thoughtsExpanded}
+          />
+        </box>
       ))}
     </box>
   );
@@ -105,11 +133,13 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -117,7 +147,7 @@ function TranscriptItem({
     case 'assistant':
       return <AssistantRow text={item.text} streaming={item.streaming} />;
     case 'thinking':
-      return <ThinkingRow text={item.text} done={item.done} />;
+      return <ThinkingRow item={item} allExpanded={thoughtsExpanded} />;
     case 'tool':
       return (
         <ToolCard
@@ -140,7 +170,9 @@ function TranscriptItem({
     case 'info':
       return (
         <box flexDirection="row">
-          <text fg={C.dim}>{`${MESSAGE_ICON.CIRCLE_FILLED} `}</text>
+          {/* A wrapped message would otherwise shrink the prefix and drop its
+              trailing space. */}
+          <text fg={C.dim} flexShrink={0}>{`${ICON.CIRCLE_FILLED} `}</text>
           <text fg={C.dim} {...selectionProps()}>
             {sanitizeTerminalText(item.text)}
           </text>
@@ -150,9 +182,12 @@ function TranscriptItem({
       return <ErrorRow text={item.text} hint={item.hint} />;
     case 'warning':
       return (
-        <text fg={C.yellow} {...selectionProps()}>
-          {sanitizeTerminalText(item.text)}
-        </text>
+        <box flexDirection="row">
+          <text fg={C.yellow} flexShrink={0}>{`${ICON.TRIANGLE} `}</text>
+          <text fg={C.yellow} {...selectionProps()}>
+            {sanitizeTerminalText(item.text)}
+          </text>
+        </box>
       );
     case 'retry':
       return (
@@ -222,14 +257,23 @@ function AssistantRow({
   );
 }
 
-function ThinkingRow({ text, done }: { text: string; done: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = thinkingMeta(done, expanded, false);
+function ThinkingRow({
+  item,
+  allExpanded,
+}: {
+  item: LiveThinkingItem;
+  allExpanded: boolean;
+}) {
+  const [clickedOpen, setClickedOpen] = useState(false);
+  // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
+  // head id, so switching the global back off leaves a hand-opened thought open.
+  const expanded = allExpanded || clickedOpen;
+  const meta = thinkingMeta(item.done, expanded, false, item.durationMs);
   return (
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (done) setExpanded((v) => !v);
+        if (item.done) setClickedOpen((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -238,9 +282,9 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
           {meta.hint ? ` ${meta.hint}` : ''}
         </text>
       </box>
-      {!meta.collapsed && text ? (
+      {!meta.collapsed && item.text ? (
         <text fg={C.dim} attributes={4} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
+          {sanitizeTerminalText(item.text)}
         </text>
       ) : null}
     </box>
@@ -444,18 +488,17 @@ function CompactionRow({
 
 function ErrorRow({ text, hint }: { text: string; hint?: string }) {
   return (
-    <box flexDirection="column">
-      <box flexDirection="row">
-        <text fg={C.red}>{`${ICON.CROSS} `}</text>
-        <text fg={C.red} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
-        </text>
-      </box>
-      {hint ? (
-        <text fg={C.accent} {...selectionProps()}>
-          {sanitizeTerminalText(hint)}
-        </text>
-      ) : null}
+    <box flexDirection="row">
+      {/* ink's error prefix is a literal ✕, not the shared ICON.CROSS. */}
+      <text fg={C.red} flexShrink={0}>
+        {'✕ '}
+      </text>
+      <text fg={C.red} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+        {hint ? (
+          <span fg={C.dim}>{` (${sanitizeTerminalText(hint)})`}</span>
+        ) : null}
+      </text>
     </box>
   );
 }
@@ -584,8 +627,8 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
 function AwayRecapRow({ text }: { text: string }) {
   return (
     <box flexDirection="row">
-      <text fg={C.dim}>{`${ICON.REFERENCE} `}</text>
-      <text fg={C.dim} attributes={1}>
+      <text fg={C.dim} flexShrink={0}>{`${ICON.REFERENCE} `}</text>
+      <text fg={C.dim} attributes={1} flexShrink={0}>
         {'recap: '}
       </text>
       <text fg={C.dim} attributes={4} {...selectionProps()}>
