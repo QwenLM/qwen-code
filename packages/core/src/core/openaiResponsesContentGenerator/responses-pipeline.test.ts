@@ -13,7 +13,7 @@ import {
   beforeEach,
   afterEach,
 } from 'vitest';
-import type { GenerateContentParameters } from '@google/genai';
+import type { Content, GenerateContentParameters } from '@google/genai';
 import { FunctionCallingConfigMode, FinishReason } from '@google/genai';
 import { inspect } from 'node:util';
 import {
@@ -2046,6 +2046,119 @@ describe('ResponsesPipeline', () => {
       expect(second.input).toEqual(retryInput);
       expect({ ...second, input: null }).toEqual({ ...first, input: null });
     }
+
+    const encryptedError = {
+      error: {
+        type: 'invalid_request_error',
+        code: 'invalid_encrypted_content',
+        message: 'The encrypted content could not be decrypted or parsed.',
+      },
+    };
+    const encryptedBodies = [
+      JSON.stringify(encryptedError),
+      'data: ' +
+        JSON.stringify({
+          routify_response: {
+            success: false,
+            status: 400,
+            error_detail: encryptedError,
+          },
+        }) +
+        '\n\n',
+    ];
+
+    it.each(encryptedBodies)(
+      'recovers once from rejected encrypted replay: %s',
+      async (body) => {
+        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
+        fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+        const request = replayRequest();
+        const original = structuredClone(request);
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(await drain(pipeline, request)).toBeUndefined();
+        expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+        expect(request).toEqual(original);
+      },
+    );
+
+    it('preserves tool call/result pairs when recovering encrypted replay', async () => {
+      fetchMock.mockResolvedValueOnce(errorResponse(400, encryptedBodies[0]!));
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const request = replayRequest();
+      request.contents = [
+        ...(request.contents as Content[]),
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'lookup',
+                args: { value: 1 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'lookup',
+                response: { output: 'found' },
+              },
+            },
+          ],
+        },
+      ];
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, request)).toBeUndefined();
+      const first = parsedCall(0);
+      const second = parsedCall(1);
+      expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(3);
+      expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
+        0,
+      );
+      expect(second.input.slice(-2)).toEqual(first.input.slice(-2));
+      expect(second.input.slice(-2).map((i) => i.type)).toEqual([
+        'function_call',
+        'function_call_output',
+      ]);
+    });
+
+    it('surfaces the second encrypted rejection without looping', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, replayRequest())).toMatchObject({
+        status: 400,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry encrypted rejection without reasoning in the request', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(
+        await drain(pipeline, {
+          model: 'gpt-5',
+          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        }),
+      ).toMatchObject({ status: 400 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
 
     // ── RED behaviors ────────────────────────────────────────────────────
 

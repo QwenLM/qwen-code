@@ -78,6 +78,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
     SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
     GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
+    GOAL_MAX_TURNS_CAP: 10_000,
+    GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
     DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
     QWEN_DIR: '.qwen',
     Storage,
