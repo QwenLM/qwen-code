@@ -55,6 +55,14 @@ describe('fake OpenAI server', () => {
           .split('\n\n')
           .filter((frame) => frame.startsWith('data: {'))
           .map((frame) => JSON.parse(frame.slice(6)));
+        const reasoningIndex = frames.findIndex(
+          (frame) => frame.choices[0]?.delta.reasoning_content !== undefined,
+        );
+        const contentIndex = frames.findIndex(
+          (frame) => frame.choices[0]?.delta.content !== undefined,
+        );
+        expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+        expect(contentIndex).toBeGreaterThan(reasoningIndex);
         expect(frames).toEqual(
           expect.arrayContaining([
             expect.objectContaining({

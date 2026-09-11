@@ -21,6 +21,7 @@ Ctrl+O 使用 `fullDetail` 显示原始推理和工具组。完整详情优先�
 - CLI 设置 schema 和界面翻译。
 - 交互 Provider 组合、命令注册及命令上下文。
 - 历史行渲染和对话刷新。
+- daemon workspace 设置路由对 TUI 专属偏好的过滤。
 - 命令、Provider、渲染器的同目录测试，以及交互测试。
 
 ## 范围边界
@@ -39,7 +40,7 @@ Ctrl+O 使用 `fullDetail` 显示原始推理和工具组。完整详情优先�
 
 与渲染器无关的辅助函数负责紧凑工具标识与压缩资格。Ink 适配工具组，OpenTUI 适配工具卡片，不必共享布局代码。OpenTUI 的事件生产者和历史归并保留呈现元数据，以豁免用户主动命令、子代理结果及图片。恢复会话时保留标识文件所需的工具参数。过滤不得删除已保存的条目。
 
-涉及 HistoryItemDisplay、SessionPreview、Focus 命令及翻译，以及 OpenTUI 启动、命令连接、设置挂载、对话渲染、事件适配和历史归并。各边界均有同目录测试。不需要修改认证、模型选择、工具执行或 daemon 路由。
+涉及 HistoryItemDisplay、SessionPreview、Focus 命令及翻译，以及 OpenTUI 启动、命令连接、设置挂载、对话渲染、事件适配和历史归并。daemon workspace 设置路由将专注设置加入 TUI 专属过滤器，同时适用于 legacy-primary 和 selected-runtime 请求。各边界均有同目录测试。认证、模型选择、工具执行及 daemon 路由归属保持不变。
 
 接受五项维护者建议：保留身份信息的摘要、原生 OpenTUI 支持、准确的 Ctrl+O 提示、紧凑的终态取消显示，以及预览专属的 Focus 绕过。支持 OpenTUI 不会移除 Ink，也不会更改用户选择的渲染器。
 

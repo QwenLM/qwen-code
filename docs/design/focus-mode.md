@@ -46,6 +46,7 @@ and uses the existing refresh mechanism.
 - CLI settings schema and translated UI strings.
 - Interactive provider composition, command registration, and command context.
 - History-item rendering and transcript refresh.
+- Daemon workspace-settings filtering for the TUI-only preference.
 - Collocated command, provider, and rendering tests, plus interactive checks.
 
 ## Scope boundaries
@@ -81,8 +82,10 @@ tool arguments needed to identify files. Filtering never removes stored items.
 
 Affected files include HistoryItemDisplay, SessionPreview, the Focus command and
 locales, plus OpenTUI bootstrap, command wiring, settings mount, transcript,
-event adapters and history fold. Collocated tests cover each boundary. No changes
-to authentication, model selection, tool execution or daemon routes are required.
+event adapters and history fold. The daemon workspace-settings route adds focus
+to its TUI-only filter for both legacy-primary and selected-runtime requests.
+Collocated tests cover each boundary. Authentication, model selection, tool
+execution and daemon route ownership are unchanged.
 
 The five maintainer recommendations are accepted: identity-preserving summaries,
 native OpenTUI support, accurate Ctrl+O wording, compact terminal cancellations,

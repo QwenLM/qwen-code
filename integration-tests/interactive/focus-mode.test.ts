@@ -32,6 +32,8 @@ const interactiveEnv = {
   TERM: 'xterm-256color',
 };
 
+// OpenTUI always uses the alternate screen outside screen-reader mode;
+// useTerminalBuffer and the CI override only select Ink's buffer mode.
 const bufferModes = pickE2eRenderer() === 'ink' ? [true, false] : [true];
 const readSummary = /Read(?:File)? .*focus-result\.txt.*Ctrl\+O for details/;
 
@@ -257,6 +259,9 @@ describe('Focus mode', () => {
       expect(await session.screen()).not.toContain('FOCUS_TOOL_RESULT');
       expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
       expect(server.requests).toHaveLength(4);
+      expect(JSON.stringify(server.requests[3]!.body)).toContain(
+        'FOCUS_TOOL_RESULT',
+      );
 
       await session.send('/settings');
       await session.idle(200, 5000);

@@ -253,6 +253,8 @@ export class TestRig {
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
       ui: {
+        // Workspace scope prevents /focus from toggling; Focus tests must
+        // override this with undefined to exercise User-scope persistence.
         focusMode: false,
         ...((options.settings?.['ui'] as Record<string, unknown>) ?? {}),
       },
