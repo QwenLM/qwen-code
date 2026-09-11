@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
   LEASE_PREFIX,
+  REVIEW_LEASE_DIR,
   REVIEW_TMP_DIR,
   reviewBranch,
   worktreePath,
@@ -579,9 +580,28 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanStep).toContain(`for leftover in ${worktreePrefix}*; do`);
     // Leases are session+prompt scoped so a stale one is inert, but the glob
     // must stay in sync with LEASE_PREFIX or it silently never matches.
+    //
+    // BOTH locations, because leases moved out of the mounted directory: the
+    // new one is where this job's own runs leave them, and the old one is
+    // where a persisted workspace can still be holding one written by an
+    // earlier build. Both ride the repair ladder, one loop over both globs:
+    // the OLD path is inside the directory the review sandbox mounts
+    // read-write, and a reviewed PR can leave a DIRECTORY — or a mode-000
+    // one — at a lease's name. A bare `rm -rf ... 2>/dev/null || true` fails
+    // on that shape and discards both the reason and the status, so the
+    // residue wedged every later job on the runner with nothing in the log
+    // (R30-1, R30-57).
     expect(reviewCleanStep).toContain(
-      `rm -f ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json`,
+      `for lease in ${toPosix(REVIEW_LEASE_DIR)}/${LEASE_PREFIX}pr-*.json ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json; do`,
     );
+    expect(reviewCleanStep).toContain('remove_review_tree "$lease"');
+    // No lease-sweep line may discard stderr (R30-1): a survivor the ladder
+    // cannot repair is named in a ::warning::, never silently kept.
+    for (const line of stripComments(reviewCleanStep).split('\n')) {
+      if (line.includes(`${LEASE_PREFIX}pr-*`)) {
+        expect(line).not.toContain('2>/dev/null');
+      }
+    }
     // A failed rm must not be left to poison the next job's checkout: the
     // sweep owns its own permission repair — chmod, then passwordless sudo
     // chown/chmod where the pool member has it — and retries the removal per
@@ -1024,6 +1044,60 @@ describe('review worktree cleanup steps', () => {
       }
     },
   );
+  it.skipIf(!permissionFixturesAvailable)(
+    'the lease sweep repairs or names a mode-000 DIRECTORY at a lease name (R30-57)',
+    () => {
+      // The shape the ladder's lease loop exists for: a reviewed PR leaves a
+      // mode-000 directory at a lease's name inside the (read-write mounted)
+      // `.qwen/tmp`, and the next job on this reused runner inherits it.
+      // Measured: `rm -rf` on that shape exits 1 with `Permission denied`
+      // and leaves it standing — under the old bare `rm -rf ... 2>/dev/null
+      // || true` lines nothing was logged, so the wedge survived silently.
+      // The contract now: the residue is GONE, or a ::warning:: names it.
+      const fixture = mkdtempSync(join(tmpdir(), 'review-lease-sweep-'));
+      const wedge = join(
+        fixture,
+        '.qwen',
+        'tmp',
+        'qwen-review-lease-pr-1.json',
+      );
+      try {
+        mkdirSync(join(fixture, '.git'));
+        mkdirSync(wedge, { recursive: true });
+        writeFileSync(join(wedge, 'x'), 'x');
+        chmodSync(wedge, 0o000);
+        // A plain lease file at the NEW location rides the same loop.
+        const newLease = join(
+          fixture,
+          '.qwen',
+          'review-leases',
+          'qwen-review-lease-pr-2.json',
+        );
+        mkdirSync(join(fixture, '.qwen', 'review-leases'), {
+          recursive: true,
+        });
+        writeFileSync(newLease, '{}\n');
+
+        const out = runReviewCleanStep(fixture, []);
+        expect(out.status, out.stderr).toBe(0);
+        expect(existsSync(newLease)).toBe(false);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(
+          !existsSync(wedge) ||
+            warnings.some((line) =>
+              line.includes('qwen-review-lease-pr-1.json'),
+            ),
+          `wedge survived with no naming warning; stdout: ${out.stdout}`,
+        ).toBe(true);
+      } finally {
+        if (existsSync(wedge)) chmodSync(wedge, 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(!bashAvailable || !awkAvailable)(
     'skip warnings keep a CR-bearing registered path on one runner line',
     () => {
