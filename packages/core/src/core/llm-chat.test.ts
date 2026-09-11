@@ -4019,6 +4019,7 @@ describe('LlmChat', async () => {
           { text: 'continue' },
           {
             text: expect.stringContaining('Recent images reattached'),
+            partMetadata: { 'qwen-code:reattach-boundary': true },
           },
           {
             inlineData: {
