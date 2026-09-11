@@ -50,6 +50,8 @@ import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
@@ -104,6 +106,7 @@ import {
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
 } from './bridgeTypes.js';
 import {
   CHANNEL_LIVENESS_INTERVAL_MS,
@@ -23280,18 +23283,23 @@ describe('createAcpSessionBridge', () => {
         setModelResult?: Record<string, unknown>;
       } = {},
     ) {
-      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      const setModelCalls: Array<{
+        sessionId: string;
+        modelId: string;
+        _meta?: Record<string, unknown> | null;
+      }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
             if (prop === 'unstable_setSessionModel') {
-              return async (req: { sessionId: string; modelId: string }) => {
-                setModelCalls.push({
-                  sessionId: req.sessionId,
-                  modelId: req.modelId,
-                });
+              return async (req: {
+                sessionId: string;
+                modelId: string;
+                _meta?: Record<string, unknown> | null;
+              }) => {
+                setModelCalls.push(req);
                 if (opts.setModelImpl) await opts.setModelImpl();
                 return opts.setModelResult ?? {};
               };
@@ -23358,6 +23366,26 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
       expect(session.modelApplied).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('marks a scheduled-task run model as transient', async () => {
+      const { bridge, setModelCalls } = setup();
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen-max(openai)',
+        sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+        sourceId: `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}task-1`,
+      });
+
+      expect(session.modelApplied).toBe(true);
+      expect(setModelCalls).toEqual([
+        {
+          sessionId: session.sessionId,
+          modelId: 'qwen-max(openai)',
+          _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+        },
+      ]);
       await bridge.shutdown();
     });
 
