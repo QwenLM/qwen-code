@@ -3934,7 +3934,12 @@ export class LlmClient {
           // the very start of the system-reminder block keeps it close to
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
-          systemReminders.unshift(userQueryMemory.prompt);
+          // The recall prompt is bare markdown (`## Relevant memory…`), so
+          // wrap it like every other reminder: the rewind ownership proof
+          // picks the entry's first NON-reminder text part as the prompt,
+          // and an unwrapped memory block would occupy that slot and
+          // silently disable identity resolution for the turn.
+          systemReminders.unshift(wrapSystemReminder(userQueryMemory.prompt));
         }
 
         requestToSend = [...systemReminders, ...requestToSend];

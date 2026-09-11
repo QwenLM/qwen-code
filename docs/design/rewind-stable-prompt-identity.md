@@ -58,11 +58,16 @@ another entrance). A match is accepted only when **all** hold:
    text is not mistaken for it;
 5. if the target's own text is itself a cleared-media placeholder, the match's
    ordinal also agrees — the entry has exactly as many prompt entries with a
-   model-facing text before it as the target has preceding real UI turns that
-   carried one (the resume builder records `promptHasModelText` so the two
-   sides count the same population; see below) — AND at least
-   `uiUserTurnCount` user-role, non-tool-result entries precede the match:
-   the aligned counts can drop together when both sides skip an
+   model-facing text before it as the target has preceding UI items that own
+   a counted entry: real UI turns that carried one, plus drained notification
+   items (a background-agent/cron completion displays as a notification but
+   submits a real user-role entry the API side counts). The resume builder
+   records `promptHasModelText` so the two sides count the same population;
+   see below — AND at least `uiUserTurnCount` user-role, non-tool-result
+   entries _that can own a UI turn_ precede the match: a wholly-structural
+   reminder entry (the mid-history MCP added-tools notice) or a cleared
+   media-only entry carries a text part yet owns no turn, so it does not
+   count. The aligned counts can drop together when both sides skip an
    attachment-only turn, so the absolute-position term keeps the proof from
    agreeing trivially at an entry that is not the target's own;
 6. the proof is unique — no other real, non-file-key-only UI turn claims the
@@ -105,9 +110,14 @@ exists to resolve, so the check must not apply to it — and it does not, becaus
 those targets carry ordinary text and never reach condition 5. Scoping is what
 lets both hold at once; an unconditional ordinal proof resolves the collision
 but breaks absorbed-turn exactness, and an unconditional placeholder refusal
-does the reverse. Both directions are pinned: removing the scope reds the
-round-30 same-text impostor probe, and removing the ordinal clause reds the
-headline reproduction.
+does the reverse. Both directions are pinned: removing the scope (applying
+the ordinal proof to every target) reds the absorbed-turn exactness pin
+`prefers the ownership-proven identity over a positional walk that lands one
+turn late` — ordinal agreement is positional and breaks exactly where
+positions desync — and removing the ordinal clause reds the re-mint refusal
+pin `refuses (-1) when a placeholder-shaped prompt re-mints a cleared-media
+mark`, where only the ordinal separates the target's own placeholder-texted
+entry from a cleared entry wearing the re-minted mark.
 
 The durable close remains per-entry provenance — ids that cannot be re-minted,
 issued at the mint sites — which would remove the need for any ownership proof.

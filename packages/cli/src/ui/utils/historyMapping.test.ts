@@ -1283,6 +1283,40 @@ describe('ownership gate: shapes a UI-claimant whitelist got wrong', () => {
     ];
     expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
   });
+
+  it('resolves by identity when a wrapped memory recall precedes the prompt part', () => {
+    // Managed auto memory prepends a `## Relevant memory` block into the
+    // marked user Content (client.ts unshifts it into the turn's
+    // systemReminders). Wrapped as a system reminder, the ownership proof
+    // skips it and still finds the prompt part; unwrapped it would occupy
+    // the prompt-part slot and identity resolution would silently fall
+    // back to the positional walk for every memory-injected turn (R33-3).
+    // Here the walk cannot land at all (an absorbed turn leaves it one
+    // short), so only identity can resolve — change the fixture's first
+    // part to the bare block and this goes red with -1.
+    const targetEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: `${SYSTEM_REMINDER_OPEN}\n## Relevant memory\n\nUser prefers terse responses.\n${SYSTEM_REMINDER_CLOSE}`,
+        } as Part,
+        { text: 'target prompt' } as Part,
+      ],
+    };
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked, memory part wrapped
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(0);
+  });
 });
 
 describe('round-29: same-text twins defeat the text ownership proof', () => {

@@ -569,6 +569,31 @@ describe('FileHistoryService', () => {
       );
     });
 
+    // Prompt ids are minted per entrance with counters that restart on
+    // resume, so one id can land on two snapshots. Resolving by last
+    // occurrence and pruning the newer turn's backups would silently
+    // rewind to a turn the caller may not have meant — refuse loudly.
+    it('should refuse to rewind a promptId shared by two snapshots', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'modified');
+      await service.makeSnapshot('p1');
+
+      await expect(service.rewind('p1', true)).rejects.toThrow(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+
+      // The refusal must leave the timeline (and the file) untouched.
+      expect(service.getSnapshots().map((s) => s.promptId)).toEqual([
+        'p1',
+        'p1',
+      ]);
+      expect(await readFile(file, 'utf-8')).toBe('modified');
+    });
+
     it('should not truncate snapshot timeline when restore has failures', async () => {
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'original');
