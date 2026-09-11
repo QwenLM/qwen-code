@@ -47,12 +47,16 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
+  type Dirent,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
@@ -66,9 +70,10 @@ import { runBuildTest, type BuildTestReport } from './build-test.js';
 import {
   baseTreeTrustPath,
   builtTreeRecord,
+  dropBuiltTree,
   establishTrust,
   recordBuiltTree,
-  runIdentityMs,
+  runIdentity,
   type BuiltTreeStat,
   type TrustState,
 } from './lib/base-tree-trust.js';
@@ -99,6 +104,20 @@ export interface BaseTreeArgs {
   install: boolean;
   /** Test seam: the build step. Production runs the real `runBuildTest`. */
   build?: (worktree: string) => BuildTestReport;
+  /**
+   * Test seam: runs inside the reuse arm, between the inventory walk and the
+   * index-refreshing `git status`.
+   *
+   * That gap is a real window — the walk is ~1 s on a built tree — and what
+   * lands in it is a rewritten `<base>/.git`, after which the `status` runs
+   * the planted repository's `filter.<driver>.clean` on the host. The gate
+   * re-asks the pointer question there, and a guard with no way to stage the
+   * window is a guard no test can hold to account: the entry check fires
+   * first for anything planted before the call, so without this seam the
+   * re-ask is unreachable from a test and a mutation that deletes it
+   * survives. Undefined in production.
+   */
+  onReuseWindow?: () => void;
 }
 
 // Sanitized env on both helpers: an exported GIT_DIR redirects repository
@@ -123,6 +142,20 @@ const GIT_NEUTRALIZE = [
   'core.hooksPath=/dev/null/no-hooks',
 ];
 const GIT_MAX_BUFFER = 512 * 1024 * 1024;
+/**
+ * A deadline on every spawn here, the way `revParse` carries one in
+ * lib/worktree.ts.
+ *
+ * These run against a tree the containerized build just held read-write, and
+ * a `git` that never returns is not a theoretical shape: a planted
+ * repository on an unreachable mount, or a `filter.<driver>.clean` that
+ * blocks, hangs the shard with no output and no report — the A/B lane
+ * suppressed for the round and read as infrastructure trouble. Generous
+ * compared to `revParse`'s 30 s because these ARE the big reads (a real
+ * tree's listing measured 131 ms and its `status` more), and a ceiling is
+ * not a budget: it only has to be shorter than the caller's own.
+ */
+const GIT_TIMEOUT_MS = 120_000;
 
 function gitOut(cwd: string, ...args: string[]): string {
   const r = spawnSync('git', [...GIT_NEUTRALIZE, ...args], {
@@ -130,6 +163,7 @@ function gitOut(cwd: string, ...args: string[]): string {
     encoding: 'utf8',
     env: sanitizedGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
+    timeout: GIT_TIMEOUT_MS,
   });
   if (r.error) throw r.error;
   if (r.status !== 0) {
@@ -138,21 +172,51 @@ function gitOut(cwd: string, ...args: string[]): string {
   return (r.stdout ?? '').trim();
 }
 
-// The NUL-delimited form: `gitOut`'s `.trim()` would eat a leading-space
-// filename and the record separator is NUL, not whitespace.
-function gitOutZ(cwd: string, ...args: string[]): string {
+/**
+ * The NUL-delimited form, in RAW BYTES.
+ *
+ * No `encoding`, so `stdout` arrives as a Buffer: a filename is a byte
+ * string, not text, and decoding it as utf8 replaces every undecodable byte
+ * with U+FFFD — which is exactly the thing the `-z` form exists to preserve.
+ * One `touch $'plant-\xff-name.js'` inside the mount was enough to make the
+ * decoded path fail `lstat` with ENOENT, throw out of the whole enumeration,
+ * and leave the build with no record at all — suppressing the A/B lane for
+ * the round through a note that reads as infrastructure. Bytes in, bytes
+ * compared, bytes recorded (see `inventoryKey`).
+ *
+ * `.trim()` is not applied either — `gitOut`'s would eat a leading-space
+ * filename, and the record separator here is NUL, not whitespace.
+ *
+ * A non-empty stderr on an otherwise-successful listing is an INCOMPLETE
+ * answer, not a warning to ignore: `ls-files` reports a directory it could
+ * not read as `warning: unable to readdir …`, skips that subtree, and still
+ * exits 0. Returning the short listing would write a baseline that silently
+ * omits every path under it, so anything dropped there afterwards is
+ * invisible to the fence. The caller treats the throw the way it treats any
+ * other "could not enumerate" — decline, never destroy.
+ */
+function gitOutZ(cwd: string, ...args: string[]): Buffer {
   const r = spawnSync('git', [...GIT_NEUTRALIZE, ...args], {
     cwd,
-    encoding: 'utf8',
     env: sanitizedGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
+    timeout: GIT_TIMEOUT_MS,
   });
   if (r.error) throw r.error;
+  const stderr = (r.stderr ?? Buffer.alloc(0)).toString('utf8').trim();
   if (r.status !== 0) {
-    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
+    throw new Error(`git ${args.join(' ')} failed: ${stderr}`);
   }
-  const out = r.stdout ?? '';
-  return out.endsWith('\0') ? out.slice(0, -1) : out;
+  if (stderr !== '') {
+    throw new Error(
+      `git ${args.join(' ')} answered with warnings, so the listing is ` +
+        `incomplete and cannot be a baseline: ${stderr}`,
+    );
+  }
+  const out = r.stdout ?? Buffer.alloc(0);
+  return out.length > 0 && out[out.length - 1] === 0
+    ? out.subarray(0, out.length - 1)
+    : out;
 }
 
 function git(cwd: string, ...args: string[]): void {
@@ -161,6 +225,7 @@ function git(cwd: string, ...args: string[]): void {
     encoding: 'utf8',
     env: sanitizedGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
+    timeout: GIT_TIMEOUT_MS,
   });
   if (r.error) throw r.error;
   if (r.status !== 0) {
@@ -168,35 +233,128 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
-// The tree's untracked AND ignored FILES, listed individually. Two
-// `ls-files` calls rather than `git status`: status collapses a directory to
-// one `dir/` entry, and a plant dropped INSIDE a directory the build left —
-// `dist/cli.js`, `node_modules/.bin/<x>`, exactly what a host-side A/B
-// executes — then changes no set membership. `ls-files --others` never
-// collapses.
-function untrackedPaths(tree: string): string[] {
-  const others = gitOutZ(
-    tree,
-    'ls-files',
-    '-z',
-    '--others',
-    '--exclude-standard',
-  );
-  const ignored = gitOutZ(
-    tree,
-    'ls-files',
-    '-z',
-    '--others',
-    '--ignored',
-    '--exclude-standard',
-  );
-  return [...others.split('\0'), ...ignored.split('\0')]
-    .filter((e) => e !== '')
-    .sort();
+/**
+ * The tree's untracked AND ignored entries, as raw byte paths relative to
+ * the tree.
+ *
+ * Two `ls-files` calls rather than `git status`: status collapses a
+ * directory to one `dir/` entry, and a plant dropped INSIDE a directory the
+ * build left — `dist/cli.js`, `node_modules/.bin/<x>`, exactly what a
+ * host-side A/B executes — then changes no set membership.
+ *
+ * `ls-files --others` collapses in ONE case, which the earlier comment here
+ * denied: it stops descending at a nested repository and emits the single
+ * entry `dir/`. A dependency fetched from a git URL, a submodule
+ * materialised during install, or a `git init` run inside the mount all
+ * produce one. `expandCollapsed` walks those itself rather than refusing
+ * them — refusing would kill the A/B lane for the round on a legitimate
+ * tree, which is the failure this fence keeps being asked not to cause.
+ */
+function untrackedPaths(tree: string): Buffer[] {
+  const split = (out: Buffer): Buffer[] => {
+    const parts: Buffer[] = [];
+    let at = 0;
+    for (;;) {
+      const nul = out.indexOf(0, at);
+      const end = nul === -1 ? out.length : nul;
+      if (end > at) parts.push(out.subarray(at, end));
+      if (nul === -1) break;
+      at = nul + 1;
+    }
+    return parts;
+  };
+  // ONE walk, not two. `--exclude-standard` is what makes `--others` skip
+  // ignored paths, so WITHOUT it a single `--others` returns the union the
+  // two filtered walks were being paid for separately — measured on a
+  // fixture holding an ignored directory, a nested repository and plain
+  // untracked files, the unfiltered walk returns exactly the concatenation.
+  // At real scale that is ~100k paths listed once instead of twice.
+  //
+  // No sort either: the inventory is a map, so the order it is built in
+  // moves no comparison, and git's own output order is already
+  // deterministic for the record's readability.
+  const out: Buffer[] = [];
+  for (const entry of split(gitOutZ(tree, 'ls-files', '-z', '--others'))) {
+    if (entry[entry.length - 1] === SEP_BYTE) {
+      expandCollapsed(tree, entry.subarray(0, entry.length - 1), out);
+    } else {
+      out.push(entry);
+    }
+  }
+  return out;
 }
 
-const OK_MARKER = '.qwen-review-base-ok';
-const FAILED_MARKER = '.qwen-review-base-failed';
+/** `/` as a byte — what git terminates a collapsed directory entry with. */
+const SEP_BYTE = 0x2f;
+
+/**
+ * How many entries a nested repository may contribute before the listing
+ * counts as unmeasurable. A real built tree lists ~100k paths in total, so a
+ * single nested repository past this is not a dependency — and an inventory
+ * this walk could not finish must decline rather than be recorded short.
+ */
+const MAX_COLLAPSED_ENTRIES = 200_000;
+
+/**
+ * Enumerate a directory git collapsed, depth-first, appending byte paths
+ * relative to the tree.
+ *
+ * `withFileTypes` so the walk never follows a link: a symlink inside a
+ * nested repository is recorded as a link (see `untrackedInventory`), never
+ * descended into.
+ */
+function expandCollapsed(tree: string, rel: Buffer, out: Buffer[]): void {
+  const stack: Buffer[] = [rel];
+  let seen = 0;
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const abs = joinBytes(tree, dir);
+    let entries: Array<Dirent<Buffer>>;
+    try {
+      entries = readdirSync(abs, { withFileTypes: true, encoding: 'buffer' });
+    } catch (err) {
+      // Unreadable is the same class as `ls-files`' own readdir warning: an
+      // inventory that omits a subtree is not a baseline.
+      throw new Error(
+        `could not enumerate the nested repository at ${dir.toString('utf8')}: ` +
+          `${(err as Error).message}`,
+      );
+    }
+    for (const entry of entries) {
+      const child = Buffer.concat([
+        dir,
+        Buffer.from([SEP_BYTE]),
+        entry.name as unknown as Buffer,
+      ]);
+      if (++seen > MAX_COLLAPSED_ENTRIES) {
+        throw new Error(
+          `the nested repository at ${rel.toString('utf8')} holds more than ` +
+            `${MAX_COLLAPSED_ENTRIES} entries, so its inventory cannot be measured`,
+        );
+      }
+      if (entry.isDirectory()) stack.push(child);
+      else out.push(child);
+    }
+  }
+}
+
+/** `<tree>/<rel>` with the relative part kept byte-exact. */
+function joinBytes(tree: string, rel: Buffer): Buffer {
+  return Buffer.concat([Buffer.from(`${tree}${sep}`), rel]);
+}
+
+/**
+ * A byte path as an object key, losslessly.
+ *
+ * `latin1` maps each byte to exactly one code point in U+0000-U+00FF, so a
+ * filename holding any byte sequence round-trips through the JSON record
+ * unchanged — which `utf8` does not (see `gitOutZ`). ASCII paths, which is
+ * all of them in practice, are unchanged by it and stay readable in the
+ * file.
+ */
+function inventoryKey(rel: Buffer): string {
+  return rel.toString('latin1');
+}
 
 /**
  * The untracked inventory a build leaves, per file with the stat pair the
@@ -205,40 +363,130 @@ const FAILED_MARKER = '.qwen-review-base-failed';
  * the reviewed code's), and `BuiltTreeStat` says why the pair is size and
  * ctime.
  *
- * The two marker files are EXCLUDED: they are notes this pipeline itself
- * writes and the reviewed code may hold a copy of, so their presence or
- * absence must move no fence decision — and excluding them is what lets the
- * record be written before the marker without the marker showing up as its
- * own unrecorded extra.
+ * Nothing is excluded. The in-tree marker files this command used to write
+ * are gone — see the module's own reasoning at the trust store: every write
+ * into the mounted tree is a write through whatever the reviewed code left
+ * at that path (a symlink at the marker name turned the "note for a human"
+ * into an arbitrary host-file truncate; a FIFO turned it into a hang no
+ * `catch` can reach), and a note nothing reads is not worth either. So a
+ * file that happens to carry a marker's NAME is inventory like any other:
+ * recorded when the build leaves it, and an unrecorded extra when the
+ * reviewed code plants it.
  */
 function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
   // No prototype: a path literally named `__proto__` is a legal filename,
   // and the plain-object setter would swallow it — recorded nowhere, so a
   // plant at that path would be invisible to the fence.
   const inventory: Record<string, BuiltTreeStat> = Object.create(null);
-  for (const p of untrackedPaths(tree)) {
-    if (p === OK_MARKER || p === FAILED_MARKER) continue;
-    const st = lstatSync(join(tree, p));
-    inventory[p] = { size: st.size, ctimeMs: st.ctimeMs };
+  // BOTH spellings of the tree root. A link that resolves back INSIDE the
+  // tree is enumerated on its own account by the walk, so it needs no target
+  // stat; judging that against the canonical root alone misread every such
+  // link on a host where an ancestor is itself a link (`/tmp` on macOS is
+  // the everyday case), and recorded a second, redundant stat pair whose
+  // churn then declined honest rebuilds twice over.
+  const treeRoots = [resolve(tree)];
+  try {
+    const real = realpathSync(tree);
+    if (real !== treeRoots[0]) treeRoots.push(real);
+  } catch {
+    // Unresolvable: the lexical spelling is the only basis there is, and the
+    // caller's own gates rule on a tree that vanished mid-ask.
+  }
+  const escapesTree = (target: string): boolean =>
+    treeRoots.every((root) => {
+      const rel = relative(root, target);
+      return rel === '' || rel.startsWith('..') || isAbsolute(rel);
+    });
+  for (const rel of untrackedPaths(tree)) {
+    const abs = joinBytes(tree, rel);
+    let st;
+    try {
+      st = lstatSync(abs);
+    } catch (err) {
+      // Gone between the listing and the stat. That is ordinary churn on a
+      // tree a sibling shard may be running an A/B in, and it must NOT be
+      // fatal: a throw here lands no record at all at build time, and every
+      // later shard then declines for the rest of the round — the A/B lane
+      // killed by one file that moved. Skipping is fail-closed on its own
+      // terms: the path is simply not in this inventory, so a later ask that
+      // finds it there sees an unrecorded extra and declines.
+      //
+      // Only ENOENT. Any other errno is a tree this walk cannot describe,
+      // and an inventory that silently omits a subtree is not a baseline.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
+    }
+    const entry: BuiltTreeStat = { size: st.size, ctimeMs: st.ctimeMs };
+    if (st.isSymbolicLink()) {
+      // `lstat` describes the LINK, which is the right choice for spotting a
+      // planted link but the wrong one for describing what the A/B's base
+      // side actually executes: rewriting the TARGET moves neither the
+      // link's size nor its ctime. So the target is recorded too.
+      //
+      // The target's own name is recorded for every link (a relinked
+      // `node_modules/.bin/x` is a rewrite the stat pair cannot see), and
+      // the target's stat only when the target ESCAPES the tree — a target
+      // inside the tree is enumerated on its own account by the walk above,
+      // so stat-ing it here would record the same file twice and make an
+      // honest rebuild's ctime churn read as two mismatches instead of one.
+      entry.link = readlinkSync(abs, 'buffer').toString('latin1');
+      const resolved = resolve(dirname(abs.toString('latin1')), entry.link);
+      if (escapesTree(resolved)) {
+        try {
+          const target = statSync(resolved);
+          entry.targetSize = target.size;
+          entry.targetCtimeMs = target.ctimeMs;
+        } catch {
+          // A dangling escape: recorded as such, so a later ask that finds
+          // it resolvable is a change rather than a silent match.
+          entry.targetSize = -1;
+          entry.targetCtimeMs = -1;
+        }
+      }
+    }
+    inventory[inventoryKey(rel)] = entry;
   }
   return inventory;
 }
 
 /**
- * Whether every file the tree holds now is one the record holds, unchanged.
- * Recorded-but-absent is fine (residue may be cleaned between asks);
- * present-but-unrecorded is the addition arm, and present-but-rewritten —
- * size or ctime moved — is the in-place arm. Both are the plant shape.
+ * Whether the tree holds exactly what the record says it holds.
+ *
+ * The comparison is TWO-WAY, and the earlier one-way form is why: iterating
+ * only `current` made present-but-unrecorded (the addition arm) and
+ * present-but-rewritten (the in-place arm) both visible while
+ * RECORDED-BUT-ABSENT was not. Deleting `dist/cli.js` — the file this
+ * module's own docs name as "exactly what a host-side A/B executes" — then
+ * passed the fence, and the base side ran against a tree missing its built
+ * executable, reading as "fails on base too". Worse, the empty case was
+ * vacuously true: a rebuilt-but-never-populated tree matched any record at
+ * all.
+ *
+ * "Residue may be cleaned between asks" was the argument for tolerating an
+ * absence. It does not survive the measurement: nothing in this pipeline
+ * removes a file from a standing base tree between asks, and the one thing
+ * that does — a rebuild — drops the record with the tree (see
+ * `dropBuiltTree`). An absence is a change, and a change declines.
  */
 function inventoryMatches(
   current: Record<string, BuiltTreeStat>,
   recorded: Record<string, BuiltTreeStat>,
 ): boolean {
-  for (const [p, now] of Object.entries(current)) {
-    const was = recorded[p];
-    if (!was || was.size !== now.size || was.ctimeMs !== now.ctimeMs) {
-      return false;
-    }
+  const same = (a: BuiltTreeStat, b: BuiltTreeStat): boolean =>
+    a.size === b.size &&
+    a.ctimeMs === b.ctimeMs &&
+    a.link === b.link &&
+    a.targetSize === b.targetSize &&
+    a.targetCtimeMs === b.targetCtimeMs;
+  const currentKeys = Object.keys(current);
+  const recordedKeys = Object.keys(recorded);
+  if (currentKeys.length !== recordedKeys.length) return false;
+  for (const p of currentKeys) {
+    // `Object.prototype.hasOwnProperty.call`, not `recorded[p]`: `recorded`
+    // is parsed from JSON and so HAS a prototype, and a path named
+    // `constructor` would otherwise resolve to an inherited value.
+    if (!Object.prototype.hasOwnProperty.call(recorded, p)) return false;
+    if (!same(current[p], recorded[p])) return false;
   }
   return true;
 }
@@ -297,23 +545,6 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // the FIRST build can still collide — the window is narrow and the failure
   // is a build error, not a wrong verdict. A record for the wrong SHA — a
   // rebase between runs — falls through to the rebuild below.)
-  const marker = () => join(tree, OK_MARKER);
-  const failedMarker = () => join(tree, FAILED_MARKER);
-  // Either marker's first line naming this base — informational only: the
-  // markers are in-tree notes, so this answers "was this run here", never
-  // "is the tree good".
-  const markerNamesBaseSha = (): boolean => {
-    for (const m of [marker(), failedMarker()]) {
-      try {
-        if (readFileSync(m, 'utf8').trim().split('\n')[0] === baseSha) {
-          return true;
-        }
-      } catch {
-        // Absent marker — the common case.
-      }
-    }
-    return false;
-  };
   // The fence reads this run's trust record, kept OUTSIDE the mount beside
   // the worktree leases (see lib/base-tree-trust.ts). It used to read a
   // marker file inside the tree stamped with a per-run secret — but the
@@ -321,20 +552,52 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // secret readable from the mount authenticates nothing: the reviewed code
   // could copy it into a forged failed-marker and settle the A/B lane into
   // "infrastructure" for the whole round, or stamp an ok marker over a tree
-  // it shaped. So the markers are informational notes now, and the record —
-  // which the mount cannot supply — is the fence. Without it no tree is
-  // reused and no failure is settled, so its absence fails the command, not
-  // the fence.
+  // it shaped. So the record — which the mount cannot supply — is the whole
+  // of the fence, and the in-tree markers are gone entirely rather than
+  // demoted: keeping them meant this command still WROTE into the tree
+  // (through whatever the reviewed code left at that path) and still READ
+  // one (with a bare `readFileSync` a planted FIFO turned into a hang).
+  // Without the record no tree is reused and no failure is settled, so its
+  // absence fails the command, not the fence.
   let trustPath: string;
   let trust: TrustState;
   let identityMs: number;
+  let anchoredBaseSha: string | undefined;
   try {
+    // `runIdentity` first: it is the one that refuses a worktree with no
+    // host-side lease naming it, and `baseTreeTrustPath` keys under the same
+    // target — so a refusal here must happen before any path is derived.
+    const identity = runIdentity(worktree);
     trustPath = baseTreeTrustPath(worktree, args.plan);
-    identityMs = runIdentityMs(worktree, args.plan);
+    identityMs = identity.identity;
+    anchoredBaseSha = identity.mergeBaseSha;
     trust = establishTrust(trustPath, identityMs, baseSha);
   } catch (err) {
     return unavailable(
       `could not establish the run's trust artifact: ${(err as Error).message}`,
+    );
+  }
+  // The plan is inside the mount; the lease is not. When the capture
+  // recorded the merge base it resolved, THAT is the value this run is
+  // entitled to build against, and the plan agreeing with it is a
+  // precondition rather than a source.
+  //
+  // The pin alone could not carry this. It authenticates the plan against
+  // the FIRST ask's reading of the plan — but the containerized build/test
+  // phase runs before any `base-tree` ask exists, so the reviewed code holds
+  // the plan read-write BEFORE that first reading. Rewriting `mergeBaseSha`
+  // to the PR head (a real commit, so `worktree add` succeeds) made the run
+  // build, certify and pin a "base" the PR chose, with both A/B arms then
+  // emitting identical output and every real difference reading as
+  // pre-existing. Anchoring the establishment value host-side is the only
+  // thing that closes it; the pin still covers rewrites after the first ask.
+  if (anchoredBaseSha !== undefined && anchoredBaseSha !== baseSha) {
+    return unavailable(
+      `the plan names merge base ${baseSha.slice(0, 9)} but this review's ` +
+        `capture recorded ${anchoredBaseSha.slice(0, 9)} host-side, and the ` +
+        'plan lives inside the review temp dir — declining to build or ' +
+        'reuse at a sha the capture never resolved; an A/B is not available ' +
+        'for this review',
     );
   }
   if (trust.conflict) {
@@ -343,8 +606,8 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     // rewrite of `mergeBaseSha` is how the reviewed code would choose the
     // base every later A/B certifies; re-pinning would make the rewritten
     // value authoritative, so the answer is to decline. A genuine rebase
-    // arrives through a fresh capture — a new identity, a rotation, a clean
-    // pin.
+    // arrives through a fresh capture — a new identity (minted host-side
+    // when the capture records a moved merge base), a rotation, a clean pin.
     return unavailable(
       'the plan now names a different merge base than the one this run ' +
         'pinned when it started, and the plan lives inside the review temp ' +
@@ -354,7 +617,18 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   }
   try {
     const recorded = builtTreeRecord(trustPath, tree);
-    if (existsSync(tree) && recorded !== null && recorded.baseSha === baseSha) {
+    // `state: 'truncated'` is deliberately NOT in this condition: the budget
+    // cut an earlier ask's build short, which says nothing about this sha, so
+    // this ask repays the build rather than reusing a tree that was never
+    // finished or re-serving the truncation as an answer. It falls through to
+    // `buildBaseTree`, whose opening `dropBuiltTree` clears the entry before
+    // the sweep.
+    if (
+      existsSync(tree) &&
+      recorded !== null &&
+      recorded.baseSha === baseSha &&
+      recorded.state !== 'truncated'
+    ) {
       if (recorded.state === 'failed') {
         // A base that FAILED to build is a settled answer too — and the
         // record, not any in-tree marker, is what settles it: this branch
@@ -425,17 +699,57 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         } catch {
           inventory = null;
         }
+        // The pointer question, asked AGAIN — immediately before the one
+        // command in this arm that is not a safe read.
+        //
+        // The entry check above answered about the pointer as it stood then;
+        // the inventory walk between the two is ~1 s on a real tree (~100k
+        // lstats), and a sibling tree under the same read-write mount is
+        // enough for the reviewed code to rewrite `<base>/.git` inside that
+        // window. `git status` REFRESHES THE INDEX: it re-hashes every
+        // stat-dirty tracked file, which runs the resolved repository's
+        // `filter.<driver>.clean` — on the host, as the review user. A
+        // rewritten pointer aimed at a planted commondir carrying such a
+        // filter therefore turns this check into execution. Asking here
+        // shortens the window from "one inventory walk" to the two
+        // statements between this call and the spawn.
+        //
+        // `gitOut`'s `-c` pins blank `core.fsmonitor` and `core.hooksPath`,
+        // but `filter.*` cannot be blanked generically — there is no
+        // wildcard for it — so the pointer is the thing that has to be
+        // right, not the config.
+        args.onReuseWindow?.();
+        const stillTrusted = untrustedGitfile(tree);
+        if (stillTrusted !== null) {
+          return unavailable(
+            `the base tree at ${baseSha.slice(0, 9)} had its .git pointer ` +
+              `rewritten while this ask was measuring it (${stillTrusted}), ` +
+              'so the reuse check cannot be completed safely; declining to ' +
+              `reuse or discard it — remove ${tree} to force a rebuild`,
+          );
+        }
         if (
           gitOut(tree, 'status', '--porcelain', '--untracked-files=no') !==
             '' ||
           inventory === null ||
           !inventoryMatches(inventory, recorded.untracked)
         ) {
+          // Terminal within the run, and deliberately so. The two-way
+          // inventory compare means an absence declines too, and a decline
+          // that could re-record itself would let anything that changed the
+          // tree re-baseline the fence against its own change — which is the
+          // whole property this arm exists for. So the recovery named here
+          // is the one that actually works and cannot be driven from inside
+          // the mount: remove the tree, which makes the next ask rebuild it.
+          // The earlier text prescribed "retry when the probe finishes",
+          // which for the residue shape is advice that can never succeed —
+          // the residue is still there at the retry.
           return unavailable(
             `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
-              'but no longer passes a reuse check (a concurrent probe may be ' +
-              'writing it mid-A/B); declining to reuse or discard it — retry ' +
-              'when the probe finishes, or settle the claim by reading',
+              'but no longer holds exactly what this run recorded (a ' +
+              'concurrent probe may be writing it mid-A/B, or something ' +
+              'changed it); declining to reuse or discard it — settle the ' +
+              `claim by reading, or remove ${tree} to force a rebuild`,
           );
         }
         return {
@@ -453,9 +767,16 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // tree THIS run built whose record never landed or tore (the build
       // lock serializes builders, so the tree may be mid-A/B in a sibling
       // shard — discarding on a bookkeeping gap is the clobber this fence
-      // exists to prevent). The marker the build wrote is what tells them
-      // apart: it says THIS run was here. Its content certifies nothing —
-      // the decline below reuses nothing.
+      // exists to prevent).
+      //
+      // What tells them apart is `established`, and ONLY that: `adopted`
+      // means an earlier shard of THIS run minted the trust file, `healed`
+      // means this run's file tore. Both are host-side evidence that this
+      // run has been here. The earlier cut read an in-tree marker for the
+      // same question — a file inside the surface the reviewed code holds
+      // read-write, which could be planted to force this decline (and whose
+      // bare `readFileSync` hung the shard outright on a FIFO). The trust
+      // file answers it strictly better, so the marker is gone.
       const pointerWhy = untrustedGitfile(tree);
       if (
         pointerWhy !== null ||
@@ -464,8 +785,8 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         // The same no-benign-cause arm as above: a rewritten pointer is the
         // plant the rebuild sweeps, whatever the bookkeeping says.
       } else if (
-        (trust.established === 'adopted' || trust.established === 'healed') &&
-        markerNamesBaseSha()
+        trust.established === 'adopted' ||
+        trust.established === 'healed'
       ) {
         return unavailable(
           `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
@@ -536,6 +857,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   function buildBaseTree(baseSha: string): BaseTreeReport {
     let sweep: SweepResult | undefined;
     try {
+      // The record goes FIRST, before the tree it describes stops existing:
+      // `trees` is keyed by path, the base tree's path is fixed for the
+      // review, and a rebuild the whole-call budget cuts short writes no new
+      // record — so a surviving entry would certify a tree that was never
+      // built. Dropping before the sweep means a crash in between leaves the
+      // recoverable state, not the certifying one.
+      dropBuiltTree(trustPath, identityMs, tree);
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
       sweep = discardWorktree(worktree, tree);
@@ -576,6 +904,22 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     // settled answer about this SHA either (with more budget it may build
     // fully), so NO marker is written — a later shard may repay and succeed.
     if ((build.notBuilt?.length ?? 0) > 0) {
+      // Recorded as `truncated`, not left as an absence. A standing tree
+      // with NO record is ambiguous — either this, or a record that never
+      // landed or tore — and the arm that reads the absence has to pick one
+      // answer for both. Saying which one this is, host-side, lets the next
+      // shard repay the build (the note's own promise) while a torn record
+      // still declines.
+      try {
+        recordBuiltTree(trustPath, identityMs, tree, {
+          baseSha,
+          state: 'truncated',
+          untracked: {},
+        });
+      } catch {
+        // Unwritable: the next shard meets the ambiguous absence, which
+        // declines. Fail-closed, and never a certification.
+      }
       return {
         available: false,
         path: tree,
@@ -610,9 +954,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           state: 'failed',
           untracked: {},
         });
-        writeFileSync(failedMarker(), `${baseSha}\n`);
       } catch {
-        // The tree may be too broken to hold a marker; the next shard repays.
+        // The record could not be written; the next shard repays the build
+        // rather than reading a settled answer that never landed.
       }
       return {
         available: false,
@@ -636,16 +980,19 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     if (pointerWhy !== null) {
       return unavailable(
         `the base tree's .git pointer was rewritten during the build ` +
-          `(${pointerWhy}), so its residue cannot be measured safely; the ` +
-          'tree is left standing for inspection, and an A/B is not ' +
-          'available for this review (this is an infrastructure result, ' +
-          'never a finding against the PR)',
+          `(${pointerWhy}), so its residue cannot be measured safely and ` +
+          'nothing was recorded about it; the next ask rebuilds it, which ' +
+          'sweeps the plant — copy the tree aside first if you want to ' +
+          'inspect it. An A/B is not available for this review (this is an ' +
+          'infrastructure result, never a finding against the PR)',
       );
     }
-    // The host-side record is what the fast path above trusts, so it goes
-    // FIRST: a call that certifies the tree must have landed the evidence
-    // before the in-tree note. The marker is informational — content for a
-    // human, excluded from the recorded inventory — so nothing reads it.
+    // The host-side record is the whole of the fence. Nothing is written
+    // into the tree beside it: an in-tree note would be a host-side write
+    // through whatever the reviewed code left at that path for the minutes
+    // the containerized build held it — a symlink there makes the write an
+    // arbitrary host-file truncate, and a FIFO makes it a hang inside
+    // `open(2)` that no surrounding `catch` can reach.
     try {
       recordBuiltTree(trustPath, identityMs, tree, {
         baseSha,
@@ -657,11 +1004,6 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // call's answer stands — the build just succeeded in front of us —
       // and later shards decline on the missing record rather than reusing
       // what they cannot verify or discarding what a sibling may be using.
-    }
-    try {
-      writeFileSync(marker(), `${baseSha}\n`);
-    } catch {
-      // The tree may be too broken to hold a note; the record is the fence.
     }
     return {
       available: true,

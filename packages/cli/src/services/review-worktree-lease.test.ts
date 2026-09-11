@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
+  recordReviewWorktreeLeaseMergeBase,
   clearReviewWorktreeLease,
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
@@ -1464,26 +1465,108 @@ describe('lease acquisition is atomic (#9205)', () => {
     expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('prompt-b');
   });
 
-  it("keeps the lease's mtime across a same-session refresh — the run identity (R3-resume)", () => {
+  it('carries the run identity in the lease CONTENT across same-session refreshes', () => {
     // The review pipeline keys the base-tree trust file's run identity on
-    // the lease's mtime: a resumed run re-acquires here, and a moved mtime
-    // would rotate the trust state and discard the standing base tree,
-    // defeating fetch-pr's preserved plan epoch. The refresh rewrites the
-    // content (the prompt id moves) while the mtime stands.
+    // this value: a resumed run re-acquires here, and a moved identity
+    // rotates the trust state and discards the standing base tree.
+    //
+    // It lives in the content because the earlier carrier — the file's mtime,
+    // restored through `utimesSync` on every refresh — could not survive its
+    // own arithmetic: the restore floors sub-millisecond precision, so the
+    // SECOND refresh of a run drifted past the trust store's 1 ms tolerance
+    // and rotated a live run's state. Hence the loop: one refresh could not
+    // see it.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const first = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(typeof first).toBe('number');
+    for (let i = 0; i < 8; i++) {
+      createReviewWorktreeLease(leaseParams(root, { promptId: `prompt-${i}` }));
+      const now = readReviewWorktreeLease(root, 'pr-1');
+      expect(now?.promptId).toBe(`prompt-${i}`);
+      expect(now?.identity).toBe(first); // exactly, not within a tolerance
+    }
+  });
+
+  it("mints a FRESH identity on the heal arm, never the standing file's", () => {
+    // The heal arm rewrites a lease that did not parse, so the standing
+    // file's owner, session and target were never verified. The mtime
+    // carrier donated that file's timestamp to this run regardless, which
+    // made an unrelated earlier run's base-tree trust state ADOPTED instead
+    // of rotated — its pinned merge base and its recorded trees inherited by
+    // a run that had nothing to do with it. A fresh mint rotates, which
+    // loses a base tree rather than trusting one.
     const root = createRepository();
     createReviewWorktreeLease(leaseParams(root));
     const path = reviewLeasePath(root, 'pr-1');
-    // Stand the first acquisition clearly in the past: without the preserve
-    // the refresh moves the mtime to now — the gap, not wall-clock luck, is
-    // what discriminates.
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(path, past, past);
-    const before = lstatSync(path).mtimeMs;
+    const before = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    writeFileSync(path, '{ torn'); // the crash window: not parseable
     createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
-    expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('prompt-b');
-    // `utimesSync` restores through the filesystem's own granularity, so
-    // the compare carries the same 1 ms tolerance the identity read does.
-    expect(Math.abs(lstatSync(path).mtimeMs - before)).toBeLessThanOrEqual(1);
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.promptId).toBe('prompt-b');
+    expect(after?.identity).not.toBe(before);
+  });
+
+  it('reclaims the base-tree trust state for the target it clears, and only that one', () => {
+    // The trust file is keyed by the PLAN's path — a digest no other module
+    // can reconstruct — so nothing outside this ever deleted it, and a real
+    // built tree's per-file inventory measures ~9 MB. One per plan path per
+    // review, kept forever. The lease directory is where it lives and this
+    // is the call that ends a review's hold on the target, so the reclaim
+    // belongs here; the per-target directory is what makes it precise.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const mine = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    const other = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-2');
+    for (const dir of [mine, other]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'deadbeefdeadbeef.json'), '{"identity":1}');
+    }
+
+    clearReviewWorktreeLease(root, 'pr-1');
+
+    expect(existsSync(mine)).toBe(false);
+    // A concurrent review of another PR in the same repository keeps its own.
+    expect(existsSync(join(other, 'deadbeefdeadbeef.json'))).toBe(true);
+  });
+
+  it('records the merge base host-side, and rotates the identity only when it MOVES', () => {
+    // `base-tree` pins the base it certifies against, and its only source
+    // used to be the plan — which lives inside the directory the sandbox
+    // mounts read-write, and which the build/test phase gives the reviewed
+    // code a chance to rewrite BEFORE the run's first base-tree ask. This is
+    // the host-side anchor that ask compares against.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const minted = readReviewWorktreeLease(root, 'pr-1')?.identity;
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBeUndefined();
+
+    // The first recording is this capture's own fact: nothing to disagree
+    // with, so the identity stands and a standing base tree is still reused.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'a'.repeat(40),
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(minted);
+
+    // Re-recording the SAME base changes nothing at all.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    expect(readReviewWorktreeLease(root, 'pr-1')?.identity).toBe(minted);
+
+    // A MOVED base is a genuine rebase arriving through a fresh capture: the
+    // trust state must rotate rather than report a conflict between its pin
+    // and the new plan and then decline for the rest of the session.
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'b'.repeat(40));
+    const moved = readReviewWorktreeLease(root, 'pr-1');
+    expect(moved?.mergeBaseSha).toBe('b'.repeat(40));
+    expect(moved?.identity).not.toBe(minted);
+
+    // Never fatal, and never inventing a lease: an absent one is left absent.
+    const other = createRepository();
+    expect(() =>
+      recordReviewWorktreeLeaseMergeBase(other, 'pr-9', 'c'.repeat(40)),
+    ).not.toThrow();
+    expect(readReviewWorktreeLease(other, 'pr-9')).toBeNull();
   });
 
   it('heals an unreadable lease file instead of wedging on it', () => {

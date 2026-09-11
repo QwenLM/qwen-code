@@ -33,6 +33,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
+  recordReviewWorktreeLeaseMergeBase,
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
@@ -1153,6 +1154,28 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
           `is resolved from a possibly stale local ref, so the diff may not be ` +
           `the one under review.`,
+      );
+    }
+    // Record the resolved merge base in the host-side lease, beside the
+    // review-lease directory nothing mounts.
+    //
+    // `base-tree` builds and certifies the A/B's BASE side at this sha, and
+    // the plan it reads is written into `.qwen/tmp` — the directory the
+    // sandbox hands the reviewed code read-write, minutes before the first
+    // `base-tree` ask exists. Without a host-side copy, the value the fence
+    // pins is whatever the plan says at that first ask, and the pin then
+    // authenticates the mount's choice against itself. With one, `base-tree`
+    // refuses a plan that disagrees with what this capture actually
+    // resolved. Not recorded when there is no merge base: `base-tree`
+    // reports the A/B unavailable for that case on its own.
+    //
+    // Advisory and never fatal — a capture that cannot write it leaves
+    // `base-tree` reading the plan, which is where it was.
+    if (mergeBaseSha !== null && !baseFetchFailed) {
+      recordReviewWorktreeLeaseMergeBase(
+        process.cwd(),
+        leaseTarget,
+        mergeBaseSha,
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');

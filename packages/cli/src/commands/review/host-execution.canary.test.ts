@@ -62,8 +62,27 @@ import {
   baseTreeTrustPath,
   establishTrust,
   recordBuiltTree,
-  runIdentityMs,
+  runIdentity,
 } from './lib/base-tree-trust.js';
+import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+
+/**
+ * The lease fetch-pr holds for the whole review — the run identity the mount
+ * cannot touch, and the only source of one: `runIdentity` refuses rather
+ * than falling back to anything inside the mount, so `base-tree` reports
+ * itself unavailable without this and the canary would pass for the wrong
+ * reason.
+ */
+const acquireLease = (repo: string, worktree: string): void => {
+  createReviewWorktreeLease({
+    sessionId: 'canary-session',
+    promptId: 'canary-prompt',
+    target: 'pr-1',
+    repositoryRoot: repo,
+    worktreePath: worktree,
+    branch: 'qwen-review/pr-1',
+  });
+};
 
 // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
 // colon), so containment cannot exist there and the question this file asks has
@@ -291,6 +310,7 @@ describe('a planted repository reaches no host-side execution', () => {
       const canary = join(canaryDir, 'PWNED');
       const worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
       g(repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD');
+      acquireLease(repo, worktree);
       const baseSha = g(worktree, 'rev-parse', 'HEAD');
       // The base tree the pipeline would build, standing and RECORDED.
       // Through the real helpers, so the fixture cannot drift from the state
@@ -300,7 +320,7 @@ describe('a planted repository reaches no host-side execution', () => {
       const plan = join(repo, 'plan.json');
       writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);
       const trustPath = baseTreeTrustPath(worktree, plan);
-      const identityMs = runIdentityMs(worktree, plan);
+      const identityMs = runIdentity(worktree).identity;
       establishTrust(trustPath, identityMs, baseSha);
       recordBuiltTree(trustPath, identityMs, tree, {
         baseSha,
@@ -355,6 +375,7 @@ describe('a planted repository reaches no host-side execution', () => {
       const canary = join(canaryDir, 'PWNED');
       const worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
       g(repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD');
+      acquireLease(repo, worktree);
       const baseSha = g(worktree, 'rev-parse', 'HEAD');
       const plan = join(repo, 'plan.json');
       writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);

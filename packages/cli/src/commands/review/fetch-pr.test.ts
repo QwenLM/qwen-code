@@ -345,6 +345,7 @@ vi.mock('../../services/review-worktree-lease.js', () => {
     clearReviewWorktreeLease: vi.fn(),
     clearReviewWorktreeLeaseIfOwned: vi.fn(),
     createReviewWorktreeLease: vi.fn(),
+    recordReviewWorktreeLeaseMergeBase: vi.fn(),
     readReviewWorktreeLease,
     // The found-at variant the held-lease refusal uses: delegate so the
     // `mockReturnValueOnce` steering above reaches both.

@@ -11,7 +11,6 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -72,6 +71,43 @@ export interface ReviewWorktreeLease {
   repositoryRoot: string;
   worktreePath: string;
   branch: string;
+  /**
+   * This capture's run identity, minted here and carried in the lease's
+   * CONTENT.
+   *
+   * The review pipeline keys its base-tree trust state on it: the same value
+   * across a run means "the same capture", and a different one means the
+   * trust state rotates. It lives in the content rather than in the file's
+   * mtime — which is what an earlier cut used — because a timestamp is the
+   * wrong carrier for an identity. `utimesSync` restores a fractional mtime
+   * with a sub-millisecond floor, so a second same-session refresh drifted
+   * past the trust store's tolerance and rotated a live run's state; and the
+   * heal arm, which rewrites a lease it could NOT parse, donated whatever
+   * mtime the standing file had — an unrelated earlier run's identity,
+   * adopted rather than rotated. A minted number has neither failure.
+   *
+   * Optional because a lease written by a build from before this field
+   * existed carries none. A reader that needs an identity refuses on the
+   * absence rather than substituting a mount-derived one; the next capture
+   * rewrites the lease with one.
+   */
+  identity?: number;
+  /**
+   * The merge base this capture resolved, recorded HOST-SIDE.
+   *
+   * `base-tree` pins the base it certifies against, and its only source used
+   * to be `mergeBaseSha` in the plan — which lives inside the directory the
+   * sandbox mounts read-write, and which the build/test phase gives the
+   * reviewed code a chance to rewrite BEFORE the run's first `base-tree`
+   * ask. The pin then authenticated the rewritten value against itself. The
+   * capture records it here, outside the mount, so the pin has an anchor the
+   * mount cannot reach.
+   *
+   * Optional because a lease written by an older build carries none, and
+   * because a capture that could not resolve a merge base records none —
+   * both leave `base-tree` on the plan's value, which is where it was.
+   */
+  mergeBaseSha?: string;
 }
 
 function leaseDirectory(repositoryRoot: string): string {
@@ -146,6 +182,23 @@ export function clearReviewWorktreeLease(
   // never throwing — reporting failure over a cleanup that succeeded, with
   // every retry re-throwing on a file no message names. Loud instead, the
   // same contract the mirror write carries.
+  // The base-tree trust artifacts for this target, which nothing else
+  // reclaims: they are keyed by the plan's PATH, which no other module can
+  // reconstruct, and a real built tree's per-file inventory measures ~9 MB.
+  // Host-side and this session's own state, so a plain recursive remove is
+  // right here — and it is best-effort like every other removal on this
+  // path.
+  try {
+    rmSync(join(leaseDirectory(root), 'base-tree', target), {
+      recursive: true,
+      force: true,
+    });
+  } catch (error) {
+    debugLogger.debug(
+      `Failed to reclaim base-tree trust state for ${target}:`,
+      error,
+    );
+  }
   const legacy = legacyLeasePath(root, target);
   try {
     rmSync(legacy, { force: true, recursive: true });
@@ -182,6 +235,94 @@ export function clearReviewWorktreeLeaseIfOwned(
   clearReviewWorktreeLease(repositoryRoot, target);
 }
 
+/**
+ * A fresh run identity.
+ *
+ * `Date.now()` alone would collide for two captures inside one millisecond,
+ * which is reachable when a restart re-captures immediately; the random low
+ * bits make a collision a coincidence rather than a certainty, while the
+ * millisecond part keeps the value readable in the lease file. Nothing
+ * compares identities for ORDER — the trust store asks only "the same one or
+ * not" — so the ordering the random part disturbs is not used.
+ */
+function mintIdentity(): number {
+  // Seconds, not milliseconds, so the 20 random bits fit under
+  // `Number.MAX_SAFE_INTEGER` alongside them (1.8e9 * 2^20 ≈ 1.9e15 < 9e15).
+  // The trust store compares these EXACTLY, so the random part is what makes
+  // two captures inside one clock tick distinct rather than a coincidence —
+  // a millisecond part with three decimal digits of randomness left a
+  // one-in-a-thousand collision, and, worse, put two distinct mints within
+  // the store's old 1 ms tolerance of each other.
+  return (
+    Math.floor(Date.now() / 1000) * 2 ** 20 +
+    (randomBytes(3).readUIntBE(0, 3) % 2 ** 20)
+  );
+}
+
+/**
+ * Record the merge base this capture resolved, in the host-side lease.
+ *
+ * Called by `fetch-pr` once the merge base is known — which is after the
+ * lease is acquired, so it cannot be part of the acquisition write.
+ *
+ * A CHANGED merge base mints a new identity, and that is the point: a
+ * genuine rebase arrives through a fresh capture, and the base-tree trust
+ * state must rotate rather than adopt a pin taken at the old base. Without
+ * it a same-session re-capture at a moved base kept the earlier identity,
+ * the trust store reported a conflict between its pinned base and the new
+ * plan, and every later ask in the session declined — a dead A/B lane
+ * misdiagnosed as reviewed-code tampering. A re-capture at the SAME base
+ * leaves the identity alone, so the standing base tree is still reused.
+ *
+ * Never throws: the lease is advisory state, and a capture that cannot
+ * record its base leaves `base-tree` on the plan's value, which is where it
+ * was before this field existed.
+ */
+export function recordReviewWorktreeLeaseMergeBase(
+  repositoryRoot: string,
+  target: string,
+  mergeBaseSha: string,
+): void {
+  if (!validTarget(target) || !mergeBaseSha) return;
+  const root = resolve(repositoryRoot);
+  const path = leasePath(root, target);
+  const existing = readLease(path);
+  if (!existing) return;
+  if (existing.mergeBaseSha === mergeBaseSha) return;
+  const next: ReviewWorktreeLease = {
+    ...existing,
+    mergeBaseSha,
+    // A lease from a build before the identity field existed carries none,
+    // and leaving it undefined here would write it back out missing — after
+    // which `runIdentity` refuses and the A/B lane is unavailable for the
+    // rest of the review. The capture is exactly the moment a fresh identity
+    // is legitimate, so mint one.
+    identity:
+      existing.mergeBaseSha === undefined
+        ? (existing.identity ?? mintIdentity())
+        : mintIdentity(),
+  };
+  // tmp-then-rename, the shape the mirror write already uses: a lock-free
+  // reader that catches this mid-write would read a torn file, and every
+  // reader treats a torn lease as NO lease — which makes `runIdentity`
+  // refuse and `base-tree` report itself unavailable for that ask.
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    renameSync(tmp, path);
+  } catch (error) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Litter, not a verdict.
+    }
+    debugLogger.debug(`Failed to record the merge base in ${path}:`, error);
+  }
+}
+
 export function createReviewWorktreeLease(params: {
   sessionId: string | undefined;
   promptId: string | undefined;
@@ -195,16 +336,21 @@ export function createReviewWorktreeLease(params: {
   }
 
   const repositoryRoot = resolve(params.repositoryRoot);
-  const lease: ReviewWorktreeLease = {
-    sessionId: params.sessionId,
-    promptId: params.promptId,
-    target: params.target,
-    repositoryRoot,
-    worktreePath: resolve(repositoryRoot, params.worktreePath),
-    branch: params.branch,
-  };
-  const data = `${JSON.stringify(lease, null, 2)}\n`;
   const path = leasePath(repositoryRoot, params.target);
+  const leaseFor = (identity: number, mergeBaseSha?: string): string => {
+    const lease: ReviewWorktreeLease = {
+      sessionId: params.sessionId!,
+      promptId: params.promptId!,
+      target: params.target,
+      repositoryRoot,
+      worktreePath: resolve(repositoryRoot, params.worktreePath),
+      branch: params.branch,
+      identity,
+      ...(mergeBaseSha === undefined ? {} : { mergeBaseSha }),
+    };
+    return `${JSON.stringify(lease, null, 2)}\n`;
+  };
+  let data = leaseFor(mintIdentity());
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
   // The pre-move path is deliberately NOT read for authority here. While the
   // move rolled out, an mtime-bounded read honored a legacy lease that
@@ -239,33 +385,28 @@ export function createReviewWorktreeLease(params: {
     // Same-session re-fetch refreshes the lease (ownership is per session,
     // not per prompt). An unreadable file is already read as no lease by
     // every reader, so rewriting it heals a torn write instead of wedging.
-    // The refresh must not move the file's mtime: the review pipeline keys
-    // run identity on it (base-tree's trust file adopts it), and a resumed
-    // run — which re-acquires here — would otherwise rotate the trust state
-    // and discard the standing base tree, defeating the resume's preserved
-    // plan epoch.
-    const keepMtime = readTrustMtime(path);
-    writeFileSync(path, data, 'utf8');
-    if (keepMtime !== null) {
-      try {
-        const at = new Date(keepMtime);
-        utimesSync(path, at, at);
-      } catch {
-        // A filesystem that declines utimes takes the moved mtime; the
-        // rotation that follows is the honest answer, not a wedge.
-      }
+    //
+    // The refresh CARRIES THE IDENTITY FORWARD — but only from a lease this
+    // call actually verified as this session's. `existing` is null on the
+    // heal arm, where the standing file did not parse and its owner, session
+    // and target were therefore never checked; carrying an identity across
+    // from there would let an unrelated earlier run's trust state be adopted
+    // instead of rotated. On that arm a fresh identity is minted, which
+    // rotates — the direction that loses a base tree rather than trusting
+    // one. The merge base rides along the same way: it is this capture's
+    // fact, and `recordReviewWorktreeLeaseMergeBase` is what moves it.
+    if (existing) {
+      data = leaseFor(
+        typeof existing.identity === 'number' &&
+          Number.isFinite(existing.identity)
+          ? existing.identity
+          : mintIdentity(),
+        existing.mergeBaseSha,
+      );
     }
+    writeFileSync(path, data, 'utf8');
   }
   mirrorLeaseAtLegacyPath(legacy, data, params.sessionId, params.target);
-}
-
-/** A lease file's mtime, or null when it cannot be read. */
-function readTrustMtime(path: string): number | null {
-  try {
-    return lstatSync(path).mtimeMs;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -410,7 +551,12 @@ function readLease(path: string): ReviewWorktreeLease | null {
       typeof value.target !== 'string' ||
       typeof value.repositoryRoot !== 'string' ||
       typeof value.worktreePath !== 'string' ||
-      typeof value.branch !== 'string'
+      typeof value.branch !== 'string' ||
+      (value.identity !== undefined &&
+        (typeof value.identity !== 'number' ||
+          !Number.isFinite(value.identity))) ||
+      (value.mergeBaseSha !== undefined &&
+        typeof value.mergeBaseSha !== 'string')
     ) {
       return null;
     }

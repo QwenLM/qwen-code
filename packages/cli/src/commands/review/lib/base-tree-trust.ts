@@ -34,28 +34,49 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { LEASE_PREFIX, REVIEW_LEASE_DIR, REVIEW_TMP_DIR } from './paths.js';
 
-/** What one legitimately-left file looked like at record time. */
+/** What one legitimately-left entry looked like at record time. */
 export interface BuiltTreeStat {
   size: number;
   /**
    * The tamper signal: `ctimeMs` cannot be set from userland — every write,
    * chmod and rename sets it to now, `utimensat` included — so an in-place
    * rewrite of a recorded path shows here even at the same size (which is
-   * all mtime would catch: a forged mtime is one syscall). On Windows ctime
-   * is the creation time and an in-place rewrite keeps it — the lane where
-   * containment cannot exist, where this fence is silent by design anyway.
+   * all mtime would catch: a forged mtime is one syscall). On Windows it is
+   * the NTFS change time, which an in-place rewrite DOES move — the earlier
+   * note here called it the creation time, which is what `birthtimeMs`
+   * carries; the signal is not weaker there, and Windows is in any case the
+   * lane where containment cannot exist and this fence is silent by design.
    */
   ctimeMs: number;
+  /**
+   * A symlink's target, byte-exact (`latin1`, see `inventoryKey`).
+   *
+   * `lstat` describes the LINK — the right choice for spotting a planted
+   * one, the wrong one for describing what the A/B's base side executes,
+   * because rewriting the target moves neither the link's size nor its
+   * ctime. Undefined for everything that is not a symlink.
+   */
+  link?: string;
+  /**
+   * The stat pair of a symlink target that ESCAPES the tree, which the
+   * tree's own walk therefore never visits. `-1` records a target that could
+   * not be resolved at record time, so a later ask finding it resolvable is
+   * a change rather than a silent match. Undefined when the link stays
+   * inside the tree (the walk records the target on its own account) and for
+   * everything that is not a symlink.
+   */
+  targetSize?: number;
+  targetCtimeMs?: number;
 }
 
 /** What a build of one tree left behind, recorded host-side. */
@@ -63,10 +84,19 @@ export interface BuiltTreeRecord {
   baseSha: string;
   /**
    * 'failed' is a settled answer: the fence re-serves it without re-paying
-   * the build. Recorded host-side because the in-tree failed marker is one
+   * the build. Recorded host-side because an in-tree failed marker is one
    * planted line away from suppressing the A/B lane for the whole round.
+   *
+   * 'truncated' is the opposite — the whole-call budget cut the build short,
+   * which says nothing about this sha, so a later shard with more budget
+   * SHOULD repay it. It is recorded rather than left as an absence because
+   * the absence is ambiguous: a standing tree with no record is either this
+   * (repay it) or a record that never landed or tore (decline, because a
+   * sibling shard may be mid-A/B in the tree). The earlier cut told those
+   * apart by reading a marker file from inside the tree — the surface the
+   * reviewed code holds read-write — and this states it host-side instead.
    */
-  state: 'ok' | 'failed';
+  state: 'ok' | 'failed' | 'truncated';
   /**
    * The tree's untracked AND ignored files at record time, listed
    * individually (never collapsed to a directory) and EXCLUDING the two
@@ -77,7 +107,7 @@ export interface BuiltTreeRecord {
 }
 
 interface TrustFile {
-  /** The run identity this file was minted for — see `runIdentityMs`. */
+  /** The run identity this file was minted for — see `runIdentity`. */
   identity: number;
   /**
    * The merge base this run builds and certifies, pinned at establishment.
@@ -94,19 +124,19 @@ interface TrustFile {
 }
 
 /**
- * How far the stored identity may sit from the current one and still count
- * as the same run — representation noise only, the same tolerance the run
- * ledger gives the plan mtime (`PLAN_MTIME_TOLERANCE_MS` in run-ledger.ts):
- * an epoch-preserving enrichment restores the mtime through `utimesSync`,
- * which costs a unit in the last place on some filesystems, and an exact
- * compare would rotate on the pipeline's own write.
+ * Identity comparison is EXACT.
+ *
+ * It used to carry a 1 ms tolerance, because the identity was a file's mtime
+ * and `utimesSync` restores one a unit-in-the-last-place off on some
+ * filesystems — an exact compare would have rotated on the pipeline's own
+ * write. The identity is a minted token now (`mintIdentity` in
+ * review-worktree-lease.ts), so there is no representation noise to absorb —
+ * and a tolerance over a minted value is actively wrong: two captures whose
+ * tokens differ by one would read as the SAME run and adopt each other's
+ * pinned base and recorded trees.
  */
-const IDENTITY_TOLERANCE_MS = 1;
-
 function sameIdentity(a: number, b: number): boolean {
-  // The exact-equality arm covers the non-finite "no identity" value, whose
-  // difference from itself is NaN.
-  return a === b || Math.abs(a - b) <= IDENTITY_TOLERANCE_MS;
+  return a === b;
 }
 
 /**
@@ -169,78 +199,196 @@ export function baseTreeTrustPath(worktree: string, planPath: string): string {
     trustRootFor(worktree),
     basename(REVIEW_LEASE_DIR),
     'base-tree',
+    // Under the TARGET, so `clearReviewWorktreeLease` can reclaim it: the
+    // file is keyed by the plan's path, which nothing outside this module
+    // can reconstruct, so without this directory nothing ever deleted it —
+    // and a real built tree's per-file inventory measures ~9 MB, one file
+    // per plan path per review, forever.
+    reviewTargetOf(worktree),
     `${key}.json`,
   );
 }
 
 /**
- * The run identity the trust file rotates on.
+ * The review target this worktree belongs to (`pr-<n>`), or a throw.
  *
- * The worktree lease's mtime when this run holds one: `fetch-pr` acquires
- * the lease on every capture (a same-session re-fetch rewrites it), and the
- * lease lives beside the trust root — outside the mount, where reviewed code
- * cannot touch it — so a mid-run `utimes` or `chmod` of the plan rotates
- * nothing, and a plan timestamp pinned forward pins nothing either. The
- * lease is matched on its recorded worktree so a stale lease for a
+ * The pipeline's review worktrees are `review-pr-<n>`, and everything this
+ * module keys — the lease it reads the identity from, the directory the
+ * trust file is reclaimed with — is named after that target. A worktree
+ * outside the shape has no lease naming it (see `runIdentity`), so there is
+ * nothing to key on and a shared fallback key is precisely what must not
+ * happen.
+ */
+function reviewTargetOf(worktree: string): string {
+  const target = /^review-(pr-\d+)$/.exec(basename(resolve(worktree)))?.[1];
+  if (!target) {
+    throw new Error(
+      `the worktree ${worktree} is not a review worktree (its name is not ` +
+        '`review-pr-<n>`), so no host-side lease names it and this run has ' +
+        'no identity the reviewed code cannot reach',
+    );
+  }
+  return target;
+}
+
+/**
+ * What the host-side lease says about this capture: its run identity, and
+ * the merge base it resolved.
+ *
+ * Both are read from the lease file, which lives beside this trust store —
+ * outside the directory the sandbox mounts read-write — and both used to
+ * come from inside that mount instead. The identity was the lease file's
+ * MTIME, which a same-session refresh had to restore through `utimesSync`
+ * (losing sub-millisecond precision, so the second refresh of a run drifted
+ * past the trust store's tolerance and rotated a live run's state) and which
+ * the heal arm donated from whatever unrelated file stood at the path. The
+ * merge base came from the plan, which the reviewed code holds read-write
+ * before the run's first ask — so the pin authenticated a value the mount
+ * had already chosen.
+ *
+ * The lease is matched on its recorded worktree, so a stale lease for a
  * different tree never keys this run.
  *
- * Without a lease — a hand-driven `base-tree` call, outside the pipeline's
- * geometry — the plan's own mtime is the identity, the same signal the run
- * ledger keys on: a re-capture moves it (new run), an epoch-preserving
- * enrichment restores it within tolerance (same run), a backdate rotates
- * (destroy, never adopt). What the fallback cannot tell apart is a mid-run
- * `utimes` from a re-capture; base-tree.ts's decline arms are what keep that
- * rotation from destroying a live tree. Its residual: a forward pin applied
- * before the run's first ask and re-applied after a re-capture holds the
- * identity fixed across the two runs — the adoption that lands is then gated
- * by the per-file size+ctime inventory check on every reuse, the arm the pin
- * cannot reach.
+ * Throws rather than falling back. The earlier cut degraded to the plan's
+ * own mtime on ANY miss — an unreadable lease, a lease for another tree, no
+ * lease at all — which put the identity back inside the mount (one `utimes`
+ * of the plan rotated the run's state and swept a tree a sibling was mid-A/B
+ * in) and let two callers of ONE trust file hold two different identities
+ * and rotate each other's records away. A caller that cannot produce a
+ * host-side identity has no business fencing on a shared key, so it gets an
+ * error and reports the command unavailable.
  */
-export function runIdentityMs(worktree: string, planPath: string): number {
-  try {
-    const target = /^review-(pr-\d+)$/.exec(basename(resolve(worktree)))?.[1];
-    if (target) {
-      const leaseFile = join(
-        trustRootFor(worktree),
-        basename(REVIEW_LEASE_DIR),
-        `${LEASE_PREFIX}${target}.json`,
-      );
-      const lease = JSON.parse(readFileSync(leaseFile, 'utf8')) as {
-        sessionId?: unknown;
-        promptId?: unknown;
-        worktreePath?: unknown;
-      };
-      if (
-        typeof lease.sessionId === 'string' &&
-        typeof lease.promptId === 'string' &&
-        lease.worktreePath === resolve(worktree)
-      ) {
-        return statSync(leaseFile).mtimeMs;
-      }
-    }
-  } catch {
-    // No lease, an unreadable one, or one not for this tree: the plan's own
-    // mtime is the fallback identity.
+export function runIdentity(worktree: string): {
+  identity: number;
+  mergeBaseSha?: string;
+} {
+  const resolved = resolve(worktree);
+  const target = reviewTargetOf(worktree);
+  const leaseFile = join(
+    trustRootFor(worktree),
+    basename(REVIEW_LEASE_DIR),
+    `${LEASE_PREFIX}${target}.json`,
+  );
+  let lease: {
+    sessionId?: unknown;
+    promptId?: unknown;
+    worktreePath?: unknown;
+    identity?: unknown;
+    mergeBaseSha?: unknown;
+  };
+  const raw = readJsonFileSafely(leaseFile, { clearWedge: false });
+  if (raw === null) {
+    throw new Error(
+      `the review worktree lease at ${leaseFile} could not be read (absent, ` +
+        'or not a regular file), so this run has no identity',
+    );
   }
   try {
-    return statSync(planPath).mtimeMs;
+    lease = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `the review worktree lease at ${leaseFile} could not be read ` +
+        `(${(err as Error).message}), so this run has no identity`,
+    );
+  }
+  if (
+    typeof lease.sessionId !== 'string' ||
+    typeof lease.promptId !== 'string' ||
+    lease.worktreePath !== resolved
+  ) {
+    throw new Error(
+      `the review worktree lease at ${leaseFile} does not name ${resolved}, ` +
+        "so it is not this run's lease",
+    );
+  }
+  if (typeof lease.identity !== 'number' || !Number.isFinite(lease.identity)) {
+    // A lease written before the identity moved into the lease's content.
+    // The next capture rewrites it with one; until then there is nothing
+    // host-side to key on, and keying on anything else is what this throw
+    // exists to stop.
+    throw new Error(
+      `the review worktree lease at ${leaseFile} carries no run identity ` +
+        '(it was written by an earlier build), so this run has none',
+    );
+  }
+  return {
+    identity: lease.identity,
+    mergeBaseSha:
+      typeof lease.mergeBaseSha === 'string' && lease.mergeBaseSha
+        ? lease.mergeBaseSha
+        : undefined,
+  };
+}
+
+/**
+ * Read a host-side JSON file without ever blocking in `open(2)`.
+ *
+ * `lstat` BEFORE the open, the shape `readLease` in review-worktree-lease.ts
+ * already uses: `readFileSync` on a FIFO blocks in the open with no timeout,
+ * so no `catch` below can ever run and the shard hangs with no output. These
+ * two files live outside the mount, so planting one takes host access rather
+ * than the reviewed code's own hands — but the cost of the guard is one
+ * `lstat` and the cost of not having it is a hang, which is the trade the
+ * house already made for the file next door.
+ */
+function readJsonFileSafely(
+  path: string,
+  { clearWedge }: { clearWedge: boolean },
+): string | null {
+  try {
+    if (!lstatSync(path).isFile()) {
+      // A DIRECTORY at one of these names is a wedge, and whoever OWNS the
+      // file clears it — the lease module already does exactly this for the
+      // lease, and this module does it for the trust file. Left standing at
+      // the trust path it makes every later write fail EISDIR on the rename,
+      // so the run reports "could not establish the run's trust artifact"
+      // for the rest of the review with no recovery anyone is told about.
+      //
+      // At the LEASE path this only refuses: a reader that deletes another
+      // module's state is one surprise too many, and the next capture's
+      // acquisition clears its own wedge. Refusing means no identity, which
+      // means `base-tree` reports itself unavailable until then — the
+      // fail-closed direction.
+      if (clearWedge) {
+        try {
+          rmSync(path, { recursive: true, force: true });
+        } catch {
+          // Unremovable: the caller reads it as no file either way.
+        }
+      }
+      return null;
+    }
   } catch {
-    // No plan, no identity — and no trust state: the caller reports the
-    // command unavailable rather than fencing on a shared key.
-    return -Infinity;
+    return null;
+  }
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
   }
 }
 
 function readTrust(trustPath: string): TrustFile | null {
   try {
-    const value = JSON.parse(readFileSync(trustPath, 'utf8')) as TrustFile;
+    const raw = readJsonFileSafely(trustPath, { clearWedge: true });
+    if (raw === null) return null;
+    const value = JSON.parse(raw) as TrustFile;
+    // The nonce is NOT part of validity. Nothing in production reads it —
+    // it is a per-generation marker for a human reading the file and for the
+    // tests that assert a rotation happened — so treating a missing or empty
+    // one as a torn file made its only live effect the destruction of the
+    // records of a file whose identity and pin were both intact. What
+    // decides validity is what the fence actually acts on.
     if (
-      typeof value.nonce !== 'string' ||
-      value.nonce === '' ||
       typeof value.identity !== 'number' ||
-      typeof value.baseSha !== 'string'
+      !Number.isFinite(value.identity) ||
+      typeof value.baseSha !== 'string' ||
+      value.baseSha === ''
     ) {
       return null;
+    }
+    if (typeof value.nonce !== 'string' || value.nonce === '') {
+      value.nonce = randomBytes(16).toString('hex');
     }
     return value;
   } catch {
@@ -376,6 +524,45 @@ export function recordBuiltTree(
     ...trust,
     trees: { ...trust.trees, [tree]: record },
   });
+}
+
+/**
+ * Drop a tree's record, because the tree it certified is about to stop
+ * existing.
+ *
+ * `trees` is keyed by PATH alone, and the base tree's path is fixed for the
+ * review — so without this, a record survives the sweep that removes the
+ * tree it describes and goes on certifying whatever is created there next.
+ * The concrete shape: a rebuild that the whole-call budget cuts short writes
+ * no new record, and the previous generation's `state:'ok'` entry then
+ * answers for a tree that was never built.
+ *
+ * Called before the sweep rather than after, so a crash between the two
+ * leaves the recoverable state (no record, a tree that will be rebuilt)
+ * rather than the unrecoverable one (a record certifying a swept path).
+ *
+ * Silent on every failure the writer can hit, for the same reason
+ * {@link recordBuiltTree} is: this runs on the destructive path, and the
+ * fence reads a missing record as a decline.
+ */
+export function dropBuiltTree(
+  trustPath: string,
+  identityMs: number,
+  tree: string,
+): void {
+  const trust = readTrust(trustPath);
+  if (!trust || !sameIdentity(trust.identity, identityMs)) return;
+  if (!trust.trees || !(tree in trust.trees)) return;
+  const trees = { ...trust.trees };
+  delete trees[tree];
+  try {
+    atomicWrite(trustPath, { ...trust, trees });
+  } catch {
+    // The drop could not be written. The sweep still happens: a stale record
+    // over a swept tree is what the two-way inventory compare catches on the
+    // next ask (an empty tree matches no non-empty record), so this degrades
+    // to a decline rather than to a certification.
+  }
 }
 
 /** What {@link recordBuiltTree} stored for a tree, or null. */
