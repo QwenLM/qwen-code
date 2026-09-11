@@ -298,6 +298,14 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
+  // Same shared memory-state hazard as EXCLUDED_TOOLS_FOR_SUBAGENTS: a
+  // teammate runs in-process on a Config prototype-chained to the leader's
+  // (deriveConfig), so its search_memory would claim the leader's
+  // turn-scoped request signatures and mark refs delivered in the leader's
+  // turn, and manage_memory would mutate shared memory without the
+  // leader's review.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
 
 function getExcludedToolsForCurrentContext(): ReadonlySet<string> {

@@ -35,6 +35,7 @@ describe('managed auto-memory dream', () => {
       getSessionId: vi.fn().mockReturnValue('session-1'),
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
+      getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
     } as unknown as Config;
   });
 
@@ -344,6 +345,34 @@ describe('managed auto-memory dream', () => {
     });
     expect(planManagedAutoMemoryDreamByAgent).not.toHaveBeenCalled();
     await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toBe(legacy);
+  });
+
+  it('runs a manual dream in structured recall mode despite a legacy candidate', async () => {
+    // In structured mode the migration the skip message points at can never
+    // be scheduled and the mode cannot be left in-process, so gating the
+    // manual dream on candidates there is a dead end — the dream itself is
+    // the only in-product repair for an invalid document.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const memoryFile = path.join(memoryRoot, 'project', 'invalid.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(memoryFile, 'not a memory document');
+    vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('structured');
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+      undefined,
+      { trigger: 'manual', recordMetadata: true },
+    );
+
+    expect(planManagedAutoMemoryDreamByAgent).toHaveBeenCalled();
+    expect(result.systemMessage).not.toContain('migration is pending');
   });
 
   it('propagates planner failures', async () => {

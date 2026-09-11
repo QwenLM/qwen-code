@@ -3326,6 +3326,62 @@ describe('Gemini Client (client.ts)', () => {
       } as unknown as LlmChat;
     }
 
+    it('setHistory clears the delivered memory-tree revision so the router prompt is re-delivered', () => {
+      client['chat'] = {
+        setHistory: vi.fn(),
+      } as unknown as LlmChat;
+      client['lastDeliveredMemoryTreeRevision'] = 'before-rewind';
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      // The replaced history may no longer contain the turn that carried
+      // the "## Complete memory tree" router prompt; a stale revision would
+      // suppress its re-delivery for the rest of the session.
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+    });
+
+    it('truncateHistory clears the delivered memory-tree revision only when entries are removed', () => {
+      client['chat'] = mockChatWithLengths(3, 2);
+      client['lastDeliveredMemoryTreeRevision'] = 'before-rewind';
+
+      client.truncateHistory(2);
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+
+      // A no-op truncate keeps the router prompt in history, so the
+      // delivered revision is still accurate and must survive.
+      client['chat'] = mockChatWithLengths(2, 2);
+      client['lastDeliveredMemoryTreeRevision'] = 'still-valid';
+
+      client.truncateHistory(99);
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
+    });
+
+    it('stripOrphanedUserEntriesFromHistory clears the delivered memory-tree revision only when entries were stripped', () => {
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmChat;
+      client['lastDeliveredMemoryTreeRevision'] = 'before-rewind';
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValue(2),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmChat;
+      client['lastDeliveredMemoryTreeRevision'] = 'still-valid';
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
+    });
+
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = mockChatWithLengths(3, 2);

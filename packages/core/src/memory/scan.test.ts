@@ -265,6 +265,61 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('does not let a nested same-named key hijack a top-level field', () => {
+    // The rescue reads the YAML document model, which anchors fields at the
+    // top level — a nested `audit.keywords` list must never be scraped into
+    // the real keywords.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/nested.md',
+      [
+        '---',
+        'type: project',
+        'name: D',
+        'description: d',
+        'category: project_introduction',
+        'audit:',
+        '  keywords:',
+        '    - legacy #old',
+        'keywords:',
+        '  - alpha',
+        '  - issue #1234',
+        'usage_scenarios:',
+        '  - s1',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.keywords).toEqual(['alpha', 'issue #1234']);
+  });
+
+  it('validator and scanner agree on unquoted issue references', () => {
+    // The validator decides whether a file gets rewritten as legacy, so it
+    // must apply the same unquoted-`#` rescue as the scanner.
+    const content = [
+      '---',
+      'type: project',
+      'name: Release issue #1234',
+      'description: Pointers to issue #1234 and freeze PR #5678',
+      'category: project_introduction',
+      'keywords:',
+      '  - issue #1234',
+      '  - issue #5678',
+      'usage_scenarios:',
+      '  - Running the freeze checklist for #1234',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/issues.md', content)?.keywords,
+    ).toEqual(['issue #1234', 'issue #5678']);
+  });
+
   it('keeps YAML comment semantics for fixed-vocabulary fields', () => {
     const parsed = parseAutoMemoryTopicDocument(
       '/tmp/vocabulary-comment.md',

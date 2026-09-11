@@ -162,6 +162,80 @@ describe('SearchMemoryTool', () => {
     ).toBe(false);
   });
 
+  it("merges a concurrent sibling's committed coverage instead of clobbering it", async () => {
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const liveCoverage = mockConfig
+      .getMemoryManager()
+      .getBodyCoverageInHistory();
+    liveCoverage.set('project:long.md', {
+      version: 7,
+      total: 20000,
+      ranges: [{ start: 0, end: 8000 }],
+    });
+    const sourceStatus = {
+      requestedScopes: ['project' as const],
+      searchedScopes: ['project' as const],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    };
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve;
+    });
+    // Call A records a continuation window for the already-covered long ref
+    // and commits first; call B snapshotted the same starting coverage,
+    // touches a different ref, and commits last. B's write-back must merge,
+    // not replay its stale snapshot over A's committed window.
+    vi.mocked(executeSearchMemory)
+      .mockImplementationOnce(async (_params, options) => {
+        options?.bodyCoverage?.set('project:long.md', {
+          version: 7,
+          total: 20000,
+          ranges: [
+            { start: 0, end: 8000 },
+            { start: 8000, end: 16000 },
+          ],
+        });
+        return { mode: 'fetch', sourceStatus, results: [] };
+      })
+      .mockImplementationOnce(async (_params, options) => {
+        options?.bodyCoverage?.set('project:other.md', {
+          version: 3,
+          total: 100,
+          ranges: [{ start: 0, end: 100 }],
+        });
+        await siblingGate;
+        return { mode: 'fetch', sourceStatus, results: [] };
+      });
+
+    const callA = tool
+      .build({ mode: 'fetch', refs: ['project:long.md'] })
+      .execute(new AbortController().signal);
+    const callB = tool
+      .build({ mode: 'fetch', refs: ['project:other.md'] })
+      .execute(new AbortController().signal);
+
+    await callA;
+    releaseSibling();
+    await callB;
+
+    expect(liveCoverage.get('project:long.md')).toEqual({
+      version: 7,
+      total: 20000,
+      ranges: [
+        { start: 0, end: 8000 },
+        { start: 8000, end: 16000 },
+      ],
+    });
+    expect(liveCoverage.get('project:other.md')).toEqual({
+      version: 3,
+      total: 100,
+      ranges: [{ start: 0, end: 100 }],
+    });
+  });
+
   it('rejects stale historical calls while the legacy protocol is active', async () => {
     const mockConfig = config();
     vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');

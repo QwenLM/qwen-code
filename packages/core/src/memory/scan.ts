@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isMap, isScalar, isSeq, parseDocument } from 'yaml';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import {
   AUTO_MEMORY_TREE_CATEGORIES,
@@ -120,46 +121,21 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value.trim() || undefined : undefined;
 }
 
-function preserveUnquotedHash(
-  value: unknown,
-  raw: string | undefined,
-): unknown {
-  return typeof value === 'string' &&
-    raw?.includes(' #') &&
-    !raw.startsWith('"') &&
-    !raw.startsWith("'")
-    ? raw
-    : value;
-}
-
-function rawFrontmatterValue(
-  frontmatter: string,
-  key: string,
-): string | undefined {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return frontmatter
-    .match(new RegExp(`^${escapedKey}:[^\\S\\n]*(.+)$`, 'm'))?.[1]
-    ?.trim();
-}
-
-function recoverUnquotedHashList(
-  frontmatter: string,
-  key: string,
-  value: unknown,
-): unknown {
-  if (!Array.isArray(value)) return value;
-  const lines = frontmatter.split('\n');
-  const start = lines.findIndex((line) => line.trim() === `${key}:`);
-  if (start < 0) return value;
-  const rawItems: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    const match = line.match(/^[^\S\n]+-[^\S\n]*(.+)$/);
-    if (!match) break;
-    rawItems.push(match[1].trim());
+// A trailing ` #...` on a PLAIN scalar is structurally a YAML comment, but
+// for free-text memory fields the writer meant it literally. Rebuild the
+// intended text from the parsed document's own nodes rather than scraping
+// raw lines: the document model anchors each field at the top level, so a
+// nested same-named key (or any other legal YAML shape) cannot be mistaken
+// for the field being rescued.
+function plainScalarTextWithComment(node: unknown): string | undefined {
+  if (
+    !isScalar(node) ||
+    node.type !== 'PLAIN' ||
+    typeof node.comment !== 'string'
+  ) {
+    return undefined;
   }
-  return rawItems.length === value.length
-    ? value.map((item, index) => preserveUnquotedHash(item, rawItems[index]))
-    : value;
+  return `${node.value} #${node.comment}`;
 }
 
 // Fixed-vocabulary fields keep plain YAML semantics (a trailing ` #...` is a
@@ -173,17 +149,34 @@ function rescueUnquotedHashFields(
   frontmatter: string,
   parsed: Record<string, unknown>,
 ): Record<string, unknown> {
+  const document = parseDocument(frontmatter, { schema: 'core' });
+  if (document.errors.length > 0 || !isMap(document.contents)) {
+    return parsed;
+  }
   const rescued: Record<string, unknown> = { ...parsed };
-  for (const key of Object.keys(rescued)) {
-    if (YAML_VOCABULARY_KEYS.has(key)) continue;
+  for (const pair of document.contents.items) {
+    const key = isScalar(pair.key) ? String(pair.key.value) : undefined;
+    if (
+      key === undefined ||
+      YAML_VOCABULARY_KEYS.has(key) ||
+      !(key in rescued)
+    ) {
+      continue;
+    }
     const value = rescued[key];
+    const node = pair.value;
     if (typeof value === 'string') {
-      rescued[key] = preserveUnquotedHash(
-        value,
-        rawFrontmatterValue(frontmatter, key),
+      const text = plainScalarTextWithComment(node);
+      if (text !== undefined) {
+        rescued[key] = text;
+      }
+    } else if (Array.isArray(value) && isSeq(node)) {
+      if (node.items.length !== value.length) continue;
+      rescued[key] = value.map((item, index) =>
+        typeof item === 'string'
+          ? (plainScalarTextWithComment(node.items[index]) ?? item)
+          : item,
       );
-    } else if (Array.isArray(value)) {
-      rescued[key] = recoverUnquotedHashList(frontmatter, key, value);
     }
   }
   return rescued;
@@ -291,7 +284,10 @@ export function validateStructuredAutoMemoryDocument(
       : 'frontmatter-missing';
     return { valid: false, missingOrInvalidFields: [reason] };
   }
-  const parsed = parseYaml(frontmatterMatch[1]);
+  const parsed = rescueUnquotedHashFields(
+    frontmatterMatch[1],
+    parseYaml(frontmatterMatch[1]),
+  );
   const invalid: StructuredAutoMemoryValidation['missingOrInvalidFields'] = [];
   const name = stringValue(parsed['name']);
   const description = stringValue(parsed['description']);

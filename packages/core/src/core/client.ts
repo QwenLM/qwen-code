@@ -1058,6 +1058,9 @@ export class LlmClient {
       .restoreMemoryBodiesPresentInHistory(
         collectResidentMemoryBodies(this.getHistoryShallow()),
       );
+    // Same rewind hazard as setHistory: the stripped entries may have
+    // carried the complete-tree router prompt.
+    this.lastDeliveredMemoryTreeRevision = undefined;
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -1141,6 +1144,11 @@ export class LlmClient {
       .restoreMemoryBodiesPresentInHistory(
         collectResidentMemoryBodies(history),
       );
+    // The new history may no longer contain the turn that carried the
+    // complete-tree router prompt; keeping the delivered revision would
+    // suppress its re-delivery for the rest of the session. Re-delivery is
+    // idempotent — the router header states it replaces any older tree.
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.forceFullIdeContext = true;
   }
 
@@ -1167,6 +1175,9 @@ export class LlmClient {
         .restoreMemoryBodiesPresentInHistory(
           collectResidentMemoryBodies(this.getHistoryShallow()),
         );
+      // Same rewind hazard as setHistory: the truncated entries may have
+      // carried the complete-tree router prompt.
+      this.lastDeliveredMemoryTreeRevision = undefined;
     }
     this.forceFullIdeContext = true;
   }

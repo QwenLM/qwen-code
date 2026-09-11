@@ -106,9 +106,32 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
     callBodyPresentVersions.forEach((version, ref) =>
       bodyPresentVersions.set(ref, version),
     );
-    callBodyCoverage.forEach((coverage, ref) =>
-      bodyCoverage.set(ref, coverage),
-    );
+    callBodyCoverage.forEach((coverage, ref) => {
+      const live = bodyCoverage.get(ref);
+      if (!live || live.version < coverage.version) {
+        bodyCoverage.set(ref, coverage);
+        return;
+      }
+      if (live.version > coverage.version) {
+        // A concurrent sibling committed coverage for a newer file version;
+        // this call's stale snapshot entry must not downgrade it.
+        return;
+      }
+      // Same file version: union this call's windows into the live entry so
+      // a concurrent sibling's already-committed windows survive this
+      // call's write-back of its stale snapshot.
+      for (const range of coverage.ranges) {
+        if (
+          !live.ranges.some(
+            (liveRange) =>
+              liveRange.start === range.start && liveRange.end === range.end,
+          )
+        ) {
+          live.ranges.push(range);
+        }
+      }
+      live.ranges.sort((a, b) => a.start - b.start);
+    });
     callExhaustedBodyRefs.forEach((ref) => exhaustedBodyRefs.add(ref));
     const content = JSON.stringify(result, null, 2);
     return {

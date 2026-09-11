@@ -14,6 +14,7 @@ import {
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MEMORY_FRONTMATTER_EXAMPLE,
+  MEMORY_METADATA_ITEM_BOUNDS,
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
@@ -346,6 +347,17 @@ describe('managed auto-memory prompt helpers', () => {
 
     expect(example).toContain('at most 64 characters');
     expect(example).toContain('unique case-insensitively');
+  });
+
+  it('tells writers to double-quote values YAML would misparse', () => {
+    // An unquoted keyword like `git: bisect` or `#1234` is parsed by YAML as
+    // a map / comment and fails validation — the recipe must keep those
+    // values expressible by quoting them.
+    const example = MEMORY_FRONTMATTER_EXAMPLE.join('\n');
+
+    expect(example).toContain('double-quote');
+    expect(example).toContain('"#"');
+    expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote');
   });
 
   it('condensed prompt includes read-path behavioral guidance', () => {
