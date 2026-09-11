@@ -252,6 +252,14 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [148. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's…](#af-148)
 - [149. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…](#af-149)
 - [150. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…](#af-150)
+- [151. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…](#af-151)
+- [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
+- [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
+- [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
+- [155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-155)
+- [156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…](#af-156)
+- [157. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-157)
+- [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
 
 ---
 
@@ -2303,7 +2311,7 @@ brake keys on measured regeneration, not identity: every source gets a
 bounded number of untagged feedback batches per counting window once
 Critical-only engages — the review bot's budget is zero (all deferred),
 a human's is this many CONSUMED batches. Past it, continuing requires
-one conscious act (**[Critical]**, a Request changes review, or /retry),
+one conscious act (starting a comment with **[Critical]**, a Request changes review, or /retry),
 which is precisely what separates intent from automation.
 ```
 
@@ -2771,11 +2779,14 @@ In `review-scan` · `Scan for PRs with new feedback`.
 ```text
 Delay-window fallback: a review run parked BEFORE its job
 starts (the 10-minute environment wait) has no review-pr
-check-run yet, but a push now would still cancel it via
-synchronize. Only pull_request_target runs are cancelable —
-comment/review-triggered runs use per-run concurrency groups
-that a synchronize never cancels, so holding the round for
-one would defer autofix for nothing (R2-1). Match against the
+check-run yet, but a push now would still supersede it
+(#10110): a parked or pre-threshold run yields to the push
+and its work is discarded exactly as the old synchronize
+cancel did. Only pull_request_target runs share the PR-scoped
+concurrency group — comment/review-triggered runs use per-run
+groups that a push never queues behind or supersedes, so
+holding the round for one would defer autofix for nothing
+(R2-1). Match against the
 scan's REVIEW_RUNS_JSON fetch — one page of the review
 workflow's runs, empty on lookup failure — by immutable head
 SHA or PR number, never by fork-controlled bare branch name.
@@ -3000,6 +3011,23 @@ its own verdict. The trusted PATH is recorded before any branch
 code runs, so a $GITHUB_ENV-planted PATH/preload cannot swap the
 sha256sum/bash/git the steps resolve (that would defeat the digest
 gate itself).
+
+The gate's two verification passes decide whether the PAT push runs,
+and the first pass executes the branch's own build/test on the host
+before the second — so the staged runner's digest (recorded in
+GITHUB_OUTPUT, unreachable from a disk write) is verified before
+execution, or a mid-run overwrite lets the branch define its own
+verdict. Every command word in the digest check is an absolute path:
+bare names — even builtins like echo, export, or unset — are shadowed
+by $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at bash
+STARTUP even under --norc, ahead of builtins and PATH (R6-4; a
+shadowed echo prints any digest line, blinding the check to a mid-run
+overwrite of the staged runner, and a shadowed export/unset arms a
+DEBUG trap that swaps the staged runner AFTER the digest passes and
+BEFORE the launch executes it, R8-1). The body therefore carries no
+in-shell pin of its own: PATH reaches the child through the allowlist,
+and the preload channels are closed by the step-level LD_* pins, the
+env execve prefix, and env -i.
 ```
 
 <a id="af-112"></a>
@@ -3968,6 +3996,54 @@ deletion reopens only the cosmetic overwrite (nothing
 rides the stamp but the comment text), and finalize's
 read is bounded like the loop's pid-file read so a
 planted FIFO cannot stall it.
+
+The gate-side kill block (review-address's verify gate is
+the first step that runs branch code ON THE HOST — the
+agent phase sandboxes it in docker — and the loop holds
+the bot PAT in its env, so the PAT overlap is bounded to
+the sandboxed agent phase, never the host-side gate) kills
+from the pid the launch recorded in expression context;
+WORKDIR files are sandbox-writable and are never read as
+kill targets. The session kill covers a kill landing
+MID-TICK, per the KILL paragraph above. Its command words
+are ABSOLUTE-PATH-ONLY, NOT builtin: the block runs in the
+gate's OUTER shell, which inherits every $GITHUB_ENV plant
+— a BASH_FUNC_builtin%% import shadows the `builtin`
+keyword itself (the R6-4 doctrine). `builtin kill` is
+sound only inside the env -i clean child (finalize); in
+the outer shell kill is /usr/bin/kill, the same procps
+already relied on for pkill.
+
+The finalize-side kill runs in its step's OUTER shell, which
+inherits every $GITHUB_ENV plant earlier steps left — a
+BASH_FUNC_cat%% import shadows cat at bash startup and forges
+the /proc/<pid>/stat line (the matching start time sits in that
+step's own env), passing the lifecycle check on a REUSED pid so
+the real kill TERMs an unrelated process, its group and session;
+a planted kill or a PATH-planted pkill no-ops the delivery
+instead, leaving the loop holding the PAT alive to its age cap
+(R17-4). The kill target travels through expression context — a
+pid read from a WORKDIR file would be an untrusted kill target
+(WORKDIR is sandbox-writable) — and the whole PAT-touching body
+runs in the gate's env -i clean-child form, re-declaring only
+what it needs from the step-level pins and expression context:
+a BASH_FUNC_<name>%% import loads as a function at bash STARTUP
+even under --norc, ahead of builtins and PATH, under
+attacker-chosen names no step-level pin can enumerate
+(probe-verified: plants shadowing set/export/builtin/gh each
+hijacked the step's former inline body), so the class is closed
+by construction rather than enumerated.
+
+The terminal flip's stamp drain reads the tick's start-epoch file:
+a stamp older than 65s proves its request committed or died, no
+stamp means nothing in flight, and the read is bounded in time AND
+bytes — a planted FIFO must not stall the step, and a symlink to an
+endless non-NUL target (/dev/urandom, a fed FIFO) would otherwise
+stream into the substitution buffer GB-scale and kill the clean
+child before the terminal PATCH (R17-3); a valid stamp is ≤ ~20
+bytes, so the 64-byte cap covers it. A planted fresh stamp costs at
+most the 65s bound; a planted deletion reopens only the cosmetic
+overwrite.
 ```
 
 <a id="af-150"></a>
@@ -3992,4 +4068,516 @@ ends the run page is the right destination (all steps, all
 attempts), and one less thing to re-resolve on the
 crashed-agent paths where this step's outputs may be all
 that survived.
+```
+
+<a id="af-151"></a>
+
+### 151. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…
+
+In `run`.
+
+```text
+Convergence-signal circuit breaker — the off-ramp the round and growth
+brakes cannot provide (#10107). Every brake this loop had bounded its OWN
+telemetry: rounds (CRITICAL_ONLY_AFTER_ROUND, the caps), bytes (the growth
+budgets), failures (the consecutive-failure and timeout breakers). None of
+them could see the one diagnosis that matters on a non-converging pair:
+the REVIEW side has measured, since #9461/#9623, whether its own loop is
+settling — recurrence clusters, a first-time-finding rate that is not
+falling — and publishes the matched handling recommendations as a closed
+code set (`rec` in the posted ledger marker, RECOMMENDATION_CODES in
+packages/cli/src/commands/review/lib/convergence.ts). Measured on #9729:
+the observation named the failure mode in round 3 and repeated it through
+round 15, both sides' brakes engaged (critical floor from ~round 5; growth
+brake, Critical-only), and the loop still ran ~13 more rounds — ~50
+runner-hours, the PR growing +1.7k → +5.6k lines, round 15 still posting
+fresh Criticals in loop-written code. The brakes slow each side; neither
+can stop the pair, and the human who could is exactly the one takeover
+removed from the loop.
+
+The breaker consumes the codes instead of re-deriving the diagnosis: the
+review module's contract is that it measures and holds no threshold ("a
+caller wires actions to these codes without parsing prose"), so the
+threshold lives here — CONVERGENCE_BREAK_ROUNDS consecutive signal-bearing
+review rounds, with no trusted-human response in between, pause the loop.
+Three by default: the review engages its own critical posting floor after
+two flat rounds (#9938), so three signal rounds mean the posture rung has
+already been taken and the pair demonstrably did not respond to it.
+
+The action is a PARK in the growth-audit-conflict mold, not a terminal
+stop: one visible notice, then silence; a trusted-human response resumes
+the loop with a fresh N-round runway (the response steers the next rounds
+as ordinary feedback); /retry or re-engaging takeover resets via the
+window key like every other census. No NEEDS_HUMAN_LABEL — that label
+marks stops only a re-arm can lift, and a self-lifting park wearing it
+would leave the label lying the moment a maintainer's comment resumed
+the loop. Downshifting automatic re-review falls out for free: reviews
+are push-triggered, so a loop that stops pushing stops re-reviewing —
+on-demand review (a human push, /review) keeps working.
+
+'land-and-defer' and the persistently-critical exit advisory are
+deliberately NOT signal codes: both mean "this loop can end by merging",
+and pausing on them would park exactly the PR a human should merge. They
+stay visible in the review body; acting on them is a different feature.
+```
+
+<a id="af-152"></a>
+
+### 152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+Convergence-signal circuit breaker (#10107): the review side diagnoses a
+non-converging loop in machine-readable form — the `rec` codes in its
+posted ledger marker — and this gate is the consumer. See af-151 for the
+concept; this section carries the reading's mechanics.
+
+The streak is TRAILING and CONSECUTIVE: review-bot reviews after the
+boundary, last ledger marker per body (an edited body can hold more than
+one; the newest describes the round), one entry per ROUND keeping the
+newest (the review workflow dismisses its own superseded reviews but the
+dismissed body — and its marker — survives in the list, and a re-run of
+one round must not count twice), reduced in TIME order — jq's group_by
+re-sorts its input by the grouping key, so the dedup's output is re-sorted
+by submitted_at before the reduce: round-NUMBER order would miscount in
+the unsafe direction whenever a round lands out of order (a dismissed
+round's healthy re-run landing late reads as a signal tail), reset to
+zero by any marker round whose
+codes do not intersect CONVERGENCE_SIGNAL_CODES. A review without a
+parseable marker contributes nothing either way — fallback comments and
+dismissal stubs are not rounds — while a marker without `rec` is a round
+that measured no divergence (a healthy round, or one from a CLI predating
+the field) and resets: the fail-open direction, one delayed breaker, never
+a false park.
+
+The boundary is max(window key, newest trusted-human activity). The
+window-key half makes /retry and re-engagement reset the breaker exactly
+like every other census. The human-activity half is the resume signal the
+notice promises — a maintainer response moves the boundary past the streak:
+the loop wakes with a fresh CONVERGENCE_BREAK_ROUNDS of runway, and the
+response itself reaches the agent as ordinary feedback. The reviews arm
+counts every state that records a response — CHANGES_REQUESTED, COMMENTED,
+APPROVED, and DISMISSED: an approval resumes exactly like the notice
+promises ("a review or comment counts"), and a dismissed review keeps the
+boundary where the human put it, so a dismissal can never snap the
+boundary back to the window key and silently re-park under the stale
+pre-resume notice. The legs mirror
+the conflict park's wake legs (trusted-human reviews, inline comments,
+issue comments minus bot markers and @qwen-code commands) with one
+deliberate difference: NO failed-check leg. The conflict park wakes on
+outside CI going red because its parked item is a size judgment and a
+broken tree outranks it; this park's whole claim is that more automatic
+rounds are the problem, and a red check resuming the general loop would
+re-open it with zero human input. Trust: the streak reads only reviews
+the REVIEW_BOT account submitted — a review is not a forgeable surface
+the way an issue comment is — and the boundary can only be moved LATER by
+untrusted input, which is the safe direction (a later boundary shortens
+the streak and delays the park).
+
+The notice posts once per boundary, not once per window: a loop that
+resumed on a human response and re-tripped earned a fresh notice, and the
+earlier one is older than the activity that resumed it, so the dedup
+(AUTOFIX_BOT comments carrying the marker, newer than the boundary) reads
+exactly that. It deliberately does NOT begin "🤖 AutoFix stopped" — the
+fleet shepherd's REASON regex reads that prefix as a terminal stop, and
+this is a self-lifting park. The verdict is derived ABOVE the stale-base
+update, and the update's gate refuses a parked PR beside the conflict
+park: a base merge into a parked PR re-fires every synchronize-triggered
+workflow on the new head, and the base-merge round reviews an unchanged
+diff — its clean marker resets the streak, silently lifting the park
+with zero human activity (af-108's exact hazard, the one the conflict
+park's guard was added for). Both gates reuse the one derivation, so the
+two reads cannot drift; the park ACTION sits ABOVE the idle fast-path —
+a parked PR whose signal rounds all sit at or below the eval watermark IS
+the idle case, and the notice and fleet row the action writes are the
+park's only visible escalation, so below the fast-path they would never
+be reached — and still precedes target emission, so a parked PR spends
+no dispatch, no runner, and no round either way.
+The notice's release clause branches on the takeover label like the cap
+notices: `/takeover stop` is a logged no-op on a PR without the label,
+so there the notice offers takeover itself instead. Its codes clause
+claims exactly the union it prints — codes observed since the last
+maintainer response, or the window start if none — because CONV_SINCE
+advances to the newest trusted-human activity, not the window key.
+
+The RELEASE census is the park's own enumeration: a posted notice holds
+the park until the boundary itself moves (a trusted-human response or a
+re-arm). Any clean round resets the streak — including the review a
+maintainer push triggers via synchronize — but must not silently release
+the park: the dedup counts notices newer than the boundary, so a
+release-then-re-trip would re-park under the stale notice with no fresh
+one. If the signal resumes, the streak census re-parks loudly (the
+boundary moved, or the notice is still the newest word); the hold only
+keeps the quiet middle honest. The mirror and the report guard carry the
+same hold.
+```
+
+<a id="af-153"></a>
+
+### 153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Convergence-break mirror (#10107): the scan refuses to select while the
+breaker holds, but a target can be emitted moments before the tripping
+review lands — the review's own pull_request_review trigger routes a
+round for exactly the review that completes the streak — or forced past
+the scan by dispatch. The leg therefore re-derives the same reading over
+its own live fetch and idles via STALE, the same shape as the conflict
+park above it and the live-watermark revalidation before it: discard
+without action, marker, or comment. The notice stays the scan's job — a
+leg that posted it would race the scan's dedup, and the once-per-boundary
+guarantee is only checkable where the comment list and the decision live
+in one place; the next scheduled scan (10-minute cron) posts it, so the
+visible escalation lags the park by at most one scan interval.
+
+Keep the two readings in LOCKSTEP with the scan gate (boundary, streak,
+codes) — a divergence between them either burns agent rounds the scan
+already refused, or silently discards rounds the scan still allows. A
+test replays both against the same fixture. The mirror also carries the
+scan's park HOLD: a target dispatched before a clean round reset the
+streak must not land on a PR a posted notice still holds parked.
+```
+
+<a id="af-154"></a>
+
+### 154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+Convergence-break report guard (#10122): the report step's stale-base
+retry is a sibling wake leg the scan's CONV_PARKED cannot cover — that
+reading is scan-local, and this job's inputs froze at prepare time. The
+race: the scan emits a target while the streak is one short; the round
+passes prepare's mirror before the tripping review lands; the scan parks
+the PR on its next tick; the in-flight round then fails its verification
+gate — and this step, POST_HANDOFF on a frozen STALE=false, merges main
+into the parked PR. The merge re-fires every synchronize-triggered
+workflow; the base-merge round reviews an unchanged diff and posts a
+rec-less marker; the streak resets — the park lifts with zero human
+activity, the notice's "base conflicts stay unhandled while paused"
+promise broken, and no fresh notice because the boundary never moved.
+The race window is the full prepare-to-report span — tens of minutes
+against the 10-minute scan cadence — on exactly the PRs the breaker
+targets.
+
+The guard re-derives the breaker's reading over fresh fetches before the
+merge attempt — the rearm key, the boundary, and the streak programs are
+the scan gate's verbatim, and the park hold rides along, so the three
+sites stay in one lockstep pin — and skips update-branch while the
+reading holds, exactly like the conflict verdict's skip above it. A
+skipped retry reports the gate failure honestly instead; the park's own
+notice is still the scan's job.
+```
+
+<a id="af-155"></a>
+
+### 155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+The scan's dispatch gate (#8888/#8899) already refuses to start a round
+while review-pr is live, but the loop had one more head-moving write
+outside that hold: this step's stale-base retry calls update-branch at
+REPORT time, hours after the dispatch gate last looked. A review can
+start in that window — a human /review comment, a bot re-request, or a
+run the scan's fail-open probe missed — and the merge push would then
+supersede a lifecycle review run mid-flight (#10110; before the salvage
+threshold that discards its work exactly as the old cancel did), or
+invalidate a command run's posting: every review pins the head it
+reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
+final post when the head moved, so even the uncancellable per-run-group
+reviews lose their whole run to a head move.
+
+So the retry probes for a live review first, with the scan gate's probe
+pair: the statusCheckRollup filter (any live review-pr check from the
+review workflow), then the runs-API fallback for runs still parked in
+the 10-minute delay window with no check-run yet. The probe sees
+LIFECYCLE runs only: a command-triggered run executes against the base
+branch, so its review-pr check attaches to main's commit and never
+shows under the PR's rollup (the review ack comment says the same), and
+the runs fallback is event-scoped to pull_request_target exactly like
+the scan gate's (af-099). An in-flight command review therefore does
+NOT hold the refresh, and the merge push can still invalidate its
+posting — the second hazard named above, still open. Giving command
+runs a PR-head-visible signal (a pending check posted at the ack step,
+matched here) is the mechanism fix; it is deliberately deferred — it
+needs a completion/TTL story for stranded pendings and a lockstep
+decision with the scan gate, whose exclusion of command runs (R2-1)
+this probe copies — so this text scopes the hold to what it actually
+sees.
+On a live review the update is DEFERRED, not skipped: the same 9999
+sentinel MARK_TS the retry branch uses keeps the feedback live, the
+next scan re-runs the round (itself held while the review is still in
+flight), and that round's report step performs the refresh once the
+review has landed. One extra round of latency, bounded by MAX_ROUNDS,
+against hours of discarded review work. At the cap itself (MARK_ROUND ==
+MAX_ROUNDS) the hold yields to the refresh: no later round exists to
+inherit it, and a deferral there would promise a retry the scan's round
+gate forbids — so the last permitted round refreshes the base exactly as
+it did before #10110 (R32-1).
+
+Fail-open on probe errors, deliberately: the probe is an optimization,
+and failing closed would wedge stale-base recovery — the path that
+un-sticks red PRs — on any transient API error. A probe error therefore
+reads as "no review live" and the update proceeds, which is exactly the
+pre-#10110 behavior. The deferred headline joins CONSEC_FAIL's
+streak-reset needles ("deferred a stale-base refresh"): like the
+updated-a-stale-base round it defers to, the round's failure is not
+evidence about the PR, and counting it toward the cap would park a PR
+for having been reviewed at the wrong moment.
+```
+
+<a id="af-156"></a>
+
+### 156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…
+
+In `review-address` · `Triage and address` (arm), `Verification gate` (record), `Push and report` (marker).
+
+````text
+Measured on the takeover fleet on 2026-09-10 (40 PRs, 79 acted rounds,
+1369 inline findings, each blamed at its review head): after a round
+pushes, 73% of the next review's new Criticals and 93% of its
+Suggestions sit on that round's own delta (44/90 on the delta lines,
+15/90 on earlier bot rounds, 7 more within five lines of a delta hunk);
+54% of those reviews had EVERY new finding on the delta, and 62% would
+have posted nothing under the critical floor. Each pushed round costs a
+full cycle of 870 minutes median (118 agent + 289 review turnaround +
+348 idle to the next round). A fresh adversarial pass over the delta
+before the push therefore has the right scope, and its ceiling is that
+54-62%.
+
+The same measurement fixes the shape. Critical density on bot deltas is
+0.53 per 100 changed lines against 0.52 on human deltas, ~2 new
+Criticals per review whoever pushed, with no decay across rounds — the
+reviewer's yield on a fresh delta is the invariant, not the fixer's
+code. A pass that fixes findings produces a new delta with the same
+yield, so "review until clean" cannot converge inside a round; it only
+relocates the churn into a step with a hard agent budget whose overrun
+counts toward CONSECUTIVE_FAILURE_CAP and TIMEOUT_WINDOW_CAP. So the
+pass is ONE bounded delta review (--effort high: medium skips the
+reverse-audit depth where fix-of-fix Criticals first appear), a
+60-minute wait cap, and a skip below 150 changed lines (0.7 Criticals
+per review there, 89% of those reviews already delta-only).
+
+Mechanism. SELF_REVIEW (repo variable QWEN_AUTOFIX_SELF_REVIEW:
+off|ab|on) is resolved to an arm per PR in the address step — 'ab'
+splits on PR parity — and reaches the skill as three Invocation lines:
+`Self-review: on|off`, `Self-review CLI: node <workspace>/dist/cli.js`
+(the host's qwen wrapper is not on PATH inside the sandbox), and
+`Round deadline (UTC)`. An armed round's agent budget is
+SELF_REVIEW_TIMEOUT_MS (180m default) under a per-arm step cap
+(`timeout-minutes` = 190 armed, 130 unarmed), the unarmed 120m/130m
+margin rule unchanged. The 345-minute job bound cannot hold the armed
+cap AND the 70+60 same-run repair chain, and a GitHub-hosted job is cut
+at 360 whatever the bound says — so the arm is resolved once in prepare
+(never on a github-hosted runner: the hosted fallback runs the control
+shape), and an armed round skips the same-run repair (its `if:` excludes
+the arm; the repair fired on 7/79 = 9% of acted rounds in the sample), a
+deterministic rejection staying retryable for the next round as it was
+before the repair existed. The A/B must read gate rejections per arm
+beside the round counts, since the treatment arm pays a full cycle where
+the control arm pays a 60-minute repair. The skill runs the review
+command inside the session's own sandbox with QWEN_REVIEW_SANDBOX=off:
+the outer boundary is the operator's, and the review's own container
+would be a container inside it that no runtime can answer. After its
+commit the agent writes self-review.json (status, passes, dispositions,
+minutes, and the tree id of its commit). The gate validates the shape,
+compares that id with the tree of the head about to be pushed
+(bound=true|false — a tree id rather than a diff text, so git version
+skew between the sandbox and the host cannot fake a mismatch), and
+publishes one token string as the
+self_review output — advisory only, nothing rejects. Finalize
+verification selects it with the outcome exactly like audit_verdict,
+and Push and report renders it as
+`<!-- autofix-self-review arm=… status=… passes=… act=… declined=…
+deferred=… minutes=… bound=… -->` on the round report, so the A/B reads
+from the PR thread: pushed rounds to convergence, on-delta Criticals in
+the review after each armed push (baseline 73%), and round wall-clock,
+treatment arm against control.
+
+Known limits, deliberate. The record is agent-authored except for its
+binding hash and grammar; a missing or malformed file only marks the
+round (status=missing|invalid). The three Invocation lines are the only
+channel: a repo variable cannot smuggle prose (run-agent pins the CLI to
+a plain path and the deadline to an ISO instant). Whether the nested
+`review run` resolves its model credentials inside the sandbox is a
+runner fact the first armed round has to prove; the skill treats a
+failed or incomplete pass as review-failed and pushes regardless.
+<a id="af-157"></a>
+
+### 157. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Classify the live head: a round that pushes onto a fully
+GREEN head and leaves it red introduced the red. Until this
+existed the loop had no notion of a regression at all —
+`grep -rE 'regress|introduced'` over the workflow, the gate
+script and the SKILL hit only prose about WRITING regression
+tests. The consecutive-failure brake counts "rounds that
+pushed nothing", so a round that pushed a fix and turned CI
+red counted as a SUCCESS and reset the counter; the red it
+created came back as the next round's input and was paid for
+out of the round budget. A PR could alternate regress /
+repair indefinitely while every brake read it as converging.
+
+The gate cannot close this on its own. It runs build,
+typecheck, lint and `--changed` tests for the touched
+workspaces only, and says so — "Full regression is covered by
+regular CI on the PR after the push". Everything the gate
+does run IS already charged: a check that fails on the round
+tree and passes at `origin/<branch>` is a rejection, and a
+rejected round pushes nothing and feeds the brake. What is
+left over is precisely the post-push signal — the full suite,
+the other packages, other platforms — and that verdict does
+not exist until CI finishes, long after the job has ended.
+
+So the accounting is deferred rather than waited on, and it
+is measured, never inferred:
+
+  - Every ACTED round stamps `autofix-push round= head= pre=
+    key=`. `pre=` is this classifier's verdict on the head
+    the round STARTED from; `head=` is the sha it pushed
+    (NOT the redcheck marker's, which deliberately records
+    the pre-round head).
+  - The next round's prepare charges a regression only when
+    all four hold: the live head is exactly the sha that
+    marker names (nothing else moved the branch), `pre=green`
+    (fully green — `pending` and `none` are not green, so a
+    check still running at push time can never be charged),
+    the marker's window key matches, and the head is red NOW.
+  - The observing round writes `autofix-regression round=
+    key=` into whichever report it posts — pushed, no-op or
+    failure — so the record survives the round that made it.
+  - The consecutive-failure walk stops resetting on a
+    regressing round's headline, reading the round number out
+    of the headline the report already wrote it into. The
+    walk also adds THIS round's own observation, which is not
+    in the fetched comment list yet: without it the newest
+    regressing push escapes by exactly one round, and that is
+    the round that matters.
+
+Attribution is deliberately conservative on every axis that
+could charge the loop for someone else's red. A head that
+moved (a human push, a base update) breaks the head equality
+and drops the charge — and the equality binds BOTH halves:
+the marker's head to the checked-out head, and the check
+rollup to the commit it describes (`headRefOid` is read in
+the same call as the rollup; a rollup for any other commit
+classifies `none`, unknown, never chargeable). A re-arm
+changes the window key and drops the whole set with it —
+and the charge itself fires only when the run's matrix
+window IS the live re-arm key: a supersede-exempt conflict
+round can still run under a stale window, and a charge
+keyed to that dead window is one the brake's live-window
+headline walk would never read, so it is not charged. A
+head classified from a base-conflict merge or a salvage merge
+stamps `pre=none`: the pushed head did not start from the
+head prepare classified. A cancelled check is neither red
+(matching the scan's own N_RED_NOW filter) nor green: it
+classifies pending, like every other verdict-less state.
+
+GREEN is an ALLOWLIST on both axes, never a fall-through.
+The charge-enabling verdict requires every counted check to
+have FINISHED and to hold a conclusion the classifier
+recognises as passing (SUCCESS, NEUTRAL, SKIPPED); anything
+else — a conclusion it does not know, a verdict that never
+came, a re-run still in flight over a stale conclusion — is
+pending, and pending is never chargeable. Both axes are
+allowlists for the same reason: a denylist forgets the member
+it was not told about, which is how CANCELLED entered the
+green arm in the first place and how REQUESTED would have
+followed it. The status axis is `status == "COMPLETED"` with
+an absent field reading as finished, because a commit status
+carries no status field at all.
+When the push landed but the round report could not be
+posted, a marker-only comment carries the push marker, so
+the regression it may have caused can still be charged. The loop's own lanes are excluded wholesale
+by the canonical five-name filter this file's other own-lane
+filters use, plus the loop's own dispatch-pending commit
+status by its exact context value (a StatusContext carries no
+workflowName) — deliberately NOT the feedback renderer's
+review-address carve-out, which keeps failed and in-flight
+address runs visible as feedback: a charge verdict must never
+see them (a failed own round is feedback, not a regression
+the pushed code authored, and an in-flight own check would
+hold the verdict at pending across the trigger family whose
+suite attaches to the PR head). What remains uncovered is red the round did
+not author but cannot be distinguished from red it did: a
+genuinely flaky check failing on the bot's push, and main's
+own breakage arriving between the classification and the
+CI run, since CI reports on the merge of the pushed head
+with a main that moved. Neither is separable from here. A
+base-equality axis alongside the head one was considered and
+rejected: main moves between almost every pair of rounds, so
+requiring it would make the charge unreachable rather than
+accurate, and reading main's own health would put a second
+API dependency inside the charge. The consequence is bounded
+on purpose — one regression only declines to RESET a counter
+that needs five consecutive non-progress rounds to trip, and
+the recovery is automatic, since a clean push resets it. What
+the round itself can tell is already told: a push carrying a
+conflict or salvage merge stamps `pre=none`, because its head
+did not start from the head prepare classified.
+````
+
+<a id="af-158"></a>
+
+### 158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…
+
+In `review-address` · `Stage trusted test-surface instrument`.
+
+```text
+The test-weakening gate's instrument: the counter from the
+same trusted checkout as the gate runner, and its parser
+from the dependencies `npm ci` just installed against the
+TRUSTED lockfile — integrity-checked there, before any
+branch step runs.
+
+It is a step of its own, and it sits where it does because
+both halves have a placement constraint. The counter must
+come from the trusted checkout, so it must be staged BEFORE
+"Prepare branch and feedback" switches the working tree to
+the PR branch — a branch-supplied counter would let the code
+under test define its own measurement. The parser must come
+from node_modules, so it can only be staged AFTER "Install
+dependencies". Nothing else runs in that window, which is
+why this is not folded into the schema-gate staging step
+above.
+
+The parser is staged as a `.cjs` copy of typescript's
+single-file build rather than required from node_modules at
+gate time: the copy carries its own extension, so no
+`package.json` a later step plants beside it can change how
+Node loads it, and the digest below pins the bytes that
+actually execute.
+
+Both digests travel in expression context (the af-111
+doctrine) and the gate verifies them before the counter
+runs; a digest that does not match is tampering, and the
+gate fails the round without a retry.
+
+Absent from the trusted base implies absent on disk. This
+script is new in its PR, so the tolerant `cp` fails every
+pre-merge round — and `rm -rf` runs first so a leftover a
+same-UID run planted at the staged path on this persistent
+host cannot survive the failure and be digested as trusted
+content. `-rf`, not `-f`: the leftover can be a directory,
+whose non-zero `rm -f` exit would abort this `-e` step
+before the tolerant cp and wedge every later round on the
+host. When the counter is absent no digest is recorded and
+the gate fails open (`WEAKEN_MEASURED=false`), reporting
+that the surface could not be measured.
+
+A counter WITHOUT its parser is the one case that is not
+tolerated: the parser copy is a bare `cp` inside the
+presence branch, so a tree that has the counter but no
+installed typescript fails the step loudly instead of
+producing a round that quietly measures nothing.
 ```

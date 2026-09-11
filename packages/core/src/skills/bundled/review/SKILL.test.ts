@@ -51,6 +51,17 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -160,7 +171,7 @@ describe('bundled review skill', () => {
   it('pins the setup-batch ordering constraints', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
-    expect(body).toContain('`agent-prompt --roster` after the rules load');
+    expect(body).toContain('`emit-workflow` after the rules load');
     // The re-run ordering, same class as the two above and newer. A side-file
     // `--since` re-run rewrites the fetch report from scratch, while
     // `repo-context` enriches that same file in place: run in the other
@@ -168,6 +179,61 @@ describe('bundled review skill', () => {
     // without the manifest's required agents.
     expect(body).toContain(
       '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
     );
   });
 
@@ -346,7 +412,7 @@ describe('bundled review skill', () => {
     expect(body).toContain('the work list carries across models');
   });
 
-  it('launches the 3B convergence pair in the same response', () => {
+  it('launches the 3B convergence pair in one generated workflow', () => {
     // The pair's wall-clock saving exists only while both rounds go out
     // together: a later edit serializing the skill while the prompt-builder
     // tests stay green (they call each round builder themselves) restores
@@ -360,11 +426,82 @@ describe('bundled review skill', () => {
     const section = body.slice(start, end);
     expect(section).toContain('`--all-chunks --round 1`');
     expect(section).toContain('`--all-chunks --round 2`');
-    expect(section).toContain('in the same response');
+    expect(section).toContain('in one generated workflow');
+    expect(section).toContain('emit-workflow --batch');
     // The reporting transition is the fix for the round-0 blocker; a revert
     // dropping it must fail here, not slip through.
     expect(section).toContain('wait for BOTH fan-outs');
     expect(section).toContain('every shard passed as `--round 2`');
+  });
+
+  it('routes both initial topologies through the fixed workflow emitter', () => {
+    const body = coreBody();
+    for (const [start, end] of [
+      ['## Step 3A:', '## Step 3B:'],
+      ['## Step 3B:', '### Whole-file invariant agents'],
+    ]) {
+      const section = body.slice(body.indexOf(start), body.indexOf(end));
+      const commands = [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map(
+        ([, command]) => command,
+      );
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toContain('review emit-workflow --plan');
+      expect(commands[0]).toContain('--rules');
+      expect(commands[0]).not.toContain('agent-prompt');
+      expect(section).toContain('foreground `workflow` call');
+    }
+    expect(body.split('---')[1]).toMatch(/^ {2}- workflow$/m);
+    expect(body).toContain('`run_in_background: false`, without `args`');
+    expect(body).not.toContain(
+      'invoking all `agent` tools in a **single response**',
+    );
+  });
+
+  it('keeps focused navigation on workflow dispatch without reverse auditors', () => {
+    const body = coreBody();
+    const start = body.indexOf('**Automatic navigation profile:**');
+    expect(start).toBeGreaterThan(-1);
+    const focused = body.slice(start, body.indexOf('\n\n', start));
+    expect(focused).toContain('`emit-workflow`');
+    expect(focused).toContain('`scriptPath`');
+    expect(focused).toContain('ONE foreground `workflow` call');
+    expect(focused).toContain('single `docs-nav` reviewer');
+    expect(focused).toContain('Skip Step 5 entirely');
+    expect(focused).not.toContain('agent-prompt --roster');
+
+    const batch = body.slice(
+      body.indexOf('### Batch verification'),
+      body.indexOf('**Do not write the verifier'),
+    );
+    expect(batch).toContain('except for `reviewProfile: "docs-nav"`');
+    expect(batch).toContain('in the same generated workflow');
+    expect(batch).toContain('combine all successful manifests');
+    expect(batch).toContain(
+      'At medium or for `reviewProfile: "docs-nav"`, there is no reverse audit',
+    );
+  });
+
+  it('makes every recorded follow-up command produce a manifest for the selected wave', () => {
+    const body = coreBody();
+    const commands = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].flatMap(
+      ([, block]) => block.split(/(?=^"\$\{QWEN_CODE_CLI:-qwen\}")/m),
+    );
+    const builders = commands.filter((command) =>
+      command.startsWith('"${QWEN_CODE_CLI:-qwen}" review agent-prompt '),
+    );
+    expect(builders).toHaveLength(4);
+    for (const command of builders) {
+      expect(command).toContain('--batch');
+      expect(command).toMatch(/> [^\n]+\.json/);
+      expect(command).not.toContain('| head');
+    }
+    expect(body).toContain('Never glob historical manifests or prompt records');
+    expect(body).toContain('include a manifest after exit 4/5');
+    expect(body).toContain('If no build succeeded, invoke no workflow');
+    expect(body).toContain("round _k+1_ plus round _k_'s verifier shards");
+    expect(body).toContain('Keep the worktree until the workflow has settled');
+    expect(body).toContain('recover any completed verifier results');
+    expect(body).not.toContain('stop waiting on it yourself');
   });
 
   it('pins the bounded-tail protocol on the round-cap bullet', () => {
@@ -1328,6 +1465,83 @@ describe('bundled review skill', () => {
     expect(referenceBody('aone.md')).toContain('# Aone Code paths');
   });
 
+  it('keeps posting severity instructions aligned with Critical-only classification', () => {
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain('leading source marker');
+    expect(posting).toContain(
+      'quoted witness text, does not promote a Suggestion',
+    );
+    expect(posting).not.toContain('position-independent substring test');
+    expect(posting).not.toContain('occurs _anywhere_ in its body');
+  });
+
+  it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
+    // presubmit's reply carrier matches a wanted id at ANY location (its
+    // anchor may be unmapped or the finding moved); a location-qualified
+    // drop rule denied exactly the exemption that entry exists to grant.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**except a finding whose `id` appears in `matchedIds` of ANY `existingComments.repost` entry**',
+    );
+    expect(posting).toContain('so never re-check the location');
+    expect(posting).toContain('id appears in matchedIds of ANY repost');
+    expect(posting).not.toContain('entry at the same location');
+    expect(posting).not.toContain('repost entry at the same');
+    // The anchors-file and Exclusion-Criteria restatements of the rule.
+    expect(posting).toContain(
+      'the carried-id re-post exemption joins on the id',
+    );
+    expect(posting).not.toContain('intersects on `(path, line)` plus id');
+    expect(posting).not.toContain('at its location is exempted');
+  });
+
+  it('tells the model a deferral title leading with a fixed id is refused (#9940 review, round 30)', () => {
+    // `submit`'s gate reads deferred titles through the same head-slot
+    // read the closure mint uses, so an id-leading title IS a re-post —
+    // the doc listed it as a safe cross-reference, which sends the model
+    // into a refusal it was told could not happen.
+    const core = coreBody();
+    expect(core).toContain('A **deferral title is not**');
+    expect(core).toContain('a title whose HEAD SLOT carries a fixed id');
+    expect(core).toContain('re-posts that finding and is refused');
+    expect(core).not.toContain(
+      "a duplicate-drop note, a deferral title, another ruling's `by` — is a cross-reference",
+    );
+    // The gate reads the whole head slot, so "leading with" alone sends
+    // the model into the refusal the sentence exists to prevent.
+    expect(core).toContain('behind axis and source tags');
+  });
+
+  it('states where the repost legs anchor and who caps the downgrade reasons (#9940 review, round 30)', () => {
+    // presubmit writes the reasons uncapped; compose-review caps each at
+    // 400 code points, drops what a 2000-point total cannot hold, and
+    // joins and escapes the rest. And a carry-reply repost entry carries
+    // the REPLY's anchor, never null — a model told otherwise re-checks a
+    // location that answers nothing.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain("a ROOT leg's matchedIds are the ids of");
+    expect(posting).toContain("findings at that entry's own location");
+    expect(posting).toContain('else 0) — never null');
+    expect(posting).not.toContain("may be the reply's, `line: null` unmapped");
+    expect(posting).toContain('`compose-review` caps');
+    expect(posting).toContain('each at 400 code points');
+    expect(posting).toContain('ones past a 2000-point total');
+  });
+
+  it('names the CI salvage contract as the one exception to the drift restart', () => {
+    // The workflow's supersede watcher arms a salvage past its threshold
+    // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
+    // exception the anchorsAtRisk=true rule commands abandon-and-restart in
+    // exactly the drifted state a salvage creates (R32-2). Cross-pinned with
+    // scripts/tests/qwen-pr-review-workflow.test.js, which pins the export.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**One exception — the CI salvage contract:** when the environment carries `QWEN_REVIEW_SALVAGE_POST=1` **and** the file named by `QWEN_CI_REVIEW_SALVAGE_OK_FILE` exists with content equal to `headDrift.reviewedSha`',
+    );
+    expect(posting).toContain('do **not** restart: submit as planned');
+    expect(posting).toContain('this consumes no restart');
+  });
+
   it('gates every reference file on the verdict in the core body', () => {
     // A run must learn from the injected core alone WHICH file to read and
     // when; a gate that moved into the file it gates would be unreadable.
@@ -1629,6 +1843,92 @@ describe('bundled review skill', () => {
     // The anti-drift clause that makes the examples non-authoritative.
     expect(section).toContain(
       'The examples are the set as written, not the gate',
+    );
+  });
+});
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
+});
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
     );
   });
 });

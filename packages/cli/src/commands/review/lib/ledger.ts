@@ -21,6 +21,8 @@
 // wrong verdict. Parsing is correspondingly fail-quiet: a body whose marker is
 // malformed simply contributes no ledger.
 
+import { readClaimHead } from './inline-counts.js';
+
 /** One finding the review stands behind, carried to the next round. */
 export interface LedgerFinding {
   /**
@@ -333,6 +335,33 @@ export interface Ledger {
    * disengages.
    */
   flatRounds?: number;
+  /**
+   * The recommendation codes this round's convergence diagnosis matched —
+   * the machine-readable half of the observation (#9623), re-published on
+   * the one surface an OUTSIDE consumer can reach. The composed result and
+   * the durable artifact already carry them, but both live inside this
+   * process; the autofix takeover loop reads the posted review body, and
+   * without the codes there its only view of "is this loop converging" is
+   * prose (#10107).
+   *
+   * A carrier, not a contract restatement: the closed vocabulary is owned
+   * by `RECOMMENDATION_CODES` in `convergence.ts`, and membership is
+   * enforced at the ONE write site (`compose-review` passes the codes off
+   * `result.recommendations`, which `recommendationsFor` derived — typed,
+   * so an out-of-vocabulary code cannot arrive). Spelled `string[]` here
+   * because this module is `convergence.ts`'s runtime dependency and the
+   * narrow type would close an import cycle for a field this side only
+   * bounds and never interprets.
+   *
+   * Write-only telemetry: `parseLedger` deliberately does not read it back.
+   * Nothing CLI-side consumes a PRIOR round's codes — each round re-derives
+   * its own from its own diagnosis — and recovering them would hand the
+   * next round a value another account's writable surface controls, for no
+   * reader. Same rung as the streaks above (small, zero-omitted, above the
+   * shed cascade), and for the same reason: the pull request whose loop is
+   * not converging is exactly the one whose marker sits at the byte cap.
+   */
+  rec?: string[];
 }
 
 /**
@@ -379,9 +408,15 @@ export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
  * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
  * cross-references ("see R3-2 for context") and ids embedded in longer
  * hyphen runs, exempting a re-post under an unrelated thread.
+ *
+ * The full-width colon `：` rides the marker-separator grammar
+ * (`MARKER_SEPARATOR_RE` admits `[:：]`), so a carry written with it must
+ * read back — it terminates on its own: CJK usage puts no space after it,
+ * so the `(?=\s|$)` lookahead that bounds the ASCII set cannot (#9940
+ * review).
  */
 export const LEDGER_ID_READBACK = new RegExp(
-  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+  `^(${LEDGER_ID_TOKEN})(?:[:.)\\]]?(?=\\s|$)|：)\\s*`,
 );
 
 /**
@@ -396,6 +431,63 @@ export const LEDGER_ID_READBACK = new RegExp(
  * and citing a round no account ever ran.
  */
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
+
+/**
+ * The CANONICAL spelling of a ledger id: leading zeros dropped from both
+ * numbers (`R02-03` → `R2-3`). Every join downstream — the contradiction
+ * gate's fixed set, the thread matcher's map, the ledger builder's carry
+ * test, presubmit's wanted ids — is raw-string equality, so a variant the
+ * shape tolerates but no entry ever carries must collapse to the one
+ * spelling at the ONE head-slot read (`readClaimHead`) and at the marker
+ * read (`normalizeLedgerFinding`), or a re-post written `R02-3:` slips past
+ * a `fixed` ruling on `R2-3` while the body re-voices the claim (#9940
+ * review, audit). `R0-1` stays `R0-1` — the round bound refuses it.
+ */
+export function canonicalLedgerId(id: string): string {
+  return id.replace(/^R0*(\d+)-0*(\d+)$/, 'R$1-$2');
+}
+
+/**
+ * The id a claim line carries, whether that id fronts a NEW defect, and the
+ * claim itself with both stripped.
+ *
+ * `fixInduced` is the answer to a question the id alone cannot settle. Step 6
+ * re-reports two different things under a previous entry's id: a finding that
+ * STILL STANDS — the same claim, re-asserted — and a fix-induced defect, which
+ * is new work wearing the id of the entry whose fix produced it. The volume
+ * trend counts comments posted for the first time, and reading the id alone
+ * called both of them re-posts, so the trend's baseline fell on exactly the
+ * churning pull requests where new work was not falling at all. The thread
+ * lifecycle reads the same pair to keep that new defect on its OWN thread:
+ * only a still-standing re-assertion belongs in the original one.
+ *
+ * Shared by every consumer of a carried id — compose-review's ledger builder,
+ * the convergence diagnosis, and submit's thread lifecycle — so one end can
+ * never call a comment carried while another calls it new.
+ */
+export function readClaim(rest: string): {
+  id?: string;
+  fixInduced: boolean;
+  title: string;
+} {
+  // ONE reader for the claim's head slot (#10291): the id, the
+  // `(fix-induced)` marking, the axis tags and the source tag are
+  // tokenised wherever the model placed them in the slot — a source tag
+  // between the id and the marking included — and the title is what is
+  // left past the slot, the source tag kept as the finding's own text.
+  // An anchored readback restated here once disagreed with the
+  // tokeniser on exactly that placement.
+  // A bare `\r` is a line break to the line model and to the bare readback
+  // leg; splitting on `\n` alone let the id grammar's trailing `\s*` cross
+  // it and read a second-line token into the head slot (#9940 review,
+  // audit).
+  const head = readClaimHead(rest.split(/\r\n?|\n/)[0]!.trim());
+  return {
+    ...(head.id === undefined ? {} : { id: head.id }),
+    fixInduced: head.fixInduced,
+    title: head.claim,
+  };
+}
 
 /**
  * The claim LOCATOR of a work-list entry or a built finding's title: the
@@ -530,6 +622,16 @@ export function streakOf(n: unknown): number | undefined {
 }
 
 /**
+ * Bounds on the recommendation-code carrier (`Ledger.rec`). The vocabulary
+ * is closed at the write site; these bound only the SHAPE, so a value the
+ * vocabulary could never contain cannot spend the byte budget. Eight is
+ * twice the design's emitted set; forty covers the longest code in the
+ * design's full menu with room for a successor vocabulary.
+ */
+export const LEDGER_MAX_REC_CODES = 8;
+export const LEDGER_MAX_REC_CODE = 40;
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -577,7 +679,7 @@ export function serializeLedger(ledger: Ledger): string {
       ...f,
       // Length-safe by construction now: the admission test bounds the id,
       // so this slice can only be a no-op on it.
-      id: f.id.slice(0, LEDGER_MAX_ID),
+      id: canonicalLedgerId(f.id).slice(0, LEDGER_MAX_ID),
       title: f.title.slice(0, LEDGER_MAX_TITLE),
       file: f.file.slice(0, LEDGER_MAX_FILE),
     }));
@@ -648,6 +750,25 @@ export function serializeLedger(ledger: Ledger): string {
     // whose marker sits at the byte cap.
     const flat = streakOf(ledger.flatRounds);
     if (flat !== undefined && flat > 0) payload.flatRounds = flat;
+    // The recommendation codes ride the streak rung — same size class, same
+    // zero-omission, and the same argument for sitting above the shed
+    // cascade. Bounded here the way every written field is: membership
+    // belongs to the write site (see `Ledger.rec`); this bounds only the
+    // shape, deduplicated in first-seen order so a repeated code cannot
+    // spend the budget twice.
+    if (Array.isArray(ledger.rec)) {
+      const rec = [
+        ...new Set(
+          ledger.rec.filter(
+            (c): c is string =>
+              typeof c === 'string' &&
+              c.length > 0 &&
+              c.length <= LEDGER_MAX_REC_CODE,
+          ),
+        ),
+      ].slice(0, LEDGER_MAX_REC_CODES);
+      if (rec.length > 0) payload.rec = rec;
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -849,7 +970,7 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
   const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
-    id: f.id.slice(0, LEDGER_MAX_ID),
+    id: canonicalLedgerId(f.id).slice(0, LEDGER_MAX_ID),
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
     // Normalised to absent, never used to REJECT the entry. `k` is a
@@ -1004,6 +1125,10 @@ export function parseLedger(body: string | undefined): Ledger | null {
     const closed = (Array.isArray(raw.closed) ? raw.closed : [])
       .filter((c): c is LedgerClosure => isLedgerClosure(c, raw.round))
       .slice(-LEDGER_MAX_CLOSED);
+    // `rec` is deliberately NOT recovered — write-only telemetry for the
+    // workflow consumer, per the field's own note: every round re-derives
+    // its own codes, and reading a prior round's back would hand this
+    // account a value another account's writable surface controls.
     return {
       v: 1,
       round: raw.round,

@@ -8,11 +8,13 @@ import { useRef } from 'react';
 import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { RowMouseController } from './shared/RowMouseController.js';
+import { CompletionCategoryMouseController } from './CompletionCategoryMouseController.js';
 import { PrepareLabel, MAX_WIDTH } from './PrepareLabel.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
 import {
   MAX_SUGGESTIONS_TO_SHOW,
+  normalizeDescription,
   type Suggestion,
   type SuggestionCategory,
 } from '../utils/suggestions.js';
@@ -45,6 +47,8 @@ interface SuggestionsDisplayProps {
   activeCategory?: SuggestionCategory | 'all';
   /** Ordered list of tabs to show. The tab bar renders only when >2 entries. */
   availableCategories?: Array<SuggestionCategory | 'all'>;
+  /** Activate an exact category tab on click (mouse). */
+  onSelectCategory?: (category: SuggestionCategory | 'all') => void;
 }
 
 function categoryLabel(cat: SuggestionCategory | 'all'): string {
@@ -74,16 +78,6 @@ export { MAX_WIDTH };
 const MIN_DESCRIPTION_WIDTH = 12;
 const ACTIVE_MARKER_WIDTH = 2;
 
-/**
- * Collapse all runs of whitespace (including newlines from multi-line
- * SKILL.md/command descriptions) into single spaces so a description renders
- * as a single logical line. Without this, frontmatter line breaks are
- * preserved verbatim and a single long description can fill the whole terminal.
- */
-export function normalizeDescription(description: string): string {
-  return description.replace(/\s+/g, ' ').trim();
-}
-
 export function SuggestionsDisplay({
   suggestions,
   activeIndex,
@@ -98,9 +92,11 @@ export function SuggestionsDisplay({
   mouseEnabled,
   activeCategory = 'all',
   availableCategories,
+  onSelectCategory,
 }: SuggestionsDisplayProps) {
   const containerRef = useRef<DOMElement | null>(null);
   const itemRefs = useRef<Array<DOMElement | null>>([]);
+  const categoryRefs = useRef<Array<DOMElement | null>>([]);
 
   if (isLoading) {
     return (
@@ -170,12 +166,29 @@ export function SuggestionsDisplay({
           onSelectIndex={onSelectIndex}
         />
       )}
+      {mouseEnabled &&
+        showTabBar &&
+        availableCategories &&
+        onSelectCategory && (
+          <CompletionCategoryMouseController
+            containerRef={containerRef}
+            categoryRefs={categoryRefs}
+            categories={availableCategories}
+            onSelectCategory={onSelectCategory}
+          />
+        )}
       {showTabBar && availableCategories && (
         <Box flexDirection="row" marginBottom={1}>
           {availableCategories.map((cat, i) => {
             const active = cat === activeCategory;
             return (
-              <Box key={cat} marginLeft={i === 0 ? 0 : 1}>
+              <Box
+                key={cat}
+                marginLeft={i === 0 ? 0 : 1}
+                ref={(node) => {
+                  categoryRefs.current[i] = node;
+                }}
+              >
                 <Text
                   color={
                     active ? theme.background.primary : theme.text.secondary

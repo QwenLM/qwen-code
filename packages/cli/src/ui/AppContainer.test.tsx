@@ -3,15 +3,21 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
-const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
-  vi.hoisted(() => ({
-    writeTerminalTitleSpy: vi.fn(),
-    useWakeRepaintMock: vi.fn(),
-    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
-      vi.fn(() => deps),
-    ),
-  }));
+const {
+  writeTerminalTitleSpy,
+  useWakeRepaintMock,
+  buildWakeRepaintSpy,
+  readCronTasksMock,
+} = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+  useWakeRepaintMock: vi.fn(),
+  readCronTasksMock: vi.fn(),
+  buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+    vi.fn(() => deps),
+  ),
+}));
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -20,6 +26,18 @@ vi.mock('./hooks/use-wake-repaint.js', () => ({
 vi.mock('./utils/terminal-resize-reflow.js', () => ({
   buildWakeRepaint: buildWakeRepaintSpy,
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    // Control the durable scheduled_tasks.json read so the cron startup
+    // tests can pin the startup notice's only real source (and its catch
+    // fallback) instead of hitting a nonexistent hashed path.
+    readCronTasks: readCronTasksMock,
+  };
+});
 
 vi.mock('./utils/windowTitle.js', async (importOriginal) => {
   const actual =
@@ -42,16 +60,23 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
+  countActiveScheduledTasks,
   dedupeNewestFirst,
+  buildSpeculativeToolDisplays,
   getSpeculativeToolResult,
   getNextRenderMode,
+  getScheduledTasksStartupWarning,
   isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
@@ -67,15 +92,25 @@ import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
+  MCPDiscoveryState,
   SendMessageType,
+  ToolNames,
   type LlmClient,
   type GoalTurnHost,
+  describeDeliveryStatus,
+  describeDropReason,
+  PEER_ADMISSION_LIMITS,
+  type DropNotice,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
-import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import type {
+  PeerMessaging,
+  PeerQueuedDelivery,
+  PeerReceipt,
+} from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
@@ -115,7 +150,13 @@ vi.mock('ink', async (importOriginal) => {
   return {
     ...actual,
     useStdout: () => ({ stdout: mockStdout }),
-    measureElement: vi.fn(),
+    // Must return a measurement, not undefined: AppContainer's footer
+    // re-measurement layout effect dereferences `.height` on the result.
+    // An undefined return throws inside the commit; ink's error handling
+    // catches it, tears down the AppContainer tree, and renders an error
+    // panel in its place, so NO post-mount state update is ever observed
+    // (#10430).
+    measureElement: vi.fn(() => ({ width: 80, height: 5 })),
   };
 });
 
@@ -137,10 +178,30 @@ vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
 
+/**
+ * AppContainer's config-initialization effect is async: it awaits
+ * `config.initialize()` and `waitForGoalRuntime(config)` before flipping
+ * `isConfigInitialized`. Effects gated on that flag — notably the
+ * queued-submission drain — only see the flip on the re-render that
+ * follows, so tests that render `AppContainer` must wait for it before
+ * asserting on post-init behaviour (#10430).
+ */
+async function flushConfigInitialization() {
+  // Real config I/O (session writer, goal runtime) backs this flip; give
+  // it a generous bound instead of vi.waitFor's 1s default.
+  await vi.waitFor(
+    () => {
+      expect(capturedUIState?.isConfigInitialized).toBe(true);
+    },
+    { timeout: 10000 },
+  );
+}
+
 // AppContainer reads the peer inbox through this hook; a holder keeps the
 // value swappable without wrapping every render in a provider.
 const peerMessagingHolder = vi.hoisted(() => ({
   current: null as unknown,
+  failure: null as unknown,
 }));
 vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   const actual =
@@ -150,6 +211,7 @@ vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   return {
     ...actual,
     usePeerMessaging: () => peerMessagingHolder.current,
+    usePeerInboxFailure: () => peerMessagingHolder.failure,
   };
 });
 
@@ -247,6 +309,30 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  // One test below runs the real config.initialize(), which warms the tool
+  // registry; under heavy parallel CI load that can exceed the default
+  // timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
+  // runners — including the review-address verification gate's clean child —
+  // inherit a HOME the test process cannot write to. Ordinary CI already
+  // overrides HOME, so point it at a scratch directory for this suite, and
+  // leave that directory alone: the mount effect's initialize() is un-awaited,
+  // so store work can still be in flight at afterAll, and deleting the tree
+  // there fails it with ENOENT — an unhandled rejection that fails the run.
+  const savedHome = process.env['HOME'];
+  const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['HOME'] = suiteHome;
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+  });
+
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockInitResult: InitializationResult;
@@ -414,15 +500,32 @@ describe('AppContainer State Management', () => {
       needsRestart: false,
       restartReason: 'NONE',
     });
+    // Complete UseMessageQueueReturn shape. AppContainer destructures all
+    // of these and passes the drain fields straight into
+    // useQueuedSubmissionDrain; a mock missing them leaves the drain with
+    // undefined inputs, so no rendered test could ever exercise it. The
+    // idle defaults (count 0, pop -> null) keep the drain quiescent for
+    // tests that don't queue anything (#10430).
     mockedUseMessageQueue.mockReturnValue({
       removeGoalTurns: vi.fn().mockReturnValue([]),
       messageQueue: [],
+      pendingSubmissionCount: 0,
       addMessage: vi.fn(),
+      addPeerMessage: vi.fn(),
+      enqueueGoalTurn: vi.fn(),
+      peekNextUserBatchKey: vi.fn(),
+      hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+      getPendingSubmissionCount: vi.fn().mockReturnValue(0),
+      getQueuedPeerCount: vi.fn().mockReturnValue(0),
+      claimGoalTurn: vi.fn(),
+      claimDirectUserAdmission: vi.fn(),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
+      popNextSubmission: vi.fn().mockReturnValue(null),
+      restoreMessages: vi.fn(),
+      restorePeerMessage: vi.fn(),
       drainQueue: vi.fn().mockReturnValue([]),
-      popNextTurn: vi.fn().mockReturnValue(null),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -462,6 +565,12 @@ describe('AppContainer State Management', () => {
 
     // Mock Config
     mockConfig = makeFakeConfig();
+    // Most AppContainer tests do not exercise cron startup. Keep the new
+    // durable-task file read out of their lifecycle and opt in explicitly in
+    // the scheduled-task tests below.
+    vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
+    readCronTasksMock.mockReset();
+    readCronTasksMock.mockResolvedValue([]);
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -476,13 +585,16 @@ describe('AppContainer State Management', () => {
       mockLlmClient as LlmClient,
     );
 
-    // Mock SubagentManager to prevent errors during AgentTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization.
+    // getAvailableModelGrades must be present: the mount effect runs the real
+    // config.initialize() in an un-awaited IIFE, which constructs AgentTool
+    // against this mock, and refreshSubagents reads the grades there.
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
-      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -511,19 +623,23 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
-  // AgentTool's constructor fires refreshSubagents() as a floating promise;
-  // a SubagentManager mock missing any method it touches rejects unhandled
-  // and fails the whole vitest run, not just this file.
-  it('keeps the SubagentManager mock complete for AgentTool init', async () => {
-    const rejections: unknown[] = [];
-    const onRejection = (reason: unknown) => rejections.push(reason);
-    process.on('unhandledRejection', onRejection);
+  it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
+    // AppContainer's mount effect runs config.initialize() in an un-awaited
+    // IIFE; the real initialize warms the tool registry, constructing
+    // AgentTool against this mock. A SubagentManager mock missing a method
+    // AgentTool reads rejects refreshSubagents there and surfaces as an
+    // unhandled rejection that fails the whole run, so pin the surface here,
+    // where a missing method fails this test instead of leaking.
+    await mockConfig.initialize();
     try {
-      await mockConfig.initialize();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(rejections).toEqual([]);
+      const agentTool = mockConfig
+        .getToolRegistry()
+        ?.getTool(ToolNames.AGENT) as unknown as
+        | { refreshSubagents: () => Promise<void> }
+        | undefined;
+      expect(agentTool).toBeDefined();
+      await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
     } finally {
-      process.off('unhandledRejection', onRejection);
       await mockConfig.shutdown();
     }
   });
@@ -545,6 +661,33 @@ describe('AppContainer State Management', () => {
         text: 'done',
         status: ToolCallStatus.Success,
       });
+    });
+
+    it('carries the functionCall args onto the display object', () => {
+      // The fourth builder of IndividualToolCallDisplay. Without the args the
+      // setting half-applies: an accepted speculation falls back to the
+      // compact summary while live and resumed turns of the same shape show
+      // their arguments.
+      const args = { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' };
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'replace', args } }],
+        [{ functionResponse: { response: { output: 'done' } } }],
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0]!.args).toEqual(args);
+      expect(tools[0]!.name).toBe('replace');
+      expect(tools[0]!.status).toBe(ToolCallStatus.Success);
+    });
+
+    it('falls back to an empty args object when the call carries none', () => {
+      const tools = buildSpeculativeToolDisplays(
+        [{ functionCall: { name: 'ls' } }],
+        [],
+      );
+      // formatInlineToolArgs skips empty objects, so this renders no args row.
+      expect(tools[0]!.args).toEqual({});
+      expect(tools[0]!.description).toBe('ls');
     });
   });
 
@@ -875,6 +1018,213 @@ describe('AppContainer State Management', () => {
         );
       }).not.toThrow();
     });
+
+    it('announces active scheduled tasks after startup', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      // Scheduler size stays 0: the banner must come from the durable
+      // scheduled_tasks.json read alone (the scheduler is not loaded yet
+      // at startup).
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 0,
+      } as ReturnType<Config['getCronScheduler']>);
+      const durableTask = {
+        id: 'startup-task',
+        cron: '0 9 * * *',
+        prompt: 'check status',
+        recurring: true,
+        createdAt: 1,
+        lastFiredAt: null,
+      };
+      // Seed a mix of active and inactive durable tasks so the notice
+      // count pins the call site's countActiveScheduledTasks filter:
+      // announcing raw durableTasks.length (4) would fail this test.
+      readCronTasksMock.mockResolvedValue([
+        durableTask,
+        { ...durableTask, id: 'second-task' },
+        { ...durableTask, id: 'disabled-task', enabled: false },
+        { ...durableTask, id: 'invalid-cron', cron: 'not a cron expression' },
+      ]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.WARNING,
+            text: '2 active scheduled tasks. Run /loop list (loop skill) to inspect.',
+          },
+          expect.any(Number),
+        );
+      });
+      // Pin the read path: the durable file is keyed by a hash of the
+      // project root (getCronFilePath(projectRoot) in cronTasksFile.ts),
+      // and getTargetDir() differs from getProjectRoot() in this suite,
+      // so a call-site switch to getTargetDir() must fail this test.
+      expect(readCronTasksMock).toHaveBeenCalledWith(
+        mockConfig.getProjectRoot(),
+      );
+    });
+
+    it('formats the startup notice for active scheduled tasks', () => {
+      expect(getScheduledTasksStartupWarning(2)).toBe(
+        '2 active scheduled tasks. Run /loop list (loop skill) to inspect.',
+      );
+    });
+
+    it('does not announce scheduled tasks when none are active', () => {
+      expect(getScheduledTasksStartupWarning(0)).toBeNull();
+    });
+
+    it('uses singular wording for one active scheduled task', () => {
+      expect(getScheduledTasksStartupWarning(1)).toBe(
+        '1 active scheduled task. Run /loop list (loop skill) to inspect.',
+      );
+    });
+
+    it('does not announce scheduled tasks when cron is disabled', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
+      vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 2,
+      } as ReturnType<Config['getCronScheduler']>);
+      // Seed a durable task so removing the isCronEnabled gate would
+      // announce it: the mocked read resolves immediately, so the startup
+      // IIFE completes and its addItem lands before the absence assertion.
+      readCronTasksMock.mockResolvedValue([
+        {
+          id: 'startup-task',
+          cron: '0 9 * * *',
+          prompt: 'check status',
+          recurring: true,
+          createdAt: 1,
+          lastFiredAt: null,
+        },
+      ]);
+
+      // consumePendingStartupWorktreeNotice is invoked synchronously right
+      // after the cron block; waiting for it proves startup passed the
+      // gated section (and the banner addItem would already have run)
+      // before we assert the notice stayed absent.
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue(null);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(startupNoticeSpy).toHaveBeenCalled();
+      });
+      expect(readCronTasksMock).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('active scheduled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('completes startup without a notice when the durable tasks read fails', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 0,
+      } as ReturnType<Config['getCronScheduler']>);
+      readCronTasksMock.mockRejectedValue(new Error('corrupt tasks file'));
+
+      // Startup must reach past the failed read
+      // (consumePendingStartupWorktreeNotice is invoked synchronously right
+      // after the cron block) without announcing anything.
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue(null);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(startupNoticeSpy).toHaveBeenCalled();
+      });
+      expect(addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('active scheduled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('counts only enabled scheduled tasks with valid cron expressions', () => {
+      const task = {
+        id: 'active',
+        cron: '0 9 * * *',
+        prompt: 'check status',
+        recurring: true,
+        createdAt: 1,
+        lastFiredAt: null,
+      };
+      expect(
+        countActiveScheduledTasks([
+          task,
+          { ...task, id: 'disabled', enabled: false },
+          { ...task, id: 'invalid', cron: 'not a cron expression' },
+          {
+            ...task,
+            id: 'legacy-condition',
+            condition: 'only if CI is green',
+          } as typeof task,
+        ]),
+      ).toBe(1);
+    });
   });
 
   describe('State Initialization', () => {
@@ -1137,6 +1487,43 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
+    it('keeps input inactive until config initialization completes', async () => {
+      // Pins the wiring hop itself: AppContainer feeding its own
+      // isConfigInitialized into isInputActive. The predicate has unit tests
+      // and Composer covers isInputActive:false, but nothing asserted that this
+      // call site passes that particular boolean — any other in-scope boolean
+      // type-checks and reopens the `Chat not initialized` race with the suite
+      // still green.
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // First synchronous render: initialization has not flipped yet.
+      expect(capturedUIState.isConfigInitialized).toBe(false);
+      expect(capturedUIState.isInputActive).toBe(false);
+
+      await flushConfigInitialization();
+
+      expect(capturedUIState.isInputActive).toBe(true);
+    });
+
     it('keeps non-TTY output on the Static path', () => {
       Object.defineProperty(process.stdout, 'isTTY', {
         value: false,
@@ -1383,7 +1770,10 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.historyRemountKey).toBe(remountKeyBefore);
 
       vi.useRealTimers();
-      (measureElement as Mock).mockReturnValue(undefined);
+      // mockReset() restores the shared default (a real measurement);
+      // leaving an `undefined` override here would re-break every render
+      // test that runs after this one (#10430).
+      (measureElement as Mock).mockReset();
     });
 
     it('handleClearScreen avoids a second clearTerminal write', () => {
@@ -1481,6 +1871,7 @@ describe('AppContainer State Management', () => {
     it('keeps input active while compression is processing', () => {
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
           hasPendingCompression: true,
@@ -1490,8 +1881,21 @@ describe('AppContainer State Management', () => {
 
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps input inactive until chat initialization completes', () => {
+      expect(
+        isInputActiveForState({
+          isConfigInitialized: false,
+          initError: null,
+          isProcessing: false,
           hasPendingCompression: false,
           streamingState: StreamingState.Idle,
         }),
@@ -1894,16 +2298,63 @@ describe('AppContainer State Management', () => {
       view.unmount();
     });
 
+    it('drops a peer envelope whose session-id pin the drain outgrew', async () => {
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'peer' as const,
+          modelText: '<cross_session_message>stale</cross_session_message>',
+          displayText: 'Message from another session: stale',
+          delivery,
+        };
+      });
+      const drainQueuedFrame = vi.fn().mockReturnValue(false);
+      const submitQuery = vi.fn();
+      const addHistoryItem = vi.fn();
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage: vi.fn(),
+          addHistoryItem,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+          peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(drainQueuedFrame).toHaveBeenCalledWith(delivery);
+      });
+      expect(submitQuery).not.toHaveBeenCalled();
+      expect(addHistoryItem).not.toHaveBeenCalled();
+    });
+
     it('restores a failed peer admission as a peer entry, not user text', async () => {
       // Restoring as plain user text would drain the envelope through the
       // UserQuery preprocessing on retry — the exact hazard the peer
       // send type exists to prevent.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1938,6 +2389,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
     });
@@ -1951,10 +2403,12 @@ describe('AppContainer State Management', () => {
       // while the sender keeps a live `delivered` receipt.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1996,6 +2450,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
       expect(submitQuery).toHaveBeenCalledTimes(1);
@@ -2137,6 +2592,90 @@ describe('AppContainer State Management', () => {
           }),
         );
       });
+    });
+
+    it('drains a queued submission through a rendered AppContainer (#10430)', async () => {
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: StreamingState.Idle,
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText: 'queued before startup settled',
+          turnKey: 'message-queue:startup-queued',
+        };
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        pendingSubmissionCount: 1,
+        addMessage: vi.fn(),
+        addPeerMessage: vi.fn(),
+        enqueueGoalTurn: vi.fn(),
+        peekNextUserBatchKey: vi.fn(),
+        hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+        getPendingSubmissionCount: vi.fn(() => (popped ? 0 : 1)),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+        claimGoalTurn: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        popNextSubmission,
+        restoreMessages: vi.fn(),
+        restorePeerMessage: vi.fn(),
+        drainQueue: vi.fn().mockReturnValue([]),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      // The profile-finalize effect runs on the init flip and dereferences
+      // the tool registry's MCP client manager; without a stub the effect
+      // throws mid-commit, React aborts the passive flush, and the drain
+      // effect never observes the flip (#10430).
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Async config init gates the drain; wait for the gate to flip on a
+      // live re-render before expecting drain activity.
+      await flushConfigInitialization();
+
+      await vi.waitFor(
+        () => {
+          expect(popNextSubmission).toHaveBeenCalledWith('normal');
+        },
+        { timeout: 5000 },
+      );
+      expect(submitQuery).toHaveBeenCalledWith(
+        'queued before startup settled',
+        SendMessageType.UserQuery,
+        undefined,
+        expect.objectContaining({
+          userAdmission: { turnKey: 'message-queue:startup-queued' },
+        }),
+      );
     });
 
     it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
@@ -2453,6 +2992,82 @@ describe('AppContainer State Management', () => {
         'one more check',
       );
     });
+
+    // The shell-mode gate is load-bearing only through this call site: a
+    // shell-mode submission goes to bash, where a leading `<system-reminder>`
+    // is a syntax error, and is recorded as the command the user ran. Both arms
+    // go through the real handleFinalSubmit and the real shellModeActive state,
+    // so dropping `shellMode: shellModeActive` from the call turns the shell
+    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    it.each([
+      ['a shell-mode submission', true, false],
+      ['an ordinary prompt', false, true],
+    ])(
+      'adds the workflow keyword reminder only outside shell mode: %s',
+      (_case, shellMode, expectReminder) => {
+        const mockQueueMessage = vi.fn();
+        vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getAllToolNames: () => ['workflow'],
+          getTool: () => undefined,
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: 'idle',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        if (shellMode) {
+          act(() => {
+            capturedUIActions.setShellModeActive(true);
+          });
+        }
+        capturedUIActions.handleFinalSubmit('gh workflow list', {
+          submittedPrompt: 'gh workflow list',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+        const submitted = mockQueueMessage.mock.calls[0][0] as string;
+        expect(submitted).toContain('gh workflow list');
+        // Asserted on the workflow reminder's own text: this call site gates
+        // only that reminder. The other notices the handler can prepend do not
+        // check shell mode yet (#11626).
+        const workflowReminder = 'includes the "workflow" keyword';
+        if (expectReminder) {
+          expect(submitted).toContain(workflowReminder);
+        } else {
+          expect(submitted).not.toContain(workflowReminder);
+        }
+      },
+    );
 
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
@@ -5458,6 +6073,81 @@ describe('AppContainer State Management', () => {
       ).toBe(true);
     });
 
+    it('announces active scheduled tasks after restoring resumed history', async () => {
+      const calls: string[] = [];
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn((item: HistoryItemWithoutId) => {
+          calls.push(`add:${item.text}`);
+        }),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(() => {
+          calls.push('load');
+        }),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      // Scheduler size stays 0: the banner must come from the durable
+      // scheduled_tasks.json read alone.
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 0,
+      } as ReturnType<Config['getCronScheduler']>);
+      readCronTasksMock.mockResolvedValue([
+        {
+          id: 'startup-task',
+          cron: '0 9 * * *',
+          prompt: 'check status',
+          recurring: true,
+          createdAt: 1,
+          lastFiredAt: null,
+        },
+      ]);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.addItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.WARNING,
+            text: '1 active scheduled task. Run /loop list (loop skill) to inspect.',
+          },
+          expect.any(Number),
+        );
+      });
+      expect(calls.indexOf('load')).toBeLessThan(
+        calls.indexOf(
+          'add:1 active scheduled task. Run /loop list (loop skill) to inspect.',
+        ),
+      );
+      // Same pin as the startup variant: the durable read must use the
+      // project root, not getTargetDir(), to find this project's tasks.
+      expect(readCronTasksMock).toHaveBeenCalledWith(
+        mockConfig.getProjectRoot(),
+      );
+    });
+
     it('does not remeasure footer height for sticky todo status-only updates', async () => {
       // Scoped stub: makeFakeConfig().initialize() rejects on React's
       // double-mount, which leaks async renders and destabilizes the
@@ -6573,6 +7263,11 @@ describe('AppContainer State Management', () => {
     });
 
     it('surfaces unexpected outer errors through history', async () => {
+      // Scoped stub: the throwing getGeminiClient spy below would otherwise
+      // also be hit by the mount init effect's un-awaited initialize() IIFE
+      // (AgentTool.refreshSubagents calls getGeminiClient in its finally),
+      // surfacing as an unhandled rejection.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       const harness = renderRewindHarness();
       vi.spyOn(mockConfig, 'getLlmClient').mockImplementation(() => {
         throw new Error('client exploded');
@@ -7107,8 +7802,14 @@ describe('AppContainer State Management', () => {
 
     interface FakePeerMessaging {
       value: PeerMessaging;
-      submit: (modelText: string, displayText: string) => void;
+      submit: (
+        modelText: string,
+        displayText: string,
+        delivery?: PeerQueuedDelivery,
+      ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
+      emitReceipt: (receipt: PeerReceipt) => void;
+      emitDropped: (notice: DropNotice) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7125,16 +7826,37 @@ describe('AppContainer State Management', () => {
       }) as unknown as HeldMessage;
 
     const makePeerMessaging = (): FakePeerMessaging => {
-      let submitFn: ((modelText: string, displayText: string) => void) | null =
-        null;
+      let submitFn:
+        | ((
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void)
+        | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
+      let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
+      let dropListener: ((notice: DropNotice) => void) | null = null;
       const value = {
-        setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
+        setSubmitFn: (
+          fn: (
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void,
+        ) => {
           submitFn = fn;
         },
         setQueuedPeerCount: vi.fn(),
         onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
           heldListener = fn;
+          return () => {};
+        },
+        onReceipt: (fn: (receipt: PeerReceipt) => void) => {
+          receiptListener = fn;
+          return () => {};
+        },
+        onDropped: (fn: (notice: DropNotice) => void) => {
+          dropListener = fn;
           return () => {};
         },
         getHeld: () => [],
@@ -7143,10 +7865,19 @@ describe('AppContainer State Management', () => {
       } as unknown as PeerMessaging;
       return {
         value,
-        submit: (modelText, displayText) => submitFn?.(modelText, displayText),
+        submit: (modelText, displayText, delivery) =>
+          submitFn?.(modelText, displayText, delivery),
         emitHeld: (held) => {
           if (!heldListener) throw new Error('no held-change listener wired');
           heldListener(held);
+        },
+        emitReceipt: (receipt) => {
+          if (!receiptListener) throw new Error('no receipt listener wired');
+          receiptListener(receipt);
+        },
+        emitDropped: (notice) => {
+          if (!dropListener) throw new Error('no drop listener wired');
+          dropListener(notice);
         },
       };
     };
@@ -7162,6 +7893,188 @@ describe('AppContainer State Management', () => {
         />,
       );
     };
+
+    it('re-runs the gate when the held-expiry lifetime changes', () => {
+      // Both peer settings reload live, and both change what the gate
+      // would decide for messages already parked. Parking under `never`
+      // arms no timer at all, so without this trigger an edit to `1m`
+      // leaves the backlog held until session exit -- no expired receipt
+      // for the sender -- while `/peers` counts down from the new value.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionHeldExpiry: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('never')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('1m')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when the inbound policy changes', () => {
+      // The effect keys on the parsed lifetime AND the policy. The policy
+      // half is referenced nowhere in the effect body, so dropping it from
+      // the deps array flags nothing -- and a user live-editing
+      // `crossSessionInbound` from `hold` to `refuse` would never have the
+      // parked backlog settled as `denied`, leaving senders with no
+      // receipt for messages the new policy is supposed to have handled.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionInbound: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound,
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: () => ({ settings: {} }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('hold')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when policy ownership changes without changing its value', () => {
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (owner: 'user' | 'workspace') =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound: 'hold',
+            },
+          },
+          isTrusted: true,
+          workspaceSettingsActive: true,
+          forScope: (scope: SettingScope) => ({
+            settings:
+              (owner === 'user' && scope === SettingScope.User) ||
+              (owner === 'workspace' && scope === SettingScope.Workspace)
+                ? { agents: { crossSessionInbound: 'hold' } }
+                : {},
+          }),
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('user')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('workspace')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('does not re-run the gate when an unrelated setting changes', () => {
+      // `reevaluate` also settles a parked backlog as `denied` under a
+      // refuse policy, so it must key on the parsed lifetime and the
+      // policy -- not on any settings-file edit, which would discard the
+      // user's backlog on an unrelated key.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (version: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '1m',
+            },
+            ui: { ...mockSettings.merged.ui, customWittyPhrases: [version] },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('a')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('b')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).not.toHaveBeenCalledWith('held-expiry-changed');
+    });
 
     it('queues the envelope on the peer path, never as typed user input', () => {
       // The peer path marks the entry so the drain submits it on the
@@ -7185,21 +8098,56 @@ describe('AppContainer State Management', () => {
         getQueuedPeerCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
 
       renderWithPeer(peer);
       act(() => {
-        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+        peer.submit(
+          '<cross_session_message …>envelope</…>',
+          'one-liner',
+          delivery,
+        );
       });
 
       expect(addPeerMessage).toHaveBeenCalledWith(
         '<cross_session_message …>envelope</…>',
         'one-liner',
+        delivery,
       );
       expect(addMessage).not.toHaveBeenCalled();
       // close() settles still-queued entries; it needs the live depth.
       expect(peer.value.setQueuedPeerCount).toHaveBeenCalledWith(
         expect.any(Function),
       );
+    });
+
+    it('hands the drain the peer handle at the one production call site', () => {
+      // The drop behaviour itself is covered by the `renderHook` test in
+      // 'Queued submission drain', which injects `peerMessaging` directly —
+      // so it proves the logic and nothing about the container passing the
+      // handle in. Delete that single prop and the drain sees
+      // `peerMessaging === undefined`, the optional call short-circuits, and
+      // an envelope addressed to the session `/clear` replaced is submitted
+      // into its successor: the exact regression the pin check exists to
+      // prevent, with every hook-level test still green.
+      //
+      // Structural rather than behavioural for the reason recorded on the
+      // Ctrl+O guard in 'Thinking expansion': under this harness the mount
+      // effect's
+      // `setConfigInitialized(true)` never re-renders the tree, and the
+      // drain is gated on it, so a rendered AppContainer can never reach a
+      // drain at all here. Reading the call site out of the component's own
+      // source is what is left, and it is a real witness: removing
+      // `peerMessaging` from this call makes the assertion fail.
+      const drainCall = /useQueuedSubmissionDrain\(\{([^}]*)\}/.exec(
+        AppContainer.toString(),
+      );
+      expect(drainCall).not.toBeNull();
+      expect(drainCall![1]).toMatch(/\bpeerMessaging\b/);
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
@@ -7231,6 +8179,350 @@ describe('AppContainer State Management', () => {
       expect(addPeerMessage).not.toHaveBeenCalled();
     });
 
+    it('announces once, with the cause, when the inbox could not bind', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const failure = {
+        cause: 'foreign_owner',
+        socketPath: '/run/user/1000/qwen-socks/1.sock',
+        detail: 'belongs to uid 65534, not 1000',
+        hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+        attempts: 3,
+      };
+      peerMessagingHolder.failure = failure;
+      try {
+        const { rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        peerMessagingHolder.failure = { ...failure };
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const notices = addItem.mock.calls
+          .map((call) => call[0] as { type?: string; text?: string })
+          .filter((item) =>
+            item.text?.includes('Cross-session messaging is OFF'),
+          );
+        expect(notices).toHaveLength(1);
+        expect(notices[0]?.type).toBe(MessageType.ERROR);
+        expect(notices[0]?.text).toContain('belongs to another user');
+        expect(notices[0]?.text).toContain('XDG_RUNTIME_DIR');
+      } finally {
+        peerMessagingHolder.failure = null;
+      }
+    });
+
+    it('announces held and denied receipts, and delivery only after a hold', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message to '));
+
+      // The common case: delivered straight away. Nothing to say.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toEqual([]);
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'held',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        `Message to docs-cd: ${describeDeliveryStatus('held')}`,
+      );
+
+      // The user over there released it: that ends a hold they saw.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'held',
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toContain(describeDeliveryStatus('delivered'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'denied',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
+      );
+
+      // Refused is not declined: nobody looked at this one, the setting
+      // turned it away at admission. This transcript line is the only
+      // place that distinction reaches a person, so it is what makes the
+      // two answers different rather than two words for the same thing.
+      act(() => {
+        peer.emitReceipt({
+          status: 'refused',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3b',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('refused')}`,
+      );
+      expect(notices()[3]).not.toContain('declined');
+
+      // A stale address is named as such, never as a human's decision.
+      act(() => {
+        peer.emitReceipt({
+          status: 'misaddressed',
+          address: 'docs-cd',
+          origMsgId: 'm4',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('different session');
+      expect(notices()[4]).not.toContain('declined');
+
+      // An accepted message that expired was never held: the wire text
+      // for 'expired' speaks of a held message and must not be reused.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm5',
+          previous: 'delivered',
+        });
+      });
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain('exited before it read');
+      expect(notices()[5]).not.toContain('held');
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm6',
+          previous: 'held',
+        });
+      });
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
+
+      // Expired with no delivery at all now means only that the message
+      // arrived as that session was shutting down: a full queue is a drop
+      // with a reason of its own.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm7',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(8);
+      expect(notices()[7]).not.toContain('exited before');
+      // Disjunctive: `previous` records what this sender heard, and a
+      // `held` receipt can be lost to the outbound ceiling under exactly
+      // the flood this feature is about, so a live peer can land here.
+      expect(notices()[7]).toContain('shutting down, or could not keep it');
+      expect(notices()[7]).toContain('Retry once it is idle');
+    });
+
+    it('says what became of messages the far inbox turned away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+          dropReason: 'duplicate',
+          dropped: 1,
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        "Message to docs-cd: it was dropped at that session's inbox — " +
+          `${describeDropReason('duplicate')}. The identical message was ` +
+          `accepted there within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, ` +
+          'so there is nothing to re-send.',
+      );
+      // A repeat means the text is already over there, so advising a fold
+      // would have the model reword it and deliver the instruction twice.
+      expect(notices()[0]).not.toContain('Treat it as unsent');
+
+      // One receipt can stand for a burst, so the line counts rather than
+      // repeating itself.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+          dropReason: 'rate-limited',
+          dropped: 7,
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toBe(
+        "Messages to docs-cd: 7 were dropped at that session's inbox — " +
+          `${describeDropReason('rate-limited')}. Treat them as unsent; fold ` +
+          'what still matters into one later message.',
+      );
+
+      // A receipt from a build that named no reason still says enough.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('it was dropped');
+      expect(notices()[2]).not.toContain('—');
+    });
+
+    it('says when this session is turning a peer away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Dropped a message'));
+
+      const frame = {
+        msgV: 1,
+        msgId: 'm1',
+        type: 'user' as const,
+        from: '/tmp/peer.sock',
+        fromName: 'docs-cd',
+        priority: 'next' as const,
+        message: { role: 'user' as const, content: 'do a thing' },
+      };
+
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[0]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'this session is taking peer messages faster than it accepts them.',
+      );
+      // The trust category leads, as it does on both sibling lines: a
+      // peer-chosen name alone could read as the user's own session.
+      expect(notices()[0]).toContain('another session');
+
+      // The count of what one line stands for, so a flood stays one line.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'duplicate',
+          suppressed: 12,
+        });
+      });
+      expect(notices()[1]).toBe(
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'it repeated its previous message within ' +
+          `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s. ` +
+          '(+12 more dropped during this notice window)',
+      );
+      // The count is a session-wide total once the notice budget is
+      // spent, so it must not be labelled as this sender's own.
+      expect(notices()[1]).not.toContain('similar');
+
+      // A controller is named by the label its user gave it, never by
+      // anything the sender wrote.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: {
+            selfSent: false,
+            controller: { id: 'c_1234abcd', label: 'voice' },
+          },
+          reason: 'queue-full',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[2]).toBe(
+        "Dropped a message from a trusted controller (voice): this session's " +
+          'queue of undelivered peer messages is full.',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[3]).toContain('a process this session started');
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[4]).toContain(
+        'a process this session started (/tmp/peer.sock)',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[5]).toContain('from another session');
+    });
+
     it('announces a newly held message once and stays quiet when one is released', () => {
       const addItem = mockedUseHistory().addItem as Mock;
       const peer = makePeerMessaging();
@@ -7258,6 +8550,68 @@ describe('AppContainer State Management', () => {
         peer.emitHeld([heldMessage('a'), heldMessage('c')]);
       });
       expect(noticeCount()).toBe(2);
+    });
+
+    it('passes the policy scope into a held-message announcement', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            cause: 'explicit-setting',
+            policyScope: 'workspace',
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain("this repository's settings hold");
+    });
+
+    it("identifies a held message from the session's own process", () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([{ ...heldMessage('a'), selfSent: true }]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a process this session started',
+      );
+      expect(notice).not.toContain('another session');
+    });
+
+    it('names the grant when a controller message is held', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([
+          {
+            ...heldMessage('a'),
+            controller: { id: 'c_0123abcd', label: 'voice bridge' },
+          },
+        ]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a trusted controller (voice bridge)',
+      );
+      expect(notice).not.toContain('another session');
     });
 
     it('does not announce arrivals that only replace an evicted entry', () => {

@@ -24,6 +24,7 @@ import {
 } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
 /* eslint-enable import/no-internal-modules */
 import type { ChannelFactory } from './channel.js';
+import { markChannelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import { redactLogCredentials } from './logRedaction.js';
 import {
   NdJsonQueueLimitError,
@@ -95,6 +96,7 @@ class PreparedResponseBudget {
       charge > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'prepared_response',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         charge,
@@ -180,6 +182,7 @@ class OutboundOperationBudget {
       charge > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'outbound_operation',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         charge,
@@ -434,7 +437,16 @@ export function createSpawnChannelFactory(
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
-  return async (workspaceCwd, childEnvOverrides) => {
+  const factory: ChannelFactory = async (
+    workspaceCwd,
+    childEnvOverrides,
+    signal,
+  ) => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
     const sourceEnv = options.sourceEnv ?? process.env;
     const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
@@ -491,6 +503,24 @@ export function createSpawnChannelFactory(
       throw error;
     }
     const trackedChild = reservation.attach(child, { ownsProcessTree: true });
+    const abortSpawn = () => {
+      try {
+        trackedChild.killSync();
+      } catch {
+        // The child may have exited between the abort and the signal.
+      }
+    };
+    signal?.addEventListener('abort', abortSpawn, { once: true });
+    void trackedChild.exited.then(
+      () => signal?.removeEventListener('abort', abortSpawn),
+      () => signal?.removeEventListener('abort', abortSpawn),
+    );
+    if (signal?.aborted) {
+      abortSpawn();
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
@@ -600,6 +630,8 @@ export function createSpawnChannelFactory(
       exited: trackedChild.exited,
     };
   };
+  markChannelFactoryForwardsChildEnv(factory);
+  return factory;
 }
 
 /**
@@ -609,7 +641,7 @@ export function createSpawnChannelFactory(
  *
  * Note on `cwd`: CodeQL flags the `workspaceCwd` flow into `spawn({cwd})`
  * as an "uncontrolled data used in path expression" finding. That's the
- * Stage 1 trust model speaking — the caller (a token-authenticated HTTP
+ * Stage 1 trust model speaking — the caller (an operator-authorized HTTP
  * client) is treated as an extension of the operator. The agent already
  * runs as the same UID with shell-tool access, so restricting the spawn
  * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps

@@ -37,7 +37,6 @@ export interface ModelUpdateDiff {
   added: string[];
   removed: string[];
   currentModelAffected: boolean;
-  fallbackModel?: string;
 }
 
 export type UpdateChoice = 'update' | 'later' | 'skip';
@@ -148,9 +147,8 @@ function computeModelDiff(
   const added = newModelIds.filter((id) => !existingSet.has(id));
   const removed = existingModelIds.filter((id) => !newSet.has(id));
   const currentModelAffected = removed.includes(currentModel);
-  const fallbackModel = currentModelAffected ? newModelIds[0] : undefined;
 
-  return { added, removed, currentModelAffected, fallbackModel };
+  return { added, removed, currentModelAffected };
 }
 
 interface PendingUpdate {
@@ -278,7 +276,6 @@ export function useProviderUpdates(
         delete installPlan.env;
         // Template updates never change the selected model.
         delete installPlan.modelSelection;
-        const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
@@ -300,40 +297,21 @@ export function useProviderUpdates(
             },
           },
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           ...(updatesActiveProvider && {
             refreshAuth: (authType) => config.refreshAuth(authType),
           }),
         });
 
-        const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
-
-        if (activeModel === previousModel) {
-          addItem(
-            {
-              type: 'info',
-              text: t('{{plan}} configuration updated successfully.', {
-                plan: displayName,
-              }),
-            },
-            Date.now(),
-          );
-        } else {
-          addItem(
-            {
-              type: 'info',
-              text: t(
-                '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
-                { plan: displayName, model: activeModel },
-              ),
-            },
-            Date.now(),
-          );
-        }
+        addItem(
+          {
+            type: 'info',
+            text: t('{{plan}} configuration updated successfully.', {
+              plan: displayName,
+            }),
+          },
+          Date.now(),
+        );
 
         addItem(
           {

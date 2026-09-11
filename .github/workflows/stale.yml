@@ -1,8 +1,8 @@
 name: 'Mark stale issues and pull requests'
 
 # Run as a daily cron at 00:30 UTC (Beijing time 08:30).
-# Avoid the top of the hour to dodge GitHub's high-contention window,
-# and stay 30 minutes after release.yml (00:00 UTC) to reduce overlap.
+# Avoid the top of the hour to dodge GitHub's high-contention window.
+# This no longer trails the nightly release, which moved to 21:00 UTC.
 on:
   schedule:
     - cron: '30 0 * * *'
@@ -24,7 +24,7 @@ jobs:
       group: '${{ github.workflow }}-stale'
       cancel-in-progress: true
     steps:
-      - uses: 'actions/stale@eb5cf3af3ac0a1aa4c9c45633dd1ae542a27a899'  # v10.3.0
+      - uses: 'actions/stale@eb5cf3af3ac0a1aa4c9c45633dd1ae542a27a899' # v10.3.0
         with:
           repo-token: '${{ secrets.GITHUB_TOKEN }}'
           # Issues are intentionally disabled here; a separate policy will

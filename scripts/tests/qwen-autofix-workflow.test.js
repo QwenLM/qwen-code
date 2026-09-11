@@ -8,28 +8,53 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
+import {
+  count as countTestSurface,
+  measure as measureTestSurface,
+} from '../../.github/scripts/count-test-surface.mjs';
+
+// A hung-runner bound, not a performance budget, so it rides the suite's own
+// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
+// quiet machine. Release run 33957952281: this harness's heaviest case costs
+// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
+// stub's recording — so a timeout surfaced as a content mismatch.
+const subprocessTimeoutMs = Number(
+  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+);
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// The review bot's fixed-ruling NOTE shape, defined ONCE at the workflow
+// level and handed to every jq site as `--arg frf` (#9940 review, rounds
+// 28-29); the runners below pass it exactly as the workflow does.
+const fixedRulingShape =
+  workflow.match(/^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m)?.[1] ?? '';
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
-const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const releaseStepScript = readFileSync(
+  '.github/scripts/run-release-step.sh',
+  'utf8',
+);
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -50,6 +75,12 @@ const upsertDeferredScript = readFileSync(
 );
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
+// The loop-owned lane exclusion list lives in ONE workflow env entry
+// (R27-23); harnesses executing the real classifier blocks inject the
+// REAL value read from the workflow, so a drift between the two fails
+// here, not in production.
+const loopOwnedLanesJson =
+  workflow.match(/^ {2}LOOP_OWNED_LANES: '(.+)'$/m)?.[1] ?? '[]';
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
@@ -202,6 +233,15 @@ const verificationGateBodies = [
   verificationGateSteps[0] ?? '',
   reviewVerificationRunner,
 ];
+const quotedCriticalWitness = (label = '') =>
+  [
+    '**[Suggestion]** Add a regression assertion for the fallback path.',
+    '',
+    ...(label ? [label] : []),
+    '```text',
+    '**[Critical]** quoted fixture output',
+    '```',
+  ].join('\n');
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -225,6 +265,16 @@ const nodeSetupSteps =
 const hasBashMapfile =
   spawnSync('bash', ['-c', 'mapfile -d "" -t x <<< y'], { stdio: 'ignore' })
     .status === 0;
+
+// sha256sum is GNU coreutils: a macOS host without the GNU toolchain
+// (Homebrew ships it as gsha256sum) cannot run the staging step's digest
+// lines — the step is written for the runner, where coreutils is always
+// present. Probe the host like hasBashMapfile does; the pin gates only the
+// verbatim phase of the staging witness, never its text pins.
+const hasSha256sum =
+  spawnSync('bash', ['-c', 'command -v sha256sum > /dev/null 2>&1'], {
+    stdio: 'ignore',
+  }).status === 0;
 
 // GitHub Actions expressions return operand VALUES from &&/||, not
 // booleans: && yields the first falsy operand (else the last operand), ||
@@ -304,6 +354,24 @@ function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
 
+// A step's timeout-minutes, per self-review arm (af-156): a plain number
+// applies to both arms; the address step carries the one per-arm expression
+// the workflow uses, `${{ steps.prepare.outputs.self_review_arm == 'on' &&
+// <armed> || <unarmed> }}`.
+function stepCapsOf(step) {
+  const plain = step.match(/\n {8}timeout-minutes: (\d+)\n/)?.[1];
+  if (plain !== undefined) {
+    return { armed: Number(plain), unarmed: Number(plain) };
+  }
+  const perArm = step.match(
+    /\n {8}timeout-minutes: "\$\{\{ steps\.prepare\.outputs\.self_review_arm == 'on' && (\d+) \|\| (\d+) \}\}"\n/,
+  );
+  return {
+    armed: perArm ? Number(perArm[1]) : Number.NaN,
+    unarmed: perArm ? Number(perArm[2]) : Number.NaN,
+  };
+}
+
 function withRunnerDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
   try {
@@ -336,6 +404,15 @@ function qwenResultLine({ result, errorMessage, isError = false }) {
     is_error: isError,
     ...(result === undefined ? {} : { result }),
     ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
+}
+
+function qwenInitLine({ model, version }) {
+  return `${JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    ...(model === undefined ? {} : { model }),
+    ...(version === undefined ? {} : { qwen_code_version: version }),
   })}\n`;
 }
 
@@ -594,6 +671,9 @@ describe('qwen-autofix workflow', () => {
           !/startswith\("review-address"\)/.test(sel) &&
           !/!= "Qwen Autofix"/.test(sel) &&
           !/IN\("Qwen Autofix"/.test(sel) &&
+          // The wake filter excludes the loop's fleet through the shared
+          // env list now (R27-23) — the reference IS the guard.
+          !/IN\(\$looplanes\[\]\)/.test(sel) &&
           // The review-in-flight gate (#8888) selects BY NAME for the LLM
           // review check — a liveness probe, not a feedback selector, so it
           // needs neither the review-address carve-out nor the workflow guard.
@@ -2055,7 +2135,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -3114,13 +3194,18 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Seven sites now: the four feedback/deferral exclusions, the
+    // Ten sites now: the four feedback/deferral exclusions, the
     // over-budget census (command comments are not feedback batches), the
-    // conflict handoff wake filter, and its scan-side mirror for the
+    // conflict handoff wake filter, its scan-side mirror for the
     // stale-base park gate (a /command comment is not a trusted-human
-    // response and must not unpark a conflict verdict in either).
+    // response and must not unpark a conflict verdict in either), and the
+    // convergence breaker's human-activity boundary in all three of its
+    // lockstepped sites — the scan gate, the prepare mirror, and the
+    // report step's stale-base guard (#10122) — since a /command comment
+    // is not a maintainer weighing in and must not hand the loop a fresh
+    // runway.
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      7,
+      10,
     );
   });
 
@@ -3145,12 +3230,14 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflowWithScripts.split('--paginate').length - 1).toBe(22);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(25);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
-    // needs the same human-feedback legs prepare reads) = twelve normalized
-    // fetch sites. The
+    // needs the same human-feedback legs prepare reads) + the report step's
+    // convergence-guard rv/rc/ic re-fetches (#10122: the guard re-derives
+    // the breaker's reading over FRESH fetches, so it owns three new
+    // normalized sites) = fifteen normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
@@ -3170,7 +3257,7 @@ describe('qwen-autofix workflow', () => {
     // by `jq -rs` into a shell variable to resolve ONE job id, never a
     // WORKDIR file, so it bumps the total pin without joining the count
     // below.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(12);
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(15);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -6995,6 +7082,13 @@ exit 1
     // unclassified comments stay open instead of driving more code changes.
     expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
     expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const leadingCriticalDefinitions = (
+      `${workflow}\n${reviewVerificationRunner}`.match(
+        /def leading_critical:\s*\n\s*gsub\([^\n]+\)\s*\n\s*\| startswith\([^\n]+\);/g,
+      ) ?? []
+    ).map((definition) => definition.replace(/\s+/g, ' ').trim());
+    expect(leadingCriticalDefinitions).toHaveLength(9);
+    expect(new Set(leadingCriticalDefinitions).size).toBe(1);
     const inlineFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -7044,6 +7138,21 @@ exit 1
         author_association: 'MEMBER',
         body: 'The null branch still crashes.',
       },
+      {
+        id: 16,
+        created_at: '2026-01-02T00:00:05Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness('Witness:'),
+      },
+      {
+        id: 17,
+        in_reply_to_id: 16,
+        created_at: '2026-01-02T00:00:06Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'The assertion should cover the fallback path too.',
+      },
     ];
     const reviews = [
       {
@@ -7075,6 +7184,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -7086,7 +7198,7 @@ exit 1
           },
         ),
       );
-    expect(countInline(false)).toBe(5);
+    expect(countInline(false)).toBe(7);
     // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
     // but MAINTAINER comments (13) stay actionable regardless of wording —
     // the lexical **[Critical]** test applies only to the bot's own
@@ -7122,7 +7234,10 @@ exit 1
         submitted_at: '2026-01-02T00:00:01Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: 'Looks good overall',
+        body: [
+          '<!-- hidden from readers',
+          '**[Critical]** invisible marker',
+        ].join('\n'),
       },
       {
         id: 22,
@@ -7130,7 +7245,16 @@ exit 1
         submitted_at: '2026-01-02T00:00:02Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: '**[Critical]** memory leak in the owner route',
+        body: [
+          '<!-- rendered metadata -->',
+          '',
+          '\uFEFF',
+          '**[Critical]** Blocking finding(s) follow.',
+          '',
+          '⚠️ Downgraded from Request changes to Comment: self-PR.',
+          '',
+          '**[Critical]** memory leak in the owner route',
+        ].join('\n'),
       },
       {
         id: 23,
@@ -7139,6 +7263,14 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableReviews = (criticalOnly, over = []) =>
@@ -7169,10 +7301,11 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
         ),
       );
-    // All four are actionable while suggestions are in scope; in
-    // Critical-only mode only the BOT's non-Critical COMMENTED review is
-    // excluded — the maintainer's COMMENTED review stays actionable.
-    expect(countActionableReviews(false)).toBe(4);
+    // All five are actionable while suggestions are in scope. In Critical-only
+    // mode, the rendered-invisible residue ahead of 22 still leaves its
+    // Critical marker leading, while the unclosed comment in 21 and quoted
+    // marker in 24 stay non-Critical.
+    expect(countActionableReviews(false)).toBe(5);
     expect(countActionableReviews(true)).toBe(3);
     // Over-budget: the maintainer's COMMENTED review defers; their formal
     // CHANGES_REQUESTED (20) still cuts through.
@@ -7203,6 +7336,13 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: '@qwen-code /review',
+      },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableIssue = (criticalOnly, over = []) =>
@@ -7237,7 +7377,7 @@ exit 1
     // scope; the command-style comment is always excluded. In Critical-only
     // mode the maintainer's comment STAYS actionable alongside the bot's
     // Critical one — only bot non-Critical output is filtered.
-    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(false)).toBe(3);
     expect(countActionableIssue(true)).toBe(2);
     // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
     // still counts.
@@ -7278,6 +7418,15 @@ exit 1
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
         html_url: 'https://github.com/test/pull/1#review-23',
       },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#review-24',
+      },
     ];
     const countDeferredReviews = (over = []) =>
       Number(
@@ -7304,14 +7453,12 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
         ),
       );
-    // Only the BOT's COMMENTED non-Critical review is deferred;
-    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
-    // COMMENTED review are not.
-    expect(countDeferredReviews()).toBe(1);
-    expect(countDeferredReviews(['maintainer'])).toBe(2);
+    // The ordinary suggestion and the fenced-marker suggestion are deferred.
+    expect(countDeferredReviews()).toBe(2);
+    expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--arg frf "\$\{FIXED_RULING_FILTER\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
     const countDeferredInline = (over = []) =>
@@ -7335,6 +7482,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -7343,14 +7493,14 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
         ),
       );
-    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
-    // unclassified comment (13) stays actionable, and Critical (11),
-    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
-    // never deferred.
-    expect(countDeferredInline()).toBe(1);
+    // The ordinary suggestion (12), fenced-marker root (16), and its reply
+    // (17) defer together. The maintainer's unclassified comment (13) stays
+    // actionable, as do Critical (11), reply-to-Critical (14), and the
+    // CHANGES_REQUESTED-associated comment (15).
+    expect(countDeferredInline()).toBe(3);
     // Over-budget maintainer: their unclassified comment (13) joins the
     // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
-    expect(countDeferredInline(['maintainer'])).toBe(2);
+    expect(countDeferredInline(['maintainer'])).toBe(4);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
       /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -7389,6 +7539,14 @@ exit 1
         body: '**[Suggestion]** consider caching this lookup',
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
       },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#issuecomment-34',
+      },
     ];
     const countDeferredIssue = (over = []) =>
       Number(
@@ -7415,10 +7573,10 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(issueComments) },
         ),
       );
-    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
-    // comment (30), the Critical (31), and the command (32) are not.
-    expect(countDeferredIssue()).toBe(1);
-    expect(countDeferredIssue(['maintainer'])).toBe(2);
+    // Both bot suggestions are deferred; the maintainer's normal comment
+    // (30), the Critical (31), and the command (32) are not.
+    expect(countDeferredIssue()).toBe(2);
+    expect(countDeferredIssue(['maintainer'])).toBe(3);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
@@ -7496,6 +7654,18 @@ exit 1
           humanC('onetime', '2026-06-14T12:00:00Z'),
           humanC('looper', '2026-07-01T12:00:00Z'),
           humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC(
+            'quoted-issue',
+            '2026-07-02T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
+          humanC(
+            'quoted-issue',
+            '2026-07-03T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
           humanC(
             'looper',
@@ -7568,6 +7738,20 @@ exit 1
             submitted_at: '2026-07-02T12:30:00Z',
             body: 'feedback delivered through a review',
           },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-03T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
           // Request changes / APPROVED reviews are never deferrable, so two
           // consumed-span batches of each must not count (both authors absent):
           // the census mirrors the deferred renderer's `state == "COMMENTED"`.
@@ -7619,6 +7803,32 @@ exit 1
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:30:00Z',
             body: 'feedback delivered through an inline comment',
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            id: 902,
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:20:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 902,
+            created_at: '2026-07-03T13:20:00Z',
+            body: 'The same fallback path is still uncovered.',
           },
           // Critical root comment (id 901) that replyguy's replies attach to.
           {
@@ -7682,17 +7892,31 @@ exit 1
         ],
         { encoding: 'utf8' },
       );
-      // Only the two looped authors land here; every protected author above
-      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
-      // two consumed-span batches yet stays absent — dropping any one of the
-      // census's deferral-mirroring exclusions surfaces one of them and fails.
-      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
+      // The four fenced-marker authors are regular feedback in every input
+      // shape, including a reply to a fenced-marker root. The protected
+      // authors (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/
+      // sentinelvictim) still stay absent.
+      expect(JSON.parse(overOut)).toEqual([
+        'looper',
+        'quoted-inline',
+        'quoted-issue',
+        'quoted-reply',
+        'quoted-reviewer',
+        'reviewer2',
+      ]);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
     }
     // The deferral note names over-budget authors with the escapes.
     expect(prepareBranchAndFeedbackStep).toContain('is at this window');
     expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'start your comment with **[Critical]**',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '请以 **[Critical]** 开头评论',
+    );
+    expect(designDoc).toContain('starting a comment with **[Critical]**');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the
@@ -8461,6 +8685,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-ci-bot\n` +
             `LIVE_REARM_KEY=W1\nWORKDIR=${dir}\nSTALE=${stale}\n` +
+            `LOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\n` +
             `BASE_UPD_AT='${baseUpdAt}'\n` +
             `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
             `${conflictBlock}\nprintf '%s' "$STALE"`,
@@ -8936,6 +9161,57 @@ exit 1
     );
     expect(reviewVerificationRunner).toContain(
       'strip_runner_channels npm run test',
+    );
+    // The load clamps must actually reach every vitest the gate launches.
+    // Dropping the expansion from any of the three legs is silent —
+    // `set -eo pipefail` without `-u` swallows an empty array — and the
+    // gate reverts to 15s timeouts, unbounded workers and coverage on,
+    // which is the incident this script's clamps exist to prevent.
+    // Pinned on reviewVerificationRunner only: the inline issue-fix gate
+    // keeps unclamped copies by design — RUNNER_NAME is present there, so
+    // its package legs keep the config-level clamps, and its contracts leg
+    // accepts the web-shell 5s default.
+    expect(reviewVerificationRunner).toContain(
+      '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
+    expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and the array definition sits above its consumers: `set -eo
+    // pipefail` without `-u` expands a not-yet-set array to zero words, so
+    // a definition moved below them silently empties every clamp while the
+    // position-blind toContains above stay green.
+    expect(
+      reviewVerificationRunner.indexOf('VITEST_LOAD_CLAMPS=('),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+      ),
+    );
+    // ...and above the contracts call: run_check_no_ab spawns a child bash
+    // that inherits exported variables only, so an export missing or moved
+    // below the call leaves the drift leg at vitest's 5s default.
+    expect(
+      reviewVerificationRunner.indexOf('export AUTOFIX_VITEST_FLAGS'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    );
+    // ...and the unset stays below the contracts call: the child inherits
+    // the export at spawn time, so an unset moved above the call (or
+    // deleted) strips the clamps from the drift leg while every
+    // establish-side pin above stays green.
+    expect(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('unset AUTOFIX_VITEST_FLAGS'),
     );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
@@ -9561,7 +9837,10 @@ exit 1
     // review-address must also fetch ic.json and render issue-level comments.
     expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
-      '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
+      'jq \'.statusCheckRollup // []\' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '|| echo \'[]\' > "${WORKDIR}/checks.json"',
     );
     expect(workflow).toContain('## Issue-level comments');
     expect(workflow).toContain('## Failed checks');
@@ -9571,10 +9850,14 @@ exit 1
     );
     // Four sites: the NEWEST computation, the live-watermark revalidation,
     // the "Failed checks" rendering, and the "Still-red checks" rendering
-    // share the address-check carve-out (the autofix workflow's OTHER lanes
-    // failing is the loop's own business, not actionable feedback). The
-    // conflict-handoff wake filter deliberately does NOT share it: under a
-    // park no address round can legitimately run, so it excludes ALL Qwen
+    // share the address-check carve-out (the autofix workflow's OTHER
+    // lanes failing is the loop's own business, not actionable feedback).
+    // The regression classifier (af-157) deliberately does NOT share it:
+    // the charge verdict excludes ALL own-lane checks via the canonical
+    // five-name filter — a failed or in-flight own run is feedback or
+    // observer noise, not a red the loop may charge to its own push. The
+    // conflict-handoff wake filter also does NOT share it: under a park
+    // no address round can legitimately run, so it excludes ALL Qwen
     // Autofix checks — the conflict round's own failed check must not
     // unpark its own park.
     expect(
@@ -9599,6 +9882,313 @@ exit 1
     expect(routeStep).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}',
     );
+  });
+
+  it("does not count the review bot's fixed-ruling replies as feedback — matched by their posted shape, so a Critical quoting the marker still counts (#9940 review, round 28)", () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // The thread lifecycle replies `R<id> fixed by <what> <marker>` into a
+    // thread — the review bot's first inline reply class that is NOT a
+    // finding (FIXED_RULING_MARKER in lib/review-footer.ts). Counting it
+    // selected a just-approved PR for a review-address round with nothing
+    // to address. The filter matches the posted SHAPE anchored at the
+    // start: a real Critical that quotes the marker leads with its
+    // severity marker and keeps counting.
+    // Defined once, at the workflow level; the scan step no longer spells
+    // its own copy. An `--arg` value reaches jq verbatim, so the `[^\n]`
+    // class carries ONE backslash — the `[^\\n]` a jq string literal needs
+    // compiled, as a shell value, to "neither backslash nor n" and let a
+    // `by` clause with an `n` in it count (#9940 review, round 29).
+    const shape = fixedRulingShape;
+    expect(shape).toBeTruthy();
+    expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
+    // The `by` class names every line break BOTH dialects must agree on:
+    // jq's `[^\n]` admits `\r`/U+2028/U+2029 and JS's `.` does not, so the
+    // census dropped comments the TypeScript side counted (#9940 review,
+    // round 31 reverse audit).
+    expect(shape).toContain('(?: by [^\\r\\n\\x{2028}\\x{2029}]*)?');
+    // Anchored over the WHOLE body: a real note is the note and, under
+    // attribution on, its footer — anything carrying further prose fails
+    // closed toward COUNTING (#9940 review, round 31).
+    // Spelled out, not `\s`: Oniguruma's `\s` matches U+0085 and JS's does
+    // not (and JS's matches U+FEFF while Oniguruma's does not), so a note
+    // with either byte on the end was a note to one engine and a finding
+    // to the other (#9940 review, round 31 reverse audit).
+    // The two whitespace runs after the marker must not OVERLAP: a
+    // `[ \t]*` followed by a `[ \t\r\n]*` gives a run of spaces no
+    // unique split, which is quadratic — real jq aborts the scan step with
+    // `retry-limit-in-match` and `set -e` fails the whole job (#9940
+    // review, round 31 reverse audit). The trailing run therefore starts
+    // at a LINE BREAK.
+    expect(shape).toMatch(/\(\[\\r\\n\]\[ \\t\\r\\n\]\*\)\?\$$/);
+    expect(shape).not.toContain('\\s');
+    expect(shape).not.toContain('\\\\');
+    expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
+    const program = reviewScanStep.match(
+      /--arg frf "\$\{FIXED_RULING_FILTER\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(program).toBeTruthy();
+    const run = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-09-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'frf',
+          shape,
+          program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(comments) },
+      ).trim();
+    const after = { created_at: '2026-09-02T00:00:00Z' };
+    const bot = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+    };
+    const marker = '<!-- qwen-review-fixed-ruling -->';
+    // The ruling note, with and without a `by`, attribution on and off.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-2 fixed by the guard rewrite ${marker}\n\n_— m via Qwen Code /review (v1)_`,
+        },
+        { ...after, ...bot, in_reply_to_id: 1, body: `R1-3 fixed ${marker}` },
+        // A `by` clause with an `n` in it — the double-backslash class let
+        // this one count (#9940 review, round 29).
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-4 fixed by the new parser ${marker}`,
+        },
+      ]),
+    ).toBe('0');
+    // A Critical that QUOTES the marker — a review of the file defining it
+    // — is a finding: root, carried re-post reply, marker in a code block.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-1: the census filter \`${marker}\` is substring-anywhere`,
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `**[Critical]** R3-1: still stands — \`${marker}\``,
+        },
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-2: quoted\n\n    R1-2 fixed by x ${marker}`,
+        },
+      ]),
+    ).toBe('3');
+    // Attribution off strips the severity marker, so a Critical's own
+    // claim line can OPEN with a quoted ruling — the start anchor alone
+    // dropped it from the census (#9940 review, round 30).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by the guard ${marker} is the shape this filter matches, and it is anchored at both ends`,
+        },
+      ]),
+    ).toBe('1');
+    // …and a comment that quotes the whole note on its first line and
+    // states its finding underneath is a finding, not a note: anchoring
+    // the LINE dropped that comment wholesale, the live Critical with it
+    // (#9940 review, round 31).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n**[Critical]** R3-4: the census drops this whole comment`,
+        },
+      ]),
+    ).toBe('1');
+    // The tail after the marker is the CANONICAL footer, not "any italic
+    // line": a comment whose own second paragraph is italic prose is a
+    // finding, and a permissive tail read it as a note (#9940 review,
+    // round 31 reverse audit).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n_— **[Critical]** R3-4: the auth check is still missing_`,
+        },
+      ]),
+    ).toBe('1');
+    // …and the same body under a long run of horizontal whitespace still
+    // COUNTS, in bounded time. jq aborts a quadratic match rather than
+    // returning false, and the scan step runs under `set -e`, so the
+    // overlap cost the whole census, not one row (#9940 review, round 31
+    // reverse audit).
+    for (const pad of [' '.repeat(20000), '\t'.repeat(20000)]) {
+      const t0 = Date.now();
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${pad}x` }]),
+      ).toBe('1');
+      expect(Date.now() - t0).toBeLessThan(10000);
+    }
+    // Real jq, real Oniguruma: `\s` is not the same set in the two engines
+    // — it matches U+0085 here and not in JS, and U+00A0/U+FEFF in JS and
+    // not here — so the shape spells its whitespace out. Each of these
+    // must COUNT: dropping a comment the TypeScript side counts is the
+    // direction that loses a finding (#9940 review, round 31 reverse
+    // audit).
+    for (const tail of ['\u0085', '\u00a0', '\ufeff']) {
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${tail}` }]),
+      ).toBe('1');
+      expect(
+        run([
+          {
+            ...after,
+            ...bot,
+            body: `R1-2 fixed by x ${marker}\n${tail}_— m via Qwen Code /review (v1)_`,
+          },
+        ]),
+      ).toBe('1');
+    }
+    // Every other reply and root keeps counting: a carried re-post, a
+    // bot reply in prose, a human reply, a human quoting the shape.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: '**[Critical]** R1-2: still stands at HEAD',
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: 'The assertion should cover the fallback path too.',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          in_reply_to_id: 1,
+          body: 'looks fine',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          body: `R1-2 fixed by me ${marker}`,
+        },
+      ]),
+    ).toBe('4');
+    // The scan count, the two digest legs over $comments[] whose rows
+    // survive to the rendering, and the prepare job's LIVE_NEW revalidation
+    // apply the ONE shape, each handed the env value as `--arg frf` (the
+    // OVER_BUDGET leg drops every bot row later anyway); no site spells a
+    // copy of its own.
+    expect(workflow.split('test($frf)').length - 1).toBe(4);
+    expect(
+      workflow.split('--arg frf "${FIXED_RULING_FILTER}"').length - 1,
+    ).toBe(4);
+    expect(workflow.split('qwen-review-fixed-ruling -->').length - 1).toBe(1);
+  });
+
+  it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
+    // The salvage step posts the historical-head note with CI_BOT_PAT —
+    // the REVIEW_BOT account the fleet scan counts as actionable. Its
+    // marker must sit in every exclusion that counts or renders REVIEW_BOT
+    // issue comments: without it, a salvaged APPROVE (N_REVIEWS counts
+    // only CHANGES_REQUESTED/COMMENTED) flips "nothing new since
+    // watermark" into a full review-address round dispatched on the bot's
+    // own note, and the NEWEST computation advances the watermark onto
+    // it. Behavioral witness first: the scan's N_ISSUE_COMMENTS filter,
+    // extracted VERBATIM, replayed over the exact note body plus one
+    // human comment.
+    const scanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    const filterDef = scanStep.match(/BOT_COMMENT_FILTER='([^']+)'/)?.[1];
+    expect(filterDef).toContain('qwen-review-salvaged');
+    const cmd =
+      scanStep.match(/N_ISSUE_COMMENTS="\$\(jq[\s\S]*?ic\.json"\)"/)?.[0] ?? '';
+    const jqProgram = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"));
+    expect(jqProgram).toContain('| length');
+    const note = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+      created_at: '2026-08-02T00:00:00Z',
+      body:
+        '<!-- qwen-review-salvaged e2b07356f5d2e56197a89e438535edfc8e23823e -->\n\n' +
+        '⏳ **Historical-head review** — head moved while this review was in flight.',
+    };
+    const human = {
+      user: { login: 'maintainer' },
+      author_association: 'MEMBER',
+      created_at: '2026-08-02T01:00:00Z',
+      body: 'please address the remaining findings',
+    };
+    const countComments = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-08-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'bf',
+          filterDef,
+          '--arg',
+          'cf',
+          '^\\s*@qwen-code /',
+          jqProgram,
+        ],
+        { input: JSON.stringify(comments), encoding: 'utf8' },
+      ).trim();
+    // The note alone adds nothing actionable; the human comment still
+    // counts beside it.
+    expect(countComments([note])).toBe('0');
+    expect(countComments([note, human])).toBe('1');
+    expect(countComments([human])).toBe('1');
+    // Shape pin: the marker rides the shared alternation at the four
+    // sibling sites that count or render REVIEW_BOT issue comments
+    // (NEWEST, LIVE_NEW, and both feedback renderers) plus the scan
+    // filter's BOT_COMMENT_FILTER — and at no other site (the
+    // conflict-wake and over-budget filters already exclude REVIEW_BOT
+    // by login).
+    expect(
+      workflow.match(/qwen-review-ack\|qwen-review-salvaged/g) ?? [],
+    ).toHaveLength(5);
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
@@ -9682,14 +10272,14 @@ exit 1
   });
 
   it('keeps release-failure autofix issues approved for scheduled fallback', () => {
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'Safe to auto-apply approval: release-failure issue content is',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
     );
-    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseStepScript).toContain(
       'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
     );
   });
@@ -9823,7 +10413,7 @@ exit 1
         ],
         // spawnSync blocks the event loop, so vitest's async timeout can't
         // fire — bound each subprocess directly against a hung runner.
-        { encoding: 'utf8', timeout: 10_000 },
+        { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
@@ -9867,9 +10457,19 @@ exit 1
     // secret, so it is safe to echo into a public comment. Each reporting
     // step must plumb it in and render a footer that names Qwen Code and the
     // model, with an empty-variable fallback so the footer never renders a
-    // bare backtick pair.
+    // bare backtick pair. The footer prefers the model the session ACTUALLY
+    // ran: run-agent.mjs writes the stream-json init event's resolved model
+    // + CLI version to agent-model, and every read site hardens the read
+    // (WORKDIR is agent-writable) before interpolating: regular file only
+    // (a planted directory or FIFO must not abort or wedge the PAT-bearing
+    // step under -eo pipefail), never a symlink (head would follow it to an
+    // arbitrary host file), bounded head -c prefixes (sed buffers a whole
+    // line before cut could bound it), allowlist + length cap per value, and
+    // || true so any read failure degrades to the configured MODEL. The
+    // executed replay below gates the ordering and the shell semantics;
+    // these pins gate that all THREE copies carry them.
     const footer =
-      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`${CLI_DISPLAY}"';
     for (const step of [
       pushAndReportStep,
       reviewAddressReportStep,
@@ -9879,6 +10479,21 @@ exit 1
         "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
       );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain(
+        'if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then',
+      );
+      expect(step).toContain(
+        'AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'1p\' | tr -cd \'A-Za-z0-9._:/+-\' | cut -c1-100 || true)"',
+      );
+      expect(step).toContain(
+        'AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'2p\' | tr -cd \'A-Za-z0-9._+-\' | cut -c1-40 || true)"',
+      );
+      expect(step).toContain(
+        '[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"',
+      );
+      expect(step).toContain(
+        'CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \\`${AGENT_CLI_VERSION}\\`}"',
+      );
       expect(step).toContain(footer);
     }
     // Push-and-report carries BOTH the fixed and no-action bodies, so the
@@ -9898,25 +10513,178 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('executes the footer read block: preference ordering, allowlist, and fail-safe on planted paths', () => {
+    // The pins above are order-blind source substrings and execute nothing.
+    // Replay the REAL block (canonical script copy) under the same flags
+    // GitHub runs `run:` with, so the load-bearing ordering is gated —
+    // moving MODEL_DISPLAY's default below the preference would silently
+    // revert every footer to the requested model — and every planted-path
+    // shape the hardening exists for must degrade to the fallback with
+    // exit 0, never abort the PAT-bearing step under -eo pipefail.
+    // The extractor stays anchored on the default assignment immediately
+    // followed by a newline; an unanchored lazy span could silently degrade
+    // to block === '' (guarded below, and by the identity assertion).
+    const blockRe =
+      /MODEL_DISPLAY="\$\{MODEL:-default\}"\n[\s\S]*?CLI_DISPLAY="\$\{AGENT_CLI_VERSION:\+[^\n]*\n/;
+    const block = pushAndReportScript.match(blockRe)?.[0] ?? '';
+    expect(block).toContain('agent-model');
+    expect(block.trimEnd().endsWith('`}"')).toBe(true);
+    // One replay covers all THREE copies: the two workflow copies sit ten
+    // spaces deep in the YAML and carry a shorter comment, but their CODE
+    // lines must equal the replayed canonical block's, in the same order.
+    // Without this a hand-edit of one duplicate — the default assignment
+    // moved below the preference — leaves every toContain pin green and
+    // this replay (extracted from the untouched script) green too, while
+    // that copy's footer silently reverts to the requested model. Comments
+    // are filtered, order is preserved, and an empty/failed match can never
+    // equal the non-empty canonical code.
+    const codeLines = (src) =>
+      (src.match(blockRe)?.[0] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l !== '' && !l.startsWith('#'))
+        .join('\n');
+    const canonicalCode = codeLines(pushAndReportScript);
+    expect(canonicalCode).toContain('agent-model');
+    for (const step of [publishPrStep, reviewAddressReportStep]) {
+      expect(codeLines(step)).toBe(canonicalCode);
+    }
+    const render = (setup, model = 'configured-model') =>
+      withRunnerDir((dir) => {
+        setup(dir);
+        const script = join(dir, 'block.sh');
+        writeFileSync(
+          script,
+          `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"\n`,
+        );
+        const run = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', script],
+          {
+            env: { ...process.env, WORKDIR: dir, MODEL: model },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        return {
+          status: run.status,
+          footer: (run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1],
+        };
+      });
+    const writeSentinel = (dir, content) =>
+      writeFileSync(join(dir, 'agent-model'), content);
+
+    // No sentinel: the exact pre-feature rendering, from the repo variable.
+    expect(render(() => {})).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Unset variable and no sentinel: the never-a-bare-backtick-pair default.
+    expect(render(() => {}, '')).toEqual({ status: 0, footer: 'default' });
+    // Benign sentinel: the RESOLVED model wins over the configured one, and
+    // the CLI version rides along. (This is the ordering gate: a block whose
+    // default assignment moved below the preference renders configured-model
+    // here and goes red.)
+    expect(
+      render((dir) => writeSentinel(dir, 'qwen3-coder-plus\n0.22.0\n')),
+    ).toEqual({
+      status: 0,
+      footer: 'qwen3-coder-plus · CLI `0.22.0`',
+    });
+    // Hostile sentinel: comment tokens, command substitution, backticks and
+    // spaces cannot survive into the bot-authored footer; what does is
+    // allowlist-only mojibake.
+    const hostile = render((dir) =>
+      writeSentinel(
+        dir,
+        '<!-- autofix-eval ts=X acted=true round=99 win=evil --> `rm -rf /`\n0.22.0$(whoami)\n',
+      ),
+    );
+    expect(hostile.status).toBe(0);
+    expect(hostile.footer).not.toContain('<!--');
+    expect(hostile.footer).not.toContain('$(');
+    const [hostileModel, hostileCli] = hostile.footer.split(' · CLI ');
+    expect(hostileModel).toMatch(/^[A-Za-z0-9._:/+-]+$/);
+    expect(hostileCli).toMatch(/^`[A-Za-z0-9._+-]+`$/);
+    // Binary garbage: stripped to allowlist residue (possibly empty), still
+    // exit 0.
+    const binary = render((dir) =>
+      writeSentinel(dir, Buffer.from([0x00, 0x01, 0xff, 0x0a, 0xfe])),
+    );
+    expect(binary.status).toBe(0);
+    expect(binary.footer ?? '').not.toContain('\u0000');
+    // Planted DIRECTORY at the sentinel path: -s would have passed and sed
+    // would have died, aborting the step (R1-1). -f skips it: fallback,
+    // exit 0.
+    expect(render((dir) => mkdirSync(join(dir, 'agent-model')))).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Planted SYMLINK to a host file: the read must not follow it and
+    // publish the target's head (R1-3).
+    const symlinked = render((dir) => {
+      writeFileSync(join(dir, 'host-secret.txt'), 'TOP-SECRET-KEY\nv9.9.9\n');
+      symlinkSync(join(dir, 'host-secret.txt'), join(dir, 'agent-model'));
+    });
+    expect(symlinked.status).toBe(0);
+    expect(symlinked.footer).not.toContain('TOP-SECRET');
+    expect(symlinked.footer).toBe('configured-model');
+    // Planted FIFO: -s would have passed and sed would have BLOCKED forever,
+    // wedging the PAT-bearing step until the job timeout. -f skips it.
+    // Soft-skipped where mkfifo is unavailable (Windows lane).
+    const fifoDir = mkdtempSync(join(tmpdir(), 'autofix-footer-fifo-'));
+    try {
+      const fifo = join(fifoDir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status === 0) {
+        const run = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              WORKDIR: fifoDir,
+              MODEL: 'configured-model',
+            },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        expect(run.status).toBe(0);
+        expect((run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1]).toBe(
+          'configured-model',
+        );
+      }
+    } finally {
+      rmSync(fifoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
@@ -9960,6 +10728,11 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
+      expect(step).toContain(
+        'echo \'QWEN_SKIP_LATENCY_BUDGETS=1\' >> "${GITHUB_ENV}"',
+      );
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -9985,10 +10758,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -9996,6 +10768,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
@@ -11833,6 +12608,9 @@ exit 1
       'CI="${CI:-true}"',
       'KISS_AUDIT="${KISS_AUDIT:-false}"',
       'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}"',
+      'WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}"',
+      'SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"',
       'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     ];
     const gateLaunchPin = new RegExp(
@@ -11946,7 +12724,10 @@ exit 1
         join(dir, 'npm'),
         [
           '#!/usr/bin/env bash',
-          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          // One bracketed line per argv word: $*-joined logging renders a
+          // joined-blob flag identically to separate words, so a [*]-for-
+          // [@] regression in the contracts script would survive it.
+          'printf \'[%s]\\n\' "$@" >> "${NPM_LOG}"',
           'if [[ "$*" == "run check-i18n" ]]; then',
           '  exit "${I18N_EXIT:-0}"',
           'fi',
@@ -11970,14 +12751,45 @@ exit 1
 
       expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
+        '[run]',
+        '[check-i18n]',
       ]);
 
       writeFileSync(npmLog, '');
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
+      ]);
+
+      // web-shell's config sets no timeouts and has no RUNNER_NAME branch,
+      // so without caller flags the drift test runs at vitest's 5s default;
+      // the review gate launches it on a saturating shared host and hands
+      // its clamps down through this variable. The issue-fix gate leaves
+      // it unset (the case above) and accepts the 5s default there.
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          AUTOFIX_VITEST_FLAGS: '--maxWorkers=25% --testTimeout=60000',
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[--maxWorkers=25%]',
+        '[--testTimeout=60000]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
       writeFileSync(npmLog, '');
@@ -11988,7 +12800,7 @@ exit 1
           I18N_EXIT: '1',
         }).status,
       ).toBe(1);
-      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('[run]\n[check-i18n]');
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
 
       writeFileSync(npmLog, '');
@@ -12408,7 +13220,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13439,7 +14251,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -13864,6 +14676,10 @@ exit 1
       carry = '',
       listPages = null,
       listErr = '',
+      prJson = '{"title":"Some PR title","user":{"login":"someone"}}',
+      prFail = false,
+      prErr = '',
+      assignFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
       const bin = join(dir, 'bin');
@@ -13925,6 +14741,12 @@ exit 1
           '    printf "%s" "$LIST_JSON";;',
           '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
           '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
+          // PR_ERR mirrors LIST_ERR: the script captures this call's stderr as
+          // the warning's reason, so a fetch failure has to produce one.
+          '  repos/*/pulls/*) if [[ "$PR_FETCH_FAIL" == 1 ]]; then printf "%s" "$PR_ERR" >&2; exit 1; fi; printf "%s" "$PR_JSON";;',
+          // The assignment is its own endpoint call, matched before the
+          // issue-body read below so ASSIGN_FAIL fails ONLY the assignment.
+          '  */assignees) [[ "$ASSIGN_FAIL" == 1 ]] && exit 1; echo ok;;',
           '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
           '  repos/*/issues/*) [[ "$BODY_FAIL" == 1 ]] && exit 1; printf "%s" "$BODY_TEXT";;',
           'esac',
@@ -13939,7 +14761,7 @@ exit 1
           encoding: 'utf8',
           // spawnSync blocks the event loop, so vitest's async timeout cannot
           // fire — bound each subprocess directly against a hung runner.
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -13957,6 +14779,10 @@ exit 1
             COMMENTS_JSON: comments,
             COMMENTS_FAIL: commentsFail ? '1' : '0',
             WRITE_FAIL: writeFail ? '1' : '0',
+            PR_JSON: prJson,
+            PR_FETCH_FAIL: prFail ? '1' : '0',
+            PR_ERR: prErr,
+            ASSIGN_FAIL: assignFail ? '1' : '0',
           },
         },
       );
@@ -13976,6 +14802,245 @@ exit 1
     expect(created.calls).toContain(marker);
     expect(created.calls).toContain('- rc:7 `src/a.ts`: real, out of scope');
     expect(created.out).toContain('tracked in new issue #77');
+    // The creation path makes the tracking issue self-describing: the title
+    // carries the PR title, the issue is assigned to the PR author, and each
+    // rc bullet deep-links to the original review comment.
+    expect(created.calls).toContain('api repos/o/r/pulls/5');
+    expect(created.calls).toContain(
+      '-f title=Deferred review findings from PR #5: Some PR title',
+    );
+    expect(created.calls).toContain('-f assignees[]=someone');
+    // External contributors are not assignable, so the body also cc's the
+    // author — the mention is what actually reaches them.
+    expect(created.calls).toContain('cc @someone');
+    expect(created.calls).toContain(
+      'https://github.com/o/r/pull/5#discussion_r7',
+    );
+    // The ready-for-agent pointer attaches to the PER-ITEM issue, not to this
+    // tracking one: once the assign above lands this issue carries an assignee,
+    // and the scheduled ready-for-agent scan filters `no:assignee`
+    // (AUTOFIX_ISSUE_EXCLUDES in qwen-autofix.yml), so labelling it here would
+    // run without the scan that retries a label-event run cancelled by the
+    // per-issue concurrency group. Restoring the old ambiguous
+    // "(or apply the ready-for-agent flow)" parenthetical must red this.
+    expect(created.calls).toContain(
+      'apply the ready-for-agent flow to that issue',
+    );
+    expect(created.calls).not.toContain('(or apply the ready-for-agent flow)');
+    // The fetch-failure warning is gated on the CALL status plus "both derived
+    // strings came back empty" — never on a body FIELD's presence: this stub's
+    // PR_JSON is a title/user object with no `.number`, so a `jq -e '.number'`
+    // gate would warn here on every healthy round.
+    expect(created.out).not.toContain('could not fetch PR');
+    // A failed PR-context fetch degrades to the bare title and no assignee —
+    // the findings themselves are still persisted — and it WARNS, like every
+    // other gh failure path in the script: the `gh_err_reset` before the
+    // create call would otherwise wipe this call's reason unread, so a
+    // systematic pulls-endpoint failure (a fine-grained PAT rotated without
+    // pull-requests:read, a rate limit, a persistent 404) would silently
+    // revert every new tracking issue to the bare form behind a clean success
+    // line. Deleting the warning, or reading raw `${GH_ERR}` instead of
+    // `gh_reason()`, must red one of the two assertions below — the payload
+    // carries `::`, which gh_reason() neutralizes to `;;`.
+    const prFetchFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prFail: true,
+      prErr: '::error::fine-grained PAT lacks pull-requests read scope',
+    });
+    expect(prFetchFailed.out).toContain('tracked in new issue #77');
+    expect(prFetchFailed.out).toContain(
+      '::warning::could not fetch PR #5 context (;;error;;fine-grained PAT lacks pull-requests read scope)',
+    );
+    expect(prFetchFailed.out).not.toContain('::error::');
+    expect(prFetchFailed.calls).toContain(
+      '-f title=Deferred review findings from PR #5 -f body=',
+    );
+    expect(prFetchFailed.calls).not.toContain('assignees');
+    expect(prFetchFailed.calls).not.toContain('cc @');
+    // The gate's SECOND half needs its own witness, because `prFetchFailed`
+    // cannot provide one: its stub exits 1, so the first half already fires.
+    // This create path passes no --jq and gh copies a non-JSON body raw with
+    // serverError set only above status 299, so a transparent proxy answering
+    // `200 text/html` exits 0 with nothing usable — every derivation comes back
+    // empty through its `|| true`, and the issue degrades to the bare title /
+    // no cc / no assignee behind a clean success line. Dropping
+    // `( -z "${PR_TITLE_RAW}" && -z "${PR_AUTHOR}" )` from the script's gate
+    // must red the warning assertion below and leave `created` green.
+    const prUnusableBody = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '<!DOCTYPE html><html><body>200 from a transparent proxy</body>',
+    });
+    expect(prUnusableBody.out).toContain('tracked in new issue #77');
+    expect(prUnusableBody.out).toContain(
+      '::warning::could not fetch PR #5 context (the call exited 0 but returned no usable PR object)',
+    );
+    expect(prUnusableBody.out).not.toContain('no stderr captured');
+    expect(prUnusableBody.calls).toContain(
+      '-f title=Deferred review findings from PR #5 -f body=',
+    );
+    expect(prUnusableBody.calls).not.toContain('assignees');
+    expect(prUnusableBody.calls).not.toContain('cc @');
+    // A bot-authored PR gets no assignee (the bot never assigns itself).
+    const botAuthor = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"bot"}}',
+    });
+    expect(botAuthor.out).toContain('tracked in new issue #77');
+    expect(botAuthor.calls).not.toContain('assignees');
+    expect(botAuthor.calls).not.toContain('cc @');
+    // The login-charset guard in the script is the ONLY thing keeping a
+    // malformed `.user.login` (a space, an `@`, an over-long string, a
+    // non-login shape) out of both the deliberate `cc @…` mention in the
+    // public body and the `assignees[]` argument — so one fixture per declared
+    // shape. A lone space-bearing login is rejected by ANY bound: on its own it
+    // stays green when `{1,39}` is widened to `{1,}` or `@` is admitted into
+    // the class, and no test asserts the regex literal, so these cases are the
+    // guard's only witnesses. Deleting or weakening the regex must red one of
+    // the three below. (A `{"title":"t"}` fixture with no `.user` would pin
+    // nothing — `jq -r '.user.login // ""'` already yields empty there.)
+    const badLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"not a login"}}',
+    });
+    expect(badLogin.out).toContain('tracked in new issue #77');
+    expect(badLogin.calls).not.toContain('assignees');
+    expect(badLogin.calls).not.toContain('cc @');
+    // Title present + author rejected is the ONLY input that distinguishes the
+    // degradation gate's `&&` from an `||` (PR_TITLE_RAW set, PR_AUTHOR empty).
+    // Under `||` this healthy round would print "creating … with the bare
+    // title, no assignee and no cc" while still creating the ENRICHED title
+    // asserted just below — a warning naming a pulls-endpoint failure that did
+    // not happen and a degradation that did not occur, polluting the very
+    // signal the warning exists to protect. Both halves are pinned so flipping
+    // the operator reds this case either way.
+    expect(badLogin.out).not.toContain('could not fetch PR');
+    expect(badLogin.calls).toContain(
+      '-f title=Deferred review findings from PR #5: t',
+    );
+    // `@` outside the class: admitting it would publish a mention whose handle
+    // is not the login it looks like, under the bot identity.
+    const atLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"a@b"}}',
+    });
+    expect(atLogin.out).toContain('tracked in new issue #77');
+    expect(atLogin.calls).not.toContain('assignees');
+    expect(atLogin.calls).not.toContain('cc @');
+    expect(atLogin.out).not.toContain('could not fetch PR');
+    // One past GitHub's 39-char login bound: only the `{1,39}` upper bound
+    // rejects this, so widening it to `{1,}` must red this case.
+    const longLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: `{"title":"t","user":{"login":"${'a'.repeat(40)}"}}`,
+    });
+    expect(longLogin.out).toContain('tracked in new issue #77');
+    expect(longLogin.calls).not.toContain('assignees');
+    expect(longLogin.calls).not.toContain('cc @');
+    expect(longLogin.out).not.toContain('could not fetch PR');
+    // A rejected assignment only warns: by then the findings are already
+    // persisted, and the assignment is a SEPARATE idempotent call — never a
+    // second create POST. POST /repos/{owner}/{repo}/issues is not idempotent
+    // and the failures that reach a retry are the ambiguous ones (connection
+    // reset, gateway 502, a read timeout after the server committed), so a
+    // create-retry can mint a second tracking issue with the same marker that
+    // the next round's newest-first lookup orphans. This case does not pin
+    // that: its create SUCCEEDS, so a retry-on-create-failure branch never
+    // runs here — the failed-create half is pinned by the writeFail case's
+    // create-count assertion below.
+    const assignFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      assignFail: true,
+    });
+    expect(assignFailed.out).toContain('tracked in new issue #77');
+    expect(assignFailed.out).toContain('could not assign');
+    // gh.log records one call per line but the body argument contains
+    // newlines, so split on the call head rather than filtering lines.
+    const createCalls = assignFailed.calls.split(
+      'api repos/o/r/issues -f title=',
+    );
+    expect(createCalls).toHaveLength(2);
+    // Exactly one assignment attempt, against the issue the create returned,
+    // and the finding itself still reached the body.
+    expect(
+      assignFailed.calls.split('api repos/o/r/issues/77/assignees').length - 1,
+    ).toBe(1);
+    expect(assignFailed.calls).toContain('-f assignees[]=someone');
+    expect(assignFailed.calls).toContain('- rc:7 `?`: r');
+    // The PR title is API-derived content published under the bot identity, on
+    // ONE surface: the issue TITLE, which GitHub stores and renders as plain
+    // text (no markdown pass, no mention filter), so it carries the raw title
+    // — flatten+cap only, and escaping it would just corrupt the one readable
+    // string this enrichment exists to add.
+    //
+    // It must NOT reach the markdown-rendered BODY. A PR title is fully
+    // contributor-controlled and no enumerated escape chain closes that
+    // surface, so this fixture carries the payloads that survive mention /
+    // entity / comment-opener neutralization byte-identical: a markdown link
+    // (a live, clickable, attacker-chosen URL inside bot-authored text that
+    // maintainers read as trusted automation output) and an unclosed
+    // `<details>`, which makes a real HTML5 parser nest the findings `<ul>`
+    // inside it — the whole human-facing surface collapses behind GitHub's
+    // generic `Details` fold while the round logs clean success, and since
+    // the dedupe
+    // corpus reads the RAW body, the hidden items count as already tracked and
+    // are never re-published. Asserted per call on purpose: over the whole
+    // log, a rendering could be coming from the other site.
+    const titled = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson:
+        '{"title":"[URGENT](https://evil.example/y) <details> fix @foo <!-- x -->","user":{"login":"someone"}}',
+    });
+    const titledTitle = titled.calls.match(/-f title=(.*?) -f body=/)?.[1];
+    expect(titledTitle).toBe(
+      'Deferred review findings from PR #5: [URGENT](https://evil.example/y) <details> fix @foo <!-- x -->',
+    );
+    const titledBody = titled.calls.split('-f body=')[1] ?? '';
+    // The title reaches the body in NO spelling — raw, neutralized, or capped.
+    // `evil.example` is the sharpest witness, and deliberately not the
+    // `](https://` syntax: the rc deep link is a legitimate
+    // `](https://github.com/…)` in this same body, so a syntax-level assertion
+    // would stay red even with the title correctly absent.
+    expect(titledBody).not.toContain('evil.example');
+    expect(titledBody).not.toContain('URGENT');
+    expect(titledBody).not.toContain('<details>');
+    expect(titledBody).not.toContain('fix @foo');
+    expect(titledBody).not.toContain('@\u200bfoo');
+    // …while the body keeps everything it is supposed to carry: the finding,
+    // the auto-linking PR number, and the charset-validated author.
+    expect(titledBody).toContain('- rc:7 `?`: r');
+    expect(titledBody).toContain('from PR #5 by someone');
+    // The issue-TITLE surface is plain text — no mention filter — so a raw
+    // entity is inert there and escaping it would only corrupt the string;
+    // what this case pins there is the shared [\r\n\t] flatten and the .[0:80]
+    // codepoint cap (deleting either reds an assertion below). The
+    // markdown-rendered BODY is the opposite: GitHub decodes &#64; BEFORE its
+    // mention filter, so an entity there is a live mention published under the
+    // bot identity — which is why the title is kept OUT of the body entirely
+    // rather than escaped into it (the reason path's identical escape is
+    // pinned separately by `mentions`).
+    const paddedTitle = 'A'.repeat(100);
+    const entityTitle = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: `{"title":"ping &#64;admin &commat;x\\n${paddedTitle}","user":{"login":"someone"}}`,
+    });
+    // Title surface: raw entities, the newline flattened to a space, capped
+    // at 80 codepoints — the 26-codepoint prefix leaves 54 A's.
+    const entityTitleArg = entityTitle.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(entityTitleArg).toBe(
+      `Deferred review findings from PR #5: ping &#64;admin &commat;x ${'A'.repeat(54)}`,
+    );
+    const entityBody = entityTitle.calls.split('-f body=')[1] ?? '';
+    // No spelling of the title may appear in the markdown surface: not the raw
+    // entity, not the `&amp;`-escaped form the body copy used to carry, not
+    // the padded tail. Re-adding a title-body copy — escaped or not — reds one
+    // of these.
+    expect(entityBody).not.toContain('ping');
+    expect(entityBody).not.toContain('&#64;');
+    expect(entityBody).not.toContain('&amp;#64;');
+    expect(entityBody).not.toContain('&commat;');
+    expect(entityBody).not.toContain('A'.repeat(60));
     // Append path: existing issue found → dedupe against body+comments,
     // then POST an issue COMMENT (append-only; no body PATCH anywhere).
     const appended = runUpsert({
@@ -13996,6 +15061,16 @@ exit 1
     expect(appended.calls).not.toContain('- rc:8 ');
     expect(appended.calls).not.toContain('- rc:9 ');
     expect(appended.calls).not.toContain('PATCH');
+    // Negative half: the PR-context fetch is CREATION-only (the script's own
+    // comment, "Creation-only context"). The create-path assertion at the top
+    // of this block is the file's only other `pulls/` witness and it is
+    // positive, so hoisting the 4-line fetch unit (`gh_err_reset` plus
+    // `PR_FETCH_OK`/`PR_JSON`) above the create/append branch shipped green —
+    // and in production that spends an authenticated `GET /pulls/N` against the
+    // bot PAT's rate limit on every steady-state append round, the path that
+    // runs most often, instead of once per tracking issue's lifetime. Hoisting
+    // the fetch must red this.
+    expect(appended.calls).not.toContain('repos/o/r/pulls/');
     expect(appended.out).toContain('appended to issue #42');
     // Free-text mentions do not suppress (line-anchored dedupe), and a PULL
     // REQUEST carrying the marker is never selected as the tracking issue.
@@ -14052,6 +15127,20 @@ exit 1
     expect(writeFail.out).toContain('watermark-gated');
     expect(writeFail.out).toContain('- rc:7 ');
     expect(writeFail.out).not.toContain('NOT persisted this round');
+    // The create is issued ONCE, never retried (rationale: the assignFailed
+    // comment above). Only the call log can see a retry here — with the
+    // create failing, both arms print the same LOST warning, so no output
+    // assertion can distinguish them. Split on the call head because the
+    // logged body argument contains newlines.
+    const writeCreates = writeFail.calls.split(
+      'api repos/o/r/issues -f title=',
+    );
+    expect(writeCreates).toHaveLength(2);
+    // A failed create must not reach the assignment: with NUM empty, the
+    // `-n "${NUM}" &&` half of the assign guard is the only thing keeping a
+    // `repos/o/r/issues//assignees` POST off the log. Mirrors prFetchFailed's
+    // pin above, which covers the AUTHOR gate (ASSIGNABLE=0), not NUM=''.
+    expect(writeFail.calls).not.toContain('assignees');
     // Path bytes are sanitized before rendering (no forged bullet lines).
     const forged = runUpsert({
       findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
@@ -14306,6 +15395,24 @@ exit 1
     // alone silently ate every sibling but the first — R9-2.)
     expect(perSource.calls).not.toContain('`?`: dup');
     expect(perSource.calls).toContain('- ic:21 ');
+    // The ic side of the deep-link exemption, which `perSource` only pins for
+    // rv: an already-tracked issue_comment item is suppressed BY ITS RENDERED
+    // LINE, so widening the suffix condition to issue_comment would re-render
+    // every persisted ic item as new — the one-time duplicate wave over the
+    // existing tracking issues that the script's comment warns against.
+    const icTracked = runUpsert({
+      findings: '[{"id":21,"source":"issue_comment","reason":"dup"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- ic:21 `?`: dup' },
+      ]),
+    });
+    expect(icTracked.status).toBe(0);
+    // Nothing new → no write call at all. The comments READ above is spelled
+    // `?per_page=100`; the append is the `-f body=` form.
+    expect(icTracked.calls).not.toContain('issues/42/comments -f body=');
+    expect(icTracked.calls).not.toContain('#discussion_r21');
+    expect(icTracked.out).not.toContain('appended to issue');
     // A DIFFERENT finding under the same review id is still appended.
     const siblingFinding = runUpsert({
       findings:
@@ -14568,6 +15675,66 @@ exit 1
     });
     expect(titledPr.calls).toContain('-f title=');
     expect(titledPr.calls).not.toContain('issues/9/comments');
+    // The title fallback also adopts the ENRICHED creation form ("base: <PR
+    // title>") when the body lost its marker …
+    const enrichedAdopted = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 44,
+          title: 'Deferred review findings from PR #5: Some PR title',
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(enrichedAdopted.calls).toContain('issues/44/comments -f body=');
+    expect(enrichedAdopted.calls).not.toContain('-f title=');
+    // … but the colon guard keeps PR #5's base from prefix-adopting the
+    // tracking issue of PR #50 — a plain startswith would fork nothing but
+    // adopt wrongly, appending one PR's findings into another's issue.
+    const numberCollide = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 45,
+          title: 'Deferred review findings from PR #50',
+          body: 'no marker here',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(numberCollide.calls).toContain(
+      '-f title=Deferred review findings from PR #5: Some PR title',
+    );
+    expect(numberCollide.calls).not.toContain('issues/45/comments');
+    // Round-trip: the title the create path WRITES must be the title the
+    // marker-less lookup ACCEPTS. enrichedAdopted and numberCollide pin each
+    // side from its own hand-typed literal, so a one-sided restyle (": " to
+    // " - " at creation, or ":" to " -" at the lookup's startswith) leaves
+    // the other green while production forks a second tracking issue — the
+    // outcome this file ranks worst. Deriving the fixture from the recorded
+    // create call ties the two sides: a restyle on EITHER side reds this.
+    const roundTripCreate = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+    });
+    const createdTitle = roundTripCreate.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(createdTitle).toBeTruthy();
+    const roundTripAdopt = runUpsert({
+      findings: '[{"id":8,"reason":"r2"}]',
+      list: JSON.stringify([
+        {
+          number: 46,
+          title: createdTitle,
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(roundTripAdopt.calls).toContain('issues/46/comments -f body=');
+    expect(roundTripAdopt.calls).not.toContain('-f title=');
     // An unknown source value fails the gate loudly rather than silently
     // rendering under the default prefix.
     const badSource = runUpsert({
@@ -14661,6 +15828,11 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
+    // No per-test timeout: this is the file's heaviest case and it inherits
+    // the suite's 90s contention budget from scripts/tests/vitest.config.ts.
+    // A 30s cap on this exact test was removed by #10870 after it timed out on
+    // contended release runners (33676423730 / 33683912557); each spawnSync
+    // already carries its own 30s child timeout for the only real hang risk.
   });
 
   it.skipIf(!hasBashMapfile)(
@@ -14855,6 +16027,62 @@ exit 1
       expect(testSide.out).toContain('SURVIVED');
       expect(testSide.out).not.toContain('REJECT:');
       expect(testSide.advisory).toContain('test-side defect claim');
+      // A fenced marker on a source comment is not a second Critical claim.
+      // The real test-side Critical keeps the advisory path; if either of the
+      // two gate predicates treats the quoted marker as a signal, this turns
+      // into a source-side rejection.
+      const quotedSource = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedSource.out).toContain('SURVIVED');
+      expect(quotedSource.out).not.toContain('REJECT:');
+      expect(quotedSource.advisory).toContain('test-side defect claim');
+      const quotedRootReply = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n103\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+            {
+              id: 103,
+              in_reply_to_id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: 'The same fallback path is still uncovered.',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedRootReply.out).toContain('SURVIVED');
+      expect(quotedRootReply.out).not.toContain('REJECT:');
+      expect(quotedRootReply.advisory).toContain('test-side defect claim');
       // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
       // resolved alongside must not break the demotion.
       expect(
@@ -15161,6 +16389,18 @@ exit 1
     expect(repairCleanup).toContain('gate-rejection.md');
     expect(repairCleanup).toContain('"${WORKDIR}/resolved-comments.txt"');
     expect(repairCleanup).toContain('"${WORKDIR}/comment-replies.json"');
+    // The model sentinel is round-scoped by THIS deletion: dropping the line
+    // leaves run 1's agent-model readable by run 2's report when run 2 dies
+    // before its own init event — the exact no-file shape the runner test
+    // pins — attributing run 2's round to run 1's session.
+    expect(repairCleanup).toContain('"${WORKDIR}/agent-model"');
+    // rm -f exits non-zero on a directory planted at a sentinel path; the
+    // list must stay best-effort or the repair step aborts BEFORE the second
+    // agent pass (attempted=true is already written, so the round loses its
+    // repair to a cleanup failure).
+    expect(repairCleanup).toContain(
+      '"${WORKDIR}/comment-replies.json" || true',
+    );
     expect(
       repairDeterministicRejectionStep.match(
         /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
@@ -15658,11 +16898,18 @@ exit 1
     const escapeSiteRe = /sed(?: -e)? 's\/<!--\/[^']*\/g'/g;
     const escapeSites = workflowWithScripts.match(escapeSiteRe) ?? [];
     expect(escapeSites).toHaveLength(12);
-    // The next agent-derived publish site lives in
-    // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
-    // sed afterwards: the rv/ic dedupe identity is the rendered line, so
-    // escaping after the corpus comparison meant a reason containing `<!--`
-    // never matched its stored form and republished every round (R10-5).
+    // The agent-derived publish sites in upsert-deferred-issue.sh escape
+    // INSIDE jq, not in a sed afterwards: the rv/ic dedupe identity is the
+    // rendered line, so escaping after the corpus comparison meant a reason
+    // containing `<!--` never matched its stored form and republished every
+    // round (R10-5). ONE site remains — the line-builder reason escape, which
+    // must carry the canonical spelling and precede the dedupe comparison.
+    // The second site this census used to count was the PR-title
+    // neutralization at creation. It is gone on purpose: a contributor-
+    // controlled title is no longer copied into the markdown-rendered issue
+    // body at all, because no escape chain closes that surface (see the
+    // comment above the pulls fetch in the script). Re-adding a title-body
+    // copy must raise this count deliberately, not silently.
     const scriptEscapeSites =
       upsertDeferredScript.match(/gsub\("<!--"; "[^"]*"\)/g) ?? [];
     expect(scriptEscapeSites).toHaveLength(1);
@@ -15791,11 +17038,7 @@ exit 1
         'crashed or timed out before reading the feedback',
         '在读取反馈之前崩溃或超时',
       ],
-      [
-        'HEADLINE',
-        'consecutive rounds that pushed nothing',
-        '轮未能推送任何内容',
-      ],
+      ['HEADLINE', 'consecutive rounds without progress', '轮没有进展'],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
       // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
       // variables are gone) — its EN/ZH pairing stays pinned here.
@@ -16015,7 +17258,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff self-review.json heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -16275,6 +17518,13 @@ exit 1
     ).toBeLessThan(
       stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
     );
+    // count-test-surface.mjs carries the SAME absent-from-base exposure,
+    // and takes this guard verbatim — but it is staged one step later,
+    // because its parser is a copy of the typescript `npm ci` installs.
+    // Its own pins (guard, order, and the verbatim absence probe) live in
+    // 'stages the counter and its parser from the trusted base'; this step
+    // must not stage it, or it would run before node_modules exists.
+    expect(stageStep).not.toContain('count-test-surface.mjs');
     const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
     const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
     try {
@@ -17705,7 +18955,7 @@ exit 1
     expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \[\[ "\$\{STALE_BASE_DEFERRED:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -17723,6 +18973,8 @@ exit 1
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
     const STALE_BASE =
       '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
+    const STALE_BASE_DEFER =
+      '🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind `main`, but a review of this PR is still in flight (#10110).';
 
     const run = (
       priorHeadlines,
@@ -17733,7 +18985,9 @@ exit 1
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        staleBaseDeferred = false,
         agentTimeout = '',
+        regressedRound = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -17748,7 +19002,11 @@ exit 1
             return {
               user: { login: 'qwen-code-dev-bot' },
               created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
-              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->`,
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->${
+                typeof h === 'object' && h.regressed !== undefined
+                  ? `\n<!-- autofix-regression round=${h.regressed} key=${h.regKey ?? win ?? 'none'} -->`
+                  : ''
+              }`,
             };
           }),
         ),
@@ -17762,7 +19020,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\nREGRESSED_ROUND='${regressedRound}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -17870,12 +19128,102 @@ exit 1
       consec: 3,
       terminal: false,
     });
+    // A push that turned the checks red is NOT progress (af-157). Before
+    // this, "pushed something" was the whole reset test, so a PR could
+    // alternate regress / repair forever and every brake read it as
+    // converging: the red it created came back as the next round's input
+    // and was paid for out of the round budget.
+    const pushAt = (n) =>
+      `🤖 Addressed the latest review feedback (round ${n}/100).`;
+    // Control: the same push with no regression marker still resets.
+    expect(run([FAIL, FAIL, { headline: pushAt(2) }, FAIL])).toMatchObject({
+      consec: 2,
+      terminal: false,
+    });
+    // ...and with one, the streak carries straight through it.
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(2), regressed: 2 }, FAIL]),
+    ).toMatchObject({ consec: 5, terminal: true });
+    // An unbroken run of regressing pushes trips the cap on its own — the
+    // shape the old counter could never see, because each round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // THIS round's own observation is not in the fetched comments yet — the
+    // marker rides the report this step is still composing. Without folding
+    // it in, the newest regressing push escapes by exactly one round, and
+    // that is the round that matters.
+    expect(
+      run(
+        [
+          { headline: pushAt(1), regressed: 1 },
+          { headline: pushAt(2), regressed: 2 },
+          { headline: pushAt(3), regressed: 3 },
+          { headline: pushAt(4) },
+        ],
+        { regressedRound: '4' },
+      ),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // A clean push after a regression clears the streak: the brake is about
+    // consecutive non-progress, and the loop recovering is progress.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2) },
+        { headline: pushAt(3) },
+      ]),
+    ).toMatchObject({ consec: 1, terminal: false });
+    // Marker round numbers are matched WHOLE — round 1 must not charge
+    // round 10 (a substring match would, and the cap would trip early).
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(10), regressed: 1 }, FAIL]),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // A regression keyed to another window is not this window's business:
+    // a re-arm drops the whole set with the rounds it keyed.
+    expect(
+      run(
+        [
+          FAIL,
+          FAIL,
+          { headline: pushAt(2), win: 'w1', regressed: 2, regKey: 'w0' },
+          { headline: FAIL, win: 'w1' },
+        ],
+        { window: 'w1' },
+      ),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // The terminal headline must name the new cause, or a maintainer reads
+    // "pushed nothing" on a PR whose every round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]).headline,
+    ).toContain('left the checks red');
     // The CURRENT round being a stale-base retry is exempt from the breaker
     // entirely — the base was just updated and the next round builds fresh, so
     // cap-1 prior failures must not trip it.
     expect(
       run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
     ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Same for a DEFERRED stale-base refresh (#10110): the round failed
+    // because the base is stale AND a review was in flight — the fix was
+    // never re-attempted on a fresh base, so the failure is not evidence
+    // about the PR. Current-round exemption and prior-headline streak reset
+    // both mirror the retry branch.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseDeferred: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(run([FAIL, FAIL, STALE_BASE_DEFER, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -17927,7 +19275,7 @@ exit 1
     });
     expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
     expect(idleStreak.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     // ...and the TERMINAL run's job log still names the wedged runner: the
     // census warning runs outside the cap's terminal guard precisely so an
@@ -18050,7 +19398,7 @@ exit 1
     // — an `if true` mutation on the timeout guard flips the headline and
     // must fail here.
     expect(bothCapped.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
@@ -18946,8 +20294,9 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    // 111 was implemented; 333's thread is already resolved; 999 matches
-    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    // 111 was implemented (112 is a reply in the SAME thread); 333's thread
+    // is already resolved; 999 matches nothing. 222 was DECLINED, so it is
+    // deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
@@ -18961,7 +20310,10 @@ exit 1
         id: 'T_open_1',
         isResolved: false,
         comments: {
-          nodes: [{ databaseId: 111 }],
+          // 112 is a reply in this same thread: the feedback renderer lists
+          // a Critical root and its reply as two findings with their own
+          // rc: handles, so one thread can carry two selected ids (R2-1).
+          nodes: [{ databaseId: 111 }, { databaseId: 112 }],
           pageInfo: { hasNextPage: false },
         },
       },
@@ -19011,6 +20363,8 @@ exit 1
           VERIFIED_HEAD: localHead,
           LIVE_HEAD: localHead,
           PUSH_RACE_MERGED: 'false',
+          ROUND_PUSHED: 'true',
+          LIVE_HEAD_RETRY_DELAY: '0',
           ...env,
         },
         encoding: 'utf8',
@@ -19067,6 +20421,76 @@ exit 1
     expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
     expect(matching.out).toContain(
       'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    // #10106 root cause on #9729: the PR read model is eventually
+    // consistent, so a headRefOid read seconds after this round's OWN push
+    // routinely still returns the previous head — every pushed round
+    // declared drift on that one stale read and silently skipped. The
+    // initial equality check waits out propagation instead…
+    const lagThenConverge = runResolve({
+      LIVE_HEAD_SEQUENCE: `stale-pre-push-head,${localHead}`,
+    });
+    expect(lagThenConverge.status).toBe(0);
+    expect(lagThenConverge.resolved).toEqual(['resolve:T_open_1']);
+    expect(lagThenConverge.out).not.toContain(
+      'skipping review-thread resolution',
+    );
+    // …and a PUSHED round whose head never converges still skips, after
+    // exhausting the whole window rather than a single read…
+    const neverConverges = runResolve({ LIVE_HEAD: 'stale-pre-push-head' });
+    expect(neverConverges.status).toBe(0);
+    expect(neverConverges.resolved).toEqual([]);
+    expect(neverConverges.out).toContain('skipping review-thread resolution');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('5');
+    // …but the window waits out THIS round's OWN push, so a round that
+    // pushed nothing decides on ONE read — a head moved by a contributor
+    // only ever moves further from VERIFIED_HEAD, never back to it.
+    const noopNeverConverges = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopNeverConverges.status).toBe(0);
+    expect(noopNeverConverges.resolved).toEqual([]);
+    expect(noopNeverConverges.out).toContain(
+      'skipping review-thread resolution',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // And an empty selection needs no head proof at all: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    const zeroIdsDrift = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(zeroIdsDrift.status).toBe(0);
+    expect(zeroIdsDrift.resolved).toEqual([]);
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // The retry delay is a test knob on a PAT-bearing step: anything but
+    // a single digit (a GITHUB_ENV plant stalling the step to the job
+    // timeout) must fall back to the default.
+    expect(block).toContain(
+      '[[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5',
+    );
+    // The wait itself is the #10106 fix: with the sleep gone all five
+    // reads fire inside the propagation window, every one returns the
+    // stale head, and resolution silently skips every pushed round.
+    expect(block).toContain(
+      '[[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
+    );
+    // The window's premise is THIS round's OWN push propagating: five
+    // attempts only after a push, one read otherwise, and no head proof
+    // at all on an empty selection.
+    expect(block).toContain(
+      '[[ "${ROUND_PUSHED:-}" == \'true\' ]] || LIVE_HEAD_ATTEMPTS=1',
+    );
+    expect(block).toContain('if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then');
+    // R3-1: CRs go through tr, not a sed \r escape — BSD sed on the
+    // macOS test lane does not interpret \r, so a sed-spelled strip
+    // drops every CRLF-terminated id there and the fixture above goes
+    // red (ci.yml records #9220, this defect class, shipped to main).
+    expect(block).toContain(
+      "RESOLVED_IDS=\"$(tr -d '\\r' < \"${WORKDIR}/resolved-comments.txt\" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)\"",
     );
 
     const movedBeforeMutation = runResolve({
@@ -19169,6 +20593,21 @@ exit 1
     expect(resolvedByOtherActor.status).toBe(0);
     expect(resolvedByOtherActor.resolved).toEqual([]);
     expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    // R2-1: a Critical root and its reply carry two rc: handles for ONE
+    // thread. The loop resolves the thread on the first id; the second
+    // maps to the same thread and must read as same-thread dedupe — not
+    // as "another actor" resolving it between the fetch and the guard,
+    // which counted one thread as two in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const oneThreadTwoIds = runResolve();
+    expect(oneThreadTwoIds.status).toBe(0);
+    expect(oneThreadTwoIds.resolved).toEqual(['resolve:T_open_1']);
+    expect(oneThreadTwoIds.out).not.toContain('resolved by another actor');
+    expect(oneThreadTwoIds.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
     const unknownThreadState = runResolve({
@@ -19368,6 +20807,213 @@ exit 1
         'confirmed 1 selected review thread(s) resolved',
       );
     }
+
+    // #10106: the ::warning:: lines above reach only the run log — on the
+    // PR, a guard refusing round after round reads exactly like resolution
+    // working (0/90 threads on #9729, silent for days). The block composes
+    // one host-authored RESOLUTION_NOTE naming the refusing guard and
+    // counting the threads left behind, and BOTH report arms (pushed and
+    // no-op) embed it in the round report.
+    expect(
+      pushAndReportScript.match(/echo "\$\{RESOLUTION_NOTE\}"/g) ?? [],
+    ).toHaveLength(2);
+    // R2-3 wiring: each arm tells the shared function whether THIS round
+    // pushed — the pushed arm retries out its own push's propagation lag,
+    // the no-op arm decides on one read.
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='true'/g) ?? [],
+    ).toHaveLength(1);
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='false'/g) ?? [],
+    ).toHaveLength(1);
+    const noteEnd = lines.findIndex((l) =>
+      l.includes('The mirror of the resolve above'),
+    );
+    expect(noteEnd).toBeGreaterThan(j);
+    const noteBlock = [
+      ...lines.slice(i, noteEnd),
+      'printf "NOTE<%s>" "${RESOLUTION_NOTE}"',
+    ].join('\n');
+    const runNote = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync(
+        'bash',
+        ['-c', `set -euo pipefail\n${noteBlock}`],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            REPO: 'QwenLM/qwen-code',
+            PR: '7308',
+            RESOLVED_LOG: resolvedLog,
+            HEAD_READ_COUNT: headReadCount,
+            THREAD_STATE_FILE: threadStateFile,
+            THREADS_RAW_STUB: threadsRaw,
+            VERIFIED_HEAD: localHead,
+            LIVE_HEAD: localHead,
+            PUSH_RACE_MERGED: 'false',
+            ROUND_PUSHED: 'true',
+            LIVE_HEAD_RETRY_DELAY: '0',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status).toBe(0);
+      return /NOTE<([\s\S]*)>$/.exec(result.stdout)?.[1] ?? '';
+    };
+    // Every up-front guard names itself. The skip path classifies like
+    // the resolve loop: three selected THREADS here, and the one already
+    // resolved before the fetch is subtracted from the residual.
+    for (const [env, guard] of [
+      [{ PUSH_RACE_MERGED: 'true' }, 'salvage merge'],
+      [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
+      [{ VERIFIED_HEAD: 'different-verified-head' }, 'verified_head mismatch'],
+      [{ LIVE_HEAD: 'new-contributor-head' }, 'live-head drift'],
+      [{ LIVE_HEAD_EXIT: '1' }, 'live-head unreadable'],
+    ]) {
+      const note = runNote(env);
+      expect(note).toContain('Review-thread resolution skipped');
+      expect(note).toContain(`guard: \`${guard}\``);
+      expect(note).toContain(
+        'resolved 0 of 3 selected thread(s), 2 left for a later round',
+      );
+    }
+    // R2-3: a round that pushed nothing decides on ONE read — the note
+    // stays byte-identical while the head reads drop from five to one…
+    const noopDriftNote = runNote({
+      LIVE_HEAD: 'new-contributor-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopDriftNote).toContain('Review-thread resolution skipped');
+    expect(noopDriftNote).toContain('guard: `live-head drift`');
+    expect(noopDriftNote).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // …and an empty selection skips the head proof entirely: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(
+      runNote({ LIVE_HEAD: 'new-contributor-head', ROUND_PUSHED: 'false' }),
+    ).toBe('');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R3-2: the skip and break paths must count THREADS like the resolve
+    // loop does — classification cannot live only inside the guarded loop,
+    // or exactly the refusing rounds this observability was built for
+    // report id counts: two ids of ONE thread as two threads, and a
+    // pre-fetch-resolved thread as work left behind forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const skipOneThreadTwoIds = runNote({ PUSH_RACE_MERGED: 'true' });
+    expect(skipOneThreadTwoIds).toContain('Review-thread resolution skipped');
+    expect(skipOneThreadTwoIds).toContain('guard: `salvage merge`');
+    expect(skipOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    // A skip round that re-lists ONLY already-resolved ids converges to
+    // zero left instead of re-reporting a phantom residual every round.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote({ PUSH_RACE_MERGED: 'true' })).toContain(
+      'resolved 0 of 1 selected thread(s), 0 left for a later round',
+    );
+    // A mid-list break reports the same-thread dedupe it broke past, too.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const brokeOneThreadTwoIds = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(brokeOneThreadTwoIds).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(brokeOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // A mid-list abort names its guard too, and carries the partial count.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const stoppedNote = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(stoppedNote).toContain('Review-thread resolution stopped early');
+    expect(stoppedNote).toContain('guard: `live-head drift`');
+    expect(stoppedNote).toContain(
+      'resolved 1 of 2 selected thread(s), 1 left for a later round',
+    );
+    const unprovenNote = runNote({ UNKNOWN_THREAD_STATE: 'T_open_1' });
+    expect(unprovenNote).toContain('guard: `thread state unproven`');
+    expect(unprovenNote).toContain('resolved 0 of 2');
+    const ambiguousNote = runNote({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(ambiguousNote).toContain('guard: `mutation post-check ambiguous`');
+    expect(ambiguousNote).toContain('resolved 0 of 2');
+    // Healthy rounds report a positive count and never name a guard.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const healthyNote = runNote();
+    expect(healthyNote).toContain('Resolved all 1 selected review thread(s)');
+    expect(healthyNote).not.toContain('guard:');
+    // Per-thread misses without a stopping guard still show up as a count,
+    // and an incomplete thread fetch is called out as the likely cause.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R2-2: 333's thread was already resolved BEFORE the fetch — it is
+    // not work left behind, so the residual counts 999 alone; without
+    // the already-resolved probe a re-listed still-valid fix kept the
+    // residual above zero forever.
+    const partialNote = runNote();
+    expect(partialNote).toContain(
+      'Resolved 1 of 3 selected review thread(s); 1 not resolved by this round',
+    );
+    expect(partialNote).toContain('details in the run log');
+    expect(partialNote).not.toContain('guard:');
+    const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
+    expect(fetchNote).toContain('thread fetch incomplete');
+    // A round that re-lists ONLY already-resolved ids converges to "all
+    // resolved" instead of reporting a phantom residual forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // R2-1: two ids of ONE thread count one thread in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // A thread another actor resolved between the fetch and the per-thread
+    // guard is not work left for a later round: before it had its own
+    // counter the note said "3 left" while only 2 threads were open.
+    writeFileSync(
+      join(dir, 'resolved-comments.txt'),
+      'rc:222\nrc:111\nrc:444\n',
+    );
+    // The shared normalization iterates ids in sorted order (111, 222,
+    // 444), so the first thread hits the another-actor continue and the
+    // second trips the drift break.
+    const anotherActorThenDrift = runNote({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(anotherActorThenDrift).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(anotherActorThenDrift).toContain('guard: `live-head drift`');
+    expect(anotherActorThenDrift).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    // A duplicate id selects one thread, so it counts once: before the
+    // shared normalization deduplicated, the note reported "1 of 2".
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n111\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // No ids selected → no note: the line appears only when the agent
+    // asked for resolution.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '');
+    expect(runNote()).toBe('');
+    // Non-empty but zero valid ids — agent-authored files do carry
+    // malformed lines. grep -c exits 1 on zero matches, so the || true is
+    // load-bearing under the step's bash -eo pipefail: without it the
+    // assignment aborts the whole push-and-report step.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(runNote()).toBe('');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
@@ -19668,20 +21314,40 @@ exit 1
     );
     // Primary + repair agent steps and their two verification gates.
     expect(longSteps).toHaveLength(4);
-    const stepCaps = longSteps.map((b) =>
-      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
-    );
+    const stepCaps = longSteps.map((b) => stepCapsOf(b));
     for (const cap of stepCaps) {
-      expect(Number.isFinite(cap)).toBe(true);
+      expect(Number.isFinite(cap.armed)).toBe(true);
+      expect(Number.isFinite(cap.unarmed)).toBe(true);
     }
     // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
     // runtime — this reserve is an ASSUMPTION that they stay under 25m
     // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
     // of them can still eat the job timeout.
     const SETUP_AND_REPORT_MIN = 25;
-    const worstCaseMin =
-      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
-    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    // Two round shapes (af-156). Unarmed: every long step at its cap.
+    // Armed: the address step at its armed cap, and the repair chain does
+    // not run — its `if:` excludes the arm, and the repair gate only runs
+    // after an attempted repair — so only the first gate follows it.
+    const unarmedWorstMin =
+      stepCaps.reduce((a, b) => a + b.unarmed, 0) + SETUP_AND_REPORT_MIN;
+    expect(unarmedWorstMin).toBeLessThanOrEqual(jobCapMin);
+    const repairStep = longSteps.find((b) =>
+      b.startsWith("'Repair deterministic rejection'"),
+    );
+    const repairGate = longSteps.find((b) =>
+      b.startsWith("'Repair verification gate'"),
+    );
+    expect(repairStep).toBeTruthy();
+    expect(repairGate).toBeTruthy();
+    expect(repairStep).toContain(
+      "steps.prepare.outputs.self_review_arm != 'on'",
+    );
+    expect(repairGate).toContain("steps.repair.outputs.attempted == 'true'");
+    const armedWorstMin =
+      longSteps
+        .filter((b) => b !== repairStep && b !== repairGate)
+        .reduce((a, b) => a + stepCapsOf(b).armed, 0) + SETUP_AND_REPORT_MIN;
+    expect(armedWorstMin).toBeLessThanOrEqual(jobCapMin);
     expect(jobCapMin).toBeLessThanOrEqual(360);
 
     // The pending-check staleness bound (review-scan) must sit ABOVE this job
@@ -19707,7 +21373,7 @@ exit 1
     // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
     // timeout is only a backstop. Derive both from the workflow and assert
     // the margin so the pair cannot drift silently.
-    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const stepCapMin = stepCapsOf(addressStep).unarmed;
     const budgetMs = Number(
       addressStep.match(
         /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
@@ -19916,7 +21582,15 @@ exit 1
     const runMark = (env) =>
       execFileSync(
         'bash',
-        ['-c', `${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`],
+        // The mark chain nests the report stale-base retry, whose
+        // convergence guard now fetches and speaks on failure: stub gh to
+        // silent success (the fetches read '[]', the guard stays quiet and
+        // falls through exactly as before) and give the fetch files a real
+        // directory, so the exact-output mark assertions stay exact.
+        [
+          '-c',
+          `WORKDIR='${tmpdir()}'\ngh() { :; }\n${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`,
+        ],
         {
           env: {
             ...process.env,
@@ -20558,6 +22232,243 @@ exit 0
     });
   });
 
+  it('records the resolved model and CLI version for the report footers', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // The init event carries what the session ACTUALLY ran — the resolved
+      // model and the CLI version — which the footers prefer over the
+      // configured OPENAI_MODEL.
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('flattens and caps a newline-bearing, oversized init model so the sentinel stays two lines', () => {
+    // The writer's invariant — "newlines are flattened so the sentinel file
+    // stays two lines" — is what keeps the read sites' sed -n '1p'/'2p' from
+    // rendering a model fragment as the CLI version. TWO fixtures, because
+    // one cannot pin both halves: a newline discriminates the flattening
+    // only INSIDE the cap (past it, slice(0, 100) of the unflattened value
+    // equals the flattened-and-capped one), and the cap discriminates only
+    // when the value EXCEEDS it.
+    const runInit = (dir, init) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(qwenInitLine(init))});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+      expect(runAddressReview(dir, stub).status).toBe(0);
+      return readFileSync(join(dir, 'agent-model'), 'utf8');
+    };
+    // Flattening: both newlines sit inside their caps (model index 10 < 100,
+    // version index 6 < 40). Dropping either .split('\n')[0] writes a
+    // THREE-line sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: 'first-line\nsecond-line',
+          version: '0.22.0\nzap',
+        }),
+      ).toBe('first-line\n0.22.0\n');
+    });
+    // Caps: both values exceed theirs. Dropping either .slice() rides the
+    // oversized value into the sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: `${'x'.repeat(250)}\nsecond-line`,
+          version: 'v'.repeat(100),
+        }),
+      ).toBe(`${'x'.repeat(100)}\n${'v'.repeat(40)}\n`);
+    });
+  });
+
+  it('refuses a planted FIFO or symlink at the sentinel path when writing agent-model', () => {
+    // The sentinel write runs in finish() — AFTER every watchdog has been
+    // disarmed — so a plain O_WRONLY open of a planted FIFO blocks forever
+    // with nothing left to kill it, and a planted symlink is followed with
+    // O_TRUNC: the target loses its content while the round still exits 0
+    // and reports success (both arms measured in the round-4 review, with
+    // the plants created from inside the real sandbox image as the same
+    // uid). The writer opens O_NOFOLLOW|O_NONBLOCK, so the symlink becomes
+    // ELOOP and the readerless FIFO ENXIO, both landing in the best-effort
+    // catch: the run completes and the plants survive untouched.
+    const stubLines = [
+      `process.stdout.write(${JSON.stringify(
+        qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+      )});`,
+      "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+      'process.exit(0);',
+    ];
+    // FIFO arm — soft-skipped where mkfifo is unavailable (Windows lane).
+    withRunnerDir((dir) => {
+      const fifo = join(dir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status !== 0) return;
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // Bounded spawn, NOT runAddressReview: a flags-removed runner blocks
+      // inside open(2), which blocks the worker thread synchronously —
+      // measured: vitest's 90 s testTimeout never fires on it and the whole
+      // suite hangs instead of going red. The spawn timeout's SIGTERM
+      // interrupts the blocked open, so dropping O_NONBLOCK goes red
+      // deterministically at 45 s (status null); the intact arm still
+      // asserts the runner's real exit code.
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          writeWorkdirStub(dir, stubLines),
+        ],
+        { encoding: 'utf8', timeout: 45_000 },
+      );
+      expect(result.status).toBe(0);
+      expect(statSync(fifo).isFIFO()).toBe(true);
+    });
+    // Symlink arm — dropping O_NOFOLLOW truncates the canary and this
+    // asserts red on its content.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const canary = join(dir, 'canary.txt');
+      writeFileSync(canary, 'CI_DEV_BOT_PAT=canary-value\n');
+      symlinkSync(canary, join(dir, 'agent-model'));
+      const result = runAddressReview(dir, writeWorkdirStub(dir, stubLines));
+      expect(result.status).toBe(0);
+      expect(readFileSync(canary, 'utf8')).toBe(
+        'CI_DEV_BOT_PAT=canary-value\n',
+      );
+      expect(lstatSync(join(dir, 'agent-model')).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  it('keeps the writer caps equal to the reader caps so nothing publishes silently truncated', () => {
+    // A writer cap ABOVE the reader's published bound writes a legitimate
+    // value in full only to have the read site clip it — allowlist-clean
+    // output, exit 0, and a public attribution comment that looks accurate
+    // while naming a truncated model (measured in this PR's sandboxed
+    // verification: a 154-char model published as 100). Equal caps make
+    // written == published; the head -c windows must then still cover the
+    // largest file the writer can emit, or the version read loses line 2 to
+    // the byte window before sed ever sees it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const writerModelCap = Number(
+      runner.match(
+        /initModel = event\.model\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const writerVersionCap = Number(
+      runner.match(
+        /event\.qwen_code_version\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const readerModelCap = Number(
+      pushAndReportScript.match(
+        /AGENT_MODEL="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    const readerVersionCap = Number(
+      pushAndReportScript.match(
+        /AGENT_CLI_VERSION="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    for (const cap of [
+      writerModelCap,
+      writerVersionCap,
+      readerModelCap,
+      readerVersionCap,
+    ]) {
+      // A regex that stopped matching yields NaN; fail on that explicitly
+      // rather than comparing NaN to NaN.
+      expect(Number.isInteger(cap)).toBe(true);
+    }
+    expect(writerModelCap).toBe(readerModelCap);
+    expect(writerVersionCap).toBe(readerVersionCap);
+    // The windows bound BYTES while the caps count UTF-16 CODE UNITS, and
+    // writeFileSync encodes UTF-8: a BMP code unit occupies up to 3 bytes
+    // (surrogate pairs fold to 2 bytes per unit), so the largest sentinel
+    // the writer can emit is 3*(model+version)+2 bytes, not model+version+2
+    // — a one-byte-per-char figure would be ~3x too loose and let a window
+    // shrink below what line 1 actually needs. Bound each window against
+    // the line IT reads: the model read needs line 1 plus its LF, the
+    // version read needs the whole file for sed -n '2p' to see line 2.
+    // windows comes back in script order (model read first); the literal
+    // per-line pins in the footer test freeze that order.
+    const windows = [
+      ...pushAndReportScript.matchAll(
+        /head -c (\d+) "\$\{WORKDIR\}\/agent-model"/g,
+      ),
+    ].map((m) => Number(m[1]));
+    expect(windows).toHaveLength(2);
+    const maxModelBytes = 3 * writerModelCap + 1;
+    const maxSentinelBytes = maxModelBytes + 3 * writerVersionCap + 1;
+    expect(windows[0]).toBeGreaterThanOrEqual(maxModelBytes);
+    expect(windows[1]).toBeGreaterThanOrEqual(maxSentinelBytes);
+  });
+
+  it('records the model even when the run dies before a verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "process.stderr.write('boom\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      // A crashed round is exactly when the diagnosis footer needs to name
+      // the model that died.
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('writes no agent-model when the stream never reached an init event', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('died at startup\\n');",
+        'process.exit(1);',
+      ]);
+
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      // No file at all, rather than an empty one: the read sites' -s test
+      // falls back to the configured MODEL.
+      expect(existsSync(join(dir, 'agent-model'))).toBe(false);
+    });
+  });
+
   it('does not flag an API error that appears after a real verdict or a loop guard', () => {
     // Case C: the agent wrote its OWN failure.md (a real verdict) and an API
     // error also appears in the tail — that verdict must advance the watermark,
@@ -20680,7 +22591,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -21218,7 +23129,9 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // CONSEC_FAIL toward a terminal lockout on the exact PR a human is
     // settling (probe-verified entrance). The scan block mirrors prepare's
     // conflict-handoff idempotence wake set; execute the real block.
-    expect(reviewScanJob).toContain('&& "${CONFLICT_PARKED}" != \'true\' ]]');
+    expect(reviewScanJob).toContain(
+      '&& "${CONFLICT_PARKED}" != \'true\' && "${CONV_PARKED}" != \'true\' ]]',
+    );
     const scanParkGateBlock = reviewScanJob.match(
       /CONFLICT_PARKED='false'[\s\S]*?rm -f "\$\{WORKDIR\}\/rv\.scan\.json" "\$\{WORKDIR\}\/rc\.scan\.json" "\$\{WORKDIR\}\/checks\.scan\.json"\n {12}fi\n/,
     )?.[0];
@@ -21274,6 +23187,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               PR: '1',
               CHECKS_JSON: JSON.stringify(checks),
               TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]',
+              LOOP_OWNED_LANES: loopOwnedLanesJson,
               RV_FIXTURE: join(dir, 'rv.fixture.json'),
               RC_FIXTURE: join(dir, 'rc.fixture.json'),
             },
@@ -21344,6 +23258,1262 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     ).toBe('false');
   });
 
+  it('behaviorally trips the convergence breaker on N signal rounds and resumes on a human response (#10107)', () => {
+    // The review side publishes its convergence diagnosis as `rec` codes in
+    // the posted ledger marker; the scan gate is the consumer. The streak
+    // is trailing-consecutive over marker ROUNDS (a dismissed review and
+    // its same-round re-run count once), a healthy or pre-field marker
+    // resets it, and the boundary is max(window key, newest trusted-human
+    // activity) — a human response IS the resume signal. Execute the real
+    // boundary+streak block against fixture state.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-'));
+    try {
+      const led = (round, rec) =>
+        `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec === undefined ? {} : { rec }),
+        })} -->`;
+      const botReview = (at, round, rec) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `findings… ${led(round, rec)}`,
+      });
+      const readState = ({ rv = [], rc = [], ic = [], rearmKey = 'none' }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='${rearmKey}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}\n` +
+              `printf '\\n%s %s' "$CONV_STREAK" "$CONVERGENCE_BREAK_ROUNDS"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const [streak, cap] = out.split('\n').at(-1).split(' ');
+        return { streak: Number(streak), cap: Number(cap) };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3, ['root-cause-triage']),
+        botReview(T(2), 4, ['batch-fixes', 'stem-surface']),
+        botReview(T(3), 5, ['root-cause-triage', 'batch-fixes']),
+      ];
+      // Three signal rounds, nobody in between → the breaker's bar, and the
+      // malformed knob fell back to its default at the read site.
+      expect(readState({ rv: threeSignals })).toEqual({ streak: 3, cap: 3 });
+      // A healthy round (marker, no codes) resets; so does a pre-field
+      // marker from a CLI predating `rec` — not evidence of divergence.
+      for (const rec of [undefined, []]) {
+        expect(
+          readState({
+            rv: [
+              botReview(T(1), 3, ['batch-fixes']),
+              botReview(T(2), 4, rec),
+              botReview(T(3), 5, ['batch-fixes']),
+            ],
+          }).streak,
+        ).toBe(1);
+      }
+      // 'land-and-defer' is an exit signal, not a divergence one.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['land-and-defer'])] }).streak,
+      ).toBe(0);
+      // 'successor-chain' is a divergence signal like the other wired
+      // codes — the gate's list is the CLI vocabulary minus the ONE
+      // documented exit code ('land-and-defer'); the lockstep test pins
+      // that contract on both ends.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['successor-chain'])] }).streak,
+      ).toBe(1);
+      // A dismissed review and its same-round re-run count once — the
+      // NEWEST marker speaks for the round (here: the healthy re-run).
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            { ...botReview(T(2), 4, ['batch-fixes']), state: 'DISMISSED' },
+            botReview(T(3), 4, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // A review with no parseable marker is not a round — a fallback stub
+      // between signal rounds neither counts nor resets.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'fallback — no marker',
+            },
+            botReview(T(3), 4, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human response moves the boundary: only rounds AFTER it
+      // count, so every human touch grants a fresh N-round runway.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'split the cluster out',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // …but the review bot, an untrusted login, and @qwen-code command
+      // comments move nothing (commands act through their own routes).
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'suggestion digest',
+            },
+            {
+              user: { login: 'drive-by' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'bump',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: '@qwen-code /takeover',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // The window key is the other boundary: /retry or re-engaging resets
+      // the breaker exactly like every other census.
+      expect(readState({ rv: threeSignals, rearmKey: T(2) }).streak).toBe(1);
+      // A marker whose payload parses to a NON-object (number, string,
+      // array, boolean) is skipped like an unparseable one. Under jq >=
+      // 1.7 (the CI/production platform) the old `!= null` select let
+      // `.led.round` raise "Cannot index number" outside any try — the
+      // `|| echo 0` fallback turned one bad marker into CONV_STREAK=0 for
+      // the WHOLE window. jq 1.6 masks the crash (its assignment's
+      // try scope swallows the downstream error), so this witness bites
+      // only on 1.7+.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'CHANGES_REQUESTED',
+              body: '<!-- qwen-review-ledger 42 -->',
+            },
+            botReview(T(3), 5, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human REVIEW moves the boundary too — the notice
+      // promises "a review or comment counts", so the reviews arm's
+      // state filter and submitted_at field must decide here.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'review feedback, not an issue comment',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // An APPROVE-state review is a maintainer response too — the notice
+      // promises "a review or comment counts", and a maintainer who resolves
+      // the flagged issues themselves approves without a separate comment.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'APPROVED',
+              body: 'resolved the flagged issues myself',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // A DISMISSED review keeps the boundary where the human put it: a
+      // resume review later dismissed (manually, or by dismiss-stale on a
+      // force-push) must not snap the boundary back to the window key and
+      // silently re-park under the stale pre-resume notice.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'DISMISSED',
+              body: 'resume review, dismissed later',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The streak is trailing-consecutive in TIME, not in round number:
+      // jq's group_by re-sorts the deduped rounds by the grouping key, so
+      // the reduce re-sorts by submitted_at first. Rounds land out of order
+      // exactly where the per-round dedup exists for them — a dismissed
+      // round's re-run. Rounds 3-6 signal at T1-T4, then round 3's HEALTHY
+      // re-run lands at T5: the newest event is healthy, so the trailing
+      // streak is 0 even though round-number order reads a signal tail of
+      // three — a false park in the unsafe direction.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // Control: a late SIGNAL re-run extends in time order too.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, []),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(4);
+      // An edited body can hold more than one marker; the NEWEST describes
+      // the round — a `last` → `first` mutation stays green on every
+      // single-marker body, so pin a two-marker one: a healthy marker
+      // edited in AFTER the original signal marker speaks for the round.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'CHANGES_REQUESTED',
+              body: `findings… ${led(5, ['batch-fixes'])} amended after re-check ${led(5, [])}`,
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The boundary reads the NEWEST trusted-human activity, not the
+      // first: a `min` would anchor the boundary at the first response
+      // forever, and every later response — the act the notice says
+      // resumes the loop — would fail to advance it.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'looking into it',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(4),
+              body: 'keep going',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The loop's own convergence-break notice must not count as
+      // trusted-human activity even though its author carries a trusted
+      // association on this repo — the marker is not in the
+      // machine-marker exclusion regex, so the bot-login filter is the
+      // only thing keeping the park from self-disarming on its own
+      // notice.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              author_association: 'MEMBER',
+              created_at: T(2),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // Wiring: the trip parks the candidate before target emission, posts
+      // the once-per-boundary notice under its own marker, and is a PARK —
+      // never the fleet shepherd's terminal-stop headline.
+      expect(reviewScanJob).toContain(
+        'fleet_row "${PR}" \'convergence-parked\'',
+      );
+      // The release lever only exists under the takeover label, so the
+      // notice branches on it like the cap notices — two CONV_BODY texts,
+      // both under the park marker, neither a terminal-stop headline.
+      const noticeBodies =
+        reviewScanJob.match(
+          /CONV_BODY="\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/g,
+        ) ?? [];
+      expect(noticeBodies).toHaveLength(2);
+      for (const body of noticeBodies) {
+        expect(body).toContain('<!-- autofix-convergence-break -->');
+        expect(body).not.toContain('🤖 AutoFix stopped');
+        // The codes clause claims exactly what CONV_CODES derives: the
+        // union since the last maintainer response, not the window key.
+        expect(body).toContain(
+          'codes observed since the last maintainer response',
+        );
+        expect(body).toContain('自上次维护者响应以来观察到的信号码');
+      }
+      expect(noticeBodies[0]).toContain('stop` to release takeover');
+      expect(noticeBodies[1]).toContain('to take it over');
+      expect(reviewScanJob).toContain('--body "${CONV_BODY}"');
+      expect(reviewScanJob).toContain(
+        'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
+      );
+      // Trip branch, EXECUTED: the -ge threshold, the park's `continue`,
+      // the once-per-boundary notice dedup, and the CONV_CODES union are
+      // the breaker's core effect — a substring pin cannot see a threshold
+      // off by one, a missing `continue` (the parked PR still dispatched),
+      // or a dedup that reposts every scan. Run the real block through a
+      // loop (a `continue` needs one); a sentinel after the block says
+      // whether the candidate fell through to dispatch or parked.
+      // The verdict derives ABOVE the stale-base update (a base merge into
+      // a parked PR would self-lift the park); the trip branch is the park
+      // ACTION on that verdict. The harness runs the production order:
+      // boundary+streak read, verdict derivation, then the action.
+      const parkedDerivation = reviewScanJob.match(
+        /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+      )?.[0];
+      expect(parkedDerivation).toBeTruthy();
+      const tripBlock = reviewScanJob.match(
+        /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+      )?.[0];
+      expect(tripBlock).toBeTruthy();
+      const runTrip = ({
+        rv = [],
+        ic = [],
+        dryRun = 'true',
+        noticedAt,
+        takeover = 'false',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            noticedAt === undefined
+              ? ic
+              : [
+                  ...ic,
+                  {
+                    user: { login: 'qwen-code-dev-bot' },
+                    created_at: noticedAt,
+                    body: '<!-- autofix-convergence-break --> earlier notice',
+                  },
+                ],
+          ),
+        );
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='${takeover}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) if [[ "\${2:-}" == 'view' ]]; then\n` +
+              `          printf '{"labels":[{"name":"triage"}]}'\n` +
+              `        else\n` +
+              `          printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `        fi ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `    *) printf '%s\\n' "$*" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          parked: !out.includes('sentinel=reached'),
+          commentCalls: existsSync(ghCalls)
+            ? readFileSync(ghCalls, 'utf8')
+            : '',
+        };
+      };
+      // At the bar the candidate parks before dispatch; under it, it is
+      // selected normally.
+      const atBar = runTrip({ rv: threeSignals });
+      expect(atBar.parked).toBe(true);
+      expect(atBar.out).toContain('convergence-parked');
+      expect(atBar.out).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      expect(runTrip({ rv: threeSignals.slice(0, 2) }).parked).toBe(false);
+      // The notice carries the UNION of signal codes observed since the
+      // boundary — wider than the trailing streak: a round that reset the
+      // streak still contributes its code, and the reworded notice claims
+      // exactly that.
+      const union = runTrip({
+        rv: [
+          botReview(T(1), 3, ['stem-surface']),
+          botReview(T(2), 4, []),
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['root-cause-triage']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+      });
+      expect(union.parked).toBe(true);
+      expect(union.out).toContain('(codes: root-cause-triage, stem-surface)');
+      // The notice posts once per boundary; a notice already present
+      // after the boundary suppresses the repost but not the park. The
+      // live-label gate runs outside DRY_RUN, against a stubbed gh whose
+      // calls are journaled.
+      const fresh = runTrip({ rv: threeSignals, dryRun: 'false' });
+      expect(fresh.parked).toBe(true);
+      expect(fresh.commentCalls).toContain('comment');
+      // A non-takeover PR's notice offers takeover itself: `/takeover stop`
+      // is the remove branch's logged no-op without the label, and command
+      // comments do not even move the breaker's boundary.
+      expect(fresh.commentCalls).toContain('to take it over');
+      expect(fresh.commentCalls).not.toContain('stop` to release takeover');
+      // Under the label the release lever exists and is advertised.
+      const taken = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        takeover: 'true',
+      });
+      expect(taken.parked).toBe(true);
+      expect(taken.commentCalls).toContain('stop` to release takeover');
+      expect(taken.commentCalls).not.toContain('to take it over');
+      const dedup = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        noticedAt: T(9),
+      });
+      expect(dedup.parked).toBe(true);
+      expect(dedup.commentCalls).not.toContain('comment');
+      // The dedup's time filter is not vacuous: a notice OLDER than the
+      // boundary (a maintainer response resumed the loop after the first
+      // park) must not suppress the fresh notice a re-trip earns — the
+      // af-152 promise. Every case above ran the dedup against an EMPTY
+      // boundary, where `> $since` cannot be told from "any notice ever".
+      const resumed = runTrip({
+        rv: [
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['batch-fixes']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(2),
+            body: 'resuming — batch the remaining fixes',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(resumed.parked).toBe(true);
+      expect(resumed.commentCalls).toContain('comment');
+      // The park HOLD: a clean round (a push-triggered review resets the
+      // streak exactly like this) does not release a posted park — the
+      // notice holds it until the boundary itself moves, so a re-trip can
+      // never park under a stale notice, and the dedup never reposts while
+      // the hold stands.
+      const held = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(3), 5, []),
+        ],
+        dryRun: 'false',
+        noticedAt: T(4),
+      });
+      expect(held.parked).toBe(true);
+      expect(held.commentCalls).not.toContain('comment');
+      // …and a trusted-human response after the notice moves the boundary
+      // past it, releasing the hold: under the bar the candidate runs.
+      const released = runTrip({
+        rv: [
+          botReview(T(2), 3, ['root-cause-triage']),
+          botReview(T(3), 4, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(5),
+            body: 'looking at it myself',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(released.parked).toBe(false);
+      // The codes clause matches its derivation: the union is keyed to
+      // CONV_SINCE, so codes observed BEFORE a mid-window maintainer
+      // response do not ride the notice posted after the response moved
+      // the boundary.
+      const spanned = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(4), 5, ['batch-fixes']),
+          botReview(T(5), 6, ['batch-fixes']),
+          botReview(T(6), 7, ['batch-fixes']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(3),
+            body: 'addressed the first cluster',
+          },
+        ],
+      });
+      expect(spanned.parked).toBe(true);
+      expect(spanned.out).toContain('(codes: batch-fixes)');
+      expect(spanned.out).not.toContain('root-cause-triage');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the scan stale-base update (#10107)', () => {
+    // The verdict derives ABOVE the stale-base section and the update's
+    // gate refuses a parked PR beside the conflict park: a base merge into
+    // a parked PR re-fires every synchronize-triggered workflow on the new
+    // head, and the base-merge round reviews an unchanged diff — its clean
+    // marker resets the streak, silently self-lifting the park with zero
+    // human activity (af-108's exact hazard). Execute the real read, the
+    // real verdict derivation, and the real gate: a tripped streak must
+    // suppress the update-branch call, and an untripped one must still
+    // update.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(parkedDerivation).toBeTruthy();
+    // The verdict precedes the gate that consumes it.
+    expect(reviewScanJob.indexOf("CONV_PARKED='false'")).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    const staleBaseBlock = reviewScanJob.match(
+      /( {12}# Auto-update a PR that is red ONLY because of a stale base[\s\S]*?\n {12}fi\n)\n {12}# Convergence-signal circuit breaker \(#10107\): the park action on/,
+    )?.[1];
+    expect(staleBaseBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-base-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runStaleBase = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `CONFLICT_PARKED='false'\nMAIN_HEAD='mainsha'\nPR_HEAD_OID='prheadsha'\n` +
+              `CHECKS_JSON='[{"name":"Qwen Code CI","workflowName":"Qwen Code CI","conclusion":"FAILURE"}]'\n` +
+              `MAIN_GREEN_CHECKS='["Qwen Code CI"]'\n` +
+              `BASE_UPDATE_CUTOFF='2025-12-31T00:00:00Z'\n` +
+              `fleet_row() { :; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `           printf 'behind'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${staleBaseBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nCONV_PARKED=%s sentinel=%s' "$CONV_PARKED" "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const last = out.split('\n').at(-1);
+        return {
+          parked: /CONV_PARKED=true/.test(last),
+          fellThrough: /sentinel=reached/.test(last),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // Tripped: the verdict parks and the stale-base gate refuses the head
+      // move — no update-branch call, no base-updated marker.
+      const parked = runStaleBase({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.parked).toBe(true);
+      expect(parked.fellThrough).toBe(true);
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.calls).not.toContain('autofix-base-updated');
+      // Untripped: the SAME red-on-PR/green-on-main/behind state updates
+      // the base as before — the guard suppresses only the parked case.
+      const unparked = runStaleBase({ rv: [] });
+      expect(unparked.parked).toBe(false);
+      expect(unparked.fellThrough).toBe(false);
+      expect(unparked.calls).toContain('update-branch');
+      // The park HOLD reaches the gate too: a clean round after a posted
+      // notice resets the streak but does not release the park.
+      const held = runStaleBase({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'qwen-code-ci-bot' },
+            submitted_at: T(3),
+            state: 'COMMENTED',
+            body: `<!-- qwen-review-ledger ${JSON.stringify({
+              v: 1,
+              round: 5,
+              findings: [],
+            })} -->`,
+          },
+        ],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.parked).toBe(true);
+      expect(held.fellThrough).toBe(true);
+      expect(held.calls).not.toContain('update-branch');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the report stale-base retry (#10122)', () => {
+    // The report step's stale-base retry is a sibling wake leg the scan's
+    // CONV_PARKED cannot cover: that reading is scan-local, and the
+    // report's inputs froze at prepare time — a PR parked AFTER prepare
+    // would merge main in here on a failed round, and the base-merge
+    // round's clean marker would reset the streak, self-lifting the park
+    // with zero human activity. The guard re-derives the scan gate's
+    // reading over fresh fetches (the lockstep pin covers the programs);
+    // execute the real block.
+    const retryBlock = reviewAddressReportStep.match(
+      /STALE_BASE_RETRY=false\n[\s\S]*?\n {16}fi\n/,
+    )?.[0];
+    expect(retryBlock).toBeTruthy();
+    // Wiring: the guard runs inside the conflict skip and BEFORE the
+    // merge attempt it guards.
+    expect(retryBlock.indexOf('CONV_PARKED_R')).toBeLessThan(
+      retryBlock.indexOf('update-branch'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-report-'));
+    try {
+      const botReview = (at, round, rec = ['root-cause-triage']) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec ? { rec } : {}),
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runRetry = ({
+        rv,
+        ic = [],
+        verdict = 'sound',
+        shellOpts = 'set -e',
+        fetchFail = false,
+      }) => {
+        writeFileSync(join(dir, 'rv.fixture.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.fixture.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.fixture.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${shellOpts}\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
+              `FETCH_FAIL='${fetchFail}'\n` +
+              `DEFAULT_BRANCH='main'\nAUDIT_VERDICT='${verdict}'\nREPORT_HEAD='reportheadsha'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    api)\n` +
+              `      if [[ "$*" == *'update-branch'* ]]; then\n` +
+              `        printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `      elif [[ "\${FETCH_FAIL}" == 'true' ]] && [[ "$*" == *'/pulls/1/reviews'* || "$*" == *'/pulls/1/comments'* || "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        return 1\n` +
+              `      elif [[ "$*" == *'/pulls/1/reviews'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rv.fixture.json"\n` +
+              `      elif [[ "$*" == *'/pulls/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rc.fixture.json"\n` +
+              `      elif [[ "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/ic.fixture.json"\n` +
+              `      elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `        printf 'behind'\n` +
+              `      elif [[ "$*" == *'/commits/'* ]]; then\n` +
+              `        printf 'mainsha'\n` +
+              `      fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${retryBlock.replace(/^ {16}/gm, '')}\n` +
+              `printf '\\nSTALE_BASE_RETRY=%s' "$STALE_BASE_RETRY"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          stale: /STALE_BASE_RETRY=true/.test(out.split('\n').at(-1)),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // The finding's scenario arm: the round fails its gate, the streak
+      // is tripped, the PR compares behind — NO merge. The comparator arm
+      // (a conflict verdict) skips the whole leg, guard included.
+      const parked = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.stale).toBe(false);
+      expect(parked.out).toContain('convergence-parked');
+      const conflict = runRetry({ rv: [], verdict: 'conflict' });
+      expect(conflict.calls).toBe('');
+      expect(conflict.stale).toBe(false);
+      // The park HOLD reaches the report leg too: a clean round after a
+      // posted notice does not release it.
+      const held = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5, null)],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.calls).not.toContain('update-branch');
+      expect(held.stale).toBe(false);
+      // A trusted-human response after the signals moves the boundary —
+      // the retry merges main exactly as before the guard.
+      const resumed = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(6),
+            body: 'on it',
+          },
+        ],
+      });
+      expect(resumed.calls).toContain('update-branch');
+      expect(resumed.stale).toBe(true);
+      // Untripped: the merge attempt happens as before.
+      const clean = runRetry({ rv: [] });
+      expect(clean.calls).toContain('update-branch');
+      expect(clean.stale).toBe(true);
+      // R3-8's witness, executed under the step shell's production
+      // semantics: a transient gh failure of the guard's three fresh
+      // fetches must NOT abort the report step under -eo pipefail — the
+      // errexit-exempt fetches let the block run to completion (the report
+      // comment and eval marker still post), and the merge gate fails
+      // CLOSED on the unreadable park state: no update-branch.
+      const fetchFailed = runRetry({
+        rv: [],
+        fetchFail: true,
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(fetchFailed.out).toContain('STALE_BASE_RETRY=false');
+      expect(fetchFailed.calls).not.toContain('update-branch');
+      expect(fetchFailed.out).toContain('fail closed');
+      // Comparator under the same shell: healthy fetches still merge.
+      const healthyPipefail = runRetry({
+        rv: [],
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(healthyPipefail.calls).toContain('update-branch');
+      expect(healthyPipefail.stale).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('parks a feedback-idle PR visibly — the park action outranks the idle fast-path (#10122)', () => {
+    // The verdict derives above the idle fast-path, and the park ACTION
+    // must too: a parked PR whose signal rounds all sit at or below the
+    // eval watermark IS the idle case, and the notice and fleet row this
+    // action writes are the park's only visible escalation — below the
+    // fast-path the idle `continue` would fire first and the park would
+    // go invisible (the fleet says 'idle', the notice never posts). Run
+    // the production order: verdict, park action, idle fast-path.
+    expect(reviewScanJob.indexOf('convergence park active')).toBeLessThan(
+      reviewScanJob.indexOf('fleet_row "${PR}" \'idle\''),
+    );
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    const tripBlock = reviewScanJob.match(
+      /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+    )?.[0];
+    const idleBlock = reviewScanJob.match(
+      /N_FAILED_CHECKS="\$\(jq --arg wm[\s\S]*?\n {14}continue\n {12}fi\n/,
+    )?.[0];
+    expect(
+      streakBlock && parkedDerivation && tripBlock && idleBlock,
+    ).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-idle-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runIdleRace = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='true'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='false'\nROUND='1'\nEFF_MAX_ROUNDS='6'\n` +
+              `EFF_WM='2026-01-01T08:00:00Z'\nCHECKS_JSON='[]'\n` +
+              `PR_META='{"headRefOid":"h1"}'\nRED_HEAD='h1'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  if [[ "\${1:-}" == 'pr' && "$*" == *'mergeable'* ]]; then\n` +
+              `    printf 'MERGEABLE'\n` +
+              `  else\n` +
+              `    printf '{"labels":[]}'\n` +
+              `  fi\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `${idleBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return out;
+      };
+      // Three signal rounds fully consumed by the eval watermark and no
+      // new feedback: the idle case. The park still acts — notice and
+      // fleet row post, and the candidate spends no dispatch.
+      const parked = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked).not.toContain('sentinel=reached');
+      expect(parked).toContain('convergence-parked');
+      expect(parked).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      // Under the bar the same idle PR idles as before.
+      const idle = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4)],
+      });
+      expect(idle).toContain('fleet_row: 1 idle');
+      expect(idle).not.toContain('convergence-break notice');
+      // …and a non-idle unparked candidate still falls through to dispatch.
+      const selected = runIdleRace({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            submitted_at: T(9),
+            state: 'COMMENTED',
+            body: 'fresh feedback above the watermark',
+          },
+        ],
+      });
+      expect(selected).toContain('sentinel=reached');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mirrors the convergence breaker live in prepare, discarding without comment (#10107)', () => {
+    // A target can be emitted moments before the tripping review lands (the
+    // review's own submitted trigger routes a round for exactly that
+    // review), so the leg re-derives the scan gate's reading and idles via
+    // STALE — no agent run, no marker, no comment; the notice stays the
+    // scan's job. Execute the real mirror block.
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(mirrorBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-mirror-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['batch-fixes'],
+        })} -->`,
+      });
+      const staleOf = ({
+        rv = [],
+        rc = [],
+        ic = [],
+        stale = 'false',
+        rearmKey = 'none',
+        rounds = '3',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='${rearmKey}'\nSTALE='${stale}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          stale: out.trim().split('\n').pop(),
+          parked:
+            out.includes('convergence break pending') ||
+            out.includes('convergence park holds'),
+        };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3),
+        botReview(T(2), 4),
+        botReview(T(3), 5),
+      ];
+      // The breaker holds → the leg discards, and says why.
+      expect(staleOf({ rv: threeSignals })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // Under the bar → the leg runs.
+      expect(staleOf({ rv: threeSignals.slice(0, 2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // A trusted-human response since the streak → resumed.
+      expect(
+        staleOf({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              created_at: T(4),
+              body: 'batching these myself',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+      // An already-stale leg is not re-derived (the block never unsets it).
+      expect(staleOf({ rv: threeSignals, stale: 'true' }).stale).toBe('true');
+      // The mirror's window-key wiring is the scan harness's rearmKey case:
+      // a re-armed window counts only signals after the new key — a fresh
+      // runway, not a silent discard of the leg the scan still allows.
+      expect(staleOf({ rv: threeSignals, rearmKey: T(2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // The mirror's malformed-knob fallback matches the scan's (the scan
+      // side's is pinned by the 'not-a-number' case above): with a garbage
+      // repo var the mirror must park at the SAME threshold, or it burns an
+      // agent round the scan already refused.
+      expect(staleOf({ rv: threeSignals, rounds: 'garbage' })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // The park HOLD rides along: a posted notice newer than the boundary
+      // keeps the leg STALE after a clean round reset the streak — a target
+      // dispatched before the clean round must not land on a PR the scan
+      // still holds parked.
+      expect(
+        staleOf({
+          rv: [
+            botReview(T(1), 3),
+            botReview(T(2), 4),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'COMMENTED',
+              body: `<!-- qwen-review-ledger ${JSON.stringify({
+                v: 1,
+                round: 5,
+                findings: [],
+              })} -->`,
+            },
+          ],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(9),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'true', parked: true });
+      // …until a trusted-human response moves the boundary past the notice:
+      // the hold releases with the park.
+      expect(
+        staleOf({
+          rv: [botReview(T(1), 3)],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(1),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(5),
+              body: 'resuming',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the convergence signal codes inside the review CLI vocabulary, and the two gates in lockstep (#10107)', () => {
+    // The vocabulary is a CONTRACT owned by the review CLI: the workflow
+    // wires actions to codes the marker publishes, so a workflow code the
+    // CLI can never emit is a breaker that can never trip, and a renamed
+    // CLI code silently disarms it. Pin membership on both ends, and the
+    // deliberate absence of the exit code.
+    const codesEnv = workflow.match(
+      /CONVERGENCE_SIGNAL_CODES: '(\[[^\n]*\])'/,
+    )?.[1];
+    expect(codesEnv).toBeTruthy();
+    const signalCodes = JSON.parse(codesEnv);
+    expect(signalCodes.length).toBeGreaterThan(0);
+    const convergenceTs = readFileSync(
+      'packages/cli/src/commands/review/lib/convergence.ts',
+      'utf8',
+    );
+    const vocab = convergenceTs
+      .match(/RECOMMENDATION_CODES = \[([\s\S]*?)\] as const/)?.[1]
+      .match(/'([a-z-]+)'/g)
+      .map((c) => c.replaceAll("'", ''));
+    expect(vocab).toBeTruthy();
+    for (const code of signalCodes) {
+      expect(vocab).toContain(code);
+    }
+    // …and the converse: every divergence code the CLI can emit is wired —
+    // the vocabulary minus the ONE documented exit code. A code the CLI
+    // emits that the gate never counts takes the streak reduce's else-0
+    // branch and RESETS an accumulated streak instead of extending it.
+    for (const code of vocab) {
+      if (code === 'land-and-defer') continue;
+      expect(signalCodes).toContain(code);
+    }
+    // 'land-and-defer' means "this loop can end by merging" — pausing on it
+    // would park exactly the PR a human should merge.
+    expect(vocab).toContain('land-and-defer');
+    expect(signalCodes).not.toContain('land-and-defer');
+    // The marker really publishes the field the gates read.
+    const ledgerTs = readFileSync(
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'utf8',
+    );
+    expect(ledgerTs).toContain('payload.rec = rec');
+    // Lockstep: the scan gate and the prepare mirror must read the SAME
+    // streak and the SAME boundary, or one side burns rounds the other
+    // refused. The jq programs reference only their own --arg names, so
+    // the two sides' programs must be verbatim-identical modulo
+    // indentation; only the shell variable names around them differ.
+    // A program opens as `--arg… "${VAR}" '` + newline and contains no
+    // single quote of its own, so the next `'` closes it.
+    // Per-line, not whole-string, normalization: it absorbs the scan/mirror
+    // indentation difference but preserves whitespace INSIDE jq string
+    // literals — the machine-marker exclusion regex ends in a load-bearing
+    // trailing space, and a one-sided literal edit there must fail the pin
+    // instead of normalizing into it.
+    const jqProgramsOf = (block) =>
+      [...block.matchAll(/" '\n([\s\S]+?)'/g)].map((m) =>
+        m[1]
+          .split('\n')
+          .map((line) => line.trimStart())
+          .join(' ')
+          .trim(),
+      );
+    const scanBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    const reportBlock = reviewAddressReportStep.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK_R=0\n/,
+    )?.[0];
+    expect(reportBlock).toBeTruthy();
+    const scanPrograms = jqProgramsOf(scanBlock);
+    // Two programs each: the human-activity boundary and the streak.
+    expect(scanPrograms).toHaveLength(2);
+    // Three sites run the SAME programs: the scan gate, the prepare mirror
+    // (which also carries the park hold's census as a third program), and
+    // the report step's stale-base guard.
+    const mirrorPrograms = jqProgramsOf(mirrorBlock);
+    expect(mirrorPrograms.slice(0, 2)).toEqual(scanPrograms);
+    expect(jqProgramsOf(reportBlock)).toEqual(scanPrograms);
+    // The hold census is one program in the three lockstepped sites.
+    const scanParkBlock = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(scanParkBlock).toBeTruthy();
+    const reportParkBlock = reviewAddressReportStep.match(
+      /if \[\[ "\$\{CONV_STREAK_R\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n[\s\S]*?\n {18}fi\n/,
+    )?.[0];
+    expect(reportParkBlock).toBeTruthy();
+    const censusPrograms = jqProgramsOf(scanParkBlock);
+    expect(censusPrograms).toHaveLength(1);
+    expect(mirrorPrograms[2]).toEqual(censusPrograms[0]);
+    expect(jqProgramsOf(reportParkBlock)).toEqual(censusPrograms);
+    // Witness that the pin now sees a one-sided literal edit: a single extra
+    // space inside ONE side's exclusion regex (its trailing space is
+    // load-bearing) normalized away under the old whole-string collapse.
+    const mutatedScanBlock = scanBlock.replace(
+      'qwen-review-ack) ',
+      'qwen-review-ack)  ',
+    );
+    expect(mutatedScanBlock).not.toEqual(scanBlock);
+    expect(jqProgramsOf(mutatedScanBlock)).not.toEqual(scanPrograms);
+    // The design pointers resolve.
+    expect(designDoc).toContain('<a id="af-151"></a>');
+    expect(designDoc).toContain('<a id="af-152"></a>');
+    expect(designDoc).toContain('<a id="af-153"></a>');
+    expect(designDoc).toContain('<a id="af-154"></a>');
+  });
+
   it('a conflict round parks quietly — no stale-base merge in its report', () => {
     // The conflict round's own stale-base retry would re-fire every
     // synchronize-triggered workflow on the new head; those loop-generated
@@ -21404,6 +24574,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(step).toContain(
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
+      expect(step).toContain('SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"');
     }
     // The review stage step records HOME before any branch code runs — the
     // trusted_path doctrine — and only it: the issue job's stage has no
@@ -21477,6 +24648,34 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // drive stop-marker combinations through this. Defaults empty: the
     // summary default is owned by summaryPresent above, not duplicated here.
     workdirFiles = {},
+    // Test-weakening fixtures: names a shape in WEAKEN_FIXTURES whose
+    // PRE-ROUND ref carries the pinned test and whose round then edits it.
+    weaken = '',
+    // Leave the counter unstaged: the measured signals go UNAVAILABLE.
+    noCounter = false,
+    // Shadow git so the gate's own enumeration producer fails (only the
+    // calls carrying the weakening pathspec): the producer's status must
+    // be read, not swallowed.
+    gitDiffFails = false,
+    // Shadow node so the counter fails for exactly one measured file —
+    // the shape a round-authored input that exhausts the parser produces.
+    counterFailsFor = '',
+    // Shadow node so the counter SUCCEEDS for exactly one measured file
+    // while printing a verdict that carries none of the fields the reader
+    // consumes: an exit-0 run whose output cannot be read must not pass
+    // for "not the round's to weaken".
+    counterGarbageFor = '',
+    // The instrument's trust chain: a counter or parser changed after its
+    // digest was recorded, or no trusted parser staged at all.
+    tamperCounter = false,
+    tamperParser = false,
+    dropCounter = false,
+    dropParser = false,
+    unreadableCounter = false,
+    noParser = false,
+    // Plant a package.json beside the staged parser that would turn a
+    // `.js` file into an ES module: the `.cjs` staging must not care.
+    parserTypePlant = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -21492,18 +24691,55 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       sh(`git clone -q '${origin}' '${work}'`, dir);
       const g = (cmd) => sh(cmd, work);
       g('git config user.email t@t && git config user.name t');
+      // The checkout's own node_modules is the round's to choose, so the
+      // fixture plants a HOSTILE typescript there: every API returns
+      // undefined, which measures a zero surface. Every charge this suite
+      // asserts therefore proves the counter parsed with the trusted
+      // parser staged under RUNNER_TEMP, never with the checkout's.
+      mkdirSync(join(work, 'node_modules', 'typescript'), { recursive: true });
+      writeFileSync(
+        join(work, 'node_modules', 'typescript', 'package.json'),
+        '{"name":"typescript","main":"index.js"}',
+      );
+      writeFileSync(
+        join(work, 'node_modules', 'typescript', 'index.js'),
+        'module.exports = new Proxy({}, { get: () => () => undefined });\n',
+      );
+      g("printf 'node_modules/\\n' > .gitignore");
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
+      if (weaken && !WEAKEN_FIXTURES[weaken]) {
+        throw new Error(`unknown weaken fixture: ${weaken}`);
+      }
+      const fx = weaken ? WEAKEN_FIXTURES[weaken] : null;
+      if (fx && fx.onMain) {
+        for (const cmd of fixtureWrite(fx.onMain)) g(cmd);
+        // Raw commands for content `fixtureWrite` cannot express — a byte
+        // no shell argument can carry, for instance.
+        for (const cmd of fx.onMainSeed ?? []) g(cmd);
+        g('git add . && git commit -qm seed-test && git push -q origin main');
+      }
       g('git checkout -qb feature');
       if (touchCore) {
         // Reaches the core-rebuild run_check BEFORE the commit gate, so a
         // failure there exercises the no-round-commit guard.
         g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
         g('git add . && git commit -qm core');
+      } else if (fx) {
+        // The pinned test must exist at origin/feature (the PRE-ROUND ref)
+        // before the round's agent commit weakens it.
+        for (const cmd of fixtureWrite(fx.files ?? {})) g(cmd);
+        for (const cmd of fx.seed ?? []) g(cmd);
+        g('echo branch > f.txt && git add . && git commit -qm branch');
       } else {
         g('echo branch > f.txt && git commit -qam branch');
       }
       g('git push -q origin feature');
+      if (fx && fx.mainMoves) {
+        g('git checkout -q main');
+        for (const cmd of fx.mainMoves) g(cmd);
+        g('git push -q origin main && git checkout -q feature');
+      }
       if (agentCommit) {
         if (addWorkspace) {
           // The round ADDS a workspace — it does not exist at the baseline.
@@ -21516,6 +24752,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           // A file the branch TRACKS but the baseline lacks: the baseline
           // leg recreates it untracked, and the restore checkout refuses.
           g('echo tracked > clash.txt && git add . && git commit -qm agent');
+        } else if (fx) {
+          for (const cmd of fx.round) g(cmd);
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
@@ -21626,6 +24864,65 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
         chmodSync(join(bin, 'comm'), 0o755);
       }
+      if (counterFailsFor) {
+        const realNode = execFileSync('bash', ['-c', 'command -v node'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'node'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            `  if [[ "$a" == *.json && -f "$a" ]] && grep -q '"path": *"${counterFailsFor}"' "$a"; then`,
+            '    echo "stub: parser exhausted" >&2',
+            '    exit 1',
+            '  fi',
+            'done',
+            `exec '${realNode}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'node'), 0o755);
+      }
+      if (counterGarbageFor) {
+        const realNode = execFileSync('bash', ['-c', 'command -v node'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'node'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            `  if [[ "$a" == *.json && -f "$a" ]] && grep -q '"path": *"${counterGarbageFor}"' "$a"; then`,
+            // Valid JSON, no verdict: `.baselinePresent` reads as null,
+            // which the pre-fix reader took for "not the round's".
+            `    echo '{"note":"measured nothing"}'`,
+            '    exit 0',
+            '  fi',
+            'done',
+            `exec '${realNode}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'node'), 0o755);
+      }
+      if (gitDiffFails) {
+        const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'git'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            "  if [[ \"$a\" == ':(glob)**/test_*.py' ]]; then echo 'stub: enumeration refused' >&2; exit 128; fi",
+            'done',
+            `exec '${realGit}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'git'), 0o755);
+      }
       const rt = join(dir, 'rt');
       mkdirSync(rt);
       writeFileSync(
@@ -21657,6 +24954,60 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         join(rt, 'resolve-owning-packages.sh'),
         'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
       );
+      // Staged the way the workflow stages them: the counter copied from
+      // the trusted base and the parser installed from the base lockfile's
+      // pin under RUNNER_TEMP, each digested BEFORE any later mutation.
+      const digest = (file) =>
+        createHash('sha256').update(readFileSync(file)).digest('hex');
+      let counterSha = '';
+      let parserSha = '';
+      if (!noCounter) {
+        copyFileSync(
+          resolve('.github/scripts/count-test-surface.mjs'),
+          join(rt, 'count-test-surface.mjs'),
+        );
+        counterSha = digest(join(rt, 'count-test-surface.mjs'));
+        if (dropCounter) rmSync(join(rt, 'count-test-surface.mjs'));
+        if (unreadableCounter) chmodSync(join(rt, 'count-test-surface.mjs'), 0);
+        if (tamperCounter) {
+          writeFileSync(
+            join(rt, 'count-test-surface.mjs'),
+            `${readFileSync(join(rt, 'count-test-surface.mjs'), 'utf8')}\n// planted\n`,
+          );
+        }
+      }
+      if (!noParser) {
+        // The workflow stages a `.cjs` COPY of typescript's single-file
+        // build; a symlink to the real file is the same bytes for the
+        // digest and the loader, so only the tamper and plant shapes copy.
+        const parser = join(rt, 'weaken-parser', 'typescript.cjs');
+        mkdirSync(join(rt, 'weaken-parser'), { recursive: true });
+        if (tamperParser || parserTypePlant) {
+          copyFileSync(
+            resolve('node_modules/typescript/lib/typescript.js'),
+            parser,
+          );
+        } else {
+          symlinkSync(
+            resolve('node_modules/typescript/lib/typescript.js'),
+            parser,
+          );
+        }
+        parserSha = digest(parser);
+        if (tamperParser) {
+          writeFileSync(
+            parser,
+            `${readFileSync(parser, 'utf8')}\n// planted\n`,
+          );
+        }
+        if (parserTypePlant) {
+          writeFileSync(
+            join(rt, 'weaken-parser', 'package.json'),
+            '{"type":"module"}\n',
+          );
+        }
+        if (dropParser) rmSync(parser);
+      }
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
       if (summaryPresent) {
@@ -21726,6 +25077,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             FORGE_OUTPUT: forgeOutput ? '1' : '',
             DISCOVER_OUTPUT: discoverOutput ? '1' : '',
             DISCOVER_ENV: forgeEnvFile ? '1' : '',
+            WEAKEN_COUNTER_SHA256: counterSha,
+            WEAKEN_PARSER_SHA256: parserSha,
           },
         },
       );
@@ -21741,6 +25094,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         summary: readFileSync(summaryFile, 'utf8'),
         rejection: existsSync(join(workdir, 'gate-rejection.md'))
           ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        advisories: existsSync(join(workdir, 'gate-advisories.md'))
+          ? readFileSync(join(workdir, 'gate-advisories.md'), 'utf8')
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
         baselineSha,
@@ -22105,10 +25461,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
     // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+    // replay under bash — this outgrows vitest's 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head), so it runs on the suite
+    // ceiling in scripts/tests/vitest.config.ts rather than a per-test one.
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside
@@ -22619,6 +25975,4449 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).not.toContain('audit_verdict=');
     expect(r.outputs).toContain('retryable=true');
   });
+
+  // ---- test-weakening gate ------------------------------------------------
+  // Each fixture names the file(s) seeded at the PRE-ROUND ref (`files`, on
+  // the branch; `onMain`, on main ahead of the fork when the shape needs
+  // main-side history), main's moves after the fork (`mainMoves`), and the
+  // round's own commands (`round`). The gate runs for real against the
+  // fixture repo: count-test-surface.mjs is staged the way the workflow
+  // stages it (a copy under RUNNER_TEMP) and `typescript` resolves from the
+  // checkout under measurement, as on the runner.
+  const shellQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+  const fixtureWrite = (files) =>
+    Object.entries(files).flatMap(([path, lines]) => [
+      ...(path.includes('/')
+        ? [`mkdir -p '${path.slice(0, path.lastIndexOf('/'))}'`]
+        : []),
+      `printf '%s\\n' ${lines.map(shellQuote).join(' ')} > '${path}'`,
+    ]);
+  const AGENT_COMMIT = 'echo agent > f.txt && git commit -qam agent';
+  const WT_IMPORT = "import { it, expect } from 'vitest';";
+  const WT_BASE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(2);',
+    '});',
+  ];
+  const WT_BASE_MINUS_TWO = WT_BASE.filter((l) => !l.includes('two()'));
+  const WT_BASE_PLUS_THREE = [
+    ...WT_BASE.slice(0, -1),
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const testA = (head, ...body) => [
+    WT_IMPORT,
+    head,
+    ...(body.length
+      ? body
+      : ['  expect(one()).toBe(1);', '  expect(two()).toBe(2);']),
+    '});',
+  ];
+  // A second registration appended to WT_BASE, enabled or not.
+  const testB = (kind = 'it') => [
+    `${kind}('b', () => {`,
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const WEAKEN_REASON =
+    'coverage moved to pkg/b.test.ts, which pins the same behaviour end to end';
+  const roundWrites = (files, ...extra) => [
+    ...fixtureWrite(files),
+    ...extra,
+    AGENT_COMMIT,
+  ];
+  const WEAKEN_FIXTURES = {
+    // -- the three plain shapes
+    assert: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    skip: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': testA("it.skip('a', () => {") }),
+    },
+    delete: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: ['git rm -q pkg/a.test.ts', AGENT_COMMIT],
+    },
+    // -- the round deletes a pre-existing test file and THEN merges main,
+    //    which still carries it. Main moved a DIFFERENT file, so the merge
+    //    keeps the deletion without a conflict — and the merge event moves
+    //    nothing for the deleted path on either side that survived, which
+    //    must not read as main removing the baseline the round is charged
+    //    against.
+    'delete-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/b.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows-b',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes-a',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- honest edits the gate must not charge
+    add: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+    },
+    'skipif-guard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it.skipIf(process.platform === 'win32')('a', () => {",
+        ),
+      }),
+    },
+    'ctx-skip-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          "  ctx.skip(process.platform === 'win32', 'requires the POSIX daemon harness');",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'todo-new': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [...WT_BASE, "it.todo('a later behaviour');"],
+      }),
+    },
+    rename: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a, renamed', () => {"),
+      }),
+    },
+    'move-within': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '});',
+          "it('b', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    reflow: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(',
+          '    one(),',
+          '  ).toBe(',
+          '    1,',
+          '  );',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'jsx-swap': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'delete-readd-stronger': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-edit': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: roundWrites({ 'tests/test_x.py': ['def test_x():', '    pass'] }),
+    },
+    'non-test-file-delete': {
+      files: {
+        'integration-tests/README.md': ['# notes'],
+        'packages/cli/src/test-utils/render.tsx': [
+          'export const render = () => null;',
+        ],
+      },
+      round: [
+        'git rm -q integration-tests/README.md packages/cli/src/test-utils/render.tsx',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- weakenings that hide from text patterns, visible to the parser
+    'comment-out': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  /*',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '  */',
+        ),
+      }),
+    },
+    'string-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          "  const decoy = 'expect(two()).toBe(2); expect(x).toBe(1)';",
+          '  const re = /expect\\(two\\(\\)\\)\\.toBe\\(2\\)/;',
+          '  fn(expect.anything(), `expect(${decoy}).toBe(2)`);',
+        ),
+      }),
+    },
+    'jsx-decoy': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  const html = <div>expect(two()).toBe(2)</div>;',
+        ),
+      }),
+    },
+    'matcher-drop': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two());',
+        ),
+      }),
+    },
+    'computed-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it['\\x73kip']('a', () => {"),
+      }),
+    },
+    'options-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a', { skip: true }, () => {"),
+      }),
+    },
+    'skipif-true': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skipIf(true)('a', () => {"),
+      }),
+    },
+    'ctx-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          '  ctx.skip();',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'skip-swap': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it.skip('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'rename-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skip('a, renamed', () => {"),
+      }),
+    },
+    'delete-readd-weaker': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    symlink: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'rm pkg/a.test.ts',
+        'ln -s ../f.txt pkg/a.test.ts',
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-delete': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: ['git rm -q tests/test_x.py', AGENT_COMMIT],
+    },
+    'ours-merge-drops-branch-work': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      round: [
+        // The merge's TREE is its first parent's, so every per-commit diff
+        // is empty while the tip lost the branch's own assertion.
+        'git checkout -q --detach origin/main',
+        'git merge -q --no-edit -s ours feature',
+        'git branch -f feature HEAD',
+        'git checkout -q feature',
+        AGENT_COMMIT,
+      ],
+    },
+    'main-landed-unmeasurable': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/new.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/new.test.ts && git commit -qm main-adds-a-test',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({ 'pkg/new.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'unparseable-addition': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites(
+        {
+          'pkg/a.test.ts': WT_BASE_MINUS_TWO,
+          'pkg/generated.test.ts': [WT_IMPORT, "it('deep', () => {});"],
+        },
+        'git add -A pkg',
+      ),
+    },
+    'symlink-restored': {
+      files: { 'pkg/real.test.ts': WT_BASE },
+      round: [
+        // Writing THROUGH the link would edit its target; the link itself
+        // has to go first for the tip to hold a regular file.
+        'rm pkg/a.test.ts',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+      seed: ['ln -s real.test.ts pkg/a.test.ts', 'git add pkg/a.test.ts'],
+    },
+    'merge-historical-main-commit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        'git checkout -qb side',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam side-trims',
+        'git rev-parse HEAD > /tmp/qwen-side-sha',
+        'git checkout -q main',
+        'git merge -q --no-ff --no-edit -s ours side',
+        'git branch -D side',
+      ],
+      round: [
+        'git merge -q --no-edit -s ours "$(cat /tmp/qwen-side-sha)"',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    'directory-swap': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: [
+        'git rm -q tests/test_x.py',
+        'mkdir -p tests/test_x.py',
+        "printf 'moved\\n' > tests/test_x.py/inner.txt",
+        'git add -A tests',
+        AGENT_COMMIT,
+      ],
+    },
+    'symlink-python': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: [
+        'rm tests/test_x.py',
+        'ln -s ../f.txt tests/test_x.py',
+        'git add -A tests',
+        AGENT_COMMIT,
+      ],
+    },
+    'rust-delete': {
+      files: { 'crates/x/src/browser/v2_tests.rs': ['#[test]', 'fn t() {}'] },
+      round: ['git rm -q crates/x/src/browser/v2_tests.rs', AGENT_COMMIT],
+    },
+    'tab-name': {
+      files: { 'pkg/a\tb.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a\tb.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    'two-files': {
+      files: { 'pkg/a.test.ts': WT_BASE, 'pkg/b.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': WT_BASE_MINUS_TWO,
+        'pkg/b.test.ts': WT_BASE_MINUS_TWO,
+      }),
+    },
+    'spec-delete': {
+      files: { 'pkg/a.spec.ts': WT_BASE },
+      round: ['git rm -q pkg/a.spec.ts', AGENT_COMMIT],
+    },
+    'snapshot-delete': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/__snapshots__/a.test.ts.snap': ['exports[`a 1`] = `1`;'],
+      },
+      round: ['git rm -q pkg/__snapshots__/a.test.ts.snap', AGENT_COMMIT],
+    },
+    // -- attribution corners: deletions across merges, renames, roots
+    'delete-then-merge-edit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm keep-the-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    'own-file-merge-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE }),
+        'git add pkg/own.test.ts && git commit -qm own',
+        'git merge -q --no-edit origin/main',
+        'git rm -q pkg/own.test.ts',
+        'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round's OWN new test file, touched while resolving a merge and
+    //    dropped afterwards. Main never held it, so no event may latch it
+    //    into the baseline: an event whose model moved nothing contributed
+    //    nothing, however the merge commit touched the file.
+    'own-file-merge-edit-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE }),
+        'git add pkg/own.test.ts && git commit -qm own',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/own.test.ts && git commit -qm merge-and-grow-own',
+        'git rm -q pkg/own.test.ts',
+        'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS an assertion during the round and the merge resolution
+    //    drops it. Main's additions raise the baseline whatever the merge
+    //    kept, so the round removed coverage and is charged: clamping this
+    //    direction would hand it the removal for free.
+    'merge-drops-mains-add': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-drops-add',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same discard through the modify/delete arm: main appends a
+    //    whole test, the round deleted the file, and the resolution puts
+    //    back the PRE-ROUND bytes -- so main's added test is gone.
+    'delete-merge-drops-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- and the same discard spelled as a disable: the resolution keeps
+    //    main's new test but registers it skipped.
+    'delete-merge-skips-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main removes TWO assertions, the resolution keeps one of them, and
+    //    the round then removes a third of its own. Credit is what LANDED
+    //    (one), not what the model says main removed (two): crediting the
+    //    model would swallow the round's own removal.
+    'merge-keeps-one-then-round-removes': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-two',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-one',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DISABLES a pre-existing test, the resolution keeps it
+    //    enabled, and the round disables it afterwards. Main's disable
+    //    never landed, so the title stays in the baseline and the round
+    //    answers for it.
+    'merge-keeps-enabled-then-round-disables': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
+        'git commit -qam main-disables',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-enabled',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- BOTH sides add the same path during the round, the resolution
+    //    lands main's file, and the round then deletes it. Main held that
+    //    side, so the baseline holds the file and the deletion is the
+    //    round's: presence reads main's own side, not a three-way model
+    //    whose endpoint happens to equal the branch's.
+    'addadd-takes-main-then-drops': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/x.test.ts && git commit -qm round-adds-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm resolution-takes-main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm drop-x',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round un-skips a suite, main adds a test INSIDE that suite,
+    //    and the resolution takes main's file verbatim -- so the tip is
+    //    byte-identical to main's and nothing was weakened. A three-way
+    //    splice of the two sides would invent an ENABLED registration that
+    //    existed in no tree and charge the round for disabling it.
+    'merge-takes-main-after-own-unskip': {
+      onMain: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-adds-c',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam round-unskips',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution-takes-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the resolution removes MORE than main's side did. Credit is
+    //    main's own delta, not the merge's: crediting the larger landed
+    //    removal would shield the round for the difference.
+    'resolution-removes-more-than-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts && git commit -qm resolution-removes-two',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main REMOVED while the merge landed an ADDITION: the two moved in
+    //    opposite directions, so main's removal was plainly not taken and
+    //    credits nothing. Crediting the landed addition instead would
+    //    charge the round for one assertion more than it removed.
+    'main-removes-merge-adds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts && git commit -qm resolution-adds',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round, so the pre-round ref
+    //    lacks it while main still carries it untouched. Main landed
+    //    nothing here, and the round only merged: main merely still
+    //    HOLDING a file it has always held must not put it back in the
+    //    baseline, or every later round re-charges the same deletion.
+    'deleted-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- the same shape spelled as a rename an earlier round made. The old
+    //    path costs ONE ack entry in the round that renames it, not one in
+    //    every later round that merges main.
+    'renamed-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      seed: ['git mv pkg/a.test.ts pkg/b.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- main adds a file, deletes it again with the merge keeping the
+    //    round's copy, then re-adds it. Each event measures main against
+    //    its OWN merge base, so the re-add must not be credited a second
+    //    time on top of the first.
+    'main-adds-deletes-readds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-drops-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm keep-x',
+        'git checkout -q main',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        // One comment line, so the re-add is a real event: byte-identical
+        // content makes `git diff --quiet` skip it and the fixture would
+        // never reach the chain it exists to pin.
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
+        'git add pkg/x.test.ts && git commit -qm main-readds-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
+        'git add -A pkg && git commit -qm take-mains-readd',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DELETES the file and the merge does not adopt the deletion:
+    //    the round keeps its own copy, gutted. Main contributed nothing
+    //    here, so recording the event would let the round's own copy stand
+    //    in for main's side and credit main with the round's removal.
+    'main-deletes-round-keeps-weakened': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/x.test.ts', 'git commit -qm main-deletes-x'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git add -A pkg && git commit -qm keep-our-copy',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round, main GROWS it during
+    //    this one, and the round restores main's file and then guts it.
+    //    Main contributed content this round, so the baseline holds the
+    //    file however the pre-round ref stood.
+    'preround-absent-main-grows-round-guts': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm restore-mains-file',
+        ...fixtureWrite({
+          'pkg/x.test.ts': testA("it('a', () => {", '  noop();'),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a pre-existing file MAIN never held, deleted inside the merge
+    //    commit itself. Main moved nothing, so nothing may take it out of
+    //    the baseline the pre-round ref established.
+    'preround-own-file-merge-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/n.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q pkg/n.test.ts',
+        'git commit -qm merge-drops-n',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a real criss-cross: the round merged a main commit and main
+    //    merged the round's, so the merge of main has TWO equally valid
+    //    bases. They hold the same blob for this file, so git's pick
+    //    cannot change the verdict and it is measured normally.
+    'crisscross-bases-agree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt', 'git add m1.txt', 'git commit -qm m1'],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git merge -q --no-edit origin/feature',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same criss-cross, but the two bases DISAGREE about the file,
+    //    so git's pick would decide the verdict. Refused rather than
+    //    measured on a tie-break git does not promise.
+    'crisscross-bases-disagree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam m1-weakens',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moved the file EARLIER in the round, then deleted it with
+    //    the merge keeping the round's gutted copy, and the round merges
+    //    main once more. The later merge sees no main side and no base,
+    //    and recording it would let the round's own copy set the clamp --
+    //    crediting main with the round's removal one merge later.
+    'main-deletes-after-moving-then-merges-again': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt && git add m1.txt && git commit -qm m1'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git checkout -q main',
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-1',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-deletes-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-2',
+        'git checkout -q main',
+        'echo m3 > m3.txt && git add m3.txt && git commit -qm m3',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round and main only appends a
+    //    comment to its own copy. That moves no surface, so it is not a
+    //    contribution and the old deletion is not re-charged.
+    'preround-absent-main-comments': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a NON-JS test file: the counter reads no surface from it, so
+    //    "the surface did not move" is unmeasurable rather than false.
+    //    An earlier round deleted it, main GROWS it during this one, and
+    //    the round keeps its deletion: the deletion arm is the only arm
+    //    these shapes have, and it must still fire.
+    'preround-absent-main-grows-python': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/test_x.py': ['def test_a():', '    assert one() == 1'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/test_x.py'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/test_x.py': [
+            'def test_a():',
+            '    assert one() == 1',
+            '',
+            'def test_b():',
+            '    assert two() == 2',
+          ],
+        }),
+        'git commit -qam main-grows-py',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/test_x.py',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS a test file with no readable surface at all during the
+    //    round, and the round discards it in the resolution. Main added a
+    //    path the baseline did not have, so the deletion is the round's
+    //    however little the file measures.
+    'main-adds-zero-surface-round-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        // No registrations and no assertions: its measured surface is
+        // indistinguishable from an absent file, so only the file's
+        // EXISTENCE tells the baseline it arrived.
+        ...fixtureWrite({
+          'pkg/e.test.ts': [WT_IMPORT, '// fixtures live here for now'],
+        }),
+        'git add pkg/e.test.ts && git commit -qm main-adds-empty',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/e.test.ts',
+        'git commit -qm drop-mains-file',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a `.test.ts` the instrument reads NOTHING from, grown by main
+    //    while the round keeps an earlier round's deletion. An empty
+    //    measured surface is the same reading for a file that declares
+    //    nothing as for a shape the parser does not know, so the byte
+    //    fallback has to engage on the extension the parser DOES know too.
+    'preround-absent-main-grows-zero-surface-ts': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/z.test.ts': [WT_IMPORT, '// type-level fixtures live here'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/z.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/z.test.ts': [
+            WT_IMPORT,
+            '// type-level fixtures live here',
+            '// and a second note',
+          ],
+        }),
+        'git commit -qam main-grows-z',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/z.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves only DISABLED registrations on a file an earlier round
+    //    deleted. A skipped test is no coverage and reaches no signal, so
+    //    it is not a contribution and the old deletion is not re-charged.
+    'preround-absent-main-adds-skip': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/x.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git commit -qam main-adds-skip',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a criss-cross whose two candidate bases disagree about whether the
+    //    file EXISTS, not about its content. Refused like any other
+    //    disagreement: which base git picks would decide the verdict.
+    'crisscross-bases-disagree-presence': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm m1-deletes'],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        'git rm -q -f --ignore-unmatch pkg/a.test.ts',
+        'git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm main-restores',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a file that is NOTHING BUT disabled registrations, rewritten
+    //    wholesale by main while the round keeps an earlier deletion. The
+    //    surface comparison cannot see disabled registrations, so such a
+    //    file has to reach the bytes or no rewrite of it would ever read
+    //    as main contributing.
+    'preround-absent-main-rewrites-skips-only': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/s.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      seed: ['git rm -q pkg/s.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/s.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S renamed', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-rewrites-s',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/s.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the assertion total: it plants an early return
+    //    ahead of the body, so the registrations and the declared total
+    //    stand while the live count falls.
+    'preround-absent-main-guards': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/g.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/g.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/g.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+          ),
+        }),
+        'git commit -qam main-guards-g',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/g.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the DECLARED total: it deletes an assertion that
+    //    already sat behind a guard, so the live count cannot fall further.
+    'preround-absent-main-drops-behind-guard': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/d.test.ts': testA(
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      },
+      files: {},
+      seed: ['git rm -q pkg/d.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/d.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+          ),
+        }),
+        'git commit -qam main-drops-guarded',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/d.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the enabled-title multiset: same counts, a
+    //    different test name.
+    'preround-absent-main-renames-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/r.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/r.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/r.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it('a renamed'"),
+          ),
+        }),
+        'git commit -qam main-renames-test',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/r.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    'main-directory-swap': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        'git rm -q pkg/a.test.ts',
+        'mkdir -p pkg/a.test.ts',
+        "printf 'moved\\n' > pkg/a.test.ts/inner.txt",
+        'git add -A pkg && git commit -qm main-swaps-for-a-directory',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-main-empties': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [': > pkg/a.test.ts', 'git commit -qam main-empties'],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'rename-weaken': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'rename-only': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: ['git mv pkg/a.test.ts pkg/b.test.ts', AGENT_COMMIT],
+    },
+    'main-renames': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm main-renames',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'skip-with-standin': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          ...testA("it.skip('a', () => {"),
+          "it('a', () => {});",
+        ],
+      }),
+    },
+    // The same shape with the callback handed by NAME: the instrument
+    // resolves the module-scope binding, so the skipped body's assertions
+    // still measure as removed.
+    'skip-with-standin-named': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          'function body() {',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '}',
+          "it.skip('a', body);",
+          "it('a', () => {});",
+        ],
+      }),
+    },
+    'delete-behind-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '});',
+        ],
+      }),
+    },
+    'suite-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe('d', () => {",
+          "  it('a', () => { expect(one()).toBe(1); });",
+          "  it('b', () => { expect(two()).toBe(2); });",
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe('d', () => {",
+          "  it('smoke', () => { expect(one()).toBe(1); });",
+          '  return;',
+          "  it('a', () => { expect(one()).toBe(1); });",
+          "  it('b', () => { expect(two()).toBe(2); });",
+          '});',
+        ],
+      }),
+    },
+    'guard-plus-todo': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+          "it.todo('a later behaviour');",
+        ],
+      }),
+    },
+    'adds-guarded-test': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          ...WT_BASE,
+          "it('posix only', () => {",
+          "  if (process.platform === 'win32') {",
+          '    return;',
+          '  }',
+          '  expect(four()).toBe(4);',
+          '});',
+        ],
+      }),
+    },
+    'main-renames-round-keeps-both': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        'git mv pkg/a.test.ts pkg/m.test.ts',
+        ...fixtureWrite({ 'pkg/m.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm main-renames-and-drops',
+      ],
+      round: [
+        'git merge -q --no-commit --no-edit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm keep-both-paths',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm drop-our-own',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-merge-restores': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git add -A pkg && git commit -qm keep-mains-version',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-merge-adds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git add -A pkg && git commit -qm keep-mains-version',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-rename-onto': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/b.test.ts': WT_BASE_PLUS_THREE,
+      },
+      round: [
+        'git rm -q pkg/b.test.ts',
+        'git commit -qm drop-b',
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm move-a-onto-b',
+        AGENT_COMMIT,
+      ],
+    },
+    'unskip-with-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  if (!process.env.QWEN_SERVER) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_SERVER) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      }),
+    },
+    'own-rename-then-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm rename',
+        'git rm -q pkg/b.test.ts',
+        'git commit -qm delete-the-destination',
+        AGENT_COMMIT,
+      ],
+    },
+    'hook-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          "import { it, expect, beforeEach } from 'vitest';",
+          'beforeEach((ctx) => { ctx.skip(); });',
+          ...WT_BASE.slice(1),
+        ],
+      }),
+    },
+    'catch-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          '  try { connectDocker(); } catch { ctx.skip(); }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'orphan-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -q --orphan tmp',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A && git commit -qm orphan',
+        'git merge -q --allow-unrelated-histories --no-edit feature || true',
+        'git checkout --ours pkg/a.test.ts && git add pkg/a.test.ts',
+        'git commit -qm graft',
+        'git branch -f feature HEAD && git checkout -q feature',
+      ],
+    },
+    'octopus-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git checkout -qb side',
+        'echo s > s.txt && git add s.txt && git commit -qm side',
+        'git checkout -q feature',
+        // The branch moves too, so the octopus cannot fast-forward onto
+        // `side` and main's side lands as the THIRD parent.
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit side origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- declared non-goal: reachability is the runner's business
+    'dead-code': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (false) {',
+          '    expect(one()).toBe(1);',
+          '    expect(two()).toBe(2);',
+          '  }',
+        ),
+      }),
+    },
+    // -- attribution across main's own history
+    'merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- main EMPTIES the file (keeps the path, removes every line) and
+    //    the round touches nothing. Main's own delta is the whole file
+    //    going empty, and the merge landed it, so the round answers for
+    //    nothing.
+    'main-empties': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      // Truly zero bytes: `printf '%s\n'` with no operands still writes a
+      // newline, and a one-byte result would never reach the emptiness
+      // question this fixture exists to ask.
+      mainMoves: [": > 'pkg/a.test.ts'", 'git commit -qam main-empties'],
+      // The branch moves FIRST, so the merge cannot fast-forward: this has
+      // to be a real merge commit, or main's side is read straight off the
+      // commit and the merge attribution is never exercised.
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a file carrying a NUL byte, which git will not merge as text.
+    //    Attribution never asks it to: main's delta is read on main's own
+    //    side, so the measurement is the same as for any other content.
+    //    Here main only appends a comment while the round deletes an
+    //    assertion.
+    'binary-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        // Rewritten, not filtered: a line filter reads this file as binary
+        // and would empty it instead of dropping one assertion. The NUL
+        // only has to exist on the three sides of the MERGE.
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same refusal, with MAIN as the side that moved: main drops an
+    //    assertion, the round only merges. Substituting the branch's side
+    //    unconditionally would read main's weakening as the round's and
+    //    reject an honest round, so the fallback has to follow git's own
+    //    trivial-merge rule instead of a fixed side.
+    'binary-merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the refusal with BOTH sides moved: the round weakens the file and
+    //    main edits it. Neither side is the base, so the result resolves
+    //    for the branch exactly as `--ours` would have, and the round is
+    //    charged for its OWN removal — no more, no less. Taking main's
+    //    side here would charge the round for main's edit as well.
+    'binary-merge-conflict': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam round-weakens',
+        'git merge -q --no-edit -X ours origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round merges main with `-s ours`, discarding main's side for
+    //    this file, and removes an assertion of its own in the same round.
+    //    Main contributed nothing the tip took, so nothing may be
+    //    subtracted: crediting the round with main's discarded delta would
+    //    absorb its own removal exactly.
+    'strategy-ours-hole': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same shape with unmergeable content: the merge landed
+    //    nothing of main's, so main still contributed nothing.
+    'strategy-ours-hole-binary': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same discard, but the merge commit is NOT byte-identical to
+    //    the branch's side: one comment line was added while resolving. A
+    //    byte-equality bound misses this; the clamp does not, because the
+    //    landed delta is zero either way.
+    'ours-hole-plus-comment': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit -s ours origin/main || true',
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-with-note',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // -- binary, BOTH sides moved, and the resolution took MAIN's version.
+    //    Main's own delta is measured on main's side and the merge landed
+    //    it whole, so the round -- whose own edit the resolution discarded
+    //    -- is charged for nothing.
+    'binary-resolution-takes-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit -X theirs origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-delete-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-conflict-drop': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(11)')),
+        }),
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-restore': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git commit -qam drop',
+        'git merge -q --no-edit origin/main || true',
+        'git checkout --theirs pkg/a.test.ts',
+        'git add pkg/a.test.ts && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    'premerge-weaken-postmerge-decoy': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, '// main touched this file'],
+        }),
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam weaken',
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const decoy = 'expect(two()).toBe(2)';",
+            '});',
+            '// main touched this file',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE_MINUS_TWO.map((l) =>
+            l.replace('one()', 'uno()'),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-revert': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-introduced-discard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-b',
+      ],
+      round: [
+        'git merge -q --no-commit --no-edit origin/main || true',
+        'git rm -qf pkg/b.test.ts',
+        'git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'side-branch-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -qb side',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam side-weakens',
+        'git checkout -q feature',
+        'git merge -q --no-ff --no-edit side',
+        AGENT_COMMIT,
+      ],
+    },
+  };
+
+  const rejectsWeakening = (weaken, signal, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    // Retryable: the same-run repair pass can restore the coverage or
+    // record the evidence, so this must not burn the whole round.
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain(signal);
+    // The remedy has to name the artifact, or the repair pass cannot act.
+    expect(r.rejection).toContain('test-weakening.json');
+    // Rejected BEFORE the expensive deterministic checks: a round that
+    // cannot be accepted must not spend twenty minutes proving it.
+    expect(r.stdout).not.toContain('Re-running deterministic checks');
+    return r;
+  };
+  const acceptsWithoutCharge = (weaken, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.rejection).toBe('');
+    expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+    return r;
+  };
+
+  it('rejects a round that removes assertions from a pre-existing test', () => {
+    const r = rejectsWeakening('assert', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('rejects a skip marker added to a pre-existing test', () => {
+    // Assertion counts are identical on both sides — only the
+    // registration's enabled state moves.
+    rejectsWeakening('skip', 'pre-existing test registration(s) disabled');
+  });
+
+  it('rejects a deleted pre-existing test', () => {
+    rejectsWeakening('delete', 'test file deleted');
+    // A main-derived merge landing AFTER the round's own deletion does not
+    // launder it: the merge moved nothing for that path on the side that
+    // survived, so the baseline the charge rests on is still the pre-round
+    // ref's.
+    const deletedThenMerged = rejectsWeakening(
+      'delete-then-merge',
+      'test file deleted',
+    );
+    expect(deletedThenMerged.rejection).toContain('pkg/a.test.ts');
+    expect(deletedThenMerged.rejection).not.toContain('pkg/b.test.ts');
+  });
+
+  it('gates every status-0 weakening flow on the host probe', () => {
+    // Accepted rounds run the REAL script past the bite section's
+    // unconditional `mapfile`: on a bash without it (macOS ships 3.2) the
+    // spawn dies there before the semantics under test can execute, so
+    // every test asserting an ACCEPTED round carries the host gate. The
+    // set is DERIVED from this file, never hand-listed: a new
+    // accepted-round test added without the gate fails here rather than on
+    // the macOS lane, which is where the hand-list kept letting one slip.
+    const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const chunks = self
+      .split(/\n {2}it(?=[.(])/)
+      // ...except this test, whose own body quotes the signals below.
+      .filter((chunk) => !chunk.startsWith("('gates every status-0"));
+    const accepting = chunks.filter(
+      (chunk) =>
+        /acceptsWithoutCharge\('[a-z]/.test(chunk) ||
+        (chunk.includes('weaken:') &&
+          (chunk.includes('.status).toBe(0)') ||
+            chunk.includes(".rejection).toBe('')"))),
+    );
+    expect(accepting.length).toBeGreaterThan(8);
+    expect(
+      accepting
+        .filter((chunk) => !chunk.startsWith('.skipIf(!hasBashMapfile)('))
+        .map((chunk) => chunk.slice(0, 90)),
+    ).toEqual([]);
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'charges nothing to honest edits of a pre-existing test',
+    () => {
+      // Strictly more coverage.
+      acceptsWithoutCharge('add');
+      // The repo's environment-guard idioms are conditions, not skips.
+      acceptsWithoutCharge('skipif-guard');
+      acceptsWithoutCharge('ctx-skip-conditional');
+      // A skip in a catch clause is the setup-failure guard, not a skip.
+      acceptsWithoutCharge('catch-skip');
+      // Un-skipping a test that already carried an early return is
+      // strictly more coverage, not a guard the round added.
+      acceptsWithoutCharge('unskip-with-guard');
+      // A brand-new test carrying its own platform guard silences nothing
+      // that existed.
+      acceptsWithoutCharge('adds-guarded-test');
+      // A CONDITIONAL early return planted ahead of existing assertions
+      // is the environment-guard idiom (R27-21): sheltered assertions
+      // stay measured, so the round reads as no movement — the runner,
+      // not this gate, judges the condition.
+      acceptsWithoutCharge('early-return-conditional');
+      // A brand-new todo registration is the round's own.
+      acceptsWithoutCharge('todo-new');
+      // A retitled test keeps its assertions and its enabled state.
+      acceptsWithoutCharge('rename');
+      // An assertion moved WITHIN a file nets zero, by contract.
+      acceptsWithoutCharge('move-within');
+      // Prettier reflow and a JSX-carrying assertion swap: the parser sees
+      // the same declared surface a text census mis-measured.
+      acceptsWithoutCharge('reflow');
+      acceptsWithoutCharge('jsx-swap');
+      // Delete then recreate STRONGER: the tip is the authority, not the
+      // commit sequence.
+      acceptsWithoutCharge('delete-readd-stronger');
+    },
+    120000,
+  );
+
+  it('charges the weakenings that hide from a text census', () => {
+    // A commented-out assertion, a string/regex/template decoy, a JSX
+    // text decoy: the parser counts executable statements, not tokens.
+    rejectsWeakening('comment-out', 'net 2 assertion(s) removed');
+    rejectsWeakening('string-decoy', 'net 1 assertion(s) removed');
+    rejectsWeakening('jsx-decoy', 'net 1 assertion(s) removed');
+    // A matcher-less expect() pins nothing.
+    rejectsWeakening('matcher-drop', 'net 1 assertion(s) removed');
+    // Every spelling of a disabled registration the parser can decode.
+    for (const shape of [
+      'computed-skip',
+      'options-skip',
+      'skipif-true',
+      'ctx-skip',
+    ]) {
+      rejectsWeakening(shape, 'pre-existing test registration(s) disabled');
+    }
+    // The early-return spelling of a skip: the assertions it shelters stop
+    // being declared surface, so it measures as their removal.
+    rejectsWeakening('early-return', 'net 2 assertion(s) removed');
+    // ...and a throwaway registration appended beside it buys nothing.
+    rejectsWeakening('guard-plus-todo', 'net 2 assertion(s) removed');
+    // Assertions the baseline already carried behind a guard are not free
+    // to delete: the total that ignores guards falls even when the other
+    // one cannot.
+    rejectsWeakening('delete-behind-guard', 'net 2 assertion(s) removed');
+    // An early return in a DESCRIBE body stops the runner collecting what
+    // follows it, exactly as a `skip()` there would.
+    rejectsWeakening(
+      'suite-guard',
+      'pre-existing test registration(s) disabled',
+    );
+    // A hook that skips every test the file registers.
+    rejectsWeakening('hook-skip', 'pre-existing test registration(s) disabled');
+  }, 120000);
+
+  it('charges registration-level weakening by title, not by net marker count', () => {
+    // Un-skipping one test never licenses silencing another: the net
+    // marker count is zero here and the gate still charges `a`.
+    rejectsWeakening('skip-swap', 'pre-existing test registration(s) disabled');
+    // Retitle-and-skip: no baseline title is disabled, but the silenced
+    // body's assertions no longer execute.
+    rejectsWeakening('rename-skip', 'net 2 assertion(s) removed');
+    // Skip the body and plant an empty same-titled stand-in: the title
+    // count balances, the executed assertions do not.
+    rejectsWeakening('skip-with-standin', 'net 2 assertion(s) removed');
+    // ...and the same silencing with the callback handed by name: the
+    // binding resolves, so the skipped body still measures as removed.
+    rejectsWeakening('skip-with-standin-named', 'net 2 assertion(s) removed');
+  });
+
+  it('charges a weakening by the tip, whichever commit sequence produced it', () => {
+    // Delete then recreate WEAKER.
+    rejectsWeakening('delete-readd-weaker', 'net 1 assertion(s) removed');
+    // A pre-existing test replaced by a symlink is a typechange: the
+    // deletion of its surface, whatever the link's target text parses as.
+    rejectsWeakening('symlink', 'test file deleted');
+    rejectsWeakening('symlink-python', 'test file deleted');
+    // A DIRECTORY that took the file's name is not the file: the tip must
+    // hold a blob at that path for the file to count as still there.
+    rejectsWeakening('directory-swap', 'test file deleted');
+    // A side branch merged into the round is the round's own authorship.
+    rejectsWeakening('side-branch-merge', 'net 1 assertion(s) removed');
+    // ...and so is a merge whose tree is its first parent's: nothing moved
+    // per commit, yet the tip carries main's older, weaker copy.
+    const ours = rejectsWeakening(
+      'ours-merge-drops-branch-work',
+      'net 1 assertion(s) removed',
+    );
+    expect(ours.rejection).toContain('pkg/a.test.ts');
+    // A rename whose destination the round then deletes, one that lands ON
+    // a pre-existing test, and one that guts what it landed on: under the
+    // one-name rule each charges the old path, and the destination is
+    // measured against its OWN pre-round self when it had one.
+    const gone = rejectsWeakening(
+      'own-rename-then-delete',
+      'test file deleted',
+    );
+    expect(gone.rejection).toContain('pkg/a.test.ts');
+    const onto = rejectsWeakening(
+      'delete-then-rename-onto',
+      'test file deleted',
+    );
+    expect(onto.rejection).toContain('pkg/a.test.ts');
+    expect(onto.rejection).toContain('pkg/b.test.ts');
+    expect(onto.rejection).toContain('net 1 assertion(s) removed');
+  });
+
+  it('fails closed for the one file it could not measure, not the round', () => {
+    // A round-authored input can exhaust the parser. That file alone is
+    // charged (one ack entry answers it) while the rest of the round stays
+    // measured — waiving every signal because one file was unreadable is
+    // exactly the fail-open the header forbids.
+    const r = runGate({
+      weaken: 'unparseable-addition',
+      counterFailsFor: 'pkg/generated.test.ts',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('net 1 assertion(s) removed');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+    // The file the round added has no coverage to weaken, so it is not
+    // charged for being unreadable.
+    expect(r.rejection).not.toContain('pkg/generated.test.ts');
+    // ...while an unreadable file the BASELINE holds is charged on its
+    // own — the pre-round ref's, and one main landed during the round,
+    // which is the same baseline the measured arm reports.
+    const own = runGate({
+      weaken: 'assert',
+      counterFailsFor: 'pkg/a.test.ts',
+    });
+    expect(own.status).toBe(1);
+    expect(own.rejection).toContain('test surface could not be measured');
+    const landed = runGate({
+      weaken: 'main-landed-unmeasurable',
+      counterFailsFor: 'pkg/new.test.ts',
+    });
+    expect(landed.status).toBe(1);
+    expect(landed.rejection).toContain('pkg/new.test.ts');
+    expect(landed.rejection).toContain('test surface could not be measured');
+    // A counter that EXITS 0 while printing something that is not a
+    // verdict takes the same fail-closed path. Read as a verdict, its
+    // absent `baselinePresent` would say "not the round's to weaken" and
+    // uncharge the file silently — while the round still reports itself
+    // measured, which is the fail-open this whole arm exists to prevent.
+    const mute = runGate({
+      weaken: 'assert',
+      counterGarbageFor: 'pkg/a.test.ts',
+    });
+    expect(mute.status).toBe(1);
+    expect(mute.rejection).toContain('pkg/a.test.ts');
+    expect(mute.rejection).toContain('test surface could not be measured');
+    expect(mute.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it("takes main's side only from commits main itself has been", () => {
+    // A commit reachable from origin/main as someone's merged feature tip
+    // was never main: merging it with `-s ours` must not credit the round
+    // with a smaller copy of a file main never carried.
+    const r = rejectsWeakening(
+      'merge-historical-main-commit',
+      'net 2 assertion(s) removed',
+    );
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('judges non-JS test files by the deletion arm', () => {
+    rejectsWeakening('python-delete', 'test file deleted');
+    rejectsWeakening('rust-delete', 'test file deleted');
+    rejectsWeakening('spec-delete', 'test file deleted');
+  });
+
+  it('charges every weakened file and acknowledges per path', () => {
+    const r = rejectsWeakening('two-files', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    const half = runGate({
+      weaken: 'two-files',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(half.status).toBe(1);
+    expect(half.rejection).toContain('pkg/b.test.ts');
+    expect(half.rejection).not.toContain('pkg/a.test.ts');
+  });
+
+  it('uses no bash-4 construct ahead of the bite section (the bash-3.2 lane)', () => {
+    // The gate section runs before the bite section's mapfile — the first
+    // bash-4 boundary the host probe gates — so it must stay bash-3.2
+    // clean or the macOS lane dies before any verdict.
+    const start = reviewVerificationRunner.indexOf('# --- Test-weakening gate');
+    const end = reviewVerificationRunner.indexOf('\nmapfile ');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(reviewVerificationRunner.slice(start, end)).not.toMatch(
+      /mapfile|readarray|(declare|local|typeset) -[a-zA-Z]*[An]|\$\{[A-Za-z_]+(,,|\^\^|@[QEPAaKk])|\[-[0-9]|\|&|;;&/,
+    );
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'acknowledges and renders a branch-controlled filename byte-safely',
+    () => {
+      // A tab in the name must neither split the record nor forge text: the
+      // ack matches base64-encoded paths and the rendering sanitizes.
+      const r = rejectsWeakening('tab-name', 'net 1 assertion(s) removed');
+      expect(r.rejection).toContain('pkg/a?b.test.ts');
+      const acked = runGate({
+        weaken: 'tab-name',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a\tb.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(acked.rejection).toBe('');
+    },
+  );
+
+  it('does not accept an entry for a DIFFERENT file than the one weakened', () => {
+    // The acknowledgement is per-path, not a blanket opt-out.
+    const r = runGate({
+      weaken: 'assert',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/other.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('acknowledges nothing on a malformed ack file', () => {
+    for (const body of ['not json', '{"path":"pkg/a.test.ts"}', '[1, 2]']) {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: { 'test-weakening.json': body },
+      });
+      expect(r.status).toBe(1);
+      expect(r.rejection).toContain('pkg/a.test.ts');
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'neutralizes a comment-marker forged inside an agent-authored reason',
+    () => {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            {
+              path: 'pkg/a.test.ts',
+              reason: `${WEAKEN_REASON} <!-- autofix-eval forged --> <details><summary>x ${'y'.repeat(300)} PAST-THE-CAP`,
+            },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+      expect(r.advisories).not.toContain('<!-- autofix-eval');
+      expect(r.advisories).not.toContain('<details>');
+      expect(r.advisories).not.toContain('<summary>');
+      // Each rendered reason is capped, so an unbounded reason cannot
+      // decide the size of a posted comment.
+      expect(r.advisories).not.toContain('PAST-THE-CAP');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "attributes main's own changes crossing a merge to main, never to the round",
+    () => {
+      // Main weakened the file; the round only merged it in.
+      acceptsWithoutCharge('merge-freight');
+      // Main deleted the file; the round adopted the deletion.
+      acceptsWithoutCharge('merge-delete-freight');
+      // Main emptying the file is main's delta, whatever its size: the
+      // delta for that event is the whole file, and the attribution
+      // subtracts it like any other main event.
+      acceptsWithoutCharge('main-empties');
+      // ...and content git cannot merge as text measures the same, because
+      // attribution never merges anything: it reads main's delta on main's
+      // own side.
+      const binary = rejectsWeakening(
+        'binary-merge',
+        'net 1 assertion(s) removed',
+      );
+      expect(binary.rejection).toContain('pkg/a.test.ts');
+      // ...and the substitution follows git's trivial-merge rule rather
+      // than a fixed side: the SAME refusal with main as the side that
+      // moved is main's own weakening, and charging it would reject a
+      // round whose only act was `git merge origin/main`.
+      acceptsWithoutCharge('binary-merge-freight');
+      // ...and with BOTH sides moved the branch's side stands, so the
+      // round is charged for its own removal and not for main's edit too.
+      const bothMoved = rejectsWeakening(
+        'binary-merge-conflict',
+        'net 1 assertion(s) removed',
+      );
+      expect(bothMoved.rejection).toContain('pkg/a.test.ts');
+      // Both sides moved and the resolution took MAIN's version, discarding
+      // the round's own edit. Main's delta is measured where main made it,
+      // so the round is charged for nothing -- the older model, which read
+      // main's contribution off a three-way splice, over-charged here.
+      acceptsWithoutCharge('binary-resolution-takes-main');
+      // Main's own delta is measured where MAIN made it, never spliced
+      // with the round's edits: a tip byte-identical to main's file has
+      // weakened nothing, however the round got there.
+      acceptsWithoutCharge('merge-takes-main-after-own-unskip');
+      // Credit is main's delta, not the merge's: a resolution that removed
+      // more than main did is charged for the difference...
+      rejectsWeakening(
+        'resolution-removes-more-than-main',
+        'net 1 assertion(s) removed',
+      );
+      // ...and one that moved the OPPOSITE way from main credits nothing,
+      // so the round answers for exactly what it removed.
+      rejectsWeakening('main-removes-merge-adds', 'net 1 assertion(s) removed');
+      // Main's ADDITIONS are never clamped by what the merge kept: a round
+      // that drops what main landed during the round removed coverage, in
+      // every spelling of "drops".
+      rejectsWeakening('merge-drops-mains-add', 'net 1 assertion(s) removed');
+      rejectsWeakening(
+        'delete-merge-drops-mains-test',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'delete-merge-skips-mains-test',
+        '1 pre-existing test registration(s) disabled',
+      );
+      // Main's REMOVALS are credited only as far as they landed: crediting
+      // the model here would swallow the round's own removal.
+      rejectsWeakening(
+        'merge-keeps-one-then-round-removes',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'merge-keeps-enabled-then-round-disables',
+        '1 pre-existing test registration(s) disabled',
+      );
+      // A merge that DISCARDED main's side adopted nothing from it, so
+      // nothing is subtracted: the round's own removal stands charged. Both
+      // lanes, because the model is what the tip took, not what an
+      // main's own side produced.
+      for (const shape of [
+        'strategy-ours-hole',
+        'strategy-ours-hole-binary',
+        // ...and the credit is clamped by the landed DELTA, not by byte
+        // equality with the branch's side: one comment line added while
+        // resolving must not restore the phantom.
+        'ours-hole-plus-comment',
+      ]) {
+        const discarded = rejectsWeakening(shape, 'net 1 assertion(s) removed');
+        expect(discarded.rejection).toContain('pkg/a.test.ts');
+      }
+      // The round dropped an assertion, main edited it, and the merge
+      // resolution took main's side: the tip carries the assertion.
+      acceptsWithoutCharge('merge-restore');
+      // A fast-forwarded main weakened the file; the round then renamed a
+      // symbol in it.
+      acceptsWithoutCharge('ff-ride-freight');
+    },
+    120000,
+  );
+
+  it("charges the round's own authorship on either side of a merge", () => {
+    // A conflict resolution that drops an assertion.
+    rejectsWeakening('merge-conflict-drop', 'net 1 assertion(s) removed');
+    // A weakening committed BEFORE the merge, with a post-merge decoy: the
+    // tip-based recount subtracts main's contribution and nothing else.
+    rejectsWeakening(
+      'premerge-weaken-postmerge-decoy',
+      'net 1 assertion(s) removed',
+    );
+    // After riding main forward, the round restored the pre-round bytes,
+    // dropping the assertion main had just landed.
+    rejectsWeakening('ff-ride-revert', 'net 1 assertion(s) removed');
+    // A merge resolution that discards a test main added during the round.
+    const r = rejectsWeakening('merge-introduced-discard', 'test file deleted');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+  }, 120000);
+
+  it('charges a deletion the round made even when a later merge of main resolved for it', () => {
+    // The round deleted the file, main edited it, and the merge kept the
+    // deletion: main moved nothing the round can hide behind.
+    rejectsWeakening('delete-then-merge-edit', 'test file deleted');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'attributes deletions, empty files, renames and octopus merges correctly',
+    () => {
+      // A file the round created, carried across a merge of main that
+      // never held it, then deleted: its own.
+      acceptsWithoutCharge('own-file-merge-delete');
+      // ...including when the merge commit TOUCHED that own file: main
+      // never held it, so no event may latch it into the baseline.
+      acceptsWithoutCharge('own-file-merge-edit-delete');
+      // A file an EARLIER round removed is not put back in the baseline by
+      // main merely still holding it, in either spelling.
+      acceptsWithoutCharge('deleted-earlier-round-then-merge');
+      acceptsWithoutCharge('renamed-earlier-round-then-merge');
+      // Main's contribution is counted once across add / delete / re-add,
+      // not once per merge that sees it: the events CHAIN, so each is
+      // measured against main's side at the previous one.
+      rejectsWeakening(
+        'main-adds-deletes-readds',
+        'net 1 assertion(s) removed',
+      );
+      // Main's deletion that the merge did NOT adopt contributes nothing:
+      // the round kept its own copy and answers for gutting it.
+      rejectsWeakening(
+        'main-deletes-round-keeps-weakened',
+        'net 1 assertion(s) removed',
+      );
+      // ...while main GROWING a path the pre-round ref lacks does put it
+      // back in the baseline, whatever an earlier round did to it.
+      rejectsWeakening(
+        'preround-absent-main-grows-round-guts',
+        'net 1 assertion(s) removed',
+      );
+      // ...and a pre-existing file main never held is still the baseline's,
+      // however the merge commit disposes of it.
+      const ownDropped = rejectsWeakening(
+        'preround-own-file-merge-drops',
+        'test file deleted',
+      );
+      expect(ownDropped.rejection).toContain('pkg/n.test.ts');
+      // A later merge cannot let the round's own copy stand in for main's
+      // side, however many merges have passed since main last held it.
+      rejectsWeakening(
+        'main-deletes-after-moving-then-merges-again',
+        'net 1 assertion(s) removed',
+      );
+      // Main appending a comment moves no SURFACE, so it does not put a
+      // file an earlier round deleted back into the baseline...
+      acceptsWithoutCharge('preround-absent-main-comments');
+      // ...but a file whose surface the instrument cannot read at all is
+      // judged by its bytes, or the deletion arm -- the only arm those
+      // shapes have -- could never fire again.
+      const py = rejectsWeakening(
+        'preround-absent-main-grows-python',
+        'test file deleted',
+      );
+      expect(py.rejection).toContain('pkg/test_x.py');
+      // ...and a path main ADDED is the baseline's however little it
+      // measures: the round discarding it is still the round's deletion.
+      const empty = rejectsWeakening(
+        'main-adds-zero-surface-round-drops',
+        'test file deleted',
+      );
+      expect(empty.rejection).toContain('pkg/e.test.ts');
+      // ...and the fallback keys on what was MEASURED, not on the
+      // extension: a `.test.ts` the parser reads nothing from measures
+      // exactly like a `.py`.
+      const zeroTs = rejectsWeakening(
+        'preround-absent-main-grows-zero-surface-ts',
+        'test file deleted',
+      );
+      expect(zeroTs.rejection).toContain('pkg/z.test.ts');
+      // Main moving only DISABLED registrations is no coverage and reaches
+      // no signal, so it does not put the file back in the baseline.
+      acceptsWithoutCharge('preround-absent-main-adds-skip');
+      // ...but a file that is NOTHING BUT disabled registrations is not
+      // compared that way at all: the comparison cannot see its only
+      // content, so it reaches the bytes and a rewrite counts.
+      const skipsOnly = rejectsWeakening(
+        'preround-absent-main-rewrites-skips-only',
+        'test file deleted',
+      );
+      expect(skipsOnly.rejection).toContain('pkg/s.test.ts');
+      // Each field the comparison reads is load-bearing on its own: the
+      // live assertion total, the declared total behind a guard, and the
+      // enabled-title multiset.
+      for (const [shape, path] of [
+        ['preround-absent-main-guards', 'pkg/g.test.ts'],
+        ['preround-absent-main-drops-behind-guard', 'pkg/d.test.ts'],
+        ['preround-absent-main-renames-test', 'pkg/r.test.ts'],
+      ]) {
+        const moved = rejectsWeakening(shape, 'test file deleted');
+        expect(moved.rejection).toContain(path);
+      }
+      // Two equally valid merge bases holding the SAME blob cannot change
+      // the verdict, so the file is measured...
+      acceptsWithoutCharge('crisscross-bases-agree');
+      // ...and two that disagree about it are refused rather than resolved
+      // by a tie-break git does not promise.
+      const crossed = runGate({ weaken: 'crisscross-bases-disagree' });
+      expect(crossed.status).toBe(1);
+      expect(crossed.rejection).toContain('test surface could not be measured');
+      expect(crossed.rejection).toContain('pkg/a.test.ts');
+      // ...including when they disagree about whether the file EXISTS,
+      // which an identity that could not tell "no blob" from "absent"
+      // would read as agreement.
+      const crossedPresence = runGate({
+        weaken: 'crisscross-bases-disagree-presence',
+      });
+      expect(crossedPresence.status).toBe(1);
+      expect(crossedPresence.rejection).toContain(
+        'test surface could not be measured',
+      );
+      expect(crossedPresence.rejection).toContain('pkg/a.test.ts');
+      // ...but a path MAIN also added during the round is the baseline's,
+      // and dropping it after the merge is the round's deletion.
+      const addAdd = rejectsWeakening(
+        'addadd-takes-main-then-drops',
+        'test file deleted',
+      );
+      expect(addAdd.rejection).toContain('pkg/x.test.ts');
+      // Main emptied the file, and the merge landed it: main's delta is
+      // main's.
+      acceptsWithoutCharge('merge-main-empties');
+      // Main replaced the file with a DIRECTORY of the same name: a tree
+      // at that path is not the file on either side, so the round that
+      // merely merged it is not charged for main's change.
+      acceptsWithoutCharge('main-directory-swap');
+      // Main's own rename is main's: it leaves the round's view without
+      // charging the round.
+      acceptsWithoutCharge('main-renames');
+      // The round deleted the file and the merge resolution kept main's
+      // version: main's own delta from the merge base is main's, and the
+      // round's deletion did not survive into the tip.
+      acceptsWithoutCharge('delete-then-merge-restores');
+      acceptsWithoutCharge('delete-then-merge-adds');
+      // Main's side arriving as the third parent of an octopus merge is
+      // still main's side.
+      acceptsWithoutCharge('octopus-freight');
+    },
+    120000,
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'measures a rename as the deletion of the old path',
+    () => {
+      // Following a name across the round's own renames is a non-goal: the
+      // old path is charged, the new one is a new file, and one ack entry
+      // naming the old path answers it — whatever shrank inside the
+      // destination rides into the report as that entry's reason.
+      const r = rejectsWeakening('rename-weaken', 'test file deleted');
+      expect(r.rejection).toContain('pkg/a.test.ts');
+      expect(r.rejection).not.toContain('pkg/b.test.ts');
+      // A pure rename is charged the same way, and costs the same one entry.
+      const pure = rejectsWeakening('rename-only', 'test file deleted');
+      expect(pure.rejection).toContain('pkg/a.test.ts');
+      const acked = runGate({
+        weaken: 'rename-only',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(acked.rejection).toBe('');
+      // Main's own moves under either name are still main's: a file main
+      // renamed away leaves the round's view uncharged, and a round that
+      // keeps its own copy is charged only for what it removed there.
+      const bothPaths = rejectsWeakening(
+        'main-renames-round-keeps-both',
+        'net 2 assertion(s) removed',
+      );
+      expect(bothPaths.rejection).toContain('pkg/a.test.ts');
+    },
+  );
+
+  it("measures a parentless commit in the round as the round's own authorship", () => {
+    // An orphan root grafted in as the first parent of the tip is not a
+    // history the walk cannot read: it is authorship, measured against
+    // the empty tree, and the tip's shrinkage is charged.
+    const r = rejectsWeakening('orphan-merge', 'net 1 assertion(s) removed');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it('loads the staged parser as CommonJS whatever is planted beside it', () => {
+    // A package.json with {"type":"module"} next to a `.js` parser would
+    // make Node load it as ESM and the counter crash into UNAVAILABLE; the
+    // `.cjs` staging is immune, so the round is still charged.
+    const r = rejectsWeakening('assert', 'net 1 assertion(s) removed', {
+      parserTypePlant: true,
+    });
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it('refuses an instrument that changed after staging', () => {
+    // The digests recorded at staging travel in expression context; a
+    // counter or parser that differs on disk when the gate runs is
+    // tampering, never a measurement.
+    for (const [knob, reason] of [
+      [{ tamperCounter: true }, 'modified after staging'],
+      [{ tamperParser: true }, 'modified after staging'],
+      // Digested at staging but gone now is tampering too, never a
+      // measurement that quietly went UNAVAILABLE.
+      [{ dropCounter: true }, 'removed after staging'],
+      [{ dropParser: true }, 'removed after staging'],
+      // ...and so is one that can no longer be read.
+      [{ unreadableCounter: true }, 'made unreadable after staging'],
+    ]) {
+      const r = runGate({ weaken: 'assert', ...knob });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.rejection).toContain(reason);
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge non-test files or non-JS test edits',
+    () => {
+      // Files under a test directory that are not tests by name are not
+      // enumerated: a README or a render helper is not a test deletion.
+      const r = acceptsWithoutCharge('non-test-file-delete');
+      expect(r.stdout).not.toContain('test file deleted');
+      // A non-JS test file measures a zero surface: edits are not judged,
+      // only deletions are.
+      acceptsWithoutCharge('python-edit');
+      // Snapshots are out of scope: an obsolete one removed by `vitest -u`
+      // is routine bookkeeping.
+      acceptsWithoutCharge('snapshot-delete');
+      // A typechange in the GROWING direction — a symlink the round
+      // replaces with a real test file — is not a deletion.
+      acceptsWithoutCharge('symlink-restored');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "declares reachability a non-goal: dead code is the runner's business",
+    () => {
+      // Pinned as the documented boundary of the instrument, not as a
+      // guarantee: assertions wrapped in dead code still DECLARE the same
+      // surface. The package test run and the bite check judge execution.
+      acceptsWithoutCharge('dead-code');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'judges deletions even when the measurement is unavailable',
+    () => {
+      // Without the staged counter (or parser) the measured signals are
+      // skipped, and the gate says so; a whole-file deletion or typechange
+      // is proven by the pre-round -> tip pair alone.
+      for (const knob of [{ noCounter: true }, { noParser: true }]) {
+        const open = runGate({ weaken: 'assert', ...knob });
+        expect(open.status).toBe(0);
+        expect(open.stdout).toContain(
+          'test-weakening measurement UNAVAILABLE this round',
+        );
+      }
+      const closed = runGate({ weaken: 'delete', noCounter: true });
+      expect(closed.status).toBe(1);
+      expect(closed.rejection).toContain('test file deleted');
+      const linked = runGate({ weaken: 'symlink', noCounter: true });
+      expect(linked.status).toBe(1);
+      expect(linked.rejection).toContain('test file deleted');
+      // Without the walk nothing proves main made a deletion, so every
+      // one is surfaced and acknowledged like any other.
+      const freight = runGate({
+        weaken: 'merge-delete-freight',
+        noCounter: true,
+      });
+      expect(freight.status).toBe(1);
+      expect(freight.rejection).toContain('test file deleted');
+      // An enumeration producer git refuses fails CLOSED: the absence of
+      // deletions cannot be certified from nothing.
+      const refused = runGate({ weaken: 'delete', gitDiffFails: true });
+      expect(refused.status).toBe(1);
+      expect(refused.outputs).toContain('retryable=true');
+      expect(refused.rejection).toContain('refusing to certify their absence');
+    },
+  );
+
+  it('stages the counter and its parser from the trusted base, digested and verified', () => {
+    // Staged in a step of its own AFTER npm ci installed the trusted
+    // lockfile (integrity-checked) and BEFORE the branch checkout: the
+    // counter from the trusted checkout, the parser as a `.cjs` copy of the
+    // typescript npm ci installed. Absent from base implies absent on disk
+    // (rm -rf first, tolerant cp); a counter without its parser fails the
+    // step; both digests travel in expression context to the gate, which
+    // verifies them before the counter executes.
+    const stageAt = workflow.indexOf(
+      "- name: 'Stage trusted test-surface instrument'",
+    );
+    expect(stageAt).toBeGreaterThan(
+      workflow.indexOf("- name: 'Install dependencies'"),
+    );
+    expect(stageAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
+    const stageStep = workflow.slice(
+      stageAt,
+      workflow.indexOf("- name: 'Download CLI bundle'", stageAt),
+    );
+    expect(stageStep).toContain("id: 'stage_surface'");
+    expect(stageStep).toContain(
+      'rm -rf "${RUNNER_TEMP}/count-test-surface.mjs" "${RUNNER_TEMP}/weaken-parser"',
+    );
+    expect(stageStep).toContain(
+      'cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true',
+    );
+    // Absent-from-base must imply absent-on-disk: the tolerant cp FAILS
+    // every pre-merge round, so a leftover a same-UID run planted at the
+    // staged path on this persistent host must not survive it and reach
+    // the gate as trusted content. rm -rf, not -f: the leftover can be a
+    // DIRECTORY, and rm -f's non-zero exit would abort this -e step before
+    // the tolerant cp — killing every later round on the host.
+    expect(
+      stageStep.indexOf('rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/count-test-surface.mjs'),
+    );
+    // Witness, not just text: run this step VERBATIM against a tree that
+    // lacks the script (the merge-base shape) with leftovers planted in
+    // both shapes. The step must survive, leave nothing behind at either
+    // staged path, and emit no digest — the gate's own absence guard then
+    // fails open (WEAKEN_MEASURED=false), covered by `noCounter` above.
+    const surfaceProbeDir = mkdtempSync(join(tmpdir(), 'ws-stage-probe-'));
+    const surfaceRunnerTemp = mkdtempSync(join(tmpdir(), 'ws-stage-temp-'));
+    try {
+      const surfaceOutput = join(surfaceProbeDir, 'github-output');
+      mkdirSync(join(surfaceProbeDir, '.github', 'scripts'), {
+        recursive: true,
+      });
+      const surfaceScript = stageStep
+        .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
+        .replace(/^ {10}/gm, '');
+      // GitHub runs a `run:` block under `bash --noprofile --norc -e -o
+      // pipefail`, and this step is unconditional: any command inside it
+      // that fails kills the whole review-address job for every round. The
+      // probe therefore runs it the same way, or the guards it exists to
+      // witness ("rm -f's non-zero exit would abort this -e step") are not
+      // being witnessed at all.
+      const runStage = () =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            surfaceScript,
+          ],
+          {
+            cwd: surfaceProbeDir,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_TEMP: surfaceRunnerTemp,
+              GITHUB_OUTPUT: surfaceOutput,
+            },
+          },
+        );
+      for (const asDirectory of [false, true]) {
+        rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+          force: true,
+        });
+        if (asDirectory) {
+          mkdirSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'));
+          writeFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs', 'payload'),
+            'ATTACKER_CONTROLLED\n',
+          );
+        } else {
+          writeFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+            'console.log("ATTACKER_CONTROLLED");\n',
+          );
+        }
+        mkdirSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          'module.exports = { ATTACKER_CONTROLLED: true };\n',
+        );
+        writeFileSync(surfaceOutput, '');
+        const surfaceProbe = runStage();
+        expect(surfaceProbe.status).toBe(0);
+        expect(
+          existsSync(join(surfaceRunnerTemp, 'count-test-surface.mjs')),
+        ).toBe(false);
+        expect(existsSync(join(surfaceRunnerTemp, 'weaken-parser'))).toBe(
+          false,
+        );
+        expect(readFileSync(surfaceOutput, 'utf8')).toBe('');
+      }
+      // ...and the branch that runs in PRODUCTION once this lands: the
+      // counter present, the parser where npm ci puts it. Text pins cannot
+      // see ordering or a newly-failing command inside that `if`, and this
+      // step is unconditional, so a break there kills every round. Run it —
+      // on hosts with the GNU coreutils the step's digest lines assume:
+      // they call sha256sum bare, and a macOS host without it (Homebrew
+      // ships gsha256sum) would fail the spawn for a reason the runner can
+      // never hit. The witness is the string pins PLUS the redacted-arm
+      // probes above on such a host.
+      if (hasSha256sum) {
+        writeFileSync(
+          join(surfaceProbeDir, '.github', 'scripts', 'count-test-surface.mjs'),
+          readFileSync('.github/scripts/count-test-surface.mjs'),
+        );
+        mkdirSync(join(surfaceProbeDir, 'node_modules', 'typescript', 'lib'), {
+          recursive: true,
+        });
+        const plantedParser =
+          '// planted typescript build\nmodule.exports={};\n';
+        writeFileSync(
+          join(
+            surfaceProbeDir,
+            'node_modules',
+            'typescript',
+            'lib',
+            'typescript.js',
+          ),
+          plantedParser,
+        );
+        rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+          force: true,
+        });
+        writeFileSync(surfaceOutput, '');
+        const staged = runStage();
+        expect(staged.stderr).toBe('');
+        expect(staged.status).toBe(0);
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+            'utf8',
+          ),
+        ).toBe(readFileSync('.github/scripts/count-test-surface.mjs', 'utf8'));
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+            'utf8',
+          ),
+        ).toBe(plantedParser);
+        // The digests the gate verifies against are of the bytes that were
+        // actually staged, and BOTH reach expression context.
+        const digestOf = (file) =>
+          createHash('sha256').update(readFileSync(file)).digest('hex');
+        const emitted = readFileSync(surfaceOutput, 'utf8');
+        expect(emitted).toContain(
+          `weaken_counter_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+          )}\n`,
+        );
+        expect(emitted).toContain(
+          `weaken_parser_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          )}\n`,
+        );
+      }
+    } finally {
+      rmSync(surfaceProbeDir, { recursive: true, force: true });
+      rmSync(surfaceRunnerTemp, { recursive: true, force: true });
+    }
+    // The parser copy is NOT tolerant: a counter without its parser is a
+    // staging failure, not a round that quietly measures nothing.
+    expect(stageStep).toContain(
+      'cp node_modules/typescript/lib/typescript.js "${RUNNER_TEMP}/weaken-parser/typescript.cjs"\n',
+    );
+    expect(stageStep).not.toContain('npm install');
+    expect(stageStep).toContain(
+      'weaken_counter_sha256=$(sha256sum "${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+    expect(stageStep).toContain(
+      'weaken_parser_sha256=$(sha256sum "${RUNNER_TEMP}/weaken-parser/typescript.cjs"',
+    );
+    for (const name of ['WEAKEN_COUNTER_SHA256', 'WEAKEN_PARSER_SHA256']) {
+      expect(
+        workflow.match(
+          new RegExp(
+            `${name}: '\\$\\{\\{ steps\\.stage_surface\\.outputs\\.${name.toLowerCase()} \\}\\}'`,
+            'g',
+          ),
+        ) ?? [],
+      ).toHaveLength(2);
+      expect(
+        workflow.match(new RegExp(`${name}="\\$\\{${name}:-\\}" \\\\`, 'g')) ??
+          [],
+      ).toHaveLength(2);
+    }
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'weaken_trusted "${WEAKEN_COUNTER}" "${WEAKEN_COUNTER_SHA256:-}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'weaken_trusted "${WEAKEN_PARSER}" "${WEAKEN_PARSER_SHA256:-}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_PARSER="${RUNNER_TEMP}/weaken-parser/typescript.cjs"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_PARSER_FILE="${WEAKEN_PARSER}" node "${WEAKEN_COUNTER}" measure',
+    );
+    // The landed clamp's baseline is the branch's own side at the merge
+    // (R27-20): the manifest carries it as `branch`, emitted as
+    // weaken_emit's fifth field. A dropped arm falls back to the merge
+    // base silently and the wrong-attribution bug returns — pin the
+    // producer/consumer pair together.
+    expect(reviewVerificationRunner).toContain(
+      "printf '%s\\n%s\\n%s\\n%s\\n%s\\n'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      'branch_side="$(sed -n 5p <<< "${weaken_pair}")"',
+    );
+    expect(reviewVerificationRunner).toContain('branch: (if $bs == ""');
+    // R32-2: the ack remedy must not lean on the rejection document's
+    // tail window for the file list — a long list is cut from the front
+    // there, and the agent would ack a list it never saw. The complete
+    // measured list rides in its own workdir file.
+    expect(reviewVerificationRunner).toContain(
+      '> "${WORKDIR}/weaken-missing.txt"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'the complete list is <workdir>/weaken-missing.txt',
+    );
+  });
+});
+
+describe('count-test-surface: the declared test surface of a test file', () => {
+  // The instrument the test-weakening gate rests on. `count` is exercised
+  // in-process on a table of shapes (each row names what the parser must
+  // see through), and the CLI contract once through a real spawn; the
+  // attribution algebra of `measure` is exercised on blob files directly.
+  const surface = (source, path = 'a.test.ts') => {
+    const r = countTestSurface(source.join('\n'), path);
+    return { a: r.assertions, e: r.enabled, d: r.disabled };
+  };
+
+  it.each([
+    [
+      'counts a called matcher chain once, however it is chained',
+      [
+        "it('a', () => {",
+        '  expect(one()).toBe(1);',
+        '  expect(x).not.toBe(1);',
+        '  expect(x).resolves.toEqual({ a: 1 });',
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts awaited, returned and arrow-bodied assertions',
+      [
+        "it('a', async () => {",
+        '  await expect(p).rejects.toThrow();',
+        '  await vi.waitFor(() => expect(x).toBe(1));',
+        '  return expect(q).resolves.toBe(2);',
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts expect.soft/poll with a matcher and expect.unreachable',
+      [
+        "it('a', () => {",
+        '  expect.soft(x).toBe(1);',
+        '  expect.poll(() => y).toBe(2);',
+        "  expect.unreachable('never');",
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts assert() and assert.member() but not an uncalled member',
+      [
+        "it('a', () => {",
+        '  assert(x);',
+        '  assert.equal(a, b);',
+        '  const eq = assert.deepEqual;',
+        '  console.assert(x);',
+        '});',
+      ],
+      { a: 2, e: 1, d: [] },
+    ],
+    [
+      'counts a supertest .expect( member call once per chain',
+      [
+        "it('a', async () => {",
+        "  await request(app).get('/').expect(200).expect('x', /y/);",
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'does not count a bare expect(), a property-accessed matcher, or an argument',
+      [
+        "it('a', () => {",
+        '  expect(one());',
+        '  const dropped = expect(two()).toBe;',
+        '  expect.soft(x);',
+        '  fn(expect.anything(), expect.objectContaining({}));',
+        '});',
+      ],
+      { a: 0, e: 1, d: [] },
+    ],
+    [
+      'sees through comments, strings, regex literals and templates',
+      [
+        "it('a', () => {",
+        '  /* expect(one()).toBe(1); */',
+        '  // expect(two()).toBe(2);',
+        "  const s = 'expect(x).toBe(1)';",
+        '  const r = /expect\\(x\\)\\.toBe\\(1\\)/;',
+        '  const t = `expect(${s}).toBe(1)`;',
+        '  expect(three()).toBe(3);',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'sees an assertion formatted across lines',
+      [
+        "it('a', () => {",
+        '  expect(',
+        '    one(),',
+        '  ).toBe(',
+        '    1,',
+        '  );',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'sees through JSX, in both directions',
+      [
+        "it('a', () => {",
+        "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+        '  const html = <div>expect(two()).toBe(2)</div>;',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+      'a.test.tsx',
+    ],
+    [
+      'reads every collector spelling of a disabled registration',
+      [
+        "it.skip('a', fn);",
+        "test.todo('b');",
+        "describe.concurrent.skip('c', fn);",
+        "it.skip.each([1])('d %s', fn);",
+        "it['skip']('e', fn);",
+        "it['\\x73kip']('f', fn);",
+        "it.\\u0073kip('g', fn);",
+        "it?.skip('h', fn);",
+        'it',
+        "  .skip('i', fn);",
+        "it.skip.each`table`('j', fn);",
+        "xit('k', fn);",
+        "xdescribe('l', fn);",
+        "suite.todo('m', fn);",
+      ],
+      {
+        a: 0,
+        e: 0,
+        d: [
+          'test:a',
+          'test:b',
+          'describe:c',
+          'test:d %s',
+          'test:e',
+          'test:f',
+          'test:g',
+          'test:h',
+          'test:i',
+          'test:j',
+          'test:k',
+          'describe:l',
+          'describe:m',
+        ],
+      },
+    ],
+    [
+      'reads a literal skipIf/runIf and a literal options object, not a condition',
+      [
+        "it.skipIf(true)('a', fn);",
+        "it.runIf(false)('b', fn);",
+        "it('c', { skip: true }, fn);",
+        "it('d', { 'todo': true }, fn);",
+        "it.each(getCases())('e', { skip: true }, fn);",
+        "it.skipIf(process.platform === 'win32')('f', fn);",
+        "it.runIf(cond)('g', fn);",
+        "it('h', { skip: cond }, fn);",
+        "it('i', opts, fn);",
+      ],
+      {
+        a: 0,
+        e: 4,
+        d: ['test:a', 'test:b', 'test:c', 'test:d', 'test:e'],
+      },
+    ],
+    [
+      'reads a body-level unconditional skip, not the condition-valued guard',
+      [
+        "it('a', (ctx) => { ctx.skip(); expect(x).toBe(1); });",
+        "it('b', () => { skip('reason'); });",
+        "it('c', function () { this.skip(true); });",
+        "it('d', () => { skip(process.platform === 'win32', 'reason'); expect(x).toBe(1); });",
+        "it('e', () => { skip(cond); });",
+      ],
+      { a: 1, e: 2, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'measures what a conditional guard shelters; drops what an unconditional return shelters',
+      [
+        // The environment-guard idiom: a CONDITIONAL return silences
+        // nothing — the runner may still reach the assertions, and the
+        // header delegates the condition to the runner (R27-21: HEAD's
+        // own contract.test.ts measured {assertions: 0} from exactly
+        // this shape).
+        "it('a', () => {",
+        '  if (!process.env.X) {',
+        '    return;',
+        '  }',
+        '  expect(x).toBe(1);',
+        '});',
+        "it('b', () => { expect(x).toBe(1); return; });",
+        // …while an UNCONDITIONAL one still reports the test PASSED
+        // having asserted nothing, whatever constant it carries.
+        "it('c', () => { return; expect(x).toBe(1); });",
+        "it('d', () => { return 1; expect(x).toBe(1); });",
+        "it('e', () => { const h = (m) => { if (m) { return; } }; expect(x).toBe(1); });",
+        "it('f', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 4, e: 6, d: [] },
+    ],
+    [
+      'reads a truthy options constant and the fails option, not a condition',
+      [
+        "it('a', { skip: 'flaky under load' }, fn);",
+        "it('b', { fails: true }, fn);",
+        "it('c', { skip: cond }, fn);",
+        "it('d', { skip: false }, fn);",
+      ],
+      { a: 0, e: 2, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'propagates a disabled describe to everything registered inside it',
+      [
+        "describe.skip('new wrapper', () => {",
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+        "describe('d', { skip: true }, () => { it('c', fn); });",
+        "it('e', fn);",
+      ],
+      {
+        a: 0,
+        e: 1,
+        d: ['describe:new wrapper', 'test:a', 'test:b', 'describe:d', 'test:c'],
+      },
+    ],
+    [
+      'folds constants in skipIf/runIf and computed collector names',
+      [
+        "it.skipIf(!!true)('a', fn);",
+        "it.runIf(!true)('b', fn);",
+        "it.skipIf(!false)('c', fn);",
+        "it['ski' + 'p']('d', fn);",
+        "it.skipIf(!cond)('e', fn);",
+        "it[S]('f', fn);",
+      ],
+      { a: 0, e: 2, d: ['test:a', 'test:b', 'test:c', 'test:d'] },
+    ],
+    [
+      'reads a constant through a type-only wrapper',
+      [
+        "it.skipIf(true as boolean)('a', fn);",
+        "it.runIf(false as boolean)('b', fn);",
+        "it('c', { skip: true } as const, fn);",
+        "it('d', { skip: (true as boolean) }, fn);",
+        "it.skipIf(<boolean>true)('e', fn);",
+        "it.skipIf(true!)('f', fn);",
+        "it.skipIf(true satisfies boolean)('g', fn);",
+        // A wrapper around a runtime value stays a condition.
+        "it.skipIf(process.env.CI as boolean)('h', fn);",
+      ],
+      {
+        a: 0,
+        e: 1,
+        d: [
+          'test:a',
+          'test:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:g',
+        ],
+      },
+    ],
+    [
+      'folds a comparison, equality or logical operator of two constants',
+      [
+        "it.skipIf(1 === 1)('a', fn);",
+        "describe.skipIf(2 > 1)('b', fn);",
+        "it.skipIf('x' !== '')('c', fn);",
+        "it.skipIf(1 && true)('d', fn);",
+        "it.runIf(1 > 2)('e', fn);",
+        "it('f', { skip: 1 === 1 }, fn);",
+        // Placeholder folds and bigint arithmetic stay opaque to
+        // comparison: `{} === {}` is false at runtime, `1n === 1` too.
+        "it.skipIf({} === {})('g', fn);",
+        "it.skipIf(1n === 1)('h', fn);",
+        "it['' || 'skip']('i', fn);",
+      ],
+      {
+        a: 0,
+        e: 2,
+        d: [
+          'test:a',
+          'describe:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:i',
+        ],
+      },
+    ],
+    [
+      "applies the runner's own rule to body skips: only `false` keeps the test",
+      [
+        "it('a', (ctx) => { ctx.skip(null); });",
+        "it('b', (ctx) => { ctx.skip(0); });",
+        "it('c', (ctx) => { ctx.skip(undefined); });",
+        "it('d', (ctx) => { ctx.skip(false); });",
+        "it('e', (ctx) => { if (cond) ctx.skip(); expect(x).toBe(1); });",
+        "it('f', (ctx) => { cond && ctx.skip(); });",
+        "it('g', (ctx) => { cond ? ctx.skip() : run(); });",
+      ],
+      { a: 1, e: 4, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'measures the assertions behind a conditional return, whatever it yields',
+      [
+        // R27-27: the silencer no longer keys on the return's VALUE —
+        // sync and async spellings of the same conditional guard read
+        // alike, and both keep the sheltered assertions.
+        "it('a', () => { if (x) { return undefined; } expect(x).toBe(1); });",
+        "it('b', () => { if (x) return null; expect(x).toBe(1); });",
+        "it('c', () => { if (x) return void 0; expect(x).toBe(1); });",
+        "it('d', () => { if (x) return 1; expect(x).toBe(1); });",
+        "it('e', async () => { if (x) return Promise.resolve(); expect(x).toBe(1); });",
+        "it('f', async () => { if (x) return await go(); expect(x).toBe(1); });",
+        // ...as is one that follows every assertion, or one inside a
+        // nested function the test merely defines.
+        "it('g', () => { expect(x).toBe(1); return; });",
+        "it('h', () => { const h = () => { return; }; expect(x).toBe(1); });",
+      ],
+      { a: 8, e: 8, d: [] },
+    ],
+    [
+      'counts an assertion chain used as a variable initializer',
+      [
+        "it('a', async () => {",
+        "  const res = await request(app).get('/').expect(202);",
+        '  const shape = expect.objectContaining({});',
+        '  const e = expect;',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'keeps a describe out of the enabled-test count',
+      ["describe('d', () => { it('a', fn); });", "it('b', fn);"],
+      { a: 0, e: 2, d: [] },
+    ],
+    [
+      'reads a file-scope body skip as disabling the whole file',
+      [
+        'beforeEach((ctx) => { ctx.skip(); });',
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('b', () => { expect(y).toBe(2); });",
+      ],
+      { a: 0, e: 0, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'keeps a conditional hook skip, a helper and a plain callback out of it',
+      [
+        'beforeEach((ctx) => { if (cond) ctx.skip(); });',
+        'const helper = (ctx) => ctx.skip();',
+        // A callback handed to something that is NOT a collector hook says
+        // nothing about whether the file's tests run — at file scope...
+        'const cases = table.map((n) => makeCase(n, (ctx) => ctx.skip()));',
+        "it('a', () => { expect(x).toBe(1); });",
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      '...and the same boundary one level down, inside a describe',
+      [
+        "describe('d', () => {",
+        '  const cases = table.map((n) => makeCase(n, (ctx) => ctx.skip()));',
+        "  it('a', () => { expect(x).toBe(1); });",
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'reads collector names by their own entries, never the prototype',
+      [
+        // `'toString' in {}` is true through the prototype chain: a helper
+        // named after any Object.prototype member must stay a helper.
+        'const toString = (cb) => cb();',
+        "it('a', () => { expect(one()).toBe(1); });",
+        'toString(() => { expect(two()).toBe(2); });',
+        'valueOf(() => { expect(three()).toBe(3); });',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'folds every constant shape a return or a collector option can carry',
+      [
+        // A CONDITIONAL return silences nothing whatever it yields
+        // (R27-21) — the constant folding is exercised on the collector
+        // spellings below, where it decides enabled state.
+        "it('a', () => { if (!r) return -1; expect(x).toBe(1); });",
+        "it('b', () => { if (!r) return {}; expect(x).toBe(1); });",
+        "it('c', () => { if (!r) return []; expect(x).toBe(1); });",
+        "it('d', () => { if (!r) return 1n; expect(x).toBe(1); });",
+        "it('e', () => { if (!r) return NaN; expect(x).toBe(1); });",
+        // A value the runner may AWAIT is ordinary control flow.
+        "it('f', () => { if (!r) return go(); expect(x).toBe(1); });",
+        "it.skipIf(-1)('g', fn);",
+        "it.runIf(-0)('h', fn);",
+        "it('i', { skip: -1 }, fn);",
+      ],
+      { a: 6, e: 6, d: ['test:g', 'test:h', 'test:i'] },
+    ],
+    [
+      'measures a conditional constant return through wrappers and templates alike',
+      [
+        // The wrappers and template spellings fold as constants, but a
+        // CONDITIONAL return silences nothing either way (R27-21) — the
+        // fold decides the UNCONDITIONAL arms elsewhere in this table.
+        "it('a', () => { if (!r) return undefined as void; expect(x).toBe(1); });",
+        "it('b', () => { if (!r) return `full suite only: ${process.env.QWEN_FULL}`; expect(x).toBe(1); });",
+        "it('c', () => { if (!r) return `reason`; expect(x).toBe(1); });",
+        // A possibly-thenable return stays ordinary control flow.
+        "it('d', () => { if (!r) return go(); expect(x).toBe(1); });",
+        "it('e', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 5, e: 5, d: [] },
+    ],
+    [
+      'measures what a conditional return in a describe body or a hook shelters',
+      [
+        "describe('d', () => {",
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        '  expect(configured()).toBe(1);',
+        '});',
+        'beforeEach(() => {',
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        '  expect(setupOk()).toBe(true);',
+        '});',
+        "it('a', () => { expect(x).toBe(1); });",
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'reads an UNCONDITIONAL early return in a DESCRIBE body as silencing what follows',
+      [
+        "describe('d', () => {",
+        "  it('smoke', () => { expect(t).toBe(1); });",
+        '  if (true) {',
+        '    return;',
+        '  }',
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+      ],
+      { a: 1, e: 1, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'lets a CONDITIONAL early return in a DESCRIBE body keep every registration',
+      [
+        "describe('d', () => {",
+        "  it('smoke', () => { expect(t).toBe(1); });",
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+      ],
+      { a: 2, e: 3, d: [] },
+    ],
+    [
+      'shelters nothing extra in a test that is already disabled',
+      [
+        "it.skip('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+        "it('b', () => { if (!s) { return; } expect(y).toBe(1); });",
+        "it('c', () => { expect(z).toBe(1); });",
+      ],
+      { a: 2, e: 2, d: ['test:a'] },
+    ],
+    [
+      'reads a skip in a catch clause as the setup-failure guard it is',
+      [
+        "it('a', (ctx) => {",
+        '  try { connect(); } catch { ctx.skip(); }',
+        '  expect(x).toBe(1);',
+        '});',
+        "it('b', (ctx) => {",
+        '  try { connect(); } catch (e) { ctx.skip(); }',
+        '  expect(y).toBe(2);',
+        '});',
+      ],
+      { a: 2, e: 2, d: [] },
+    ],
+    [
+      'reads a skip that cannot be escaped as a disable, however wrapped',
+      [
+        // The catch fires exactly when the assertion fails: the test can
+        // never report a failure, so the registration is disabled — the
+        // setup-failure guard this is one token away from.
+        "it('a', (ctx) => { try { expect(x).toBe(1); } catch { ctx.skip(); } });",
+        "it('b', (ctx) => { if (true) ctx.skip(); expect(x).toBe(1); });",
+        "it('c', (ctx) => { if (1 === 1) { ctx.skip(); } expect(x).toBe(1); });",
+      ],
+      { a: 0, e: 0, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'reads the constant-condition arms exactly as the runner reads them',
+      [
+        // Arm-aware (R27-1's other direction): the arm a constant takes
+        // is unconditional, the arm it skips is dead code that disables
+        // nothing — and an undecidable condition stays the runner's.
+        "it('a', (ctx) => { if (false) { ctx.skip(); } });",
+        "it('b', (ctx) => { if (false) {} else { ctx.skip(); } });",
+        "it('c', (ctx) => { true && ctx.skip(); });",
+        "it('d', (ctx) => { false && ctx.skip(); });",
+        "it('e', (ctx) => { if (cond) ctx.skip(); });",
+        "it('f', (ctx) => { true ? ctx.skip() : noop(); });",
+        "it('g', (ctx) => { false ? noop() : ctx.skip(); });",
+      ],
+      { a: 0, e: 3, d: ['test:b', 'test:c', 'test:f', 'test:g'] },
+    ],
+    [
+      'folds arithmetic in a collector position with JavaScript semantics',
+      [
+        // Every operator arm is pinned DISCRIMINATIVELY: dropping one
+        // flips its row between disabled and enabled.
+        "it.skipIf(6 * 7 === 42)('a', fn);",
+        "it.runIf(10 % 3)('b', fn);",
+        "it('c', { skip: 2 ** 10 > 1000 }, fn);",
+        "it.skipIf(8 - 8)('d', fn);",
+        "it.skipIf(8 - 7)('d2', fn);",
+        "it.skipIf(10 % 3)('x', fn);",
+        // A placeholder or a bigint never enters the fold.
+        "it.skipIf([] * 2)('e', fn);",
+        "it.skipIf(2n * 2n > 1n)('f', fn);",
+      ],
+      { a: 0, e: 4, d: ['test:a', 'test:c', 'test:d2', 'test:x'] },
+    ],
+    [
+      "reads Playwright's fixme as the disabled registration it is",
+      ["test.fixme('a', fn);", "it('b', fn);"],
+      { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'books the Playwright-namespaced API by kind, and utilities as nothing',
+      [
+        // R30-2: `test.describe` is a suite (its disabled state
+        // propagates), `test.beforeEach` is a hook, and the utility
+        // members register no phantom test.
+        "test.describe('a', () => { it('x', () => { expect(one()).toBe(1); }); });",
+        "test.describe.skip('b', () => { it('y', fn); });",
+        'test.beforeEach(() => { expect(setup()).toBe(true); });',
+        "test.step('logged step', fn);",
+        'test.use({ headless: true });',
+      ],
+      { a: 2, e: 1, d: ['describe:b', 'test:y'] },
+    ],
+    [
+      'never folds an operator over a placeholder value',
+      [
+        // R32-1: the object fold carries truthiness, not a value —
+        // `-[]` is -0 (falsy) at runtime, never the placeholder's -1.
+        "it.skipIf(+{})('a', fn);",
+        "it.runIf(-[])('b', fn);",
+        "it('c', { skip: +[] }, fn);",
+        "it('d', { skip: -1 }, fn);",
+      ],
+      { a: 0, e: 3, d: ['test:d'] },
+    ],
+    [
+      'measures a registration through a callback handed by name',
+      [
+        'function body(ctx) {',
+        '  ctx.skip();',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it('b', fn);",
+      ],
+      { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'measures the named-body shapes exactly like their inline spellings',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it.skip('a', body);",
+        "it('a', () => {});",
+        'function suite() {',
+        "  it('b', () => { expect(2).toBe(2); });",
+        '}',
+        "describe.skip('c', suite);",
+      ],
+      { a: 0, e: 1, d: ['test:a', 'test:b', 'describe:c'] },
+    ],
+    [
+      'keeps a body shared with an enabled registration live',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it.skip('b', body);",
+      ],
+      { a: 1, e: 1, d: ['test:b'] },
+    ],
+    [
+      'reads a collector factory binding as no registration at all',
+      [
+        "const posixOnly = it.skipIf(process.platform !== 'linux');",
+        'const rows = it.each(getCases());',
+        'const myTest = test.extend({});',
+        "it('a', fn);",
+      ],
+      { a: 0, e: 1, d: [] },
+    ],
+    [
+      'sees a chain through a type-only wrapper',
+      [
+        "(it as any).skip('a', () => { expect(1).toBe(1); });",
+        "(it.skip as any)('b', () => { expect(1).toBe(1); });",
+        "it('c', (ctx) => { (ctx as any).skip(); expect(1).toBe(1); });",
+        "it('d', () => { (expect(1) as any).toBe(1); });",
+        "(describe as any).skip('e', () => { it('f', () => { expect(1).toBe(1); }); });",
+      ],
+      // test:d stays enabled — its body only ASSERTS through a wrapper.
+      { a: 1, e: 1, d: ['test:a', 'test:b', 'test:c', 'describe:e', 'test:f'] },
+    ],
+    [
+      'counts assertions only where the runner would execute them',
+      [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('a', () => {});",
+        "it('b', () => { expect(z).toBe(3); });",
+        'beforeEach(() => { expect(setup).toBe(true); });',
+      ],
+      { a: 2, e: 2, d: ['test:a'] },
+    ],
+    [
+      'counts a declared surface, not a reachable one (documented non-goal)',
+      [
+        "it('a', () => { if (false) { expect(x).toBe(1); } });",
+        "it('b', () => { const unused = () => expect(x).toBe(1); });",
+      ],
+      { a: 2, e: 2, d: [] },
+    ],
+    [
+      'measures a file that does not parse cleanly',
+      ["it('a', () => { expect(x).toBe(1) ; }} ) garbage <<<"],
+      { a: 1, e: 1, d: [] },
+    ],
+  ])('%s', (_title, source, expected, path) => {
+    expect(surface(source, path)).toEqual(expected);
+  });
+
+  it('resolves a registration callback bound by name, exactly like the inline spelling', () => {
+    // The runner receives the SAME function whether the registration
+    // hands it over inline or by name, so the two spellings must measure
+    // alike: the body's skip reaches the registration, its assertions
+    // leave the surface, and a disabled describe's body propagates.
+    expect(
+      countTestSurface(
+        [
+          'function body(ctx) {',
+          '  ctx.skip();',
+          '  expect(1).toBe(1);',
+          '}',
+          "it('x', body);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        [
+          'function suite() {',
+          "  it('a', () => { expect(1).toBe(1); });",
+          '}',
+          "describe.skip('d', suite);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
+    // The inline spellings these must agree with.
+    expect(
+      countTestSurface(
+        "it('x', (ctx) => { ctx.skip(); expect(1).toBe(1); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        "describe.skip('d', () => { it('a', () => { expect(1).toBe(1); }); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
+  });
+
+  it('measures every dialect the gate selects, not only .ts', () => {
+    // The pathspec selects `*.test.*` and `*.spec.*` whatever the
+    // extension, and the repository tracks hundreds of `*.test.js` files.
+    // A dialect missing from the parser's table measures ZERO — which the
+    // gate reads as a file with no surface to weaken, so gutting one is
+    // free. Every extension the table claims must therefore be exercised.
+    const body = [
+      "it('a', () => {",
+      '  expect(one()).toBe(1);',
+      '  expect(two()).toBe(2);',
+      '});',
+      "it.skip('b', () => {",
+      '  expect(three()).toBe(3);',
+      '});',
+    ];
+    for (const ext of [
+      '.ts',
+      '.mts',
+      '.cts',
+      '.tsx',
+      '.js',
+      '.mjs',
+      '.cjs',
+      '.jsx',
+    ]) {
+      expect({ ext, ...surface(body, `a.test${ext}`) }).toEqual({
+        ext,
+        a: 2,
+        e: 1,
+        d: ['test:b'],
+      });
+    }
+  });
+
+  it('measures a zero surface for a non-JS test file', () => {
+    expect(
+      countTestSurface('def test_x():\n    assert 1\n', 'test_x.py'),
+    ).toEqual({
+      language: 'other',
+      assertions: 0,
+      declared: 0,
+      enabled: 0,
+      disabled: [],
+      enabledTitles: [],
+    });
+  });
+
+  it('serves the count and measure modes over the CLI the gate uses', () => {
+    const counter = resolve('.github/scripts/count-test-surface.mjs');
+    const counted = spawnSync('node', [counter, 'count', 'pkg/a.test.ts'], {
+      input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+      encoding: 'utf8',
+    });
+    expect(counted.status).toBe(0);
+    expect(JSON.parse(counted.stdout)).toMatchObject({
+      language: 'ts',
+      assertions: 1,
+      enabled: 1,
+    });
+    // The gate runs the counter from a STAGED copy under RUNNER_TEMP, which
+    // on macOS is reached through /var -> /private/var. The CLI must fire
+    // when this file is the program however its path was spelled — a
+    // main-module guard comparing argv to the module URL literally would
+    // read as "imported", print nothing, and the gate would report every
+    // file unmeasurable.
+    const linkDir = mkdtempSync(join(tmpdir(), 'surface-link-'));
+    try {
+      const linked = join(linkDir, 'count-test-surface.mjs');
+      symlinkSync(counter, linked);
+      const viaLink = spawnSync('node', [linked, 'count', 'pkg/a.test.ts'], {
+        input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+        encoding: 'utf8',
+      });
+      expect(viaLink.status).toBe(0);
+      expect(JSON.parse(viaLink.stdout)).toMatchObject({ assertions: 1 });
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+    // ...and IMPORTING it must not run the CLI against the importer's argv:
+    // a positional the importing program owns would otherwise land in the
+    // unknown-mode arm and take that process down with exit 2.
+    const imported = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `await import(${JSON.stringify(pathToFileURL(counter).href)}); console.log('IMPORT_OK');`,
+        'measure',
+        'not-a-manifest.json',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(imported.stderr).toBe('');
+    expect(imported.status).toBe(0);
+    expect(imported.stdout).toContain('IMPORT_OK');
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const manifest = join(dir, 'm.json');
+      writeFileSync(
+        manifest,
+        JSON.stringify({
+          path: 'pkg/a.test.ts',
+          tip: blob('tip', ["it('a', () => { expect(x).toBe(1); });"]),
+          pre: blob('pre', [
+            "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+          ]),
+          events: [],
+        }),
+      );
+      const measured = spawnSync('node', [counter, 'measure', manifest], {
+        encoding: 'utf8',
+      });
+      expect(measured.status).toBe(0);
+      expect(JSON.parse(measured.stdout)).toEqual({
+        language: 'ts',
+        assertions: -1,
+        enabled: 0,
+        newlyDisabled: [],
+        baselinePresent: true,
+      });
+      const unknown = spawnSync('node', [counter, 'bogus'], {
+        encoding: 'utf8',
+      });
+      expect(unknown.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("subtracts main's contribution across events, and only that", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const two = blob('two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const one = blob('one', ["it('a', () => { expect(x).toBe(1); });"]);
+      const oneSkipped = blob('one-skipped', [
+        "it.skip('a', () => { expect(x).toBe(1); });",
+      ]);
+      const twoPlusB = blob('two-b', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it.todo('b');",
+      ]);
+      const m = (o) => measureTestSurface({ path: 'pkg/a.test.ts', ...o });
+      // Main removed the assertion (the event carries it); the round only
+      // merged: nothing to charge.
+      expect(
+        m({ tip: one, pre: two, events: [{ before: two, after: one }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: true });
+      // Main added the file; the round dropped it: the baseline holds the
+      // file and the round removed its whole surface.
+      expect(
+        m({ tip: null, pre: null, events: [{ before: null, after: two }] }),
+      ).toMatchObject({ assertions: -2, baselinePresent: true });
+      // Main deleted the file; the round adopted it: no baseline to weaken.
+      expect(
+        m({ tip: null, pre: two, events: [{ before: two, after: null }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: false });
+      // The round disabled `a`; main's later event did not touch its state.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: oneSkipped, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: -1, newlyDisabled: ['test:a'] });
+      // Main itself disabled `a` across the event: not the round's doing.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: one, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: 0, newlyDisabled: [] });
+      // A todo registration that is new at the tip is the round's own.
+      expect(m({ tip: twoPlusB, pre: two, events: [] })).toMatchObject({
+        enabled: 0,
+        newlyDisabled: [],
+      });
+      // Main disabled `a` and re-enabled it later: the shield does not
+      // outlive the re-enable, so the round disabling `a` is charged.
+      const aSkipped = blob('a-skipped', [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const aSkippedPlusB = blob('a-skipped-b', [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+      ]);
+      expect(
+        m({
+          tip: aSkippedPlusB,
+          pre: two,
+          events: [
+            { before: two, after: aSkipped },
+            { before: aSkipped, after: two },
+          ],
+        }),
+      ).toMatchObject({ newlyDisabled: ['test:a'] });
+      // A registration the round added before a merge of main is carried
+      // across the event on both sides: it never joins the baseline, so
+      // disabling it later is the round's own business.
+      const twoB = blob('two-b-enabled', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+      ]);
+      const twoBSkipped = blob('two-b-skipped', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it.skip('b', () => { expect(z).toBe(3); });",
+      ]);
+      const twoBMainTouched = blob('two-b-main-touched', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+        '// main touched this file',
+      ]);
+      expect(
+        m({
+          tip: twoBSkipped,
+          pre: two,
+          events: [{ before: twoB, after: twoBMainTouched }],
+        }),
+      ).toMatchObject({ newlyDisabled: [], enabled: 0 });
+      // ...while a `b` that main itself landed is baseline.
+      expect(
+        m({
+          tip: twoBSkipped,
+          pre: two,
+          events: [{ before: two, after: twoB }],
+        }),
+      ).toMatchObject({ newlyDisabled: ['test:b'], enabled: -1 });
+      // Duplicate titles are multisets: disabling one of two `a`s is
+      // charged once; adding a third, disabled `a` beside two enabled
+      // ones charges nothing.
+      const twoAs = blob('two-as', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('a', () => { expect(y).toBe(2); });",
+      ]);
+      const oneOfTwoAsSkipped = blob('two-as-one-skipped', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it.skip('a', () => { expect(y).toBe(2); });",
+      ]);
+      const twoAsPlusTodo = blob('two-as-todo', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('a', () => { expect(y).toBe(2); });",
+        "it.todo('a');",
+      ]);
+      expect(
+        m({ tip: oneOfTwoAsSkipped, pre: twoAs, events: [] }),
+      ).toMatchObject({ newlyDisabled: ['test:a'] });
+      expect(m({ tip: twoAsPlusTodo, pre: twoAs, events: [] })).toMatchObject({
+        newlyDisabled: [],
+      });
+      // An UNCONDITIONAL early return the round plants in front of
+      // existing assertions measures as their removal, while a brand-new
+      // test carrying its own guard costs nothing and no throwaway
+      // registration can pay for one.
+      const oneNoGuard = blob('one-no-guard', [
+        "it('a', () => { expect(x).toBe(1); });",
+      ]);
+      const oneGuardedPlusTodo = blob('one-guarded-todo', [
+        "it('a', () => { return; expect(x).toBe(1); });",
+        "it.todo('c');",
+      ]);
+      const oneNoGuardPlusGuarded = blob('one-plus-guarded', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('c', () => { return; expect(y).toBe(2); });",
+      ]);
+      expect(
+        m({ tip: oneGuardedPlusTodo, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: -1 });
+      expect(
+        m({ tip: oneNoGuardPlusGuarded, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      // …while the CONDITIONAL spelling is the environment-guard idiom:
+      // sheltered assertions stay measured, so planting one reads as no
+      // movement in either direction (R27-21/R27-27).
+      const oneCondGuarded = blob('one-cond-guarded', [
+        "it('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+      ]);
+      expect(
+        m({ tip: oneCondGuarded, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      expect(
+        m({ tip: oneNoGuard, pre: oneCondGuarded, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      // ...and an assertion the baseline already carried behind a guard
+      // is not free to delete: the conditional guard keeps it measured,
+      // so deleting it still charges its removal.
+      const guardedTwo = blob('guarded-two', [
+        "it('a', () => { if (!s) { return; } expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const guardedNone = blob('guarded-none', [
+        "it('a', () => { if (!s) { return; } });",
+      ]);
+      expect(
+        m({ tip: guardedNone, pre: guardedTwo, events: [] }),
+      ).toMatchObject({ assertions: -2 });
+      // R27-20: the landed delta is measured against the branch's side at
+      // the merge, or a resolution that DISCARDED main's removal still
+      // credits it — main removed three, the round removed two of its
+      // own, the merge kept the branch's side whole, and main's credit
+      // is zero (the old before-baseline read the round's own removal as
+      // main's landed one and the file reported no movement).
+      const baseFive = blob('base-five', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); expect(u).toBe(4); expect(v).toBe(5); });",
+      ]);
+      const mainTwo = blob('main-two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const branchThree = blob('branch-three', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); });",
+      ]);
+      expect(
+        m({
+          tip: branchThree,
+          pre: baseFive,
+          events: [
+            {
+              before: baseFive,
+              after: mainTwo,
+              landed: branchThree,
+              branch: branchThree,
+            },
+          ],
+        }),
+      ).toMatchObject({ assertions: -2 });
+      // An event that moved nothing — both sides absent, or byte-identical
+      // — neither shields nor decides whether the baseline holds the file.
+      expect(
+        m({ tip: null, pre: two, events: [{ before: null, after: null }] }),
+      ).toMatchObject({ baselinePresent: true });
+      expect(
+        m({ tip: null, pre: null, events: [{ before: two, after: two }] }),
+      ).toMatchObject({ baselinePresent: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('review-address: regression accounting (af-157)', () => {
+  // The loop had no notion of a regression at all: the consecutive-failure
+  // brake counts "rounds that pushed nothing", so a round that pushed a fix
+  // and turned CI red counted as a SUCCESS and reset the counter. The gate
+  // cannot close this — it runs `--changed` tests for the touched workspaces
+  // and defers full regression to the PR's own CI, whose verdict does not
+  // exist until long after the job ended. So the charge is measured on the
+  // NEXT round, from markers, and these tests run the real block.
+  const script = prepareBranchAndFeedbackStep
+    .match(
+      /# ---- regression accounting[\s\S]*?echo "regressed_round=\$\{REGRESSED_ROUND\}" >> "\$\{GITHUB_OUTPUT\}"\n/,
+    )?.[0]
+    ?.replace(/^ {10}/gm, '');
+  it('extracts the block it tests', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it('excludes every loop-owned lane from the head-state classifiers, by name', () => {
+    // R27-23: a lane the loop owns but the exclusion omits attaches its
+    // check runs to the same PR head, so the charge classifier reads the
+    // loop's OWN red as the round's regression (and the wake classifiers
+    // wake on it). The list lives in ONE env entry every classifier
+    // references — a hand-copied list per site drifts.
+    const expected = [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+      'Qwen Triage',
+      'Qwen Triage Finalize',
+      'PR self-report label',
+      'Qwen PR Safety Precheck',
+      'Comment Attachment Guard',
+      'PR Asset Branch Cleanup',
+    ];
+    const lanes = JSON.parse(loopOwnedLanesJson);
+    expect([...lanes].sort()).toEqual([...expected].sort());
+    // …every listed name is a real workflow's `name:` line, or a rename
+    // leaves the exclusion matching nothing while the suite is green.
+    const workflowNames = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+      .map(
+        (f) =>
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*'([^']+)'/m,
+          )?.[1] ??
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*"?([^"\n]+)"?/m,
+          )?.[1],
+      );
+    for (const n of lanes) expect(workflowNames).toContain(n);
+    // …and every head-state classifier references the shared list —
+    // charge (review-address) and both wake sites (review-address,
+    // review-scan) — with no literal copy surviving beside it.
+    const uses = workflow.match(/IN\(\$looplanes\[\]\)/g) ?? [];
+    expect(uses.length).toBe(3);
+    expect(workflow).not.toMatch(/IN\("Qwen Autofix"/);
+    expect(workflow).not.toMatch(/IN\('Qwen Autofix'/);
+  });
+
+  const HEAD = 'a'.repeat(40);
+  const OTHER = 'b'.repeat(40);
+  const run = ({
+    checks,
+    comments = [],
+    checkedOutHead = HEAD,
+    // The commit the rollup describes (headRefOid read with the rollup).
+    checksHead = HEAD,
+    window = 'w1',
+    // The live re-arm key prepare computed: defaults to the run's window
+    // (the ordinary case); a supersede-exempt conflict round can still run
+    // under a stale matrix window.
+    liveKey = window,
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'af148-'));
+    try {
+      writeFileSync(join(dir, 'checks.json'), JSON.stringify(checks));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const outFile = join(dir, 'out');
+      writeFileSync(outFile, '');
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nLIVE_REARM_KEY='${liveKey}'\nLOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
+        ],
+        { encoding: 'utf8' },
+      );
+      const out = readFileSync(outFile, 'utf8');
+      return {
+        state: out.match(/check_state=(\S*)/)?.[1] ?? '',
+        regressed: out.match(/regressed_round=(\S*)/)?.[1] ?? '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const pushMarker = ({
+    round = 3,
+    head = HEAD,
+    pre = 'green',
+    key = 'w1',
+  }) => [
+    {
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: '2026-01-01T00:00:00Z',
+      body: `report\n<!-- autofix-push round=${round} head=${head} pre=${pre} key=${key} -->`,
+    },
+  ];
+  const RED = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+  const GREEN = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+
+  it('classifies the head state the marker records', () => {
+    expect(run({ checks: GREEN }).state).toBe('green');
+    expect(run({ checks: RED }).state).toBe('red');
+    // A check still RUNNING is not green: a round pushing while CI is
+    // mid-flight must never be able to claim the head was clean, or a
+    // pre-existing failure that had not landed yet gets charged to it.
+    expect(
+      run({
+        checks: [{ name: 'Test', status: 'IN_PROGRESS', conclusion: null }],
+      }).state,
+    ).toBe('pending');
+    expect(
+      run({
+        checks: [
+          { __typename: 'StatusContext', context: 'dco', state: 'PENDING' },
+        ],
+      }).state,
+    ).toBe('pending');
+    // No checks at all is unknown, never green.
+    expect(run({ checks: [] }).state).toBe('none');
+    // The loop's OWN dispatch-pending commit status is a StatusContext with
+    // no workflowName: excluded by its exact context value, so a head
+    // carrying nothing but the loop's stamp is still unknown, while a
+    // third-party status (dco above) keeps counting.
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'SUCCESS',
+          },
+        ],
+      }).state,
+    ).toBe('none');
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'PENDING',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    // A check with no verdict — a required context that never reported, a
+    // stale one, a run that never started — is pending, never green.
+    for (const check of [
+      { __typename: 'StatusContext', context: 'required', state: 'EXPECTED' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STALE' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STARTUP_FAILURE' },
+    ]) {
+      expect(run({ checks: [check, ...GREEN] }).state).toBe('pending');
+    }
+    // GREEN is an allowlist, never the fall-through: a conclusion this
+    // classifier does not recognise — a state GitHub adds later, or one
+    // it never enumerated — reads as pending, so it can never mint the
+    // charge-enabling premise on its own. The recognised passing states
+    // stay green, or the mechanism would never charge anything.
+    for (const conclusion of ['SUCCESS', 'NEUTRAL', 'SKIPPED']) {
+      expect(
+        run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
+      ).toBe('green');
+    }
+    // A check still in flight is pending even when it carries a conclusion
+    // from an earlier attempt: the verdict on the head is not in yet.
+    // REQUESTED is in the enumeration too, and it is the member a denylist
+    // written from memory forgets — which is why this axis is an allowlist
+    // (`status == COMPLETED`) rather than a list of in-flight states.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'WAITING',
+      'PENDING',
+      'REQUESTED',
+      'A_STATUS_GITHUB_ADDS_LATER',
+    ]) {
+      expect(
+        run({ checks: [{ name: 'a', status, conclusion: 'SUCCESS' }] }).state,
+      ).toBe('pending');
+    }
+    for (const conclusion of ['MOON_PHASE', 'DEGRADED', 'ABANDONED']) {
+      expect(
+        run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
+      ).toBe('pending');
+      expect(
+        run({
+          checks: [{ name: 'a', status: 'COMPLETED', conclusion }, ...GREEN],
+        }).state,
+      ).toBe('pending');
+    }
+    // The rollup is read live, after the checkout: a rollup describing any
+    // other commit says nothing about the checked-out head.
+    expect(run({ checks: GREEN, checksHead: OTHER }).state).toBe('none');
+    expect(run({ checks: RED, checksHead: OTHER }).state).toBe('none');
+    // CANCELLED is not a failure here, matching the scan's own N_RED_NOW
+    // filter — but not-red is not green: a cancelled run produced no
+    // verdict, so it classifies pending like every verdict-less state and
+    // can never mint the charge-enabling premise.
+    expect(
+      run({
+        checks: [{ name: 'a', status: 'COMPLETED', conclusion: 'CANCELLED' }],
+      }).state,
+    ).toBe('pending');
+    expect(
+      run({
+        checks: [
+          { name: 'a', status: 'COMPLETED', conclusion: 'CANCELLED' },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('pending');
+    // The loop's OWN lanes going red is its business, not the PR's — the
+    // charge verdict excludes every own-lane workflow (the canonical
+    // five-name filter), with no review-address carve-out: a failed prior
+    // address round is feedback for the next round, not a regression the
+    // pushed code introduced, and an in-flight own check is observer
+    // noise on the triggers whose suite attaches to the PR head. The
+    // carve-out survives at the FEEDBACK sites (N_FAILED_CHECKS /
+    // N_RED_NOW). All FIVE own-lane workflow names are exercised — a name
+    // dropped from the jq filter would read as a PR-side regression here.
+    for (const loopWorkflow of [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+    ]) {
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+            ...GREEN,
+          ],
+        }).state,
+      ).toBe('green');
+      // An own lane ALONE is no signal at all: excluded by the filter, it
+      // leaves an empty set — unknown, never the red a charge needs.
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+          ],
+        }).state,
+      ).toBe('none');
+    }
+    // The round's own in-flight check must not hold the verdict pending.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'IN_PROGRESS',
+            conclusion: null,
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+  });
+
+  it('charges the prior round only when all four facts hold', () => {
+    // The whole point: green head in, red head out, nothing else moved.
+    expect(run({ checks: RED, comments: pushMarker({}) }).regressed).toBe('3');
+    // The head MOVED — a human push or a base update owns the red, not the
+    // bot's round.
+    expect(
+      run({ checks: RED, comments: pushMarker({ head: OTHER }) }).regressed,
+    ).toBe('');
+    // ...and the equality binds the rollup too: a red rollup for a commit
+    // pushed after the checkout is not the checked-out head's red.
+    expect(
+      run({ checks: RED, checksHead: OTHER, comments: pushMarker({}) })
+        .regressed,
+    ).toBe('');
+    // The round pushed onto an already-red head: it did not create this.
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'red' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'pending' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'none' }) }).regressed,
+    ).toBe('');
+    // A re-arm moved the window: the old round is not this window's charge.
+    expect(
+      run({ checks: RED, comments: pushMarker({ key: 'w0' }) }).regressed,
+    ).toBe('');
+    // ...and when this run's own matrix window is the stale one (a
+    // supersede-exempt conflict round after a re-arm), the charge stays
+    // with the live window: the brake walks headlines under the live key,
+    // so a charge keyed to the dead window would never land there.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({ key: 'w0' }),
+        window: 'w0',
+        liveKey: 'w1',
+      }).regressed,
+    ).toBe('');
+    // Head is green now — nothing to charge.
+    expect(run({ checks: GREEN, comments: pushMarker({}) }).regressed).toBe('');
+    // A failed own address run beside a green suite is feedback, not a
+    // regression: the charge path never bills the prior round for it.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // Same for a red auxiliary lane of the fleet.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // No push marker at all (a no-op round pushed nothing that could
+    // regress): fail open.
+    expect(run({ checks: RED, comments: [] }).regressed).toBe('');
+    // A marker forged by anyone other than the bot is not evidence.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({}).map((c) => ({
+          ...c,
+          user: { login: 'someone-else' },
+        })),
+      }).regressed,
+    ).toBe('');
+  });
+
+  it('reads the NEWEST push marker, not the first', () => {
+    const [older] = pushMarker({ round: 2, head: OTHER });
+    const [newer] = pushMarker({ round: 5, head: HEAD });
+    expect(
+      run({
+        checks: RED,
+        comments: [
+          { ...older, created_at: '2026-01-01T00:00:00Z' },
+          { ...newer, created_at: '2026-01-02T00:00:00Z' },
+        ],
+      }).regressed,
+    ).toBe('5');
+  });
+
+  it('stamps the push marker on the pushed report and nowhere else', () => {
+    // Only an ACTED round can regress, so only the pushed report carries
+    // autofix-push — and it names the PUSHED sha, not REPORT_HEAD (which
+    // deliberately records the PRE-round head for the redcheck marker).
+    expect(pushAndReportScript).toContain(
+      '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
+    );
+    // The field carries the CLASSIFIER's verdict, not a literal: replacing
+    // this one line with `PUSH_PRE=green` would leave the whole mechanism
+    // shaped exactly as it is while charging every red head to the round.
+    expect(pushAndReportScript).toContain('PUSH_PRE="${CHECK_STATE:-none}"');
+    // A salvage-merged branch move or a base-conflict merge means the pushed
+    // head did not start from the head prepare classified: the premise is
+    // stamped unknown.
+    expect(pushAndReportScript).toContain(
+      "[[ \"${PUSH_RACE_MERGED}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    expect(pushAndReportScript).toContain(
+      "[[ \"${CONFLICT:-false}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    // ...and so does any merge commit the push carries past the head
+    // prepare classified (a clean in-round merge of main trips neither arm
+    // above): the pushed head then holds content prepare never classified.
+    expect(pushAndReportScript).toContain(
+      '[[ -n "$(git rev-list --merges "${REPORT_HEAD}..${PUSHED_HEAD}" 2>/dev/null)" ]] && PUSH_PRE=\'none\'',
+    );
+    // When the push landed but the report post failed, a marker-only
+    // comment still carries the push record — the only record a later
+    // round can charge a regression against.
+    expect(pushAndReportScript).toContain(
+      'gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/push-marker.md"',
+    );
+    // ...and the fallback is gated on the af-157 state the round AUTHORED,
+    // never on its outcome: a no-op round pushes nothing, but the
+    // regression it observed about the PRIOR round is just as
+    // unrecoverable once its report is lost, because the marker it read is
+    // superseded by the next push. Both markers are emitted under their
+    // own presence guard, so neither rides a round that has none.
+    // The REPORT-post give-up arm, not the push-retry give-up above it.
+    const giveUpArm = pushAndReportScript.slice(
+      pushAndReportScript.indexOf(
+        'report post failed ${attempt} times for PR #${PR}; giving up',
+      ),
+      pushAndReportScript.indexOf("REPORT_POSTED}\" == 'true'"),
+    );
+    expect(giveUpArm.length).toBeGreaterThan(200);
+    expect(giveUpArm).not.toContain('"${OUTCOME:-}" == \'fixed\'');
+    expect(giveUpArm).toContain(
+      '[[ -n "${PUSHED_HEAD:-}" || -n "${REGRESSED_ROUND:-}" ]]',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->',
+    );
+    // Each marker under its own presence guard, so neither rides a round
+    // that has none.
+    expect(
+      giveUpArm.indexOf('if [[ -n "${PUSHED_HEAD:-}" ]]; then'),
+    ).toBeLessThan(giveUpArm.indexOf('autofix-push round='));
+    expect(
+      giveUpArm.indexOf('if [[ -n "${REGRESSED_ROUND:-}" ]]; then'),
+    ).toBeLessThan(giveUpArm.indexOf('autofix-regression round='));
+    // R31-2: the fallback note also carries the eval marker, in both arms
+    // — round numbering reads autofix-eval only, so a fallback-posted
+    // round that consumes no number makes the NEXT round reuse it, and
+    // the brake's regression walk then charges two rounds as one.
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
+    );
+    // The emitter's headline shape and the brake's reader agree on where
+    // the round number sits.
+    expect(pushAndReportScript).toContain(
+      'Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS})',
+    );
+    expect(workflow).toContain('[[ "${H}" =~ \\(round\\ ([0-9]+)/ ]]');
+    expect(
+      '🤖 Addressed the latest review feedback (round 12/100). What changed'.match(
+        /\(round ([0-9]+)\//,
+      )?.[1],
+    ).toBe('12');
+    expect(pushAndReportScript).toContain('PUSHED_HEAD="$(git rev-parse HEAD');
+    // headRefOid rides the same read as the rollup, so the classifier can
+    // bind its verdict to the commit the rollup describes.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '--json statusCheckRollup,headRefOid',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'ROLLUP_HEAD="$(jq -r \'.headRefOid // ""\' <<< "${PR_ROLLUP}"',
+    );
+    // Two emitters: the report, and the marker-only fallback for a report
+    // that could not be posted.
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-push /g) ?? []).length,
+    ).toBe(2);
+    // The OBSERVATION rides every report shape: a run of failures after a
+    // regressing push must not lose the record.
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->',
+    );
+    // The marker-only fallback carries the regression observation too:
+    // the report that would have carried it is the one that failed.
+    expect(pushAndReportScript).toMatch(
+      /<!-- autofix-push round=\$\{NEXT_ROUND\} head=\$\{PUSHED_HEAD\} pre=\$\{PUSH_PRE\} key=\$\{WINDOW:-none\} -->"\n[\s\S]{0,500}?<!-- autofix-regression round=\$\{REGRESSED_ROUND\} key=\$\{WINDOW:-none\} -->"[\s\S]{0,200}?\} > "\$\{WORKDIR\}\/push-marker\.md"/,
+    );
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-regression round=/g) ?? [])
+        .length,
+    ).toBe(3);
+    // The visible disclosure rides beside the marker on every report shape
+    // — pushed, no-op and failure — not only the pushed one.
+    expect(
+      (pushAndReportScript.match(/Regression charged to round/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewAddressReportStep).toContain('Regression charged to round');
+    // Both report steps receive the charge; only the push step (the marker
+    // emitter) reads the head state.
+    expect(
+      (
+        workflow.match(
+          /REGRESSED_ROUND: '\$\{\{ steps\.prepare\.outputs\.regressed_round \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(2);
+    expect(
+      (
+        workflow.match(
+          /CHECK_STATE: '\$\{\{ steps\.prepare\.outputs\.check_state \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(1);
+  });
 });
 
 describe('review verification gate: preexisting output is consumed', () => {
@@ -22707,7 +30506,7 @@ describe('run-agent idle watchdog', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -22950,7 +30749,7 @@ describe('stale sandbox container cleanup', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -22996,5 +30795,551 @@ describe('stale sandbox container cleanup', () => {
     expect(r.failure).toContain('timeout (1200ms)');
     expect(r.failure).not.toContain('idle-timeout');
     expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+});
+
+describe('report-step stale-base hold while review-pr is in flight (#10110)', () => {
+  // The scan's dispatch gate (#8888) covers every push the SCAN can make,
+  // but the report step's stale-base retry calls update-branch hours after
+  // that gate last looked — the one loop-owned head move outside the hold.
+  // Full rationale → qwen-autofix.md#af-156.
+
+  it('probes for a live review before the report-step update-branch', () => {
+    const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
+    const updateAt = reviewAddressReportStep.indexOf(
+      'gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}"',
+    );
+    expect(probeAt).toBeGreaterThan(-1);
+    expect(updateAt).toBeGreaterThan(probeAt);
+    // Both probe layers, mirroring the scan gate: the rollup filter (any
+    // started review-pr check) and the runs-API fallback for lifecycle runs
+    // still parked in the delay window with no check-run yet. The probe is
+    // lifecycle-scoped by construction — a command run carries no PR-head
+    // check and the runs fallback is event-scoped (af-156).
+    expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
+    expect(reviewAddressReportStep).toContain(
+      'actions/workflows/qwen-code-pr-review.yml',
+    );
+    // The update runs only on a falsy probe — fail-open: a probe error must
+    // not wedge stale-base recovery, so errors read as "no review live".
+    // R32-1: the deferral is only honest while a next round exists — at
+    // the cap the scan's round gate parks the PR before any report step,
+    // so the hold yields to the refresh there.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${REVIEW_LIVE_R}" == \'true\' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then\n                          STALE_BASE_DEFERRED=true\n                        elif gh api -X PUT',
+    );
+    expect(designDoc).toContain('At the cap itself (MARK_ROUND ==');
+  });
+
+  it('refreshes instead of deferring on the capped round (replayed decision)', () => {
+    // The hold's branch choice, executed: the block from the rollup probe
+    // through the update-branch PUT runs verbatim with a stub gh (live
+    // rollup, PUT logged) and the real jq. Below the cap a live review
+    // defers; AT the cap (MARK_ROUND == MAX_ROUNDS) the same live review
+    // must yield to the refresh, because the next scan the deferred
+    // headline promises is the one the round gate skips (R32-1).
+    const start = reviewAddressReportStep.indexOf(
+      'ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup',
+    );
+    const putAt = reviewAddressReportStep.indexOf(
+      'elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch"',
+      start,
+    );
+    const end =
+      reviewAddressReportStep.indexOf('\n                        fi', putAt) +
+      '\n                        fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(putAt).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(putAt);
+    const block = reviewAddressReportStep.slice(start, end);
+    const decide = ({ markRound, maxRounds, live }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-hold-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  *"--json statusCheckRollup"*) printf "%s\\n" "$ROLLUP_JSON" ;;',
+            '  *"update-branch"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const rollup = live
+          ? [
+              {
+                name: 'review-pr',
+                workflowName: '🧐 Qwen Pull Request Review',
+                status: 'IN_PROGRESS',
+              },
+            ]
+          : [];
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -euo pipefail',
+              'PR=1; REPO=o/r; REPORT_HEAD=sha-head',
+              `MARK_ROUND=${markRound}; MAX_ROUNDS=${maxRounds}`,
+              'STALE_BASE_DEFERRED=false; STALE_BASE_RETRY=false',
+              block,
+              'printf "deferred=%s retry=%s\\n" "$STALE_BASE_DEFERRED" "$STALE_BASE_RETRY"',
+            ].join('\n'),
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              ROLLUP_JSON: JSON.stringify(rollup),
+            },
+          },
+        ).trim();
+        const put = readFileSync(ghLog, 'utf8').includes('update-branch');
+        return `${out} put=${put}`;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Below the cap, a live review defers and the PUT is withheld.
+    expect(decide({ markRound: 5, maxRounds: 10, live: true })).toBe(
+      'deferred=true retry=false put=false',
+    );
+    // At the cap the same live review yields: the PUT is issued and the
+    // deferred headline (with its "next scan" promise) is never taken.
+    expect(decide({ markRound: 10, maxRounds: 10, live: true })).toBe(
+      'deferred=false retry=true put=true',
+    );
+    // No live review: the refresh runs whatever the round.
+    expect(decide({ markRound: 10, maxRounds: 10, live: false })).toBe(
+      'deferred=false retry=true put=true',
+    );
+  });
+
+  it('defers with the retry branch sentinel and an exempted headline', () => {
+    // Deferred keeps the exact semantics of the retry branch minus the
+    // update: the 9999 sentinel keeps feedback live so the next round
+    // re-runs and ITS report step refreshes the base once the review landed.
+    const deferred = reviewAddressReportStep.match(
+      /elif \[\[ "\$\{STALE_BASE_DEFERRED\}" == 'true' \]\]; then[\s\S]*?(?=\n {16}else)/,
+    )?.[0];
+    expect(deferred).toBeTruthy();
+    expect(deferred).toContain("MARK_TS='9999-12-31T23:59:59Z'");
+    expect(deferred).toContain('deferred a stale-base refresh');
+    expect(deferred).toContain('#10110');
+    // The deferred headline joins the streak-reset needles: a round that
+    // failed because it was reviewed at the wrong moment is not evidence
+    // about the PR.
+    expect(reviewAddressReportStep).toContain(
+      '|| "${H}" == *"deferred a stale-base refresh"*',
+    );
+  });
+
+  it('detects a live review through the replayed rollup filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /REVIEW_LIVE_R="\$\(jq -r '([\s\S]*?)' <<< "\$\{ROLLUP_R\}"/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (checks) =>
+      execFileSync('jq', ['-r', filter], {
+        input: JSON.stringify(checks),
+        encoding: 'utf8',
+      }).trim();
+    const live = {
+      name: 'review-pr',
+      workflowName: '🧐 Qwen Pull Request Review',
+      status: 'IN_PROGRESS',
+    };
+    expect(probe([live])).toBe('true');
+    expect(probe([{ ...live, status: 'QUEUED' }])).toBe('true');
+    // A finished review does not hold, and neither does a live check that
+    // is not the review workflow's review-pr.
+    expect(
+      probe([{ ...live, status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    ).toBe('false');
+    expect(probe([{ ...live, workflowName: 'CI' }])).toBe('false');
+    expect(probe([{ ...live, name: 'lint' }])).toBe('false');
+    expect(probe([])).toBe('false');
+  });
+
+  it('detects a delay-parked lifecycle run through the replayed runs filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /jq -r --arg pr "\$\{PR\}" --arg head "\$\{LIVE_HEAD_R\}" '([\s\S]*?)' 2> \/dev\/null \|\| echo/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (runs, pr = '9729', head = 'sha-live') =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'pr', pr, '--arg', 'head', head, filter],
+        {
+          input: JSON.stringify({ workflow_runs: runs }),
+          encoding: 'utf8',
+        },
+      ).trim();
+    const parked = {
+      event: 'pull_request_target',
+      status: 'waiting',
+      head_sha: 'sha-live',
+      pull_requests: [],
+    };
+    expect(probe([parked])).toBe('true');
+    // Matches by PR number too (fork heads may not equal the fetched head).
+    expect(
+      probe([
+        { ...parked, head_sha: 'other', pull_requests: [{ number: 9729 }] },
+      ]),
+    ).toBe('true');
+    // Completed runs, non-lifecycle events, and unrelated runs do not
+    // hold. The command-event exclusion is a DELIBERATE scope, not coverage
+    // (af-155): the hold does not see command runs, and the design doc must
+    // say so instead of claiming a trigger-independent probe.
+    expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
+    expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
+    expect(
+      probe([{ ...parked, head_sha: 'other', pull_requests: [{ number: 1 }] }]),
+    ).toBe('false');
+    // An empty fetched head must not wildcard-match every run.
+    expect(probe([{ ...parked, head_sha: '' }], '9729', '')).toBe('false');
+  });
+
+  it('documents the hold in the design doc', () => {
+    // af-155 is the hold's own entry (af-149 predates it: pinning that
+    // anchor let the section be removed or renumbered with the suite green).
+    expect(designDoc).toContain('<a id="af-155"></a>');
+    expect(designDoc).toContain(
+      'Hold the stale-base refresh while a review-pr is in flight',
+    );
+    expect(designDoc).toContain('deferred a stale-base refresh');
+  });
+
+  it('scopes the hold to lifecycle runs instead of claiming trigger independence (R13-2)', () => {
+    // The probe pair is structurally blind to command-triggered review
+    // runs: they execute against the base branch (their review-pr check
+    // attaches to main's commit, never the PR's rollup) and the runs
+    // fallback is event-scoped to pull_request_target. The docs and the
+    // deferred headline must scope the hold to what it sees, so no reader
+    // relies on protection for command runs that does not exist; the
+    // mechanism fix (a PR-head-visible signal posted by command runs) is
+    // deliberately deferred (af-155).
+    expect(designDoc).not.toContain('trigger-independent');
+    expect(designDoc).toContain('The probe sees');
+    expect(designDoc).toContain('LIFECYCLE runs only');
+    expect(reviewAddressReportStep).toContain(
+      'but a lifecycle review of this PR is still in flight',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Command-triggered reviews are invisible to this probe (af-155)',
+    );
+  });
+});
+
+describe('in-round self-review A/B (af-156)', () => {
+  const skill = readAutofixSkill();
+  const pushAndReport = readFileSync(pushAndReportScriptPath, 'utf8');
+  // The review lane's step: the issue lane has a 'Verification gate' of its
+  // own earlier in the file, so the end anchor is searched from the start.
+  const prepareStart = workflow.indexOf(
+    "      - name: 'Prepare branch and feedback'",
+  );
+  const addressStart = workflow.indexOf("      - name: 'Triage and address'");
+  const prepareStep = workflow.slice(prepareStart, addressStart);
+  const addressStep = workflow.slice(
+    addressStart,
+    workflow.indexOf("      - name: 'Verification gate'", addressStart),
+  );
+  const gateSection = reviewVerificationRunner.slice(
+    reviewVerificationRunner.indexOf("SELF_REVIEW_RECORD='arm=off'"),
+    reviewVerificationRunner.indexOf(
+      '# A conflict verdict must STOP BLOCKED: completing as fixed',
+    ),
+  );
+
+  it('arms the pass from the repo variable and hands the runner the arm, CLI entry and deadline', () => {
+    expect(workflow).toContain(
+      `SELF_REVIEW: "\${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"`,
+    );
+    // Resolved once in prepare; the address cap, the repair skip and the
+    // gate record all read that one output.
+    expect(prepareStep).toContain(
+      'echo "self_review_arm=${SELF_REVIEW_ARM}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(addressStep).toContain(
+      `SELF_REVIEW_ARM: "\${{ steps.prepare.outputs.self_review_arm || 'off' }}"`,
+    );
+    expect(addressStep).toContain(
+      `timeout-minutes: "\${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"`,
+    );
+    expect(workflow).toContain(
+      "steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}",
+    );
+    expect(addressStep).toContain('--self-review "${SELF_REVIEW_ARM}"');
+    expect(addressStep).toContain(
+      '--self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js"',
+    );
+    expect(addressStep).toContain('--deadline "${ROUND_DEADLINE}"');
+    // An armed round's budget stays under the step backstop with the same
+    // margin rule the unarmed budget follows.
+    const stepCapMin = stepCapsOf(addressStep).armed;
+    expect(addressStep).toContain('BUDGET_CAP_MS=10800000');
+    expect(10800000 / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    expect(7200000 / 60000).toBeLessThanOrEqual(
+      stepCapsOf(addressStep).unarmed - 1,
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'",
+    );
+    // Replay the arm block: the split runs on the PR number alone.
+    const armBlock = prepareStep.match(
+      /SELF_REVIEW_ARM='off'\n[\s\S]*?esac\n[ \t]*fi\n/,
+    )?.[0];
+    expect(armBlock).toBeTruthy();
+    const armFor = (mode, pr, runnerEnvironment = 'self-hosted') =>
+      execFileSync(
+        'bash',
+        ['-c', `${armBlock}\nprintf '%s' "$SELF_REVIEW_ARM"`],
+        {
+          env: {
+            ...process.env,
+            SELF_REVIEW: mode,
+            PR: pr,
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // GitHub-hosted jobs are capped at 360 minutes whatever timeout-minutes
+    // says; the armed worst case only fits on the self-hosted pool.
+    expect(armFor('on', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291')).toBe('on');
+    expect(armFor('ab', '11290')).toBe('off');
+    expect(armFor('ab', '11291x')).toBe('off');
+    expect(armFor('on', '11290')).toBe('on');
+    expect(armFor('off', '11291')).toBe('off');
+    expect(armFor('', '11291')).toBe('off');
+  });
+
+  it('prints the three self-review lines and refuses values that could carry prose', () => {
+    const prompt = (extra) =>
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          '/tmp/autofix-review-5678',
+          ...extra,
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+    const off = prompt([]);
+    expect(off).toContain('\nSelf-review: off\n');
+    expect(off).toContain('\nSelf-review CLI: qwen\n');
+    expect(off).toContain('\nRound deadline (UTC): unknown\n');
+    const on = prompt([
+      '--self-review',
+      'on',
+      '--self-review-cli',
+      'node /work/dist/cli.js',
+      '--deadline',
+      '2026-09-10T12:00:00Z',
+    ]);
+    expect(on).toContain('\nSelf-review: on\n');
+    expect(on).toContain('\nSelf-review CLI: node /work/dist/cli.js\n');
+    expect(on).toContain('\nRound deadline (UTC): 2026-09-10T12:00:00Z\n');
+    const refused = (args) =>
+      runAutofixRunner(['--mode', 'address-review', ...args, '--print-prompt'])
+        .stderr;
+    expect(refused(['--self-review', 'maybe'])).toContain(
+      '--self-review must be on or off',
+    );
+    expect(refused(['--self-review-cli', 'qwen; rm -rf /'])).toContain(
+      '--self-review-cli must be a plain command path',
+    );
+    expect(refused(['--deadline', 'soon'])).toContain(
+      '--deadline must be an ISO-8601 UTC instant',
+    );
+  });
+
+  it('spells the one-pass rule in the skill and carves the CLI exception for it alone', () => {
+    expect(skill).toContain('### In-round self-review');
+    expect(skill).toContain(
+      'Only when the Invocation block says `Self-review: on`.',
+    );
+    expect(skill).toContain(
+      'QWEN_REVIEW_SANDBOX=off <cli> review run --approval-mode auto --effort high --json --quiet',
+    );
+    expect(skill).toContain('No `QWEN_SANDBOX=true` and no `env -u SANDBOX`');
+    expect(skill).toMatch(/and stop: no\s+second pass/);
+    expect(skill).toContain('`skipped-small`');
+    expect(skill).toContain('`skipped-deadline`');
+    expect(skill).toContain('the round is never blocked on its own audit');
+    expect(skill).toContain('write `<workdir>/self-review.json`');
+    expect(skill).toMatch(
+      /The one\s+CLI exception is the in-round self-review command/,
+    );
+    expect(skill).toContain(
+      'run the in-round self-review when the Invocation block arms it',
+    );
+  });
+
+  it('validates the record in the gate, binds it to the pushed delta, and renders it as a marker', () => {
+    expect(gateSection).toContain(
+      'IN("converged", "findings-fixed", "deadline", "review-failed", "skipped-small", "skipped-deadline")',
+    );
+    expect(gateSection).toContain(
+      'ACTUAL_TREE="$(git rev-parse \'HEAD^{tree}\' 2> /dev/null)"',
+    );
+    // Advisory only: no reject_fix on this path, and the record is
+    // published on the fixed path beside the other gate outputs.
+    expect(gateSection).not.toContain('reject_fix');
+    expect(reviewVerificationRunner).toContain(
+      'echo "self_review=${SELF_REVIEW_RECORD}" >> "${GITHUB_OUTPUT}"',
+    );
+    // Every gate launch carries the arm; Finalize selects the record with
+    // the outcome; the report renders the selected record, not the file.
+    const launches =
+      workflow.match(
+        /bash --norc "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
+      ) ?? [];
+    const armed =
+      workflow.match(/SELF_REVIEW_ARM="\$\{SELF_REVIEW_ARM:-off\}" \\/g) ?? [];
+    expect(launches.length).toBeGreaterThan(0);
+    expect(armed.length).toBe(launches.length);
+    expect(workflow).toContain(
+      'SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"',
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW: '${{ steps.final_verify.outputs.self_review }}'",
+    );
+    expect(pushAndReport).toContain(
+      'echo "<!-- autofix-self-review ${SELF_REVIEW} -->"',
+    );
+    // Replay the render guard: a forged output cannot close the marker early.
+    const renderBlock = pushAndReport.match(
+      /local SELF_REVIEW_RE='[^\n]*'\n\s*if \[\[ "\$\{SELF_REVIEW:-\}" =~ \$\{SELF_REVIEW_RE\} \]\]; then\n\s*echo "<!-- autofix-self-review \$\{SELF_REVIEW\} -->"\n\s*fi/,
+    )?.[0];
+    // Both acted-report shapes render it.
+    expect(pushAndReport.match(/^\s*emit_self_review_marker$/gm)).toHaveLength(
+      2,
+    );
+    expect(renderBlock).toBeTruthy();
+    const render = (value) =>
+      execFileSync('bash', ['-c', renderBlock.replace(/^\s*local /, '')], {
+        env: { ...process.env, SELF_REVIEW: value },
+        encoding: 'utf8',
+      });
+    expect(
+      render(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true',
+      ),
+    ).toBe(
+      '<!-- autofix-self-review arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true -->\n',
+    );
+    expect(render('arm=on --> <script>')).toBe('');
+    expect(render('')).toBe('');
+  });
+
+  it('runs the gate record section against real files: missing, malformed, skipped, unbound', () => {
+    withRunnerDir((dir) => {
+      const workdir = join(dir, 'work');
+      mkdirSync(workdir, { recursive: true });
+      const gateLog = join(workdir, 'gate-output.log');
+      const run = (arm) =>
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            // The section tees its log line to stdout; only the record is
+            // under test here.
+            `set -eo pipefail\nGATE_LOG=${JSON.stringify(gateLog)}\n: > "$GATE_LOG"\nBRANCH=nope\n{\n${gateSection}\n} > /dev/null\nprintf '%s' "$SELF_REVIEW_RECORD"`,
+          ],
+          {
+            env: { ...process.env, WORKDIR: workdir, SELF_REVIEW_ARM: arm },
+            encoding: 'utf8',
+            cwd: dir,
+          },
+        ).trim();
+      const record = (doc) =>
+        writeFileSync(join(workdir, 'self-review.json'), doc);
+      const findings = { act: 0, declined: 0, deferred: 0 };
+      expect(run('off')).toBe('arm=off');
+      expect(existsSync(join(workdir, 'gate-advisories.md'))).toBe(false);
+      expect(run('on')).toBe('arm=on status=missing');
+      record('not json');
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'skipped-small',
+          passes: 0,
+          findings,
+          minutes: 0,
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=skipped-small passes=0 act=0 declined=0 deferred=0 minutes=0',
+      );
+      // A status that claims a pass needs a tree id; no git repository
+      // answers here, so the binding resolves to bound=false, never a crash.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: 1,
+          findings,
+          minutes: 41.9,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=false',
+      );
+      // Grammar: a status outside the vocabulary or a field that is not a
+      // non-negative integer is invalid — never rendered.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged -->',
+          passes: 1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: -1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      expect(
+        readFileSync(join(workdir, 'gate-advisories.md'), 'utf8'),
+      ).toContain('in-round self-review');
+    });
+  });
+
+  it('documents the arm in the design doc', () => {
+    expect(designDoc).toContain('<a id="af-156"></a>');
+    expect(designDoc).toContain('(#af-156)');
   });
 });

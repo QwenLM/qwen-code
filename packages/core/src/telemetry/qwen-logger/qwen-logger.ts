@@ -285,7 +285,8 @@ export class QwenLogger {
         auth_type: authType,
         model: this.config?.getModel(),
         base_url:
-          authType === AuthType.USE_OPENAI
+          authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES
             ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
         ...(this.config?.getChannel?.()
@@ -584,6 +585,7 @@ export class QwenLogger {
         subagent_name: event.subagent_name,
         status: event.status,
         terminate_reason: event.terminate_reason,
+        ...(event.loop_type ? { loop_type: event.loop_type } : {}),
       },
       snapshots: JSON.stringify({
         ...(event.execution_summary

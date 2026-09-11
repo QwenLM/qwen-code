@@ -12,8 +12,6 @@ import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
-// For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
-import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
@@ -42,6 +40,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'packages/web-templates/src/generated/**',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -52,6 +51,7 @@ export default tseslint.config(
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
       'packages/desktop-shell/runtime/**',
       'packages/desktop-shell/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
@@ -302,6 +302,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ['packages/web-shell/client/daemon/**/*.{ts,tsx}'],
+    rules: {
+      'no-console': ['error', { allow: ['debug', 'warn', 'error'] }],
+    },
+  },
+  {
     files: [
       'packages/web-shell/client/**/*.test.{ts,tsx}',
       'packages/web-shell/client/test/**/*.{ts,tsx}',
@@ -413,6 +419,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      // web-templates' export-html template build scripts also run with `node`.
+      'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
@@ -471,17 +479,32 @@ export default tseslint.config(
     },
   },
 
+  // The VS Code companion renders through @qwen-code/web-shell; the legacy
+  // @qwen-code/webui surface must not re-enter the extension bundle.
+  {
+    files: ['packages/vscode-ide-companion/src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@qwen-code/webui', '@qwen-code/webui/*'],
+              message:
+                'vscode-ide-companion must render through @qwen-code/web-shell; do not re-introduce @qwen-code/webui.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 
   // VS Code IDE companion - out of scope for no-console rule
   {
     files: ['packages/vscode-ide-companion/**/*.ts', 'packages/vscode-ide-companion/**/*.tsx', 'packages/vscode-ide-companion/**/*.js'],
-    rules: { 'no-console': 'off' },
-  },
-  // WebUI package - UI component library with Storybook
-  {
-    files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
     rules: { 'no-console': 'off' },
   },
   // Chrome extension (chrome-extension) - the MV3 background service
@@ -584,5 +607,4 @@ export default tseslint.config(
       'react/react-in-jsx-scope': 'off',
     },
   },
-  storybook.configs['flat/recommended'],
 );

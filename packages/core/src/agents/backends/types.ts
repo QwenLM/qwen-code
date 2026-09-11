@@ -12,6 +12,7 @@
  */
 
 import type { Content } from '@google/genai';
+import type { ContentGenerator } from '../../core/contentGenerator.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
   AgentMessage,
@@ -192,6 +193,28 @@ export interface Backend {
    * a handle and may omit this method.
    */
   getAgent?(agentId: string): TeamAgentHandle | undefined;
+
+  /**
+   * Get the dedicated ContentGenerator an in-process agent was spawned
+   * with, when the backend created one for an explicitly requested
+   * per-agent route. Lets spawn callers verify a requested route
+   * actually materialized instead of silently falling back to the
+   * parent's generator. PTY-based backends run each agent in its own
+   * process and may omit this method; note that TeamManager fails the
+   * spawn of a model-selecting definition on a backend that omits it,
+   * because absence makes the route unverifiable.
+   */
+  getAgentContentGenerator?(agentId: string): ContentGenerator | undefined;
+
+  /**
+   * Get why the dedicated ContentGenerator could not be created for an
+   * agent, when the backend swallowed the creation failure and fell
+   * back to the parent's generator. Lets spawn callers surface the
+   * underlying cause (missing API key, bad base URL, ...) instead of a
+   * bare "route did not materialize". PTY-based backends may omit this
+   * method.
+   */
+  getAgentContentGeneratorError?(agentId: string): string | undefined;
 
   /**
    * Stop all running agents.

@@ -9,9 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import { isRateLimitError } from '../../utils/rateLimit.js';
 import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
   DEFAULT_TIMEOUT,
   DISABLED_REQUEST_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from '../openaiContentGenerator/constants.js';
 
 const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
@@ -147,6 +152,54 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+    expect(anthropicState.constructorOptions?.['fetch']).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('installs session ID injection on the runtime fetch', async () => {
+    const runtimeFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    vi.doMock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+      const actual =
+        await importOriginal<
+          typeof import('../../utils/runtimeFetchOptions.js')
+        >();
+      return {
+        ...actual,
+        buildRuntimeFetchOptions: vi.fn(() => ({ fetch: runtimeFetch })),
+      };
+    });
+
+    try {
+      const { AnthropicContentGenerator } = await importGenerator();
+      void new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/anthropic',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const sessionAwareFetch = anthropicState.constructorOptions?.[
+        'fetch'
+      ] as typeof fetch;
+      await sessionAwareFetch(
+        'https://routify-pub.alibaba-inc.com/protocol/anthropic/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session');
+    } finally {
+      vi.doUnmock('../../utils/runtimeFetchOptions.js');
+    }
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {
@@ -2870,6 +2923,336 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
+  // Regression for the manual-mode leading-thinking requirement: Anthropic
+  // rejects a thinking-enabled tool loop whose final assistant turn doesn't
+  // begin with a thinking block. mergeConsecutiveAssistantMessages's
+  // straight concatenation can otherwise leave a leading text block ahead
+  // of a later thinking run (see converter.ts's
+  // ensureLeadingAssistantThinking doc).
+  describe('manual-mode leading-thinking normalization', () => {
+    it('reorders the latest assistant turn to lead with thinking under an explicit-budget (manual) configuration', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          // Must stay above budget_tokens below: Anthropic requires
+          // budget_tokens < max_tokens (documented in buildThinkingConfig)
+          // and buildSamplingParameters does not clamp between the two, so a
+          // smaller value here would make this canonical manual-mode fixture
+          // model a request the real API rejects -- passing only because the
+          // client is mocked.
+          samplingParams: { max_tokens: 64_000 },
+          schemaCompliance: 'auto',
+          // Explicit budget_tokens is the escape hatch that keeps
+          // claude-opus-4-6 (a 4.6+ model that otherwise defaults to
+          // adaptive) on the manual `{ type: 'enabled', budget_tokens }`
+          // shape -- see "honors explicit reasoning.budget_tokens" above.
+          reasoning: { budget_tokens: 42_000 },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+          {
+            // No leading thinking block on this earlier turn -- adaptive
+            // mode explicitly permits this, and it's what the merge
+            // concatenates ahead of the next turn's thinking block.
+            role: 'model' as const,
+            parts: [{ text: 'Sure, one moment.' }],
+          },
+          {
+            role: 'model' as const,
+            parts: [
+              {
+                text: 'reasoning about the tool call',
+                thought: true,
+                thoughtSignature: 'sig-1',
+              },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user' as const,
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [rawRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const anthropicRequest = rawRequest as {
+        thinking?: unknown;
+        messages: Array<{ role: string; content: unknown[] }>;
+      };
+
+      expect(anthropicRequest.thinking).toEqual({
+        type: 'enabled',
+        budget_tokens: 42_000,
+      });
+      expect(
+        (options as { headers?: Record<string, string> })?.headers?.[
+          'anthropic-beta'
+        ],
+      ).toContain('interleaved-thinking-2025-05-14');
+
+      // The two model turns are merged into one assistant message by
+      // mergeConsecutiveAssistantMessages; the merged turn is also the
+      // request's latest assistant message, and manual mode requires it
+      // to begin with thinking.
+      const assistantMessages = anthropicRequest.messages.filter(
+        (m) => m.role === 'assistant',
+      );
+      const latestAssistant = assistantMessages.at(-1) as {
+        content: Array<{
+          type: string;
+          text?: string;
+          thinking?: string;
+          signature?: string;
+        }>;
+      };
+      expect(latestAssistant.content[0]?.type).toBe('thinking');
+      expect(latestAssistant.content[0]?.thinking).toBe(
+        'reasoning about the tool call',
+      );
+      expect(latestAssistant.content[0]?.signature).toBe('sig-1');
+      expect(latestAssistant.content[1]).toEqual({
+        type: 'text',
+        text: 'Sure, one moment.',
+      });
+      expect(latestAssistant.content[2]?.type).toBe('tool_use');
+    });
+
+    it('reorders the latest assistant turn to lead with thinking under an effort-ladder (manual) configuration on a pre-4.6 model', async () => {
+      // buildThinkingConfig reaches `{ type: 'enabled' }` two ways: the
+      // explicit-budget escape hatch (covered by the test above) and the
+      // effort ladder for pre-4.6 / unversioned ids (covered here). The
+      // generator gates ensureLeadingAssistantThinking on the BUILT config's
+      // `type === 'enabled'`, not on the presence of reasoning.budget_tokens,
+      // so the ladder path must reorder the same way. claude-opus-4-5 with
+      // effort only (no budget_tokens) resolves to the manual budget shape
+      // `{ type: 'enabled', budget_tokens: 32_000 }` -- see "keeps the
+      // budget_tokens config for older 4.x models" above.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1b',
+        model: 'claude-opus-4-5',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          // Must stay above the effort-ladder budget_tokens (32_000 for
+          // medium): Anthropic requires budget_tokens < max_tokens, so a
+          // smaller value would model a request the real API rejects.
+          samplingParams: { max_tokens: 64_000 },
+          schemaCompliance: 'auto',
+          // Effort only, no budget_tokens: claude-opus-4-5 (pre-4.6) takes
+          // the effort ladder to `{ type: 'enabled', budget_tokens: 32_000 }`.
+          reasoning: { effort: 'medium' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+          {
+            // No leading thinking block on this earlier turn -- it's what the
+            // merge concatenates ahead of the next turn's thinking block.
+            role: 'model' as const,
+            parts: [{ text: 'Sure, one moment.' }],
+          },
+          {
+            role: 'model' as const,
+            parts: [
+              {
+                text: 'reasoning about the tool call',
+                thought: true,
+                thoughtSignature: 'sig-1',
+              },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user' as const,
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [rawRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const anthropicRequest = rawRequest as {
+        thinking?: unknown;
+        messages: Array<{ role: string; content: unknown[] }>;
+      };
+
+      expect(anthropicRequest.thinking).toEqual({
+        type: 'enabled',
+        budget_tokens: 32_000,
+      });
+      expect(
+        (options as { headers?: Record<string, string> })?.headers?.[
+          'anthropic-beta'
+        ],
+      ).toContain('interleaved-thinking-2025-05-14');
+
+      // The two model turns are merged into one assistant message; the merged
+      // turn is also the request's latest assistant message, and manual mode
+      // requires it to begin with thinking.
+      const assistantMessages = anthropicRequest.messages.filter(
+        (m) => m.role === 'assistant',
+      );
+      const latestAssistant = assistantMessages.at(-1) as {
+        content: Array<{
+          type: string;
+          text?: string;
+          thinking?: string;
+          signature?: string;
+        }>;
+      };
+      expect(latestAssistant.content[0]?.type).toBe('thinking');
+      expect(latestAssistant.content[0]?.thinking).toBe(
+        'reasoning about the tool call',
+      );
+      expect(latestAssistant.content[0]?.signature).toBe('sig-1');
+      expect(latestAssistant.content[1]).toEqual({
+        type: 'text',
+        text: 'Sure, one moment.',
+      });
+      expect(latestAssistant.content[2]?.type).toBe('tool_use');
+    });
+
+    it('leaves the latest assistant turn in chronological order under adaptive thinking (no explicit budget)', async () => {
+      // Guards the generator's `ensureLeadingAssistantThinking:
+      // thinking?.type === 'enabled'` gate: a regression to `!!thinking`
+      // (truthy for both `{type:'enabled'}` and `{type:'adaptive'}`) would
+      // silently reintroduce the hoist-every-thinking corruption this PR
+      // removed from the merge path, but only on adaptive-thinking models
+      // -- which the manual-mode test above cannot catch.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-2',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          // No explicit budget_tokens: claude-opus-4-6 (a 4.6+ model)
+          // defaults to adaptive thinking.
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+          {
+            role: 'model' as const,
+            parts: [{ text: 'Sure, one moment.' }],
+          },
+          {
+            role: 'model' as const,
+            parts: [
+              {
+                text: 'reasoning about the tool call',
+                thought: true,
+                thoughtSignature: 'sig-1',
+              },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            // Answer t1 so the request ends on a tool_result rather than an
+            // unanswered tool_use: without this, stripTrailingAssistantPrefill
+            // appends a synthetic 'Continue.' user turn, leaving a tool_use
+            // with no tool_result after it -- the exact HTTP 400 shape
+            // mergeConsecutiveAssistantMessages documents. Mirrors the
+            // manual-mode sibling above; the assertion is unaffected.
+            role: 'user' as const,
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [rawRequest] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const anthropicRequest = rawRequest as {
+        thinking?: unknown;
+        messages: Array<{
+          role: string;
+          content: Array<{ type: string; text?: string }>;
+        }>;
+      };
+
+      expect(anthropicRequest.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
+
+      const assistantMessages = anthropicRequest.messages.filter(
+        (m) => m.role === 'assistant',
+      );
+      const latestAssistant = assistantMessages.at(-1)!;
+      expect(latestAssistant.content.map((b) => b.type)).toEqual([
+        'text',
+        'thinking',
+        'tool_use',
+      ]);
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
   // anthropic-compatible API rejects requests in thinking mode when a prior
   // assistant turn carrying `tool_use` omits a thinking block. Plain-text
@@ -3285,12 +3668,13 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
-    const collectGeneratedStream = async () => {
+    const collectGeneratedStream = async (baseUrl?: string) => {
       const { AnthropicContentGenerator } = await importGenerator();
       const generator = new AnthropicContentGenerator(
         {
           model: 'claude-test',
           apiKey: 'test-key',
+          baseUrl,
           timeout: 10_000,
           maxRetries: 2,
           samplingParams: { max_tokens: 100 },
@@ -3311,6 +3695,93 @@ describe('AnthropicContentGenerator', () => {
       }
       return { chunks, error };
     };
+
+    it.each([
+      [
+        'api_error',
+        'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+        429,
+      ],
+      ['api_error', 'Streaming error: 404: Model not found.', undefined],
+      ['api_error', 'Streaming error: 404: Account quota exceeded.', undefined],
+      [
+        'authentication_error',
+        'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+        undefined,
+      ],
+      [
+        'api_error',
+        'Invalid prompt containing Rate limit exceeded on Anthropic API.',
+        undefined,
+      ],
+    ])(
+      'normalizes actual SDK SSE %s / %s to status %s',
+      async (type, message, status) => {
+        const { default: ActualAnthropic } =
+          await vi.importActual<typeof import('@anthropic-ai/sdk')>(
+            '@anthropic-ai/sdk',
+          );
+        const client = new ActualAnthropic({
+          apiKey: 'test-key',
+          maxRetries: 0,
+          fetch: vi.fn().mockResolvedValue(
+            new Response(
+              `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`,
+              {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' },
+              },
+            ),
+          ),
+        });
+        const stream = await client.messages.create({
+          model: 'test-model',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'test' }],
+          stream: true,
+        });
+        anthropicState.createImpl.mockResolvedValue(stream);
+        const { chunks, error } = await collectGeneratedStream(
+          'https://anthropic-proxy.example.test',
+        );
+        expect(chunks).toEqual([]);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as { status?: number }).status).toBe(status);
+        expect(isRateLimitError(error)).toBe(status === 429);
+        if (status === 429) {
+          expect(error).toHaveProperty('cause', expect.any(Error));
+          expect((error as Error).cause).not.toHaveProperty('status', 429);
+        }
+      },
+    );
+
+    it.each([401, 404])(
+      'preserves explicit status %s on stream errors',
+      async (status) => {
+        const original = Object.assign(
+          new Error(
+            JSON.stringify({
+              type: 'error',
+              error: {
+                type: 'api_error',
+                message:
+                  'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+              },
+            }),
+          ),
+          { status },
+        );
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* () {
+            throw original;
+            yield {};
+          })(),
+        );
+        const { error } = await collectGeneratedStream();
+        expect(error).toBe(original);
+        expect(isRateLimitError(error)).toBe(false);
+      },
+    );
 
     it.each([
       {
@@ -4893,6 +5364,142 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it('keeps the fallback probe signal live after the drain abort (no spurious AbortError)', async () => {
+      // Regression for the empty-fallback probe: the shared stream guard aborts
+      // the per-request controller the moment the source stream drains, which
+      // happens before the probe runs. The probe must NOT inherit that
+      // already-aborted signal, or the SDK rejects it immediately with a
+      // spurious AbortError instead of surfacing the provider's real error
+      // (e.g. a 402 credit-balance response). Model the SDK's abort semantics:
+      // the probe's `create` rejects at call time when handed an aborted signal.
+      //
+      // The guards must be ON for this regression to bite — the spurious
+      // AbortError only exists because the guard's drain-time abort precedes
+      // the probe. Stub the env knobs so an ambient `QWEN_STREAM_*=0`
+      // (documented disable values) in the dev/CI shell can't silently switch
+      // the guards off and vacate the test.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      try {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* () {
+              // Empty stream: drains immediately, after which the guard aborts
+              // the per-request controller and the fallback probe runs.
+            })(),
+          )
+          .mockImplementationOnce(
+            (_req: unknown, opts: { signal?: AbortSignal }) => {
+              if (opts?.signal?.aborted) {
+                const abortErr = new Error('The operation was aborted');
+                abortErr.name = 'AbortError';
+                return Promise.reject(abortErr);
+              }
+              return Promise.reject(new Error('402 credit balance is too low'));
+            },
+          );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 123 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        await expect(async () => {
+          for await (const _chunk of stream) {
+            void _chunk;
+          }
+        }).rejects.toThrow('402 credit balance is too low');
+
+        expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('aborts the fallback probe when the caller signal cancels mid-probe', async () => {
+      // Pins the probe's caller-signal linkage: the probe derives a child of
+      // the caller's signal, so a user Ctrl-C landing while the non-streaming
+      // probe is in flight (the quota/billing-shaped 200-but-empty response)
+      // aborts the probe instead of letting it run to completion against the
+      // provider and spend quota on a turn already cancelled. Mutant check:
+      // deriving the child from `undefined` leaves the hung probe unsettled
+      // and this test fails on the timeout assertion.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      try {
+        const { AnthropicContentGenerator } = await importGenerator();
+        const callerAc = new AbortController();
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* () {
+              // Empty stream: drains immediately, then the probe runs.
+            })(),
+          )
+          .mockImplementationOnce(
+            // A probe that hangs until its signal aborts, modelling an
+            // in-flight non-streaming request.
+            (_req: unknown, opts: { signal?: AbortSignal }) =>
+              new Promise((_resolve, reject) => {
+                const abortErr = new Error('The operation was aborted');
+                abortErr.name = 'AbortError';
+                if (opts?.signal?.aborted) {
+                  reject(abortErr);
+                  return;
+                }
+                opts?.signal?.addEventListener('abort', () => reject(abortErr));
+              }),
+          );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 123 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+
+        const settled = (async () => {
+          for await (const _chunk of stream) {
+            void _chunk;
+          }
+        })().catch((e: unknown) => e);
+
+        // Wait until the probe call is in flight, then cancel like a user.
+        await vi.waitFor(() =>
+          expect(anthropicState.createImpl).toHaveBeenCalledTimes(2),
+        );
+        callerAc.abort();
+        const err = await settled;
+        expect((err as Error).name).toBe('AbortError');
+        expect((err as Error).message).toBe('The operation was aborted');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it.each([
       { case: 'an empty buffer', partialJson: '' },
       { case: 'a partial buffer', partialJson: '{"file_path":' },
@@ -4998,6 +5605,485 @@ describe('AnthropicContentGenerator', () => {
         streamingAttempt,
         expect.anything(),
       );
+      // The probe's short-lived child must be aborted once the probe settles:
+      // that is what releases the SDK's abort listener instead of leaving it
+      // attached until the caller's long-lived round signal ends.
+      const [, fallbackOptions] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
+      expect(fallbackOptions?.signal?.aborted).toBe(true);
+    });
+  });
+
+  // Issue #9005 finding 4: the OpenAI wire wraps its stream in an idle
+  // watchdog plus a non-resetting lifetime cap (openaiContentGenerator
+  // `withStreamGuards`), while the Anthropic wire had neither — a stream that
+  // returns 200 and then goes silent (or drip-feeds `thinking_delta` frames
+  // forever, which keep resetting any idle-only timer) hangs the CLI until
+  // the process is killed. These tests pin the Anthropic wire to the same
+  // guards, mirroring the OpenAI pipeline's watchdog suite.
+  describe('stream watchdog guards (issue #9005 finding 4)', () => {
+    // A manually gated SSE event source: events arrive only when pushed, so
+    // tests can model a stream that goes silent or is drip-fed. Mirrors the
+    // `gatedStream` helper in openaiContentGenerator/pipeline.test.ts.
+    function gatedEventStream() {
+      let resolveNext: ((r: IteratorResult<unknown>) => void) | null = null;
+      const buffered: unknown[] = [];
+      let ended = false;
+      let returned = false;
+      const deliver = (r: IteratorResult<unknown>) => {
+        const r2 = resolveNext;
+        resolveNext = null;
+        r2?.(r);
+      };
+      return {
+        push(event: unknown) {
+          if (resolveNext) deliver({ done: false, value: event });
+          else buffered.push(event);
+        },
+        end() {
+          ended = true;
+          if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        wasReturned() {
+          return returned;
+        },
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<unknown>> {
+                if (buffered.length) {
+                  return Promise.resolve({
+                    done: false,
+                    value: buffered.shift()!,
+                  });
+                }
+                if (ended) {
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as never,
+                  });
+                }
+                return new Promise((res) => {
+                  resolveNext = res;
+                });
+              },
+              return(): Promise<IteratorResult<unknown>> {
+                returned = true;
+                ended = true;
+                if (resolveNext) {
+                  deliver({ done: true, value: undefined as never });
+                }
+                return Promise.resolve({
+                  done: true,
+                  value: undefined as never,
+                });
+              },
+            };
+          },
+        },
+      };
+    }
+
+    const buildGenerator = async (guardConfig: {
+      streamIdleTimeoutMs?: number;
+      streamMaxLifetimeMs?: number;
+    }) => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      return new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+          ...(guardConfig.streamIdleTimeoutMs !== undefined
+            ? { streamIdleTimeoutMs: guardConfig.streamIdleTimeoutMs }
+            : {}),
+          ...(guardConfig.streamMaxLifetimeMs !== undefined
+            ? { streamMaxLifetimeMs: guardConfig.streamMaxLifetimeMs }
+            : {}),
+        },
+        mockConfig,
+      );
+    };
+
+    const streamRequest = {
+      model: 'models/ignored',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Drain the stream and capture whatever it ends with. Without the guards a
+    // silent/drip-fed source never settles, so callers race the result
+    // against a sentinel instead of awaiting it directly — a missing
+    // watchdog then fails the assertion instead of hanging the test.
+    const consumeUntilSettled = (
+      stream: AsyncGenerator<GenerateContentResponse>,
+    ) =>
+      (async () => {
+        for await (const _chunk of stream) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+
+    beforeEach(() => {
+      // Ignore ambient QWEN_STREAM_* knobs from the dev/CI shell so the
+      // explicit-config tests aren't silently overridden.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    it('aborts and throws a retryable ETIMEDOUT when the stream is silent past the idle timeout', async () => {
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: 1000,
+        chunksReceived: 0,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('uses the shared default idle timeout when no override is configured', async () => {
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('default-idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        chunksReceived: 0,
+      });
+    });
+
+    it('honours QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case: with no explicit
+      // `streamIdleTimeoutMs` config field, the constructor must resolve the
+      // idle window from the deployment env knob. Mutant check: replacing the
+      // constructor's `resolveStreamIdleTimeoutMs(contentGeneratorConfig)`
+      // with `contentGeneratorConfig.streamIdleTimeoutMs ??
+      // DEFAULT_STREAM_IDLE_TIMEOUT_MS` ignores the env knob (falls back to
+      // the 240s default) and this test fails on the sentinel.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(2999); // inside the env window
+      await vi.advanceTimersByTimeAsync(0);
+      const earlySentinel = Symbol('idle-watchdog-fired-before-env-value');
+      const early = await Promise.race([
+        captured,
+        Promise.resolve(earlySentinel),
+      ]);
+      expect(early).toBe(earlySentinel); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1); // t=3000 — the env value
+      await vi.advanceTimersByTimeAsync(0);
+      const lateSentinel = Symbol('env-idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(lateSentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: 3000,
+        chunksReceived: 0,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('does not interrupt a stream whose events keep arriving inside the idle window', async () => {
+      const gated = gatedEventStream();
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      let done = false;
+      let error: unknown;
+      const texts: string[] = [];
+      const consume = (async () => {
+        for await (const chunk of stream) {
+          for (const candidate of chunk.candidates ?? []) {
+            for (const part of candidate.content?.parts ?? []) {
+              if (part.text) texts.push(part.text);
+            }
+          }
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      });
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'hel' },
+      });
+      await vi.advanceTimersByTimeAsync(500); // < 1000ms idle window
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'lo' },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push({ type: 'content_block_stop', index: 0 });
+      gated.push({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 1 },
+      });
+      gated.push({ type: 'message_stop' });
+      gated.end();
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+      expect(texts).toEqual(['hel', 'lo']);
+    });
+
+    it('caps total stream lifetime when thinking deltas keep resetting the idle watchdog', async () => {
+      // The issue #9005 finding-4 shape: adaptive thinking emits long runs of
+      // `thinking_delta` frames, each resetting an idle-only timer, while the
+      // message never completes (the #8597 drip-fed hang). The lifetime cap
+      // does not reset.
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 3000,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      for (let i = 0; i < 4; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(500); // each drip resets the 1s idle watchdog
+      }
+      await vi.advanceTimersByTimeAsync(1000); // now past the 3000ms cap
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: 3000,
+        chunksReceived: 6,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('honours QWEN_STREAM_MAX_LIFETIME_MS when no explicit config is set', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case: with no explicit
+      // `streamMaxLifetimeMs` config field, the constructor must resolve the
+      // cap from the deployment env knob. Mutant check: replacing the
+      // constructor's `resolveStreamMaxLifetimeMs(contentGeneratorConfig)`
+      // with `contentGeneratorConfig.streamMaxLifetimeMs ?? 0` disables the
+      // cap and this test fails on the sentinel.
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '4000');
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      for (let i = 0; i < 7; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(500); // each drip resets the idle watchdog
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=4500 — past the 4s env cap
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('env-lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: 4000,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+    });
+
+    it('uses the default lifetime cap when nothing overrides it', async () => {
+      // No explicit config, no QWEN_STREAM_* env: the cap must resolve to the
+      // shared default. The drips land every 200s — inside the 240s default
+      // idle window, so the idle watchdog stays quiet while the lifetime cap
+      // accumulates upstream wait up to the 900s default.
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      for (let i = 0; i < 5; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        // Inside the 240s default idle window, so only the cap can fire.
+        await vi.advanceTimersByTimeAsync(200_000);
+      }
+      // The cap is reached at t=900s during the last advance; the final drip
+      // at t=800s keeps the 240s idle watchdog pending until t=1040s.
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('default-lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: DEFAULT_STREAM_MAX_LIFETIME_MS,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+    });
+
+    it('leaves streams unguarded when both timeouts are disabled (<= 0)', async () => {
+      const gated = gatedEventStream();
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 0,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _chunk of stream) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      });
+      // A silence far beyond the default idle timeout — survivable only
+      // when the guards are explicitly disabled.
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 1000);
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'still here' },
+      });
+      gated.push({ type: 'content_block_stop', index: 0 });
+      gated.push({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 1 },
+      });
+      gated.end();
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case. A user Ctrl-C that
+      // lands while the idle-watchdog timer is pending must surface as a
+      // non-retryable AbortError, not the watchdog's retryable ETIMEDOUT —
+      // ETIMEDOUT is in the retryable set, so the retry loop would otherwise
+      // resume the turn the user just cancelled. This pins the `parentSignal`
+      // argument threaded into `withStreamGuards`: replacing it with
+      // `undefined` makes the timer reject with StreamInactivityTimeoutError
+      // and this test fail.
+      const callerAc = new AbortController();
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream({
+        ...streamRequest,
+        config: { abortSignal: callerAc.signal },
+      } as unknown as GenerateContentParameters);
+      const captured = consumeUntilSettled(stream);
+      callerAc.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('user-abort-did-not-propagate');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).not.toBe(sentinel);
+      expect((err as Error).name).toBe('AbortError');
+      expect((err as { code?: string }).code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
     });
   });
 

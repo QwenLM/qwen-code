@@ -26,7 +26,6 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -34,11 +33,14 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
-  readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
-  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import {
+  redirectedAncestor,
+  untrustedGitfile,
+  untrustedRepositoryFrom,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -67,6 +69,11 @@ import {
   worktreePath,
 } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
+import {
+  automaticReviewRequested,
+  DOCS_NAV_PROFILE,
+  isStaticDocsNavDiff,
+} from './lib/docs-nav-profile.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -101,6 +108,14 @@ import {
   clearRoundStamps,
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
+import {
+  PREBUILD_BUDGET_S,
+  PREBUILD_ENV,
+  prebuildCovered,
+  prebuildRequested,
+  prebuildWorktree,
+  type WorktreeDependencies,
+} from './lib/prebuild.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -189,6 +204,24 @@ type FetchPrResult = PlanReport & {
    * says so instead of fanning out agents over zero hunks.
    */
   emptyDiff?: boolean;
+  /**
+   * What the prebuild did to the worktree, when this run asked for one
+   * (`QWEN_REVIEW_PREBUILD`, set by CI's review workflow — issue #10108):
+   * Agent 7's own `build-test --install --build-only`, run here before any
+   * agent starts and outside every agent's budget. `installed: true` means
+   * the tree holds a complete `node_modules` (npm's own marker, the gate
+   * Agent 7 reads), `built: true` that the scoped build closure compiled too,
+   * so a probe can run a test before Agent 7 finishes — but never against a
+   * workspace in that closure while Agent 7's own build is running: the
+   * per-package build script pre-cleans `dist` before each recompile, so an
+   * import of a rebuilding sibling resolves against a missing or partial
+   * `dist` in that window. Agent 7's install is a no-op on such a tree (its
+   * build recompiles). Anything else carries a `note` and the review behaves
+   * exactly as it did before the prebuild existed. Absent entirely when no
+   * prebuild was asked for or its session-shell cover is absent (every local
+   * run) and on an empty diff, where the skill stops before any agent runs.
+   */
+  dependencies?: WorktreeDependencies;
   /**
    * The recomputed merge-base diff is far smaller than the PR's advertised
    * GitHub stat — overlapping PRs merged since the author's last rebase have
@@ -613,17 +646,11 @@ function cleanStale(prNumber: string): void {
     );
   }
   const ref = reviewBranch(prNumber);
-  if (refExists(ref)) {
-    tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], {
-        stdio: 'pipe',
-        // Same reason as every other git spawn in this pipeline: a delete must
-        // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at.
-        env: sanitizedGitEnv(),
-      }),
-    );
-  }
+  // Through `lib/git`'s wrapper, not a direct spawn: `branch -D` finds its
+  // repository from `process.cwd()` and is a reference-transaction hook
+  // channel, so an ungated one runs whatever hooks a planted pointer
+  // configures. `gitOpt` never throws, which is what `tryRemove` was for.
+  if (refExists(ref)) gitOpt('branch', '-D', ref);
 }
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
@@ -683,11 +710,35 @@ function tryResume(
   const markerResumes = marker.resumes.filter(
     (r) => r.sessionId.toLowerCase() !== currentKey,
   ).length;
+  // Before reading anything through this tree's own pointer: `--resume`
+  // coexists with the sandbox on the very lane it polices, and the tree it
+  // reads is the one the previous run's containerized commands could write.
+  // `status` REFRESHES THE INDEX, so a planted `core.fsmonitor` runs on the
+  // host inside the very command that collects the ruling's evidence — the
+  // attack does not need the resume to succeed. See `untrustedGitfile`.
+  // REFUSE TO FRESH, not refuse to crash. Throwing here propagates out of
+  // `runFetchPr`, the enclosing catch rolls the lease back and re-throws, and
+  // `cleanStale` — the thing that would REMOVE the planted tree — is never
+  // reached. That contradicts what this file, the `--resume` describe and the
+  // docs all promise: the flag never fails a run that could start over. So
+  // this returns a refusal like every other one, the fresh path runs, and the
+  // planted tree is swept on the way.
+  if (untrustedGitfile(wt) !== null) {
+    return {
+      resumed: false,
+      reason: 'worktree-untrusted',
+      priorFetchedSha: null,
+    };
+  }
   // `--porcelain` prints nothing on a clean tree; a null (the command could
   // not run) is treated as dirty. `--untracked-files=normal` explicitly, so
   // a `status.showUntrackedFiles=no` tuning cannot hide residue that is not
-  // in the PR.
+  // in the PR. `core.fsmonitor` inert here too: the gate above proves the
+  // pointer, this proves the command cannot be turned into an execution even
+  // if some future path reaches it ungated.
   const status = gitOpt(
+    '-c',
+    'core.fsmonitor=',
     '-C',
     wt,
     'status',
@@ -800,6 +851,46 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
 
+  // BEFORE the first git command of the run, not at step 4. Every git
+  // invocation this command makes without an explicit `-C` — `cleanStale`'s
+  // `worktree remove --force`, step 2's `git fetch`, the branch rollbacks —
+  // discovers its repository from `process.cwd()`, and in the nested geometry
+  // `mountRootFor` documents (a review running inside another review's
+  // worktree) that launch directory sits inside the outer review's read-write
+  // mount: the outer PR's containerized build can rewrite the pointer git
+  // resolves here. `git fetch` through a rewritten pointer loads the planted
+  // repository's transport config — `core.sshCommand`, `remote.*.uploadpack`,
+  // a `url.*.insteadOf` rewrite — and runs it on the host. Gating only the
+  // `worktree add` at step 4 left every command before it resolving through
+  // exactly the pointer the gate exists to distrust.
+  //
+  // Kept at this call site even though `lib/git`'s wrappers now ask the same
+  // question (see `assertTrustedLaunchDir`), because this command changes
+  // state that is NOT a git call before it makes one: the lease read and the
+  // lease write both land before `cleanStale`, and a run that registers a
+  // lease and then dies at the first git command has taken the lock for
+  // nothing. The ordering test pins exactly that — no lease read, no sweep,
+  // no git call.
+  //
+  // A throw, not a refusal-to-fresh like the `--resume` gate's: that one can
+  // fall back because the fresh path is the safe one, and here the fresh path
+  // is what has been poisoned. There is no command left to run in a
+  // repository this process cannot locate honestly — `cleanStale` would sweep
+  // through the same pointer.
+  //
+  // Says nothing outside a mount (`mountRootFor` answers null), so an ordinary
+  // `qwen review` from a normal checkout never reaches the question.
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd());
+  if (launchUntrusted !== null) {
+    throw new Error(
+      `refusing to review PR #${prNumber} from this directory: ` +
+        `${launchUntrusted}. Every git command below — the stale-worktree ` +
+        `sweep, the PR fetch, the worktree creation — would resolve through ` +
+        `that pointer and run whatever the repository it names configures. ` +
+        `Run the review from a checkout outside the review temp dir.`,
+    );
+  }
+
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
   // reviewing — that is precisely how #9205 destroyed a round-4 review mid-run.
@@ -825,15 +916,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `concurrent session.`,
     );
   }
-  const holder = readReviewWorktreeLease(process.cwd(), leaseTarget);
-  if (reviewLeaseHeldByAnotherSession(holder)) {
+  const holder = readReviewWorktreeLeaseAt(process.cwd(), leaseTarget);
+  if (holder && reviewLeaseHeldByAnotherSession(holder.lease)) {
     throw new Error(
       `PR #${prNumber} is already being reviewed by another session ` +
-        `(session ${holder.sessionId}). Same-PR reviews share one worktree ` +
+        `(session ${holder.lease.sessionId}). Same-PR reviews share one worktree ` +
         `path and cannot run concurrently, so this run refuses rather than ` +
         `destroy the other session's state. Wait for that session to finish ` +
         `— its cleanup releases the lease — or, only if that session is ` +
-        `gone, delete ${reviewLeasePath(process.cwd(), leaseTarget)} and ` +
+        `gone, delete ${holder.path} and ` +
         `re-run.`,
     );
   }
@@ -952,16 +1043,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     } catch (err) {
-      // Roll back the fetched ref so the next run starts clean.
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      // Roll back the fetched ref so the next run starts clean — through the
+      // gated wrapper, for the reason `cleanStale` gives.
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
@@ -971,19 +1055,68 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
+    //
+    // Asked a SECOND time, immediately before the write. The hoisted gate at
+    // the top of this function is what keeps the fetch and the sweep from
+    // running through a poisoned pointer; this one narrows the window between
+    // that answer and the checkout `worktree add` performs, which is the step
+    // that executes a planted filter. Neither closes the TOCTOU window a
+    // same-user writer has — `scratch-tree` documents the same residual — and
+    // one spawn is a cheap price for making the window one function long
+    // instead of one command long.
+    //
+    // The pointer it judges is the LAUNCH directory's, not the new tree's:
+    // `git()` sets no cwd, so `worktree add` finds the repository from
+    // `process.cwd()`. Gating `wt`'s OWN pointer would be a no-op — a tree
+    // that does not exist yet has no pointer to distrust.
+    //
+    // OUTSIDE the try, because the catch below is a rollback. Thrown from
+    // inside, the refusal was caught by the path that deletes the fetched ref,
+    // and `branch -D` is a reference-transaction hook channel: the gate said
+    // "do not resolve through this pointer" and its own refusal immediately
+    // did, running the plant's hooks and then reporting the run as `Failed to
+    // create worktree at …` — indistinguishable from an infrastructure
+    // failure. Outside, it propagates to the lease rollback, which spawns no
+    // git at all, and reaches the user unmangled.
+    const freshUntrusted = untrustedRepositoryFrom(process.cwd());
+    if (freshUntrusted !== null) {
+      throw new Error(
+        `refusing to create a review worktree: ${freshUntrusted}`,
+      );
+    }
+    // The DESTINATION itself, and its ancestors (R27-9): `cleanStale` is not
+    // proof the path of `wt` is real — `releaseWorktree` DECLINES the sweep
+    // when a symlink sits at an ancestor (`git.ts`), prints a line, and
+    // leaves the link standing. `mkdirSync(dirname(wt))` would then create
+    // THROUGH the link and `git worktree add wt ref` would create and check
+    // out the PR's code at the link's target — outside the review temp dir,
+    // where `mountRootFor` answers null and the build/test phase runs
+    // unsandboxed in a directory the planter chose. Outside the rollback try
+    // for the same reason as the gate above.
+    //
+    // The walk starts AT `wt`, not at its parent. A link at the leaf is the
+    // cheaper plant of the two: `releaseWorktree` unlinks one it can reach,
+    // but `cleanStale` only WARNS when that release reports `freed: false`
+    // (an EACCES on `.qwen/tmp` is enough) and runs on to here, and `git
+    // worktree add` through a leaf link creates and checks out at the link's
+    // target — measured on git 2.43, exit 0 with the tree in the external
+    // directory. `redirectedAncestor` lstats its first component before any
+    // stop test, so asking at the leaf adds it to the same walk at no cost:
+    // a real directory or an absent path there is not a link, and the walk
+    // proceeds to the ancestors exactly as before.
+    const wtRedirected = redirectedAncestor(resolve(wt));
+    if (wtRedirected !== null) {
+      throw new Error(
+        `refusing to create a review worktree at ${wt}: ${wtRedirected} is ` +
+          `a symlink, so the create and checkout would land wherever it ` +
+          `points — outside the review temp dir. Remove the link and re-run.`,
+      );
+    }
     try {
       mkdirSync(dirname(wt), { recursive: true });
       git('worktree', 'add', wt, ref);
     } catch (err) {
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );
@@ -1593,6 +1726,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
+    // Ruled once, up front: the report's `emptyDiff` flag below and the
+    // prebuild gate after the write read the same answer (the rationale for
+    // its two guards sits with the flag).
+    const emptyDiff = isEmptyDiff({
+      diffPath: fullText === null ? null : diffRel,
+      baseFetchFailed,
+      diffText: fullText ?? '',
+    });
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1626,13 +1767,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // emptied PR went unflagged because its own delta was not empty. Both
       // are full-range facts, so both read `fullText` on EVERY round, delta
       // -scoped or not.
-      ...(isEmptyDiff({
-        diffPath: fullText === null ? null : diffRel,
-        baseFetchFailed,
-        diffText: fullText ?? '',
-      })
-        ? { emptyDiff: true }
-        : {}),
+      ...(emptyDiff ? { emptyDiff: true } : {}),
       // Collapse detection compares recomputed reality against GitHub's
       // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
       // signature, not rounding. Both thresholds are deliberately coarse — this
@@ -1690,9 +1825,81 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         hasDeadline: hasReviewDeadline(process.env),
       }),
       ...planEffortField(args.effort),
+      ...(automaticReviewRequested() &&
+      !args.resume &&
+      !anchor?.incremental.effective &&
+      !baseFetchFailed &&
+      mergeBaseSha !== null &&
+      fullText !== null &&
+      isStaticDocsNavDiff(fullText, (side, path) =>
+        gitRaw(
+          'show',
+          `${side === 'base' ? mergeBaseSha : fetchedSha}:${path}`,
+        ).toString('utf8'),
+      )
+        ? { reviewProfile: DOCS_NAV_PROFILE }
+        : {}),
     };
 
     writeFileSync(out, stringifyPlanReport(result), 'utf8');
+
+    // 6. Prebuild the worktree — install and compile it through Agent 7's
+    //    own `build-test` — when this run asked for it (CI does; issue
+    //    #10108). After the plan write, because `build-test` reads the plan
+    //    for its file list; before the session ledger below, because the
+    //    plan is rewritten with the outcome and the ledger keys on the plan's
+    //    mtime — the run epoch every downstream fence reads through must be
+    //    the FINAL write's. Not on an empty diff: the skill stops there
+    //    before any agent runs, and an install nobody will use is pure cost.
+    //    Best-effort by contract — the prebuild records a reason instead of
+    //    throwing — and absent from the report entirely when not asked for,
+    //    so every local review reads the plan it always did.
+    if (
+      prebuildRequested() &&
+      !emptyDiff &&
+      result.reviewProfile !== DOCS_NAV_PROFILE
+    ) {
+      if (!prebuildCovered()) {
+        // CI welds the opt-in together with a session-shell default that
+        // carries the budget; a local opt-in has only the built-in 120s
+        // default, and a prebuild started under it dies mid-install with
+        // the whole fetch-pr call — the fail-open path never gets to
+        // record anything. Warn and skip instead: the pre-prebuild flow is
+        // exactly the status quo this module exists to improve on.
+        writeStderrLine(
+          `Prebuild skipped: ${PREBUILD_ENV} is set, but the session shell ` +
+            `default cannot carry the ${PREBUILD_BUDGET_S}s budget — the ` +
+            `covering default is welded only by CI's review workflow. ` +
+            `build-test installs and builds on its own path as before.`,
+        );
+      } else {
+        // The call below is a blocking prefix of up to PREBUILD_BUDGET_S
+        // that emits nothing until it returns (runBuildTest captures its
+        // stdio), so a run killed mid-prebuild must leave a line naming
+        // where it died.
+        writeStderrLine(
+          `Prebuilding the worktree via build-test (${PREBUILD_ENV}=1, ` +
+            `budget ${PREBUILD_BUDGET_S}s)...`,
+        );
+        result.dependencies = prebuildWorktree({
+          plan: out,
+          worktree: wt,
+          report: tmpFile(`pr-${prNumber}`, 'prebuild.json'),
+        });
+        writeFileSync(out, stringifyPlanReport(result), 'utf8');
+        const deps = result.dependencies;
+        const took = `${Math.round(deps.durationMs / 1000)}s`;
+        writeStderrLine(
+          deps.installed && deps.built
+            ? `Prebuilt the worktree in ${took}: dependencies installed and ` +
+                `the scoped build closure compiled; build-test's install is ` +
+                `a no-op on this tree.`
+            : `Prebuild did not complete in ${took} (installed: ${deps.installed}, ` +
+                `built: ${deps.built}${deps.note ? `; ${deps.note}` : ''}); ` +
+                `build-test installs and builds on its own path as before.`,
+        );
+      }
+    }
     // Record this session against the plan just written: a later `--resume`
     // reads the ledger to find this attempt's transcripts. After the plan
     // write, so the entry sits inside the run-epoch fence it is read through.

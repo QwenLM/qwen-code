@@ -57,11 +57,16 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getUserMemory: vi.fn().mockReturnValue(''),
     getSystemPrompt: vi.fn().mockReturnValue(undefined),
     getOutputStyle: vi.fn().mockReturnValue(undefined),
+    getCodeModeOnly: vi.fn().mockReturnValue(false),
+    isTodoWriteEnabled: vi.fn().mockReturnValue(false),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+    isSkillEnabled(this: Config, skill: { name: string }) {
+      return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+    },
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -92,11 +97,16 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+      isSkillEnabled(this: Config, skill: { name: string }) {
+        return !this.getDisabledSkillNames().has(skill.name.toLowerCase());
+      },
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -218,6 +228,8 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -267,6 +279,8 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),

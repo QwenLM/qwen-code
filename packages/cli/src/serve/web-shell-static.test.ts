@@ -8,34 +8,26 @@ import { describe, expect, it } from 'vitest';
 import {
   buildWebShellCsp,
   buildWebShellPermissionsPolicy,
-  loopbackSandboxOrigins,
-  portFromHostHeader,
 } from './web-shell-static.js';
 
 describe('Web Shell sandbox framing', () => {
-  it('pins loopback sandbox origins to the request Host port', () => {
-    expect(portFromHostHeader('localhost:4170')).toBe('4170');
-    expect(portFromHostHeader('[::1]:4170')).toBe('4170');
-    expect(portFromHostHeader('127.0.0.1')).toBeUndefined();
-    expect(loopbackSandboxOrigins('127.0.0.1:4170')).toEqual([
-      'http://localhost:4170',
-      'http://127.0.0.1:4170',
-      'https://localhost:4170',
-      'https://127.0.0.1:4170',
-    ]);
-    expect(loopbackSandboxOrigins('127.0.0.1:4170').join(' ')).not.toContain(
-      '[::1]',
+  it('allows live previews and PDF blobs while retaining shell isolation', () => {
+    const csp = buildWebShellCsp();
+    expect(csp).toContain('frame-src http: https: blob:;');
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain("media-src 'self' data:");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain(
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
     );
+    expect(csp).not.toContain('frame-src *');
   });
 
-  it('allows only the daemon loopback port in frame-src', () => {
-    const csp = buildWebShellCsp([], loopbackSandboxOrigins('localhost:4170'));
-    expect(csp).toContain(
-      'frame-src http://localhost:4170 http://127.0.0.1:4170 https://localhost:4170 https://127.0.0.1:4170',
-    );
-    expect(csp).not.toContain('[::1]');
-    expect(csp).not.toContain('http://localhost:*');
-    expect(csp).not.toContain('http://127.0.0.1:*');
+  it('retains the explicit embedding ancestor allowlist', () => {
+    const csp = buildWebShellCsp(['chrome-extension://test-extension']);
+    expect(csp).toContain('frame-ancestors chrome-extension://test-extension');
+    expect(csp).toContain('frame-src http: https: blob:;');
   });
 
   it('keeps camera, microphone, and geolocation host-blocked', () => {

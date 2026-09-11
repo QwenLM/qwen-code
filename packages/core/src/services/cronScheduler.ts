@@ -12,9 +12,15 @@ import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { CronTaskDelivery, DurableCronTask } from './cronTasksFile.js';
+import type {
+  CronRunSessionOutcome,
+  CronTaskDelivery,
+  DurableCronTask,
+} from './cronTasksFile.js';
 import {
   addCronTask,
+  annotateCronRunSession,
+  cronTaskSessionDeletionId,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -89,6 +95,15 @@ export interface CronJob {
    * absent, the task uses the shared model: only the lock owner fires it.
    */
   boundSessionId?: string;
+  /** Whether a daemon-backed consumer should execute this fire in the bound
+   * task session or dispatch it into a fresh child session. */
+  sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for a fresh per-run session. */
+  modelServiceId?: string;
+  /** Named group assigned to a fresh per-run session. */
+  groupId?: string;
+  /** Human-readable task label used to name a fresh per-run session. */
+  name?: string;
   delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
@@ -284,6 +299,21 @@ export class CronScheduler {
   // eligible to fire them. Cleared on stop so a later enable still treats
   // genuinely overdue work as missed.
   private armedDurableOneShots = new Set<string>();
+  // Exact persisted snapshots for active per-run one-shots. The tick removes
+  // such a task before its async fresh-session dispatch finishes; retain the
+  // original so a rejected dispatch can put the unexecuted task back without
+  // dropping route-only fields such as session ownership.
+  private restorablePerRunOneShots = new Map<
+    string,
+    { task: DurableCronTask; index: number }
+  >();
+  private consumedPerRunOneShots = new Set<string>();
+  // The durable deletion generation observed by the task-file mutation that
+  // removed each consumed one-shot.
+  private consumedPerRunRemovalGenerations = new Map<
+    string,
+    ReadonlyMap<string, number>
+  >();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
@@ -559,7 +589,12 @@ export class CronScheduler {
    */
   async delete(id: string): Promise<boolean> {
     const job = this.jobs.get(id);
-    if (!job) return this.cancelWakeup(id);
+    if (!job) {
+      this.restorablePerRunOneShots.delete(id);
+      this.consumedPerRunOneShots.delete(id);
+      this.consumedPerRunRemovalGenerations.delete(id);
+      return this.cancelWakeup(id);
+    }
 
     this.jobs.delete(id);
     if (job.durable && this.projectRoot) {
@@ -572,6 +607,9 @@ export class CronScheduler {
         throw error;
       }
     }
+    this.restorablePerRunOneShots.delete(id);
+    this.consumedPerRunOneShots.delete(id);
+    this.consumedPerRunRemovalGenerations.delete(id);
     this.armedDurableOneShots.delete(id);
     return true;
   }
@@ -925,6 +963,11 @@ export class CronScheduler {
     // Jobs mid-createDurable are on their way to disk — treat them as
     // present so this reload doesn't delete the live job it can't see yet.
     for (const id of this.pendingAdd) diskIds.add(id);
+    for (const id of this.restorablePerRunOneShots.keys()) {
+      if (!diskIds.has(id) && !this.consumedPerRunOneShots.has(id)) {
+        this.restorablePerRunOneShots.delete(id);
+      }
+    }
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
@@ -958,6 +1001,15 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!task.recurring && task.sessionMode === 'per_run') {
+        this.restorablePerRunOneShots.set(task.id, {
+          task,
+          index: read.findIndex((candidate) => candidate.id === task.id),
+        });
+      } else {
+        this.restorablePerRunOneShots.delete(task.id);
+        this.consumedPerRunOneShots.delete(task.id);
+      }
       if (!task.recurring && this.#shouldFireDurable(job)) {
         this.armedDurableOneShots.add(task.id);
       } else {
@@ -1153,7 +1205,9 @@ export class CronScheduler {
             runs: appendCronRun(t.runs, {
               at: stamp,
               kind: 'catch-up',
-              ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+              ...(t.sessionMode !== 'per_run' && this.sessionId
+                ? { sessionId: this.sessionId }
+                : {}),
             }),
           };
         });
@@ -1245,6 +1299,130 @@ export class CronScheduler {
     job.lastFiredAt = Date.now();
     debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
     this.onFire(job);
+    return true;
+  }
+
+  /** Attributes an already-persisted per-run fire to the session it ran in,
+   * and/or marks its fresh-session creation as failed. */
+  async annotateRunSession(
+    taskId: string,
+    firedAt: number,
+    outcome: CronRunSessionOutcome,
+  ): Promise<void> {
+    if (outcome.sessionId && this.consumedPerRunOneShots.delete(taskId)) {
+      this.restorablePerRunOneShots.delete(taskId);
+      this.consumedPerRunRemovalGenerations.delete(taskId);
+    }
+    if (!this.projectRoot) return;
+    // The onFire callback runs before tick() queues its run-history write.
+    // Yield once, then wait for that write so the entry exists before editing it.
+    await Promise.resolve();
+    await this.pendingPersist;
+    await updateCronTasks(this.projectRoot, (tasks) =>
+      tasks.map((task) =>
+        task.id === taskId
+          ? annotateCronRunSession(task, firedAt, outcome)
+          : task,
+      ),
+    );
+  }
+
+  /** Pauses and records a durable per-run one-shot that never dispatched. */
+  async restoreConsumedOneShot(taskId: string): Promise<boolean> {
+    const projectRoot = this.projectRoot;
+    const snapshot = this.restorablePerRunOneShots.get(taskId);
+    const firedAt = snapshot?.task.lastFiredAt;
+    if (
+      !projectRoot ||
+      !snapshot ||
+      firedAt == null ||
+      !this.consumedPerRunOneShots.has(taskId)
+    ) {
+      return false;
+    }
+
+    // onFire runs before tick() queues the removal write. Let tick finish, then
+    // wait for that write so the restore cannot be deleted immediately after
+    // it lands.
+    await Promise.resolve();
+    await this.pendingPersist;
+    const removalGeneration = this.consumedPerRunRemovalGenerations.get(taskId);
+    if (
+      !this.consumedPerRunOneShots.has(taskId) ||
+      removalGeneration === undefined
+    ) {
+      this.restorablePerRunOneShots.delete(taskId);
+      this.consumedPerRunOneShots.delete(taskId);
+      this.consumedPerRunRemovalGenerations.delete(taskId);
+      return false;
+    }
+    this.armedDurableOneShots.delete(taskId);
+    let restoreGenerations: ReadonlyMap<string, number> = new Map();
+    let restored = false;
+    try {
+      await updateCronTasks(
+        projectRoot,
+        (tasks) => {
+          if (
+            [...removalGeneration].some(
+              ([id, generation]) => restoreGenerations.get(id) !== generation,
+            )
+          )
+            return tasks;
+          const existing = tasks.findIndex((task) => task.id === taskId);
+          const current = tasks[existing] ?? snapshot.task;
+          const failed: DurableCronTask = {
+            ...current,
+            enabled: false,
+            lastFiredAt: firedAt,
+            runs: appendCronRun(current.runs, {
+              at: firedAt,
+              kind: 'scheduled',
+              sessionDispatchFailed: true,
+            }),
+          };
+          restored = true;
+          if (existing !== -1) {
+            return tasks.map((task, index) =>
+              index === existing ? failed : task,
+            );
+          }
+          const next = [...tasks];
+          next.splice(Math.min(snapshot.index, next.length), 0, failed);
+          return next;
+        },
+        {
+          observeDeletionIds: [...removalGeneration.keys()],
+          onDeletionGenerations: (generations) => {
+            restoreGenerations = generations;
+          },
+        },
+      );
+    } catch (error) {
+      // Symmetric with the !restored exit: release the consumed snapshot so
+      // the retained state can't pin the reload GC for the rest of this
+      // process's life. The re-fire guard (pendingRemoval) stays.
+      this.restorablePerRunOneShots.delete(taskId);
+      this.consumedPerRunOneShots.delete(taskId);
+      this.consumedPerRunRemovalGenerations.delete(taskId);
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silently destroyed one-shot
+      console.warn(
+        `CronScheduler: could not restore scheduled one-shot task ${taskId} ` +
+          `after its run failed to dispatch — the task may be gone from ` +
+          `disk with no recorded run.`,
+      );
+      throw error;
+    }
+    if (!restored) {
+      this.restorablePerRunOneShots.delete(taskId);
+      this.consumedPerRunOneShots.delete(taskId);
+      this.consumedPerRunRemovalGenerations.delete(taskId);
+      return false;
+    }
+    this.pendingRemoval.delete(taskId);
+    this.jobs.delete(taskId);
+    this.consumedPerRunOneShots.delete(taskId);
+    this.consumedPerRunRemovalGenerations.delete(taskId);
     return true;
   }
 
@@ -1443,43 +1621,95 @@ export class CronScheduler {
         this.armedDurableOneShots.delete(id);
       }
       const removed = new Set(removedIds);
+      const removedByFire = new Set<string>();
+      let removalGenerations: ReadonlyMap<string, number> = new Map();
       // Guard the just-fired recurring ids against re-detection by a reload that
       // races this async write (removed one-shots are already covered by
       // pendingRemoval). Cleared when the write lands. Symmetric to the
       // catch-up persist — see firePersistPending.
       const guarded = [...firedAt.keys()];
       this.markFirePersistPending(guarded);
+      const recordRemovalGenerations = () => {
+        for (const id of removedByFire) {
+          const generation = removalGenerations.get(id);
+          if (generation !== undefined && this.consumedPerRunOneShots.has(id)) {
+            const observed = new Map([[id, generation]]);
+            const sessionId =
+              this.restorablePerRunOneShots.get(id)?.task.sessionId;
+            if (sessionId) {
+              const key = cronTaskSessionDeletionId(sessionId);
+              const sessionGeneration = removalGenerations.get(key);
+              if (sessionGeneration === undefined) continue;
+              observed.set(key, sessionGeneration);
+            }
+            this.consumedPerRunRemovalGenerations.set(id, observed);
+          }
+        }
+      };
       this.trackPersist(
-        updateCronTasks(this.projectRoot, (tasks) =>
-          tasks
-            .filter((t) => !removed.has(t.id))
-            // A recurring fire also appends a bounded run record. One-shots
-            // were routed to removedIds above and filtered out here, so they
-            // never accrue history — they're deleted the moment they fire.
-            .map((t) => {
-              const stamp = firedAt.get(t.id);
-              // Never regress lastFiredAt: a concurrent writer (a manual
-              // POST /run, or a catch-up persist) may have stamped a NEWER value
-              // between this tick's read and write; overwriting it with the older
-              // tick slot could re-open an already-covered slot. Mirrors the
-              // catch-up persist's equality guard.
-              if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
-                return t;
-              return {
-                ...t,
-                lastFiredAt: stamp,
-                runs: appendCronRun(t.runs, {
-                  at: stamp,
-                  kind: 'scheduled',
-                  // The owner session that ran this fire — links the run back
-                  // to its transcript. Set whenever a durable fire persists.
-                  ...(this.sessionId ? { sessionId: this.sessionId } : {}),
-                }),
-              };
-            }),
-        ).finally(() => {
-          this.clearFirePersistPending(guarded);
-        }),
+        updateCronTasks(
+          this.projectRoot,
+          (tasks) =>
+            tasks
+              .filter((t) => {
+                if (!removed.has(t.id)) return true;
+                removedByFire.add(t.id);
+                const snapshot = this.restorablePerRunOneShots.get(t.id);
+                if (snapshot) {
+                  snapshot.task = {
+                    ...t,
+                    lastFiredAt: snapshot.task.lastFiredAt,
+                  };
+                }
+                return false;
+              })
+              // A recurring fire also appends a bounded run record. One-shots
+              // were routed to removedIds above and filtered out here, so they
+              // never accrue history — they're deleted the moment they fire.
+              .map((t) => {
+                const stamp = firedAt.get(t.id);
+                // Never regress lastFiredAt: a concurrent writer (a manual
+                // POST /run, or a catch-up persist) may have stamped a NEWER value
+                // between this tick's read and write; overwriting it with the older
+                // tick slot could re-open an already-covered slot. Mirrors the
+                // catch-up persist's equality guard.
+                if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
+                  return t;
+                return {
+                  ...t,
+                  lastFiredAt: stamp,
+                  runs: appendCronRun(t.runs, {
+                    at: stamp,
+                    kind: 'scheduled',
+                    // The owner session that ran this fire — links the run back
+                    // to its transcript. Set whenever a durable fire persists.
+                    ...(t.sessionMode !== 'per_run' && this.sessionId
+                      ? { sessionId: this.sessionId }
+                      : {}),
+                  }),
+                };
+              }),
+          {
+            observeDeletionIds: (tasks) => [
+              ...removedIds,
+              ...tasks.flatMap((task) =>
+                removed.has(task.id) && task.sessionId
+                  ? [cronTaskSessionDeletionId(task.sessionId)]
+                  : [],
+              ),
+            ],
+            onDeletionGenerations: (generations) => {
+              removalGenerations = generations;
+            },
+          },
+        )
+          .then(recordRemovalGenerations, (error) => {
+            recordRemovalGenerations();
+            throw error;
+          })
+          .finally(() => {
+            this.clearFirePersistPending(guarded);
+          }),
       );
     }
 
@@ -1545,6 +1775,14 @@ export class CronScheduler {
 
     if (!job.recurring || expired) {
       this.jobs.delete(job.id);
+    }
+
+    if (!job.recurring && job.durable && job.sessionMode === 'per_run') {
+      this.consumedPerRunOneShots.add(job.id);
+      const snapshot = this.restorablePerRunOneShots.get(job.id);
+      if (snapshot) {
+        snapshot.task = { ...snapshot.task, lastFiredAt: matchedMinuteMs };
+      }
     }
 
     if (this.onFire) {
@@ -1661,6 +1899,10 @@ function durableTaskToJob(
     jitterMs,
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
+    ...(task.sessionMode ? { sessionMode: task.sessionMode } : {}),
+    ...(task.modelServiceId ? { modelServiceId: task.modelServiceId } : {}),
+    ...(task.groupId ? { groupId: task.groupId } : {}),
+    ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
 }
@@ -1674,6 +1916,8 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
+    ...(job.sessionMode ? { sessionMode: job.sessionMode } : {}),
+    ...(job.name ? { name: job.name } : {}),
     ...(job.delivery ? { delivery: job.delivery } : {}),
   };
 }

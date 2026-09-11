@@ -117,7 +117,8 @@ By default, HTTP hooks cannot target private or link-local IP ranges. In platfor
 
 - This setting is **only honored from User, System, and SystemDefaults settings scopes**. A value set in Workspace (project) settings is ignored and logged as a warning, so a cloned repository can never self-grant this bypass.
 - The flag relaxes only the general private/CGNAT/link-local **range** checks. Cloud metadata endpoints stay blocked in every configuration: the `BLOCKED_HOSTS` list is matched literally (`metadata.google.internal`, `metadata.azure.internal`, ...), and the metadata IPs `169.254.169.254` and `100.100.100.200` are blocked in all serialized forms (including IPv4-mapped IPv6 such as `::ffff:a9fe:a9fe`) and after DNS resolution.
-- The `security.allowedHttpHookUrls` whitelist still applies independently. In managed environments, pair this flag with a whitelist so only the intended internal endpoints are reachable.
+- The `security.allowedHttpHookUrls` whitelist still applies independently. In managed environments, pair this flag with a whitelist so only the intended internal endpoints are reachable. A whitelist in Workspace (project) settings is honored only when no User, System, or SystemDefaults scope sets one; otherwise it is ignored and logged as a warning, so a repository can narrow where its hooks send data but never replace a whitelist you configured (an empty whitelist means "allow all").
+- HTTP hooks never follow redirects. A 3xx response is treated like any other non-2xx status: a non-blocking hook failure, and the redirect target is never contacted.
 
 > **Warning:** Enabling this flag lets hooks reach internal infrastructure on your network. Enable it only in trusted, managed settings — never in a repository you do not control.
 
@@ -336,25 +337,25 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                                  | Matcher Target                                                 |
-| :------------------- | :---------------------------------------------- | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                           | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution                 | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                      | Tool id                                                        |
-| `UserPromptSubmit`   | Before supported model invocations              | None                                                           |
-| `SessionStart`       | When session starts or resumes                  | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                               | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `SessionDelete`      | After an explicitly selected session is deleted | None                                                           |
-| `MessageDisplay`     | Repeatedly, as the reply streams                | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response       | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                            | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                             | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction                  | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent                     | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown                 | Tool id                                                        |
-| `PermissionDenied`   | When tool permission is denied                  | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created                 | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed         | None (always fires)                                            |
+| Event                | Triggered When                                   | Matcher Target                                                 |
+| :------------------- | :----------------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                            | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution                  | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                       | Tool id                                                        |
+| `UserPromptSubmit`   | Before supported model invocations               | None                                                           |
+| `SessionStart`       | When session starts or resumes                   | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                                | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `SessionDelete`      | After an explicitly selected session is deleted  | None                                                           |
+| `MessageDisplay`     | Repeatedly, as the reply streams                 | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response        | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                             | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                              | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction                   | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent                      | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown                  | Tool id                                                        |
+| `PermissionDenied`   | When AUTO-mode classification denies a tool call | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created                  | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed          | None (always fires)                                            |
 
 ### Matcher Patterns
 
@@ -465,11 +466,11 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 
 **Exit Code Behavior (Command Hooks):**
 
-| Exit Code | Behavior                                                                              |
-| :-------- | :------------------------------------------------------------------------------------ |
-| `0`       | Success. Parse JSON in `stdout` to control behavior.                                  |
-| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model. |
-| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.           |
+| Exit Code | Behavior                                                                                                                                                                                                                                                                                                                                                                       |
+| :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
+| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
+| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
 
 **Output Structure:**
 
@@ -609,24 +610,28 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 #### UserPromptSubmit
 
-**Purpose**: Executed before supported model invocations to validate, block, or enrich the current model-bound prompt. The event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input.
+**Purpose**: Executed before supported model invocations to validate, block, or enrich their input. On the core/headless path, the event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input. The ACP session path has its own invocation policy: retries and newly dispatched background tasks can still invoke legacy hooks; continue, restored-question, and runtime-goal turns do not.
 
 **Event-specific fields**:
 
 ```json
 {
-  "prompt": "current model-bound prompt for this hook invocation",
-  "submitted_prompt": "optional user text captured at a supported interactive TUI submission boundary"
+  "prompt": "legacy prompt for this invocation; semantics depend on the execution path",
+  "submitted_prompt": "optional user text captured at a supported submission boundary"
 }
 ```
 
-`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
+`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn must carry an explicit submission declaration. Missing, non-string, empty, or whitespace-only declarations omit the field; the value is never reconstructed from `prompt` or a display label. Retries, continuations, and channel-classified turns omit it. The channel exclusion includes both automated events and human messages relayed through channel adapters.
 
-Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
+Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs do not declare provenance because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. Existing clients without this declaration continue running legacy hooks but do not trigger provenance-gated Auto Recall. Do not add the declaration globally to an SDK transport: scheduled tasks, Live task runs, sub-session spawns, model-authored cross-session messages, and promoted mid-turn messages must not acquire it automatically. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers. These declarations are caller-supplied provenance, not proof of human authorship or authorization.
+
+On the ACP path, the initial legacy `prompt` is the request's text blocks joined with a space before resource, attachment, slash-command, or model-only expansion. It does not expose the complete expanded model input. `submitted_prompt` can equal that text, but comes only from the explicit declaration and preserves its original whitespace. On the core/headless path, legacy `prompt` represents the current model-bound text for the hook invocation. Neither field is a complete DLP inspection surface.
+
+The following composer rules apply to the interactive TUI, not to ACP clients. Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
 
 After restored or provenance-unavailable model-bound input is cleared or submitted, the composer also clears its undo and redo history. This prevents undo from restoring expanded text after its marker or sidecar has been consumed.
 
-Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. Consumers should treat the field as a TUI text projection rather than a byte-for-byte record of clipboard input.
+Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. On that TUI path, consumers should treat the field as a text projection rather than a byte-for-byte record of clipboard input. ACP clients have no equivalent built-in Vim, paste-placeholder, history, or rewind provenance tracking; they own whether restored or edited text retains a valid submission declaration.
 
 Any non-empty input present while Vim mode is enabled omits `submitted_prompt`, including after Vim is disabled, because Vim registers do not carry provenance in this version. This conservative rule also covers drafts entered before enabling Vim. Clearing the composer starts a new eligible input.
 
@@ -664,10 +669,7 @@ This two-field payload is written only for this kind of user-prompt record.
 `hookContext` intentionally duplicates the tagged part so offline and
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
-context. For a supported interactive TUI submission it is the raw composer
-projection carried by `submitted_prompt`; ACP, headless, `serve`, SDK, remote
-input, and other paths without that provenance record the expanded pre-hook
-prompt instead.
+context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection or attachment references require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released
@@ -766,7 +768,7 @@ When sent to the model, injected `additionalContext` is appended as its own mess
 }
 ```
 
-The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
+The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it. A command hook is left to finish if Qwen exits after dispatch; its stdout and stderr are ignored and remain independent of Qwen's pipes.
 
 #### MessageDisplay
 
@@ -885,6 +887,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 - Authentication failure logging
 - Billing error notifications
 - Error statistics collection
+
+A command hook is left to finish if Qwen exits after dispatch; its stdout and stderr are ignored and remain independent of Qwen's pipes.
 
 #### SubagentStart
 
@@ -1347,10 +1351,12 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 Only `command` type supports asynchronous execution. Setting `"async": true` runs the hook in the background without blocking the main flow.
 
+Async hooks are scoped to the Qwen process because their captured output is delivered through the in-memory async hook registry. On POSIX, Qwen reclaims a still-running async hook process tree when it exits, except for event types whose sections explicitly guarantee fire-and-forget completion after exit. Windows cannot reconstruct a descendant tree after its root exits, so full parent-exit reclamation there requires a Job Object or descendant tracking.
+
 **Features:**
 
 - Cannot return decision control (operation has already occurred)
-- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`
+- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
 
 **Example:**
@@ -1490,11 +1496,11 @@ A PostToolUse HTTP hook that sends all tool execution records to a remote audit 
 }
 ```
 
-### Example 3: Interactive TUI Submitted Prompt Validation Hook
+### Example 3: Submitted Prompt Validation Hook
 
-To inspect the current model-bound content instead, read `prompt`. That field can include generated or expanded content, is not the original user input, and does not imply that `UserPromptSubmit` covers every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
+On the core/headless path, `prompt` can include generated or expanded content rather than original user input. On ACP it starts with the pre-expansion request text, so reading it does not inspect attachment bodies or the complete model input. `UserPromptSubmit` does not cover every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
 
-A UserPromptSubmit hook that validates supported interactive TUI submissions for sensitive information and provides context for long prompts. It skips invocations where source provenance is unavailable. The keyword check is illustrative and is not a complete DLP policy:
+A UserPromptSubmit hook that validates supported submitted text and provides context for long prompts. It also runs on headless submissions and explicitly declared ACP/daemon submissions; it is not TUI-only. It skips invocations where source provenance is unavailable. A blocking result stops the affected invocation, including on these non-TUI paths. The keyword check is illustrative and is not a complete DLP policy:
 
 **prompt_validator.py**
 

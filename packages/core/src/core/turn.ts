@@ -37,7 +37,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -75,6 +75,7 @@ export enum LlmEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  GoalSettlementFailed = 'goal_settlement_failed',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
@@ -148,6 +149,11 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /** Parent model tool call for a programmatically dispatched child call. */
+  parentCallId?: string;
+  source?: 'model' | 'code_mode';
+  /** Exact tools an exec call may dispatch for a restricted agent. */
+  codeModeAllowedToolNames?: readonly string[];
 }
 
 export type ToolExecutionStatus =
@@ -243,6 +249,14 @@ export function createDuplicateProviderToolCallResponse(
 ): ToolCallResponseInfo {
   const providerCallId = request.providerCallId ?? request.callId;
   const message = duplicateProviderToolCallMessage(providerCallId);
+  return createNotStartedToolErrorResponse(request, message);
+}
+
+export function createNotStartedToolErrorResponse(
+  request: ToolCallRequestInfo,
+  message: string,
+  errorType: ToolErrorType = ToolErrorType.EXECUTION_FAILED,
+): ToolCallResponseInfo {
   return {
     callId: request.callId,
     responseParts: [
@@ -256,7 +270,7 @@ export function createDuplicateProviderToolCallResponse(
     ],
     resultDisplay: message,
     error: new Error(message),
-    errorType: ToolErrorType.EXECUTION_FAILED,
+    errorType,
     executionStatus: 'not_started',
   };
 }
@@ -387,16 +401,38 @@ export enum CompressionStatus {
    * splitter). (R5.2)
    */
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+
+  /**
+   * The compression side-query failed before producing a summary. Kept
+   * distinct from empty summaries so callers can tell API/provider failures
+   * apart from model output quality failures.
+   */
+  COMPRESSION_FAILED_API_ERROR,
+}
+
+export function isCompressionFailureStatus(
+  status: CompressionStatus | null | undefined,
+): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+  );
 }
 
 /**
  * Why an auto-compaction fired. Drives the user-facing notice so a
  * screenshot-overflow trigger isn't mislabeled as "approached the token
- * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ * limit" and a 413-driven compaction isn't mislabeled as a token overflow
+ * (#10380). Undefined on NOOP / failure paths and for callers that don't
+ * set it.
  */
 export type CompactionTriggerReason =
   | 'token_limit'
   | 'image_overflow'
+  | 'payload_overflow'
   | 'manual';
 
 export interface ChatCompressionInfo {
@@ -458,6 +494,11 @@ export type ServerLlmHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerLlmGoalSettlementFailedEvent = {
+  type: LlmEventType.GoalSettlementFailed;
+  value: string;
+};
+
 export type ServerLlmUserPromptSubmitBlockedEvent = {
   type: LlmEventType.UserPromptSubmitBlocked;
   value: {
@@ -495,6 +536,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmContentEvent
   | ServerLlmErrorEvent
   | ServerLlmFinishedEvent
+  | ServerLlmGoalSettlementFailedEvent
   | ServerLlmHookSystemMessageEvent
   | ServerLlmUserPromptSubmitBlockedEvent
   | ServerLlmStopHookLoopEvent

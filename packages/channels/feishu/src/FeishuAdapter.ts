@@ -12,7 +12,12 @@ import {
   isTerminalTaskLifecycleType,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
-import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
+import {
+  buildCardContent,
+  extractTitle,
+  FEISHU_CHUNK_LIMIT,
+  splitChunks,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import { FeishuQuestionCardController } from './question-card-controller.js';
 import type {
@@ -94,6 +99,7 @@ interface CardSessionState {
   /** Stop clicked before any terminal event — render 已停止生成 on every wind-down path. */
   userStopped?: boolean;
   terminalStatus?: FeishuTerminalStatus;
+  sourceLabel?: string;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -129,6 +135,12 @@ const FEISHU_STATUS_STRINGS = [
 ] as const;
 const escapeRegExp = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeFeishuMarkdown = (value: string) =>
+  value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
@@ -136,6 +148,8 @@ const FEISHU_STATUS_BLOCK_RE = new RegExp(
   `(?:^|\\n)---\\n\\*${FEISHU_STATUS_LABELS}\\*(?=\\n|$)`,
   'g',
 );
+const FEISHU_SOURCE_LABEL_LINE_RE =
+  /^\\\[(?:[A-Za-z0-9](?:[A-Za-z0-9]|\\[_-]){0,31}|[^\r\n]+ · [A-Za-z0-9](?:[A-Za-z0-9]|\\[_-]){0,31})\\\](?:\n\n?)?/u;
 
 const BASE_URL = 'https://open.feishu.cn/open-apis';
 
@@ -224,8 +238,10 @@ export class FeishuChannel extends ChannelBase {
       sendCard: (chatId, card) => this.sendInteractiveCard(chatId, card),
       patchCard: (messageId, card) =>
         this.patchInteractiveCard(messageId, card),
-      sendFallback: (chatId, text) =>
-        this.sendMessageInternal(chatId, text, true),
+      sendFallback: (chatId, text, sourceLabel) =>
+        sourceLabel
+          ? this.sendMessageInternal(chatId, text, true, 'chat_id', sourceLabel)
+          : this.sendMessageInternal(chatId, text, true),
       onError: (operation, error) => {
         process.stderr.write(
           `[Feishu:${this.name}] ${operation} error: ${error instanceof Error ? error.message : error}\n`,
@@ -559,7 +575,7 @@ export class FeishuChannel extends ChannelBase {
       const content = JSON.parse(item.body.content);
 
       if (item.msg_type === 'interactive') {
-        return { content: this.extractCardText(content), isFromBot };
+        return { content: this.extractCardText(content, isFromBot), isFromBot };
       } else if (item.msg_type === 'text') {
         return { content: content.text || undefined, isFromBot };
       } else if (item.msg_type === 'post') {
@@ -611,7 +627,10 @@ export class FeishuChannel extends ChannelBase {
    * Supports both v2 format ({ schema, body: { elements } }) and
    * v1/API-returned format ({ title, elements: [[...]] }).
    */
-  private extractCardText(card: Record<string, unknown>): string | undefined {
+  private extractCardText(
+    card: Record<string, unknown>,
+    isFromBot = false,
+  ): string | undefined {
     const lines: string[] = [];
 
     // Try v2 format: { body: { elements: [...] } }
@@ -700,6 +719,9 @@ export class FeishuChannel extends ChannelBase {
     text = text.replace(FEISHU_STATUS_BLOCK_RE, '');
     // Strip greeting prefix like "好的，<at id=xxx></at>\n\n"
     text = text.replace(/^好的，<at[^>]*><\/at>\s*\n*/, '');
+    if (this.config.multiSession && isFromBot) {
+      text = text.replace(FEISHU_SOURCE_LABEL_LINE_RE, '');
+    }
     return text.trim() || undefined;
   }
 
@@ -970,11 +992,37 @@ export class FeishuChannel extends ChannelBase {
     await this.sendMessageInternal(chatId, text, false);
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (sourceLabel) {
+      await this.sendMessageInternal(
+        chatId,
+        text,
+        false,
+        'chat_id',
+        sourceLabel,
+      );
+    } else {
+      await this.sendMessage(chatId, text);
+    }
+  }
+
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendMessageInternal(target.chatId, text, true);
+    await this.sendMessageInternal(
+      target.chatId,
+      text,
+      true,
+      'chat_id',
+      sourceLabel,
+    );
   }
 
   protected override async pushProactiveDelivery(
@@ -1005,6 +1053,8 @@ export class FeishuChannel extends ChannelBase {
     text: string,
     throwOnFailure: boolean,
     receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
+    sourceLabel?: string,
+    leadingPrefix?: string,
   ): Promise<void> {
     const token = await this.getTenantAccessToken();
     if (!token) {
@@ -1020,7 +1070,21 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
-    const chunks = splitChunks(text);
+    const hasVisibleContent = text.trim().length > 0 || Boolean(leadingPrefix);
+    const sourcePrefix =
+      sourceLabel && hasVisibleContent
+        ? `${escapeFeishuMarkdown(sourceLabel)}\n\n`
+        : '';
+    const firstPrefix = leadingPrefix ? `${leadingPrefix}\n\n` : '';
+    const contentLimit =
+      FEISHU_CHUNK_LIMIT - sourcePrefix.length - firstPrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('Feishu attribution exceeds the message limit.');
+    }
+    const chunks = splitChunks(text, contentLimit).map(
+      (chunk, index) =>
+        `${index === 0 ? firstPrefix : ''}${sourcePrefix}${chunk}`,
+    );
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
@@ -1083,6 +1147,27 @@ export class FeishuChannel extends ChannelBase {
         }
       }
     }
+  }
+
+  private sendFallbackMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+    leadingPrefix?: string,
+  ): Promise<void> {
+    return sourceLabel
+      ? this.sendMessageInternal(
+          chatId,
+          text,
+          false,
+          'chat_id',
+          sourceLabel,
+          leadingPrefix,
+        )
+      : this.sendMessage(
+          chatId,
+          leadingPrefix ? `${leadingPrefix}\n\n${text}` : text,
+        );
   }
 
   // ----- Interactive Card Streaming -----
@@ -1178,14 +1263,22 @@ export class FeishuChannel extends ChannelBase {
   ): Promise<{ messageId: string; success: boolean }> {
     const cardTitle =
       title || (inboundMsgId && this.msgToQuestion.get(inboundMsgId)) || 'Qwen';
-    const card = buildCardContent(text, {
-      title: cardTitle,
-      showStopButton: true,
-      isStreaming: true,
-      statusLabel: this.statusLabelFor(),
-      collapsible: this.collapsible,
-      collapsibleThreshold: this.collapsibleThreshold,
-    });
+    const statusLabel = this.statusLabelFor();
+    const card = buildCardContent(
+      this.attributedCardText(
+        inboundMsgId,
+        text,
+        `\n\n---\n*${statusLabel}*`.length,
+      ),
+      {
+        title: cardTitle,
+        showStopButton: true,
+        isStreaming: true,
+        statusLabel,
+        collapsible: this.collapsible,
+        collapsibleThreshold: this.collapsibleThreshold,
+      },
+    );
 
     try {
       const messageId = await this.sendInteractiveCard(chatId, card);
@@ -1214,17 +1307,50 @@ export class FeishuChannel extends ChannelBase {
     const cardTitle = inboundMsgId
       ? this.msgToQuestion.get(inboundMsgId) || 'Qwen'
       : 'Qwen';
-    const card = buildCardContent(text, {
-      title: cardTitle,
-      showStopButton: !finished,
-      isStreaming: !finished,
-      statusLabel:
-        statusLabel ?? (!finished ? this.statusLabelFor() : undefined),
-      collapsible: this.collapsible,
-      collapsibleThreshold: this.collapsibleThreshold,
-    });
+    const effectiveStatusLabel =
+      statusLabel ?? (!finished ? this.statusLabelFor() : undefined);
+    const card = buildCardContent(
+      this.attributedCardText(
+        inboundMsgId,
+        text,
+        effectiveStatusLabel ? `\n\n---\n*${effectiveStatusLabel}*`.length : 0,
+      ),
+      {
+        title: cardTitle,
+        showStopButton: !finished,
+        isStreaming: !finished,
+        statusLabel: effectiveStatusLabel,
+        collapsible: this.collapsible,
+        collapsibleThreshold: this.collapsibleThreshold,
+      },
+    );
 
     return this.patchInteractiveCard(messageId, card);
+  }
+
+  private attributedCardText(
+    inboundMsgId: string | undefined,
+    text: string,
+    reservedChars = 0,
+  ): string {
+    if (!inboundMsgId) return this.truncateCardText(text, reservedChars);
+    const sourceLabel = this.cardSessions.get(inboundMsgId)?.sourceLabel;
+    if (!sourceLabel) return this.truncateCardText(text, reservedChars);
+
+    const atPrefix = this.msgToSenderName.get(inboundMsgId);
+    let body = text;
+    const prefixes: string[] = [];
+    if (atPrefix && (body === atPrefix || body.startsWith(`${atPrefix}\n`))) {
+      prefixes.push(atPrefix);
+      body = body.slice(atPrefix.length).replace(/^\s{1,2}/u, '');
+    }
+    prefixes.push(escapeFeishuMarkdown(sourceLabel));
+    const prefix = prefixes.join('\n\n');
+    if (!body) return prefix;
+    return `${prefix}\n\n${this.truncateCardText(
+      body,
+      reservedChars + prefix.length + 2,
+    )}`;
   }
 
   protected override async presentUserInputRequest(
@@ -1280,12 +1406,8 @@ export class FeishuChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
-    // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
-    // Skip card creation/updates to avoid duplicate content and a misleading
-    // "已取消" card at the end.
-    if (this.config.blockStreaming === 'on') return;
-
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
@@ -1306,9 +1428,14 @@ export class FeishuChannel extends ChannelBase {
         stopped: false,
         accumulatedText: '',
         lastUpdateAt: Date.now(),
+        sourceLabel:
+          segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
       };
       this.cardSessions.set(inboundMsgId, cardState);
     }
+
+    cardState.sourceLabel ??=
+      segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId);
 
     if (cardState.stopped) return;
 
@@ -1466,7 +1593,6 @@ export class FeishuChannel extends ChannelBase {
     _chatId: string,
     sessionId: string,
   ): void {
-    if (this.config.blockStreaming === 'on') return;
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
@@ -1494,7 +1620,7 @@ export class FeishuChannel extends ChannelBase {
       this.onResponseBoundary(chatId, sessionId);
       return;
     }
-    if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
+    if (reason !== 'input_requested') {
       return;
     }
 
@@ -1605,7 +1731,14 @@ export class FeishuChannel extends ChannelBase {
         }
         if (!updated) {
           await this.deleteCard(cardState.messageId);
-          if (displayText) await this.sendMessage(chatId, displayText);
+          if (displayText) {
+            await this.sendFallbackMessage(
+              chatId,
+              text,
+              cardState.sourceLabel,
+              atPrefix,
+            );
+          }
         }
       } else {
         if (cardState.creating) {
@@ -1613,7 +1746,12 @@ export class FeishuChannel extends ChannelBase {
           cardState.abandoned = true;
         }
         if (text) {
-          await this.sendMessage(chatId, displayText);
+          await this.sendFallbackMessage(
+            chatId,
+            text,
+            cardState.sourceLabel,
+            atPrefix,
+          );
         }
       }
     } finally {
@@ -1689,7 +1827,12 @@ export class FeishuChannel extends ChannelBase {
       );
       if (!updated) {
         await this.deleteCard(cardState.messageId);
-        await this.sendMessage(chatId, finalText);
+        await this.sendFallbackMessage(
+          chatId,
+          contentPart,
+          cardState.sourceLabel,
+          prefix,
+        );
       }
     }
 
@@ -1735,17 +1878,21 @@ export class FeishuChannel extends ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const sourceLabel =
+      segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId);
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
         `[Feishu:${this.name}] onResponseComplete: no inboundMsgId for session ${sessionId}, fallback to sendMessage\n`,
       );
-      await this.sendMessage(chatId, fullText);
+      await this.sendFallbackMessage(chatId, fullText, sourceLabel);
       return;
     }
 
     const cardState = this.cardSessions.get(inboundMsgId);
+    if (cardState) cardState.sourceLabel ??= sourceLabel;
     if (cardState) cardState.completed = true;
 
     if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
@@ -1805,7 +1952,7 @@ export class FeishuChannel extends ChannelBase {
       cardState.stopped = true;
       cardState.abandoned = true;
       this.cleanupCard(inboundMsgId);
-      await this.sendMessage(chatId, fullText);
+      await this.sendFallbackMessage(chatId, fullText, sourceLabel);
       return;
     }
 
@@ -1865,9 +2012,11 @@ export class FeishuChannel extends ChannelBase {
             // before falling back to sendMessage
             await this.deleteCard(cardState.messageId);
             this.cleanupCard(inboundMsgId);
-            await this.sendMessage(
+            await this.sendFallbackMessage(
               chatId,
-              atSender ? `${atSender}\n\n${fullText}` : fullText,
+              fullText,
+              sourceLabel,
+              atSender,
             );
             return;
           }
@@ -1907,10 +2056,7 @@ export class FeishuChannel extends ChannelBase {
 
     // Fallback to plain message (include @sender prefix for consistency)
     this.cleanupCard(inboundMsgId);
-    await this.sendMessage(
-      chatId,
-      atSender ? `${atSender}\n\n${fullText}` : fullText,
-    );
+    await this.sendFallbackMessage(chatId, fullText, sourceLabel, atSender);
   }
 
   protected override onPromptStart(
@@ -1923,12 +2069,10 @@ export class FeishuChannel extends ChannelBase {
         ? messageId
         : undefined;
     if (inboundMsgId) {
+      const sourceLabel = this.getResponseSourceLabel(sessionId);
       this.sessionToInboundMsg.set(sessionId, inboundMsgId);
       this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
-      if (
-        this.config.blockStreaming !== 'on' &&
-        !this.cardSessions.has(inboundMsgId)
-      ) {
+      if (!this.cardSessions.has(inboundMsgId)) {
         this.cardSessions.set(inboundMsgId, {
           messageId: '',
           created: false,
@@ -1936,7 +2080,11 @@ export class FeishuChannel extends ChannelBase {
           stopped: false,
           accumulatedText: '',
           lastUpdateAt: Date.now(),
+          sourceLabel,
         });
+      } else {
+        const cardState = this.cardSessions.get(inboundMsgId);
+        if (cardState) cardState.sourceLabel ??= sourceLabel;
       }
     }
   }
@@ -1998,10 +2146,12 @@ export class FeishuChannel extends ChannelBase {
           // Card creation failed — fallback to plain message delivery
           if (cs.accumulatedText) {
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
-            const fallbackText = atPrefix
-              ? `${atPrefix}\n\n${cs.accumulatedText}`
-              : cs.accumulatedText;
-            this.sendMessage(_chatId, fallbackText).catch(() => {});
+            this.sendFallbackMessage(
+              _chatId,
+              cs.accumulatedText,
+              cs.sourceLabel,
+              atPrefix,
+            ).catch(() => {});
           } else if (cs.terminalStatus !== 'completed') {
             // No accumulated text (e.g. a failure before the first chunk, or a
             // post-answer failure after the output card was released for a
@@ -2010,10 +2160,12 @@ export class FeishuChannel extends ChannelBase {
             const fallbackLabel = cs.terminalStatus
               ? this.statusLabelFor(cs.terminalStatus)
               : '出错了，请重试';
-            const errorText = atPrefix
-              ? `${atPrefix}\n\n*${fallbackLabel}*`
-              : `*${fallbackLabel}*`;
-            this.sendMessage(_chatId, errorText).catch(() => {});
+            this.sendFallbackMessage(
+              _chatId,
+              `*${fallbackLabel}*`,
+              cs.sourceLabel,
+              atPrefix,
+            ).catch(() => {});
             process.stderr.write(
               `[Feishu:${this.name}] onPromptEnd: no card and no accumulated text for inbound=${inboundMsgId}, sent error fallback\n`,
             );
@@ -2026,8 +2178,9 @@ export class FeishuChannel extends ChannelBase {
         // to avoid leaking state if onResponseComplete was skipped.
         this.cleanupCard(inboundMsgId);
       } else if (!cs) {
-        // No card session created (blockStreaming mode or gate rejection) —
-        // clean up auxiliary maps populated by processMessage.
+        // onPromptStart's isKnownInboundMessageId gate rejected this message, so
+        // no card session exists — clean up the auxiliary maps processMessage
+        // populated.
         this.msgToQuestion.delete(inboundMsgId);
         this.msgToSenderName.delete(inboundMsgId);
         this.msgToSenderId.delete(inboundMsgId);
@@ -2256,11 +2409,13 @@ export class FeishuChannel extends ChannelBase {
             await this.deleteCard(cardState.messageId);
             // Same `---` + label shape as rendered cards so extractCardText
             // strips it from quote-reply context.
-            await this.sendMessage(
+            await this.sendFallbackMessage(
               chatId,
-              finalText
-                ? `${finalText}\n\n---\n*${stopLabel}*`
+              contentPart
+                ? `${contentPart}\n\n---\n*${stopLabel}*`
                 : `---\n*${stopLabel}*`,
+              cardState.sourceLabel,
+              prefix,
             );
           }
         }
@@ -2368,9 +2523,10 @@ export class FeishuChannel extends ChannelBase {
     const MAX_CARD_CHARS = 20_000;
     if (text.length + reservedChars <= MAX_CARD_CHARS) return text;
     const marker = '\n\n_(内容过长，已截断早期内容)_';
+    const body = text.endsWith(marker) ? text.slice(0, -marker.length) : text;
     const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
     let truncated =
-      text.slice(
+      body.slice(
         -(MAX_CARD_CHARS - marker.length - fenceReserve - reservedChars),
       ) + marker;
     // Re-balance code fences after truncation
@@ -2427,6 +2583,7 @@ export class FeishuChannel extends ChannelBase {
       lastUpdateAt: Date.now(),
       userStopped: cardState.userStopped,
       terminalStatus: cardState.terminalStatus,
+      sourceLabel: cardState.sourceLabel,
     });
   }
 
@@ -2464,28 +2621,32 @@ export class FeishuChannel extends ChannelBase {
       let isMentioned = false;
       let cleanText = content.text;
       if (msg.mentions && msg.mentions.length > 0) {
+        const mentionReplacements = new Map<string, string>();
         for (const mention of msg.mentions) {
           const mentionId =
             mention.id.open_id || mention.id.user_id || mention.id.union_id;
-          if (mentionId === this.botOpenId) {
+          const isBotMention = mentionId === this.botOpenId;
+          if (isBotMention) {
             isMentioned = true;
           }
-          // Replace @mention placeholder in text
-          cleanText = cleanText.replaceAll(
+          // Resolve the structured placeholder directly. Removing the bot by
+          // rendered display name would corrupt a preceding member whose name
+          // merely starts with the bot's name.
+          mentionReplacements.set(
             mention.key,
-            () => `@${mention.name}`,
+            isBotMention ? '' : `@${mention.name}`,
           );
         }
-        // Strip bot @mention from text — use replace (not replaceAll) to
-        // avoid removing literal occurrences of the bot's name the user typed.
-        if (isMentioned && this.botOpenId) {
-          for (const mention of msg.mentions) {
-            const mentionId =
-              mention.id.open_id || mention.id.user_id || mention.id.union_id;
-            if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
-            }
-          }
+        const mentionKeys = [...mentionReplacements.keys()].sort(
+          (a, b) => b.length - a.length,
+        );
+        if (mentionKeys.length > 0) {
+          cleanText = cleanText
+            .replace(
+              new RegExp(mentionKeys.map(escapeRegExp).join('|'), 'gu'),
+              (key) => mentionReplacements.get(key) ?? key,
+            )
+            .trim();
         }
       }
 
@@ -2506,6 +2667,7 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
+        ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
         messageId: msgId,
         threadId: msg.root_id || undefined,
         isGroup,
@@ -2678,7 +2840,12 @@ export class FeishuChannel extends ChannelBase {
           ).catch(() => {});
           this.cleanupCard(msgId);
         } else {
-          this.sendMessage(chatId, '处理消息时出错，请重试。').catch(() => {});
+          this.sendFallbackMessage(
+            chatId,
+            '处理消息时出错，请重试。',
+            existingCard.sourceLabel ??
+              this.getInboundErrorSourceLabel(envelope),
+          ).catch(() => {});
           this.cleanupCard(msgId);
         }
       });
@@ -2700,13 +2867,18 @@ export class FeishuChannel extends ChannelBase {
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
+    /** Whether text came from the user rather than a media placeholder. */
+    userAuthoredText: boolean;
   } {
     try {
       const content = JSON.parse(contentJson);
 
       switch (messageType) {
         case 'text':
-          return { text: (content.text as string) || '' };
+          return {
+            text: (content.text as string) || '',
+            userAuthoredText: true,
+          };
 
         case 'post': {
           // Rich text (post) format: extract text from nested structure
@@ -2745,13 +2917,17 @@ export class FeishuChannel extends ChannelBase {
               lines.push(parts.join(''));
             }
           }
-          return { text: lines.join('\n').trim() || '' };
+          return {
+            text: lines.join('\n').trim() || '',
+            userAuthoredText: true,
+          };
         }
 
         case 'image':
           return {
             text: '(image)',
             imageKey: (content.image_key as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'file':
@@ -2759,29 +2935,34 @@ export class FeishuChannel extends ChannelBase {
             text: `(file: ${(content.file_name as string) || 'file'})`,
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'audio':
-          return { text: '(audio)' };
+          return { text: '(audio)', userAuthoredText: false };
 
         case 'media':
           return {
             text: '(video)',
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'interactive':
-          return { text: '(card message — not supported)' };
+          return {
+            text: '(card message — not supported)',
+            userAuthoredText: false,
+          };
 
         default:
-          return { text: '' };
+          return { text: '', userAuthoredText: false };
       }
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] extractContent parse error (type=${messageType}): ${err instanceof Error ? err.message : err}\n`,
       );
-      return { text: '' };
+      return { text: '', userAuthoredText: false };
     }
   }
 }

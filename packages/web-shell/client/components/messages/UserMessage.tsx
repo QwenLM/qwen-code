@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -9,10 +8,15 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
+import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
@@ -21,6 +25,7 @@ import {
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
+import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -29,12 +34,9 @@ import type {
   WebShellComposerTagIconMap,
 } from '../../customization';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
-import {
-  getComposerTagDisplay,
-  getComposerTagLabel,
-  getComposerTagValue,
-} from '../../hooks/useComposerCore';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -42,6 +44,7 @@ import styles from './UserMessage.module.css';
 interface UserMessageImage {
   data: string;
   mimeType: string;
+  attachmentId?: string;
 }
 
 interface UserMessageFile {
@@ -60,9 +63,107 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  onEdit?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
-  onImagePreview?: (src: string, alt?: string) => void;
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+}
+
+interface ScheduledTaskRunContent {
+  name: string;
+  id: string;
+  cron: string;
+  triggeredAt: string;
+  trigger: 'scheduled' | 'manual';
+  prompt: string;
+}
+
+// Mirrors `SCHEDULED_TASK_RUN_INSTRUCTION` in cli/src/runtime/scheduled-task-run.ts
+// (the client cannot import that package): the header `buildScheduledTaskRunPrompt`
+// puts ahead of the task's own instructions. Change both together.
+const SCHEDULED_TASK_RUN_INSTRUCTION =
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
+
+function parseScheduledTaskRunContent(
+  content: string,
+): ScheduledTaskRunContent | null {
+  const separator = `\n\n${SCHEDULED_TASK_RUN_INSTRUCTION}\n\n`;
+  const separatorIndex = content.indexOf(separator);
+  if (separatorIndex < 0) return null;
+  const lines = content.slice(0, separatorIndex).split('\n');
+  if (lines.length !== 6 || lines[5] !== 'Session: new chat for this run') {
+    return null;
+  }
+  const values = [
+    ['Scheduled task: ', lines[0]],
+    ['Task ID: ', lines[1]],
+    ['Schedule: ', lines[2]],
+    ['Triggered at: ', lines[3]],
+    ['Trigger: ', lines[4]],
+  ] as const;
+  if (values.some(([prefix, line]) => !line?.startsWith(prefix))) return null;
+  const trigger = lines[4]!.slice('Trigger: '.length);
+  if (trigger !== 'scheduled' && trigger !== 'manual') return null;
+  return {
+    name: lines[0]!.slice('Scheduled task: '.length),
+    id: lines[1]!.slice('Task ID: '.length),
+    cron: lines[2]!.slice('Schedule: '.length),
+    triggeredAt: lines[3]!.slice('Triggered at: '.length),
+    trigger,
+    prompt: content.slice(separatorIndex + separator.length),
+  };
+}
+
+function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
+  const { language, t } = useI18n();
+  const triggeredAt = new Date(run.triggeredAt);
+  const triggeredAtLabel = Number.isNaN(triggeredAt.getTime())
+    ? run.triggeredAt
+    : triggeredAt.toLocaleString(language);
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-scheduled-task-run-message
+    >
+      <div className={styles.scheduledTaskHeader}>
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('scheduledTasks.runContext.title')}
+          </span>
+          <strong className={styles.scheduledTaskName}>{run.name}</strong>
+        </span>
+      </div>
+      <div className={styles.scheduledTaskMeta}>
+        <span className={styles.scheduledTaskMetaItem} title={run.cron}>
+          <span>{t('scheduledTasks.runContext.schedule')}</span>
+          <code>{describeCron(run.cron, t)}</code>
+        </span>
+        <span className={styles.scheduledTaskMetaItem}>
+          <span>{t('scheduledTasks.runContext.triggeredAt')}</span>
+          <time dateTime={run.triggeredAt}>{triggeredAtLabel}</time>
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t(
+            run.trigger === 'manual'
+              ? 'scheduledTasks.runContext.trigger.manual'
+              : 'scheduledTasks.runContext.trigger.scheduled',
+          )}
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t('scheduledTasks.sessionMode.perRun')}
+        </span>
+      </div>
+      <div className={styles.scheduledTaskId}>
+        {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
+      </div>
+      <div className={styles.scheduledTaskPrompt}>
+        <LinkifiedText text={run.prompt} />
+      </div>
+    </div>
+  );
 }
 
 function DefaultUserMessageContent({
@@ -92,7 +193,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <Fragment key={index}>{segment.text}</Fragment>
+          <LinkifiedText key={index} text={segment.text} />
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -124,10 +225,12 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
+  onEdit,
   onImagePreview,
   onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -155,7 +258,14 @@ export const UserMessage = memo(function UserMessage({
     onAttachmentPreview || onComposerTagClick
       ? handleComposerTagClick
       : undefined;
+  const scheduledTaskRun = useMemo(
+    () => parseScheduledTaskRunContent(content),
+    [content],
+  );
   const renderedContent = useMemo(() => {
+    if (scheduledTaskRun) {
+      return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
+    }
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -181,9 +291,11 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return content;
+    if (!parts) return <LinkifiedText text={content} />;
     return parts.map((part, index) => {
-      if (part.type === 'text') return part.text;
+      if (part.type === 'text') {
+        return <LinkifiedText key={index} text={part.text} />;
+      }
       return (
         <ReadonlyComposerTag
           key={`${part.tag.id}-${index}`}
@@ -213,6 +325,7 @@ export const UserMessage = memo(function UserMessage({
     renderComposerTag,
     renderComposerTagTooltip,
     renderUserMessageContent,
+    scheduledTaskRun,
   ]);
 
   const measureOverflow = useCallback(() => {
@@ -235,7 +348,7 @@ export const UserMessage = memo(function UserMessage({
   }, [measureOverflow]);
 
   return (
-    <div className={styles.chatMessageRow}>
+    <div className={styles.chatMessageRow} data-web-shell-user-row>
       <div
         className={`${styles.chatMessageColumn}${
           isLocateFlashing && content.trim().length === 0
@@ -264,6 +377,12 @@ export const UserMessage = memo(function UserMessage({
                           onImagePreview(
                             src,
                             t('user.uploadedImage', { index: index + 1 }),
+                            img.attachmentId
+                              ? {
+                                  kind: 'attachment',
+                                  attachmentId: img.attachmentId,
+                                }
+                              : undefined,
                           )
                       : undefined
                   }
@@ -302,14 +421,10 @@ export const UserMessage = memo(function UserMessage({
                     }
                   }}
                 >
-                  <FileTypeIcon
+                  <FileAttachmentContent
                     name={file.name}
                     mimeType={file.mimeType}
-                    size={16}
-                    className={styles.chatFileIcon}
-                    aria-hidden="true"
                   />
-                  <span className={styles.chatFileName}>{file.name}</span>
                 </span>
               );
             })}
@@ -318,21 +433,21 @@ export const UserMessage = memo(function UserMessage({
         {content.trim().length > 0 && (
           <div
             className={`${styles.chatBubble}${
-              isLocateFlashing ? ` ${flashStyles.flash}` : ''
-            }`}
+              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
             data-web-shell-user-bubble
           >
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !expanded
+                heightOverflowing && !documentMode && !expanded
                   ? styles.chatContentCollapsed
                   : ''
               }`}
             >
               {renderedContent}
             </div>
-            {heightOverflowing && (
+            {heightOverflowing && !documentMode && (
               <button
                 type="button"
                 className={styles.toggleButton}
@@ -376,6 +491,17 @@ export const UserMessage = memo(function UserMessage({
               <span>{t('common.retry')}</span>
             </button>
           </div>
+        )}
+        {onEdit && (
+          <button
+            type="button"
+            className={styles.editButton}
+            onClick={onEdit}
+            aria-label="Edit message"
+            title="Edit message"
+          >
+            <PencilIcon aria-hidden="true" />
+          </button>
         )}
       </div>
     </div>
@@ -434,7 +560,7 @@ export function ReadonlyComposerTag({
       : undefined;
   return (
     <span
-      className={`${styles.messageTag}${
+      className={`${styles.messageTag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}${
         clickable ? ` ${styles.messageTagClickable}` : ''
       }`}
       role={clickable ? 'button' : undefined}
@@ -460,13 +586,22 @@ export function ReadonlyComposerTag({
     >
       {custom ?? (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.messageTagIcon}
               style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && (
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}

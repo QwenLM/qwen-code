@@ -64,6 +64,7 @@ describe('reviewCommand', () => {
       'mock-provider',
       'extract-step',
       'script-lint',
+      'dedup-candidates',
       'revert-hunk',
       'resolve-anchors',
       'check-coverage',

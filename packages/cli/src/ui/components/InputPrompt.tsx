@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  type SuggestionCategory,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -26,13 +30,12 @@ import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { parseSlashCommand } from '../commands/commands.js';
 import { StreamingState } from '../types.js';
-import {
-  ApprovalMode,
-  type Config,
-  Storage,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -52,6 +55,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -267,6 +271,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
+  const { menu: contextMenu, closeMenu: closeContextMenu } = useContextMenu();
   const {
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
@@ -900,6 +905,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns navigation keys
+      // (the menu overlay handles them); any other key closes the menu and is
+      // then processed normally — mirroring click-away dismissal.
+      if (contextMenu !== null) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        closeContextMenu();
+        // Fall through: the dismissing key continues through the normal
+        // pipeline (vim, paste handling, shell-mode, shortcuts) after the
+        // menu closes — returning here would skip every remaining
+        // interceptor and drop the key into the bare readline layer.
+      }
+
       // When the Background tasks dialog is open, swallow every key so
       // nothing reaches the composer buffer — the dialog's own keypress
       // handler owns selection, open/close, and stop actions. Keep this ahead
@@ -1422,10 +1446,28 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       };
 
-      // If the command is a perfect match, pressing enter should execute it.
+      // The buffer updates synchronously, but completion is render-derived and
+      // can still describe the previous keystroke when Enter arrives.
+      const isSubmit = keyMatchers[Command.SUBMIT](key);
+      let isLiveSlashCommand = false;
+      if (isSubmit && buffer.text.startsWith('/') && !/\s$/.test(buffer.text)) {
+        const { commandToExecute, args, canonicalPath } = parseSlashCommand(
+          buffer.text,
+          slashCommands,
+        );
+        const commandPartCount = buffer.text.slice(1).split(/\s+/).length;
+        isLiveSlashCommand =
+          commandToExecute?.action !== undefined &&
+          args.length === 0 &&
+          canonicalPath.length === commandPartCount;
+      }
+
       // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
       // intercepting Shift+Enter as submit when the user wants a newline.
-      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
+      const isCurrentPerfectMatch = buffer.text.startsWith('/')
+        ? isLiveSlashCommand
+        : completion.isPerfectMatch;
+      if (isSubmit && isCurrentPerfectMatch) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
@@ -1870,6 +1912,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       focus,
       buffer,
       completion,
+      slashCommands,
       shellModeActive,
       setShellModeActive,
       onClearScreen,
@@ -1906,6 +1949,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
+      contextMenu,
+      closeContextMenu,
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
@@ -2152,6 +2197,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       uiActions,
     ],
   );
+  const handleCategorySelect = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      completion.selectCategory(category);
+      setExpandedSuggestionIndex(-1);
+    },
+    [completion],
+  );
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
@@ -2336,6 +2388,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             onSelectIndex={
               suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
+            onSelectCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : handleCategorySelect
             }
           />
         </Box>

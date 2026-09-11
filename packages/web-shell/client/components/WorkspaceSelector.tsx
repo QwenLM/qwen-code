@@ -1,5 +1,10 @@
 import { useRef, useState } from 'react';
-import { FolderClosedIcon, FolderPlusIcon, LockIcon } from 'lucide-react';
+import {
+  CircleDashedIcon,
+  FolderClosedIcon,
+  FolderPlusIcon,
+  LockIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   DropdownMenu,
@@ -35,11 +40,18 @@ interface WorkspaceSelectorProps {
   busy?: boolean;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
+  /** Offer a projectless (standalone) target alongside the workspaces. */
+  standaloneSupported?: boolean;
+  selectedStandalone?: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
 }
+
+/** Radio-group value that stands for the projectless target. */
+const STANDALONE_OPTION_ID = '__standalone__';
 
 /**
  * Composer workspace menu. Capability-gated creation actions and disabled
@@ -52,8 +64,11 @@ export function WorkspaceSelector({
   busy,
   scratchSupported,
   existingFolderSupported,
+  standaloneSupported,
+  selectedStandalone,
   className,
   onSelectWorkspace,
+  onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
 }: WorkspaceSelectorProps) {
@@ -62,25 +77,33 @@ export function WorkspaceSelector({
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
+  const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
       : workspace.primary,
   );
   const canCreate = scratchSupported || existingFolderSupported;
-  if (workspaces.length <= 1 && !canCreate) return null;
+  const standaloneSelectable = Boolean(
+    standaloneSupported && onSelectStandalone,
+  );
+  if (workspaces.length <= 1 && !canCreate && !standaloneSelectable) {
+    return null;
+  }
+  const triggerLabel = selectedStandalone
+    ? t('sidebar.noWorkspace')
+    : (selected?.label ?? '');
 
   return (
     <TooltipProvider delayDuration={300}>
       <DropdownMenu
         open={menuOpen}
         onOpenChange={(open) => {
+          if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
-          if (open) {
-            suppressTooltipRef.current = true;
-            setTooltipOpen(false);
-          }
+          suppressTooltipRef.current = true;
+          setTooltipOpen(false);
         }}
       >
         <Tooltip
@@ -104,7 +127,6 @@ export function WorkspaceSelector({
                   }
                 }}
                 onPointerLeave={() => {
-                  suppressTooltipRef.current = false;
                   setTooltipOpen(false);
                 }}
                 onBlur={() => {
@@ -114,17 +136,41 @@ export function WorkspaceSelector({
                   }
                 }}
               >
-                <FolderClosedIcon size={16} strokeWidth={1.2} />
-                <span data-slot="select-value">{selected?.label ?? ''}</span>
+                {selectedStandalone ? (
+                  <CircleDashedIcon size={16} strokeWidth={1.2} />
+                ) : (
+                  <FolderClosedIcon size={16} strokeWidth={1.2} />
+                )}
+                <span data-slot="select-value">{triggerLabel}</span>
               </button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent side="top">{selected?.label}</TooltipContent>
+          <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
-        <DropdownMenuContent align="start" className="min-w-56">
+        <DropdownMenuContent
+          align="start"
+          className="min-w-56"
+          onPointerDownCapture={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onKeyDownCapture={() => {
+            pointerDismissedRef.current = false;
+          }}
+          onPointerDownOutside={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onCloseAutoFocus={(event) => {
+            if (pointerDismissedRef.current) event.preventDefault();
+            pointerDismissedRef.current = false;
+          }}
+        >
           <DropdownMenuRadioGroup
-            value={selected?.id}
+            value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
+              if (id === STANDALONE_OPTION_ID) {
+                onSelectStandalone?.();
+                return;
+              }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
               onSelectWorkspace(next.primary ? undefined : next.cwd);
@@ -148,6 +194,13 @@ export function WorkspaceSelector({
                 )}
               </DropdownMenuRadioItem>
             ))}
+            {standaloneSelectable && (
+              <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>
+                <span className="min-w-0 flex-1 truncate">
+                  {t('sidebar.noWorkspace')}
+                </span>
+              </DropdownMenuRadioItem>
+            )}
           </DropdownMenuRadioGroup>
           {canCreate && (
             <>
@@ -157,7 +210,14 @@ export function WorkspaceSelector({
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
+                <DropdownMenuSubContent
+                  onPointerDownCapture={() => {
+                    pointerDismissedRef.current = true;
+                  }}
+                  onKeyDownCapture={() => {
+                    pointerDismissedRef.current = false;
+                  }}
+                >
                   {scratchSupported && (
                     <DropdownMenuItem onSelect={onCreateScratch}>
                       {t('sidebar.startFromScratch')}

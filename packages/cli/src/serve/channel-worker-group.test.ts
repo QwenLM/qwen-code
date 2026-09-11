@@ -141,6 +141,128 @@ const deliveryRequest: ChannelDeliveryRequest = {
 };
 
 describe('createChannelWorkerGroup', () => {
+  it('rejects 26 initial owners before constructing a supervisor', () => {
+    const groups = Array.from({ length: 26 }, (_, index) => ({
+      workspaceCwd: `/ws/${index}`,
+      selection: { mode: 'names' as const, names: [`bot-${index}`] },
+    }));
+    const createSupervisor = vi.fn();
+    expect(() =>
+      createChannelWorkerGroup({
+        groups,
+        registry: fakeRegistry(
+          groups.map((group, index) =>
+            fakeRuntime(group.workspaceCwd, index === 0),
+          ),
+        ),
+        createSupervisor,
+        shared,
+      }),
+    ).toThrow(/at most 25/);
+    expect(createSupervisor).not.toHaveBeenCalled();
+  });
+
+  it('requires releasing an old owner before replacing it at capacity', async () => {
+    const groups = Array.from({ length: 26 }, (_, index) => ({
+      workspaceCwd: `/ws/${index}`,
+      selection: { mode: 'names' as const, names: [`bot-${index}`] },
+    }));
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: groups.slice(0, 25),
+      registry: fakeRegistry(
+        groups.map((entry, index) =>
+          fakeRuntime(entry.workspaceCwd, index === 0),
+        ),
+      ),
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    await expect(group.reconcile(groups.slice(1))).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(recorded).toHaveLength(25);
+    expect(
+      recorded.every((entry) => entry.supervisor.stop.mock.calls.length === 0),
+    ).toBe(true);
+    await group.reconcile(groups.slice(1, 25));
+    await group.reconcile(groups.slice(1));
+    expect(recorded).toHaveLength(26);
+    expect(group.snapshots()).toHaveLength(25);
+    await group.stop();
+  });
+
+  it('counts an owner retained after failed candidate rollback', async () => {
+    const groups = Array.from({ length: 26 }, (_, index) => ({
+      workspaceCwd: `/ws/${index}`,
+      selection: { mode: 'names' as const, names: [`bot-${index}`] },
+    }));
+    const factory = makeCreateSupervisor(() => snapshot({}));
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      const supervisor = factory.createSupervisor(opts);
+      if (opts.workspace === '/ws/24') {
+        supervisor.start.mockRejectedValue(new Error('candidate failed'));
+        supervisor.stop.mockRejectedValue(new Error('still alive'));
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: groups.slice(0, 24),
+      registry: fakeRegistry(
+        groups.map((entry, index) =>
+          fakeRuntime(entry.workspaceCwd, index === 0),
+        ),
+      ),
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    await expect(group.reconcile(groups.slice(0, 25))).rejects.toMatchObject({
+      rolledBack: false,
+    });
+    expect(group.snapshots()).toHaveLength(25);
+    await expect(
+      group.reconcile([...groups.slice(0, 24), groups[25]!]),
+    ).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(factory.recorded).toHaveLength(25);
+    group.killAllSync();
+  });
+
+  it('counts recovery owners after temporary removal and filters partial reload targets', async () => {
+    const groups = Array.from({ length: 26 }, (_, index) => ({
+      workspaceCwd: `/ws/${index}`,
+      selection: { mode: 'names' as const, names: [`bot-${index}`] },
+    }));
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: groups.slice(0, 25),
+      registry: fakeRegistry(
+        groups.map((entry, index) =>
+          fakeRuntime(entry.workspaceCwd, index === 0),
+        ),
+      ),
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    await group.removeWorkspace('/ws/0');
+    await expect(group.reconcile(groups.slice(1))).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(recorded).toHaveLength(25);
+    await group.restoreWorkspace('/ws/0');
+    await group.reconcile(groups, { forceWorkspaceCwd: '/ws/1' });
+    expect(group.snapshots()).toHaveLength(25);
+    await group.stop();
+  });
+
   it('passes workerTlsCaCertPath through to every supervisor', () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>
@@ -716,6 +838,36 @@ describe('createChannelWorkerGroup', () => {
     });
     await group.removeWorkspace(SECONDARY);
     expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
+  });
+
+  it('forgets a permanently removed workspace instead of restoring it', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false, { VERSION: 'old' }),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.removeWorkspace(SECONDARY, { permanent: true });
+    runtimes.splice(1, 1, fakeRuntime(SECONDARY, false, { VERSION: 'new' }));
+    await group.restoreWorkspace(SECONDARY);
+
+    expect(recorded).toHaveLength(2);
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({ workspaceCwd: PRIMARY }),
+    ]);
   });
 
   it('removes a restored worker from routing when startup fails', async () => {

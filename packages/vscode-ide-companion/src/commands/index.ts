@@ -8,13 +8,14 @@ import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/providers/WebViewProvider.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
-import { shouldResolveAgainstWorkspace } from '../utils/file-path.js';
+import { resolveWorkspacePath } from '../utils/file-path.js';
 import { CHAT_VIEW_ID_SIDEBAR } from '../constants/viewIds.js';
 
 type Logger = (message: string) => void;
 
 export const runQwenCodeCommand = 'qwen-code.runQwenCode';
 export const showDiffCommand = 'qwenCode.showDiff';
+export const closeDiffCommand = 'qwenCode.closeDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
 export const authCommand = 'qwen-code.auth';
@@ -61,26 +62,38 @@ export function registerNewCommands(
   disposables.push(
     vscode.commands.registerCommand(
       showDiffCommand,
-      async (args: { path: string; oldText: string; newText: string }) => {
+      async (args: {
+        path: string;
+        oldText: string;
+        newText: string;
+        readOnly?: boolean;
+        permissionRequestId?: string;
+      }) => {
         try {
-          let absolutePath = args.path;
-          if (shouldResolveAgainstWorkspace(args.path)) {
-            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-            if (workspaceFolder) {
-              absolutePath = vscode.Uri.joinPath(
-                workspaceFolder.uri,
-                args.path,
-              ).fsPath;
-            }
-          }
+          const absolutePath = resolveWorkspacePath(args.path);
           log(`[Command] Showing diff for ${absolutePath}`);
-          await diffManager.showDiff(absolutePath, args.oldText, args.newText);
+          await diffManager.showDiff(absolutePath, args.oldText, args.newText, {
+            readOnly: args.readOnly === true,
+            permissionRequestId: args.permissionRequestId,
+          });
         } catch (error) {
           const errorMsg = getErrorMessage(error);
           log(`[Command] Error showing diff: ${errorMsg}`);
           vscode.window.showErrorMessage(`Failed to show diff: ${errorMsg}`);
         }
       },
+    ),
+  );
+
+  disposables.push(
+    vscode.commands.registerCommand(
+      closeDiffCommand,
+      async (filePath: string, permissionRequestId?: string) =>
+        diffManager.closeDiff(
+          resolveWorkspacePath(filePath),
+          true,
+          permissionRequestId,
+        ),
     ),
   );
 

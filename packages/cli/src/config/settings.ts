@@ -29,10 +29,12 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
+  WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
@@ -386,6 +388,42 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
       );
     }
+    for (const ref of WORKSPACE_NON_OVERRIDING_SETTINGS) {
+      if (!isSettingDefined(workspaceFile.originalSettings, ref)) continue;
+      const definingScope = [
+        SettingScope.System,
+        SettingScope.User,
+        SettingScope.SystemDefaults,
+      ].find((scope) =>
+        isSettingDefined(loadedSettings.forScope(scope).originalSettings, ref),
+      );
+      if (definingScope === undefined) continue;
+      warningSet.add(
+        `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
+      );
+    }
+    // Tighten-only keys: the same verdict the merge applied, so the
+    // warning and the strip cannot disagree about a value. A value that
+    // merely repeats what is already in force is dropped without a
+    // warning — it lost nothing.
+    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
+      const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
+        system: loadedSettings.system.settings,
+        systemDefaults: loadedSettings.systemDefaults.settings,
+        user: loadedSettings.user.settings,
+      });
+      if (verdict === undefined || verdict.kept) continue;
+      const key = `${entry.section}.${entry.key}`;
+      if (verdict.reason === 'system-sets') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because System scope settings also set it.`,
+        );
+      } else if (verdict.reason === 'looser') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because it would loosen the ${verdict.against} value. A workspace may only make this setting stricter.`,
+        );
+      }
+    }
   }
   return [...warningSet];
 }
@@ -414,22 +452,137 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+type SettingKeyRef = {
+  readonly section: keyof Settings;
+  readonly key: string;
+};
+
+function isSettingDefined(
+  settings: Settings,
+  { section, key }: SettingKeyRef,
+): boolean {
+  const sectionValue = settings[section] as Record<string, unknown> | undefined;
+  return sectionValue?.[key] !== undefined;
+}
+
 /**
- * Strip the workspace-restricted settings before merging so a repository
- * cannot opt the user into those capabilities. Returns a shallow copy, and
- * the input unchanged when it carries none of them.
+ * Return `settings` without the given keys. Returns a shallow copy, and the
+ * input unchanged when it carries none of them.
  */
-function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+function stripSettingKeys(
+  settings: Settings,
+  keys: Iterable<SettingKeyRef>,
+): Settings {
   let stripped: Settings | undefined;
-  for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+  for (const { section, key } of keys) {
     const source = (stripped ?? settings)[section] as
       | Record<string, unknown>
       | undefined;
     if (source?.[key] === undefined) continue;
-    const { [key]: _restricted, ...rest } = source;
+    const { [key]: _removed, ...rest } = source;
     stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
   return stripped ?? settings;
+}
+
+/**
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities.
+ */
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  return stripSettingKeys(settings, WORKSPACE_RESTRICTED_SETTINGS);
+}
+
+/**
+ * Drop the workspace's WORKSPACE_NON_OVERRIDING_SETTINGS values that a
+ * higher scope also defines. A repository may narrow where its own HTTP
+ * hooks send data, but it must never replace a whitelist the user or
+ * platform configured: an empty whitelist means "allow all", so a replaced
+ * list is a widened one.
+ */
+function stripWorkspaceOverrides(
+  workspace: Settings,
+  higherScopes: readonly Settings[],
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_NON_OVERRIDING_SETTINGS.filter((ref) =>
+      higherScopes.some((scope) => isSettingDefined(scope, ref)),
+    ),
+  );
+}
+
+type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
+
+type TightenOnlyVerdict =
+  | { kept: true }
+  | { kept: false; reason: 'system-sets' }
+  | {
+      kept: false;
+      reason: 'looser';
+      against: 'User' | 'SystemDefaults' | 'default';
+    }
+  | { kept: false; reason: 'same' };
+
+/**
+ * Decide one tighten-only key for a workspace, or `undefined` when the
+ * workspace does not set it.
+ *
+ * System wins outright, as it does for every setting. Otherwise the
+ * workspace value is compared against whichever of User and SystemDefaults
+ * sets the key — the stricter of the two if both do — and against the
+ * feature's default when neither does. Strictly stricter is kept; equal
+ * is dropped silently; looser is dropped with a warning.
+ */
+function tightenOnlyVerdict(
+  entry: TightenOnlyEntry,
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const read = (settings: Settings): unknown =>
+    (settings[entry.section] as Record<string, unknown> | undefined)?.[
+      entry.key
+    ];
+  const candidate = read(workspace);
+  if (candidate === undefined) return undefined;
+  if (read(scopes.system) !== undefined) {
+    return { kept: false, reason: 'system-sets' };
+  }
+  let against: 'User' | 'SystemDefaults' | 'default' = 'default';
+  let baseline = entry.strictness(undefined);
+  for (const [name, settings] of [
+    ['SystemDefaults', scopes.systemDefaults],
+    ['User', scopes.user],
+  ] as const) {
+    const value = read(settings);
+    if (value === undefined) continue;
+    const rank = entry.strictness(value);
+    if (against === 'default' || rank > baseline) {
+      against = name;
+      baseline = rank;
+    }
+  }
+  const rank = entry.strictness(candidate);
+  if (rank > baseline) return { kept: true };
+  if (rank === baseline) return { kept: false, reason: 'same' };
+  return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Drop the workspace's tighten-only values that would not make the
+ * setting stricter than the operator scopes already have it.
+ */
+function stripWorkspaceLoosenings(
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_TIGHTEN_ONLY_SETTINGS.filter((entry) => {
+      const verdict = tightenOnlyVerdict(entry, workspace, scopes);
+      return verdict !== undefined && !verdict.kept;
+    }),
+  );
 }
 
 function mergeSettings(
@@ -441,7 +594,14 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceRestrictedSettings(workspace),
+        stripWorkspaceLoosenings(
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
+          { system, systemDefaults, user },
+        ),
         'workspace',
       )
     : ({} as Settings);
@@ -606,15 +766,23 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
@@ -627,6 +795,11 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(
@@ -634,6 +807,29 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
+  }
+
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
   }
 
   /**

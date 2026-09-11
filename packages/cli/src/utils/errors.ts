@@ -22,12 +22,12 @@ import { writeStderrLine } from './stdioHelpers.js';
 const debugLogger = createDebugLogger('CLI_ERRORS');
 
 /**
- * Marker thrown when a producer has already formatted the error message and
- * written it to stderr — the downstream `handleError` should propagate the
- * exit code without printing or reformatting again.
+ * Marker thrown when a producer has already formatted and reported an error
+ * through the active output path — the downstream `handleError` should
+ * propagate the exit code without printing or reformatting it again.
  *
  * The non-interactive runner uses this when an upstream API error event
- * arrives mid-stream: it formats with parseAndFormatApiError, writes once,
+ * arrives mid-stream: it formats with parseAndFormatApiError, reports it,
  * and then throws. Without this marker, handleError would call
  * parseAndFormatApiError a second time on the (now formatted) Error.message,
  * yielding "[API Error: [API Error: ...]]" plus a duplicate stderr line.
@@ -145,7 +145,7 @@ export async function handleError(
   config: Config,
   customErrorCode?: string | number,
 ): Promise<never> {
-  // Producers that already wrote a formatted message to stderr (see
+  // Producers that already reported a formatted message (see
   // AlreadyReportedError above) should not be reprinted or reformatted here.
   // In TEXT mode this short-circuits straight to a clean re-throw; in JSON
   // mode we still emit the structured payload exactly once so machine

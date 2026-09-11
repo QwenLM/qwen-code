@@ -238,7 +238,9 @@ describe('useCompletion', () => {
   describe('category tabs', () => {
     const mixed = [
       { label: 'a.ts', value: 'a.ts', category: 'file' as const },
-      { label: 'S', value: 'session:1', category: 'session' as const },
+      { label: 'b.ts', value: 'b.ts', category: 'file' as const },
+      { label: 'S1', value: 'session:1', category: 'session' as const },
+      { label: 'S2', value: 'session:2', category: 'session' as const },
     ];
 
     it('derives availableCategories from present categories', () => {
@@ -266,10 +268,62 @@ describe('useCompletion', () => {
       const { result } = renderHook(() => useCompletion());
       act(() => {
         result.current.setSuggestions(mixed);
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
       });
       act(() => result.current.switchCategory(1));
       expect(result.current.activeCategory).toBe('file');
       expect(result.current.activeSuggestionIndex).toBe(0);
+      expect(result.current.visibleStartIndex).toBe(0);
+    });
+
+    it('selects an exact category and resets active and scroll indices', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
+      });
+
+      act(() => result.current.selectCategory('session'));
+
+      expect(result.current.activeCategory).toBe('session');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+      expect(result.current.visibleStartIndex).toBe(0);
+      expect(result.current.suggestions).toEqual([mixed[2], mixed[3]]);
+    });
+
+    it('preserves indices when re-selecting the active category', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
+      });
+
+      act(() => result.current.selectCategory('all'));
+
+      expect(result.current.activeCategory).toBe('all');
+      expect(result.current.activeSuggestionIndex).toBe(1);
+      expect(result.current.visibleStartIndex).toBe(1);
+    });
+
+    it('ignores a category that is not available', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions([mixed[0]]);
+      });
+      act(() => {
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
+      });
+
+      expect(result.current.availableCategories).toEqual(['all']);
+      act(() => result.current.selectCategory('session'));
+
+      expect(result.current.activeCategory).toBe('all');
+      expect(result.current.activeSuggestionIndex).toBe(1);
+      expect(result.current.visibleStartIndex).toBe(1);
     });
 
     it('cycles backwards with direction -1 and wraps from all to last', () => {
@@ -302,9 +356,9 @@ describe('useCompletion', () => {
         result.current.setSuggestions(mixed);
       });
       act(() => result.current.switchCategory(1)); // → file
-      expect(result.current.suggestions).toEqual([mixed[0]]);
+      expect(result.current.suggestions).toEqual([mixed[0], mixed[1]]);
       act(() => result.current.switchCategory(1)); // → session
-      expect(result.current.suggestions).toEqual([mixed[1]]);
+      expect(result.current.suggestions).toEqual([mixed[2], mixed[3]]);
     });
 
     it('falls back to "all" when the active tab disappears', () => {

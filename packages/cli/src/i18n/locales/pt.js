@@ -431,6 +431,7 @@ export default {
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',
   'Hide Tips': 'Ocultar Dicas',
+  'Show Tool Call Arguments': 'Mostrar Argumentos das Chamadas de Ferramenta',
   'Show Line Numbers in Code': 'Mostrar Números de Linhas no Código',
   'Show Citations': 'Mostrar Citações',
   'Custom Witty Phrases': 'Frases de Efeito Personalizadas',
@@ -803,8 +804,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto capturada em um ponto de envio compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1060,6 +1061,12 @@ export default {
     'A compressão do histórico do chat não reduziu o tamanho. Isso pode indicar problemas com o prompt de compressão.',
   'Could not compress chat history due to a token counting error.':
     'Não foi possível comprimir o histórico do chat devido a um erro de contagem de tokens.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão estava vazio.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
+  'Could not compress chat history due to an API error.':
+    'Não foi possível comprimir o histórico do chat devido a um erro da API.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

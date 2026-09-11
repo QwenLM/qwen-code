@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+  HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -65,6 +69,31 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
+    });
+
     it('should have correct structure for each setting', () => {
       Object.entries(getSettingsSchema()).forEach(([_key, definition]) => {
         expect(definition).toHaveProperty('type');
@@ -101,6 +130,12 @@ describe('SettingsSchema', () => {
         expect(definition.properties).toBeDefined();
         expect(typeof definition.properties).toBe('object');
       });
+    });
+
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
     });
 
     it('should have accessibility nested properties', () => {
@@ -209,6 +244,16 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
     });
 
+    it('should have general.outputStyle setting in schema', () => {
+      const outputStyle = getSettingsSchema().general.properties!.outputStyle;
+
+      expect(outputStyle).toBeDefined();
+      expect(outputStyle.type).toBe('string');
+      expect(outputStyle.category).toBe('General');
+      expect(outputStyle.default).toBe(undefined);
+      expect(outputStyle.requiresRestart).toBe(true);
+    });
+
     it('should have plansDirectory setting in schema', () => {
       expect(getSettingsSchema().plansDirectory).toBeDefined();
       expect(getSettingsSchema().plansDirectory.type).toBe('string');
@@ -286,6 +331,29 @@ describe('SettingsSchema', () => {
         { value: 'hold', label: 'Hold for review' },
         { value: 'refuse', label: 'Refuse' },
       ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
+    });
+
+    it('should offer exactly the hold lifetimes core knows how to parse', () => {
+      // Three copies of this vocabulary exist: core's table, these
+      // options, and the generated JSON schema. Adding an option here
+      // without a core entry fails nowhere -- `parseHeldExpiry` takes its
+      // unrecognized branch, logs at debug level (off by default), and
+      // returns the five-minute default. A user who hand-edits
+      // settings.json to the new value gets a silently shorter review
+      // window, with the whole suite green.
+      const crossSessionHeldExpiry =
+        getSettingsSchema().agents.properties.crossSessionHeldExpiry;
+
+      expect(crossSessionHeldExpiry.options?.map((o) => o.value)).toEqual(
+        HELD_EXPIRY_OPTIONS,
+      );
+      // And the declared default must be one core resolves to a real
+      // lifetime, not one that happens to fall back to it.
+      expect(HELD_EXPIRY_OPTIONS).toContain(crossSessionHeldExpiry.default);
     });
 
     it('should define model grade settings', () => {
@@ -312,6 +380,42 @@ describe('SettingsSchema', () => {
       expect(timeout.maximum).toBe(2_147_483_647);
       expect(timeout.requiresRestart).toBe(true);
       expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.requiresRestart).toBe(false);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should bound the Goal cadence ceilings and default them to no ceiling', () => {
+      const model = getSettingsSchema().model.properties;
+
+      for (const [key, cap] of [
+        ['goalMaxTurns', GOAL_MAX_TURNS_CAP],
+        ['goalMaxActiveMinutes', GOAL_MAX_ACTIVE_MINUTES_CAP],
+      ] as const) {
+        const setting = model[key];
+        expect(setting).toBeDefined();
+        expect(setting.type).toBe('integer');
+        expect(setting.category).toBe('Model');
+        // Absent means no ceiling: a cadence is what an operator asks for,
+        // not a number the project picks on their behalf.
+        expect(setting.default).toBeUndefined();
+        expect(setting.minimum).toBe(-1);
+        expect(setting.maximum).toBe(cap);
+        expect(setting.excludedValues).toEqual([0]);
+        expect(setting.requiresRestart).toBe(true);
+        expect(setting.showInDialog).toBe(false);
+      }
     });
 
     it('should define count-based model limits as integers', () => {
@@ -541,6 +645,24 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
+    });
+
     it('should define Markdown render mode as a user-facing UI enum', () => {
       const renderMode = getSettingsSchema().ui.properties.renderMode;
 
@@ -571,6 +693,28 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should expose tool call details as a live UI setting', () => {
+      const showToolCallDetails =
+        getSettingsSchema().ui.properties.showToolCallDetails;
+      expect(showToolCallDetails).toBeDefined();
+      expect(showToolCallDetails.type).toBe('boolean');
+      expect(showToolCallDetails.default).toBe(true);
+      expect(showToolCallDetails.showInDialog).toBe(true);
+      expect(showToolCallDetails.requiresRestart).toBe(false);
+    });
+
+    it('should have showToolCallArgs in ui settings', () => {
+      const showToolCallArgs =
+        getSettingsSchema().ui.properties.showToolCallArgs;
+      expect(showToolCallArgs).toBeDefined();
+      expect(showToolCallArgs.type).toBe('boolean');
+      // Default must stay false — the compact tool view is the baseline.
+      expect(showToolCallArgs.default).toBe(false);
+      expect(showToolCallArgs.showInDialog).toBe(true);
+      // Read at render time, so no restart is needed.
+      expect(showToolCallArgs.requiresRestart).toBe(false);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {

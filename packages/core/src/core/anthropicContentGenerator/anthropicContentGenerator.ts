@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import type {
   EmbedContentParameters,
   EmbedContentResponse,
@@ -27,6 +27,7 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
+type AnthropicFetch = NonNullable<ClientOptions['fetch']>;
 import { AnthropicContentConverter } from './converter.js';
 import { buildAnthropicUsageMetadata } from './usage.js';
 import {
@@ -34,6 +35,11 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import { resolveRequestTimeout } from '../openaiContentGenerator/constants.js';
+import {
+  resolveStreamIdleTimeoutMs,
+  resolveStreamMaxLifetimeMs,
+  withStreamGuards,
+} from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -48,6 +54,8 @@ import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { parseToolCallArguments } from '../tool-call-arguments.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { getErrorStatus } from '../../utils/errors.js';
+import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import { isRetryableStreamTransportError } from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
@@ -58,6 +66,34 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
+
+function normalizeStreamError(error: unknown): unknown {
+  const redacted = redactProxyError(error);
+  if (!(redacted instanceof Error) || getErrorStatus(redacted) !== undefined) {
+    return redacted;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(redacted.message) as {
+      error?: { type?: unknown; message?: unknown };
+    } | null;
+  } catch {
+    return redacted;
+  }
+  if (
+    payload?.error?.type === 'api_error' &&
+    typeof payload.error.message === 'string' &&
+    /^Streaming error: 404: Rate limit exceeded on Anthropic API\.?$/i.test(
+      payload.error.message.trim(),
+    )
+  ) {
+    // The gateway's 404 is message text inside a successful SSE response.
+    return Object.assign(new Error(redacted.message, { cause: redacted }), {
+      status: 429,
+    });
+  }
+  return redacted;
+}
 
 /**
  * Hostname-only DeepSeek anthropic-compatible detector. Returns true ONLY
@@ -300,6 +336,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private effortClampWarned = false;
   private budgetDropWarned = false;
   private temperatureDropWarned = false;
+  // Stream watchdog tuning, resolved once (config field > env > default) so
+  // the env read + any invalid-value warning happen per generator, not per
+  // streaming request. Same guards the OpenAI pipeline applies — the two
+  // wires must not differ on whether a stalled stream is recoverable
+  // (issue #9005 finding 4).
+  private readonly streamIdleTimeoutMs: number;
+  private readonly streamMaxLifetimeMs: number;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -320,7 +363,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
       'anthropic',
       this.cliConfig.getProxy(),
     );
-
     // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
     // instead of the SDK-default `x-api-key` header. Use the SDK's
     // `authToken` parameter (sends `Authorization: Bearer` natively) only
@@ -348,12 +390,24 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
+      fetch: buildSessionAwareFetch(
+        runtimeOptions.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ) as unknown as AnthropicFetch,
     });
 
     this.converter = new AnthropicContentConverter(
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
+    );
+
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      contentGeneratorConfig,
+    );
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
+      contentGeneratorConfig,
     );
   }
 
@@ -425,10 +479,36 @@ export class AnthropicContentGenerator implements ContentGenerator {
       throw redactProxyError(error);
     }
 
+    // Two guards wrap the stream, identical to the OpenAI pipeline (the SDK
+    // `timeout` only bounds connect + first response). The inactivity
+    // watchdog aborts + surfaces a retryable ETIMEDOUT after `idleMs` of no
+    // events; the lifetime cap covers what the watchdog cannot — a drip-fed
+    // stream (e.g. long runs of low-content `thinking_delta` frames) resets
+    // the idle timer forever while never completing (issue #8597), so it
+    // aborts once `maxLifetimeMs` of accumulated upstream-wait has passed.
+    // `<= 0` disables each guard. Issue #9005 finding 4.
+    const idleMs = this.streamIdleTimeoutMs;
+    const maxLifetimeMs = this.streamMaxLifetimeMs;
+    const guardedStream =
+      idleMs > 0 || maxLifetimeMs > 0
+        ? withStreamGuards(
+            stream,
+            idleMs,
+            maxLifetimeMs,
+            () => perRequestAc.abort(),
+            request.config?.abortSignal,
+          )
+        : stream;
+
     const inner = this.processStreamWithEmptyFallback(
-      this.redactStreamErrors(stream),
+      this.redactStreamErrors(guardedStream),
       anthropicRequest,
-      perRequestAc.signal,
+      // The empty-stream fallback probe needs a signal that is still live
+      // after the source stream drains. The shared stream guard aborts
+      // `perRequestAc` in its `finally` the moment the source drains — which
+      // happens before the probe runs — so pass the caller's signal instead;
+      // the probe derives its own short-lived child from it.
+      request.config?.abortSignal,
       headers,
       telemetryAttempt,
     );
@@ -757,6 +837,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
+        // Manual (non-adaptive) extended thinking requires an assistant
+        // turn to begin with a thinking block whenever a tool_use remains
+        // in it; adaptive thinking relaxes this. Applied to every such turn
+        // in history, not just the latest -- see
+        // ensureLeadingAssistantThinking's doc in the converter.
+        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,
@@ -1155,7 +1241,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         yield event;
       }
     } catch (error) {
-      throw redactProxyError(error);
+      throw normalizeStreamError(error);
     }
   }
 
@@ -1614,6 +1700,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     let response: Message;
+    // Derive a fresh short-lived child for the probe from the caller's signal.
+    // Reusing the per-request controller is wrong here: the shared stream guard
+    // already aborted it when the source drained (its `finally` cleanup), and
+    // passing an already-aborted signal makes the SDK reject immediately with
+    // a spurious AbortError instead of surfacing the provider's real error
+    // (e.g. a 402 credit-balance response). A child of the caller's signal
+    // keeps the probe cancellable by the user while ignoring the drain abort,
+    // and aborting it once the probe settles releases the SDK's abort listener.
+    const probeAc = createChildAbortController(abortSignal);
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
       const fallbackAttempt = reportAnthropicFollowingRequest(
@@ -1621,13 +1716,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         telemetryAttempt,
       );
       response = (await this.client.messages.create(fallbackRequest, {
-        signal: abortSignal,
+        signal: probeAc.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
       reportAnthropicResponse(fallbackAttempt, response);
       yield this.converter.convertAnthropicResponseToLlm(response);
     } catch (error) {
       throw redactProxyError(error);
+    } finally {
+      probeAc.abort();
     }
   }
 

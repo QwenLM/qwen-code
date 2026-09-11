@@ -6,8 +6,17 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+} from '@qwen-code/qwen-code-core';
+import {
   RunBudgetEnforcer,
   parseDurationSeconds,
+  validateGoalCheckpointTimeoutSeconds,
+  validateGoalMaxActiveMinutes,
+  validateGoalMaxTurns,
+  validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from './runBudget.js';
@@ -82,6 +91,104 @@ describe('validateMaxWallTimeSetting', () => {
 
   it('rejects values larger than the Node.js timeout ceiling', () => {
     expect(() => validateMaxWallTimeSetting(3_000_000)).toThrow();
+  });
+});
+
+describe('validateGoalTokenBudget', () => {
+  it.each([-1, 1, 30_000_000, 300_000_000])(
+    'accepts supported value %s',
+    (value) => {
+      expect(validateGoalTokenBudget(value)).toBe(value);
+    },
+  );
+
+  it.each([0, -2, 1.5, 300_000_001, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid value %s',
+    (value) => {
+      expect(() => validateGoalTokenBudget(value)).toThrow();
+    },
+  );
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalTokenBudget('5000')).toThrow();
+  });
+});
+
+describe('validateGoalMaxTurns', () => {
+  it.each([-1, 1, 20, GOAL_MAX_TURNS_CAP])(
+    'accepts supported value %s',
+    (value) => {
+      expect(validateGoalMaxTurns(value)).toBe(value);
+    },
+  );
+
+  it.each([
+    0,
+    -2,
+    1.5,
+    GOAL_MAX_TURNS_CAP + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects invalid value %s', (value) => {
+    expect(() => validateGoalMaxTurns(value)).toThrow();
+  });
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalMaxTurns('20')).toThrow();
+  });
+
+  it('says what to write instead of 0', () => {
+    // The sibling budget setting learned this the hard way: 0 reads as "no
+    // budget" to anyone who has not read the docs.
+    expect(() => validateGoalMaxTurns(0)).toThrow(/Use -1 to disable, not 0/);
+  });
+});
+
+describe('validateGoalMaxActiveMinutes', () => {
+  it.each([-1, 1, 30, GOAL_MAX_ACTIVE_MINUTES_CAP])(
+    'accepts supported value %s',
+    (value) => {
+      expect(validateGoalMaxActiveMinutes(value)).toBe(value);
+    },
+  );
+
+  it.each([
+    0,
+    -2,
+    0.5,
+    GOAL_MAX_ACTIVE_MINUTES_CAP + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects invalid value %s', (value) => {
+    expect(() => validateGoalMaxActiveMinutes(value)).toThrow();
+  });
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalMaxActiveMinutes('30')).toThrow();
+  });
+});
+
+describe('validateGoalCheckpointTimeoutSeconds', () => {
+  it.each([1, 180, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP])(
+    'accepts supported value %s',
+    (value) => {
+      expect(validateGoalCheckpointTimeoutSeconds(value)).toBe(value);
+    },
+  );
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects invalid value %s', (value) => {
+    expect(() => validateGoalCheckpointTimeoutSeconds(value)).toThrow();
+  });
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalCheckpointTimeoutSeconds('30')).toThrow();
   });
 });
 

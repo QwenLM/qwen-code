@@ -16,6 +16,7 @@ import {
 } from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import {
@@ -146,6 +147,36 @@ describe('DiscoveredMCPTool', () => {
           content: [{ type: 'text', text: 'ok' }],
         })),
       }) satisfies McpDirectClient;
+
+    it.each(['summary', 'json', 'empty'] as const)(
+      'preserves CUA action handles with %s content',
+      async (kind) => {
+        const structuredContent = {
+          snapshot_id: 's00000001',
+          elements: [{ element_token: 's00000001:8', label: 'View' }],
+        };
+        const serialized = JSON.stringify(structuredContent);
+        const content =
+          kind === 'empty'
+            ? []
+            : [
+                {
+                  type: 'text' as const,
+                  text: kind === 'json' ? serialized : 'View menu',
+                },
+              ];
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({ content, structuredContent })),
+        };
+        const result = await createDirectTool(mcpClient, false)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expect(result.llmContent).toEqual([
+          { text: serialized },
+          ...(kind === 'summary' ? [{ text: 'View menu' }] : []),
+        ]);
+      },
+    );
 
     it('injects trusted request metadata for an allowed stdio tool', async () => {
       const mcpClient = successfulClient();
@@ -1174,7 +1205,7 @@ describe('DiscoveredMCPTool', () => {
         appResourceUi,
       );
 
-    it('loads an MCP App resource without changing model-visible content', async () => {
+    it('loads an MCP App resource while preserving structured tool output', async () => {
       const mcpClient: McpDirectClient = {
         callTool: vi.fn(async () => ({
           content: [{ type: 'text', text: 'Dashboard ready' }],
@@ -1201,13 +1232,16 @@ describe('DiscoveredMCPTool', () => {
         .build({ param: 'test' })
         .execute(new AbortController().signal);
 
-      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.llmContent).toEqual([
+        { text: '{"revenue":42}' },
+        { text: 'Dashboard ready' },
+      ]);
       expect(result.returnDisplay).toMatchObject({
         type: 'mcp_app',
         resourceUri: 'ui://demo/dashboard',
         html: '<main>Revenue</main>',
         toolArguments: { param: 'test' },
-        fallbackText: 'Dashboard ready',
+        fallbackText: '{"revenue":42}\nDashboard ready',
         csp: { connectDomains: ['https://api.example.com'] },
         permissions: { clipboardWrite: {} },
       });
@@ -3095,5 +3129,72 @@ describe('DiscoveredMCPTool', () => {
 
       vi.useRealTimers();
     });
+  });
+});
+
+describe('DiscoveredMCPTool AUTO-mode classifier projection', () => {
+  const makeTool = (
+    annotations?: McpToolAnnotations,
+    config?: { getAutoModeSettings?: () => Record<string, unknown> },
+  ) =>
+    new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      'slack',
+      'post_message',
+      'Post a message',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      config as unknown as Config,
+      undefined,
+      undefined,
+      undefined,
+      annotations,
+    );
+
+  it('forwards server, tool, annotations and arguments to the classifier', () => {
+    const tool = makeTool({ readOnlyHint: false, openWorldHint: true });
+    expect(
+      tool.toAutoClassifierInput({
+        channel: '#ops',
+        text: 'AWS_SECRET_ACCESS_KEY=abcd',
+      }),
+    ).toEqual({
+      server: 'slack',
+      tool: 'post_message',
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      // The argument content is the evidence the classifier needs — a
+      // secret in a chat payload is exactly the case it must catch.
+      arguments: { channel: '#ops', text: 'AWS_SECRET_ACCESS_KEY=abcd' },
+    });
+  });
+
+  it('forwards arguments when the config carries no autoMode.mcp settings', () => {
+    const tool = makeTool(undefined, { getAutoModeSettings: () => ({}) });
+    const projected = tool.toAutoClassifierInput({ text: 'hi' });
+    expect(projected).toMatchObject({ arguments: { text: 'hi' } });
+  });
+
+  it('still forwards arguments when the config lacks getAutoModeSettings', () => {
+    const tool = makeTool(undefined, {});
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toMatchObject({
+      arguments: { text: 'hi' },
+    });
+  });
+
+  it('returns the name-only sentinel when forwardArguments is false', () => {
+    const tool = makeTool(undefined, {
+      getAutoModeSettings: () => ({ mcp: { forwardArguments: false } }),
+    });
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toBe('');
+  });
+
+  it('marks truncated arguments instead of dropping them silently', () => {
+    const tool = makeTool();
+    const projected = tool.toAutoClassifierInput({
+      body: 'q'.repeat(50_000),
+    }) as Record<string, unknown>;
+    expect(projected['arguments_truncated']).toBe(true);
+    expect(JSON.stringify(projected)).toContain('…[truncated');
   });
 });

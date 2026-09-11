@@ -132,6 +132,9 @@ describe('Session review-worktree lease sweep', () => {
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
       }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
@@ -168,8 +171,16 @@ describe('Session review-worktree lease sweep', () => {
         clearStatusChangeCallback: vi.fn(),
         hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
+      }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
       // The Session constructor and Session.prompt both reach for the
       // canonical Goal runtime. A real Config throws this exact error when
       // Goal persistence is off, and both call sites are written to fall

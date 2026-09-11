@@ -9,6 +9,7 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
+import { isDocumentNavigation } from './web-shell-preauth.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -29,6 +30,7 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
+  "media-src 'self' data:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
@@ -36,42 +38,6 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   // attacker origin.
   "base-uri 'none'",
 ];
-
-/**
- * Loopback origins the Web Shell may frame for the MCP App sandbox, pinned to
- * the request's Host port. Wildcard ports would let a compromised shell embed
- * any loopback listener.
- */
-export function loopbackSandboxOrigins(
-  hostHeader: string | undefined,
-): string[] {
-  const port = portFromHostHeader(hostHeader);
-  const suffix = port ? `:${port}` : '';
-  // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
-  // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
-  const hosts = ['localhost', '127.0.0.1'] as const;
-  return (['http', 'https'] as const).flatMap((scheme) =>
-    hosts.map((host) => `${scheme}://${host}${suffix}`),
-  );
-}
-
-export function portFromHostHeader(
-  hostHeader: string | undefined,
-): string | undefined {
-  if (!hostHeader) return undefined;
-  if (hostHeader.startsWith('[')) {
-    const end = hostHeader.indexOf(']');
-    if (end === -1) return undefined;
-    const rest = hostHeader.slice(end + 1);
-    return rest.startsWith(':') && /^\d+$/u.test(rest.slice(1))
-      ? rest.slice(1)
-      : undefined;
-  }
-  const colon = hostHeader.lastIndexOf(':');
-  if (colon === -1) return undefined;
-  const port = hostHeader.slice(colon + 1);
-  return /^\d+$/u.test(port) ? port : undefined;
-}
 
 export function buildWebShellPermissionsPolicy(): string {
   return [
@@ -93,76 +59,27 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
-  frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  // PDF attachments use blob URLs; live previews pin their own child source.
+  const frameSrc = 'frame-src http: https: blob:';
   return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 
 /** Default (no-framing) Web Shell CSP. */
 export const WEB_SHELL_CSP = buildWebShellCsp();
 
-/**
- * True when the request is a top-level document navigation (address-bar
- * load, link click, or refresh) rather than a programmatic fetch/XHR.
- *
- * Mirrors the `bypass` discriminator in `packages/web-shell/vite.config.ts`
- * so the daemon's SPA fallback claims exactly the requests the dev proxy
- * would have served `index.html` for — and leaves API fetches (which carry
- * `Accept: application/json`) to fall through to the JSON routes / 404.
- */
-export function isDocumentNavigation(req: Request): boolean {
-  const fetchMode = req.headers['sec-fetch-mode'];
-  const fetchDest = req.headers['sec-fetch-dest'];
-  const accept = req.headers.accept ?? '';
-  return (
-    fetchMode === 'navigate' ||
-    fetchDest === 'document' ||
-    accept.trim().toLowerCase().startsWith('text/html')
-  );
-}
-
-/**
- * Exact session deep-link document navigations: `/session/<id>` with an
- * optional trailing slash and no further segments. Expressed as a regex (not
- * an Express route) so callers outside the runtime app — the deferred-runtime
- * gate in `run-qwen-serve.ts` — can apply the same discriminator.
- */
-const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
-
-/**
- * True when the request matches a route `mountWebShellAssets` registers
- * BEFORE `bearerAuth`. The deferred-runtime gate in `createDelegatingServeApp`
- * exempts exactly these so a cold daemon answers the shell's entry points the
- * same way the warm runtime app does, instead of 401ing browser navigations
- * that cannot attach the bearer header. Percent-encoded single-segment deep
- * links (e.g. `/session/<id>%2fstatus`) also match — Express does not decode
- * `%2F` during route matching — but they cannot reach an API route or session
- * data: pre-auth answers serve only the public shell HTML or the MCP App
- * sandbox proxy, identical to `GET /` (or the startup-failure envelope).
- * Keep in sync with the routes registered in `mountWebShellAssets` and
- * `mountMcpAppSandbox`.
- */
-export function isPreAuthWebShellRequest(req: Request): boolean {
-  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
-  // Express route matching is case-insensitive by default, so the warm app
-  // serves /Session/<id> and /Assets/* pre-auth too; mirror that exactly.
-  const reqPath = req.path.toLowerCase();
-  if (
-    reqPath === '/' ||
-    // Express non-strict routing compiles `/` to `/^(?:\/)(?:\/$)?$/i`, so
-    // a raw `//` also matches `app.get('/')` pre-auth (but `///` does not).
-    reqPath === '//' ||
-    reqPath === '/assets' ||
-    reqPath.startsWith('/assets/') ||
-    reqPath === '/mcp-app-sandbox'
-  )
-    return true;
-  return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
-}
+// The pre-auth discriminators live in the dependency-light
+// `web-shell-preauth.ts` so the serve fast-path static closure
+// (`server/self-origin.ts`) can use them without eagerly loading this
+// module's express-static/CSP machinery. Re-exported here because this
+// module remains their canonical import for the runtime app.
+export {
+  isDocumentNavigation,
+  isPreAuthWebShellRequest,
+} from './web-shell-preauth.js';
 
 /**
  * Build the `index.html` responder for a Web Shell dir. Sets the security
@@ -175,9 +92,8 @@ function createSendIndex(
   frameAncestors: readonly string[] = [],
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  return (req: Request, res: Response): void => {
-    const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
-    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
+  return (_req: Request, res: Response): void => {
+    const csp = buildWebShellCsp(frameAncestors);
     res
       .status(200)
       .set('Content-Security-Policy', csp)

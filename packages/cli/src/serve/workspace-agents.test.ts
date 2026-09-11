@@ -735,13 +735,18 @@ describe('workspace agents routes', () => {
     });
   });
 
-  it('returns 403 agent_readonly when deleting a built-in agent', async () => {
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).delete('/workspace/agents/general-purpose');
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('agent_readonly');
-  });
+  it.each(['', '?scope=workspace'])(
+    'returns 403 agent_readonly when deleting a built-in agent with scope %s',
+    async (scope) => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).delete(
+        `/workspace/agents/general-purpose${scope}`,
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('agent_readonly');
+    },
+  );
 
   it('returns 404 when deleting a missing agent', async () => {
     const bridge = buildBridgeStub();
@@ -752,7 +757,7 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('agent_not_found');
   });
 
-  it('refuses POST with 401 token_required on no-token loopback strict mode', async () => {
+  it('refuses POST when the injected strict gate fails closed', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({
       bridge,

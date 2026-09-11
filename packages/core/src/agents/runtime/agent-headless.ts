@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -135,10 +136,12 @@ export function templateString(
  * Each execute() call runs one task through AgentCore's reasoning loop. Calls
  * must be sequential; later calls reuse the same chat and prepared tools.
  */
-export class AgentHeadless {
+export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
+  private loopType: string | null = null;
   private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
@@ -225,6 +228,10 @@ export class AgentHeadless {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    // A re-executed instance (stop-hook continuation, resident turns) must
+    // not carry the previous run's loop attribution into an ERROR/FINISH
+    // spread; the field is only meaningful for a LOOP_DETECTED stop.
+    this.loopType = null;
     const resetStats = options.resetStats !== false;
     if (resetStats) {
       this.core.resetExecutionStats();
@@ -385,6 +392,7 @@ export class AgentHeadless {
 
         this.finalText = result.text;
         this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
+        this.loopType = result.loopType ?? null;
       } catch (error) {
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
@@ -402,6 +410,7 @@ export class AgentHeadless {
         this.core.eventEmitter?.emit(AgentEventType.FINISH, {
           subagentId: this.core.subagentId,
           terminateReason: this.terminateMode,
+          ...(this.loopType ? { loopType: this.loopType } : {}),
           timestamp: Date.now(),
           rounds: summary.rounds,
           totalDurationMs: summary.totalDurationMs,
@@ -420,6 +429,7 @@ export class AgentHeadless {
             : 'failed',
           {
             terminate_reason: this.terminateMode,
+            ...(this.loopType ? { loop_type: this.loopType } : {}),
             result: this.finalText,
             execution_summary: this.core.stats.formatCompact(
               'Subagent execution completed',

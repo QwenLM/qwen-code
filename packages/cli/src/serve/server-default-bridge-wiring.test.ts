@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -15,6 +16,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 
 const WS_BOUND = path.resolve('/work/bound');
@@ -46,7 +48,18 @@ function makeBridge(
   } as unknown as AcpSessionBridge;
 }
 
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 describe('createServeApp default bridge wiring', () => {
+  // Every test below resets the module registry and re-imports the full
+  // serve module graph; under heavy parallel CI load that can exceed the
+  // default timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
     vi.resetModules();
@@ -86,6 +99,7 @@ describe('createServeApp default bridge wiring', () => {
     expect(sessionLifecycle).toBeDefined();
     expect(bridgeOptions).toMatchObject({
       delegateReadTextFileToClient: false,
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     });
     await expect(
       bridgeOptions!.fileSystem!.writeText({
@@ -125,7 +139,7 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'not_found',
     });
-  }, 15_000);
+  });
 
   it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
     let bridgeOptions: BridgeOptions | undefined;
@@ -182,7 +196,7 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toBe(boundaryError);
     expect(writeSameHostToolText).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;

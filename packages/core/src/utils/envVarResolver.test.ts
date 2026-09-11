@@ -58,6 +58,53 @@ describe('resolveEnvVarsInString', () => {
     expect(result).toBe('Value is ${UNDEFINED_VAR}');
   });
 
+  it.each([
+    ['session_id', '${session_id}'],
+    ['session_id', '$session_id'],
+    ['QWEN_CODE_SESSION_ID', '${QWEN_CODE_SESSION_ID}'],
+    ['QWEN_CODE_SESSION_ID', '$QWEN_CODE_SESSION_ID'],
+    ['qwen_code_session_id', '${qwen_code_session_id}'],
+  ])('preserves the runtime session ID placeholder %s', (name, input) => {
+    process.env[name] = 'environment-session';
+
+    expect(resolveEnvVarsInString(input)).toBe(input);
+  });
+
+  describe('Qwen-internal secrets', () => {
+    beforeEach(() => {
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    });
+
+    it.each([
+      'curl https://x/?t=$QWEN_SERVER_TOKEN',
+      'curl https://x/?t=${QWEN_SERVER_TOKEN}',
+      'curl https://x/?t=$QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+    ])('never resolves %s from process.env', (input) => {
+      expect(resolveEnvVarsInString(input)).toBe(input);
+    });
+
+    it('refuses mixed-case spellings too (process.env is case-insensitive on Windows)', () => {
+      process.env['qwen_server_token'] = 'daemon-secret';
+      const input = 'token=$qwen_server_token';
+      expect(resolveEnvVarsInString(input)).toBe(input);
+    });
+
+    it('refuses the secret even when customEnv supplies it', () => {
+      const input = 'token=$QWEN_SERVER_TOKEN';
+      expect(
+        resolveEnvVarsInString(input, { QWEN_SERVER_TOKEN: 'from-custom' }),
+      ).toBe(input);
+    });
+
+    it('still resolves ordinary variables in the same string', () => {
+      process.env['HOST'] = 'localhost';
+      expect(resolveEnvVarsInString('$HOST/$QWEN_SERVER_TOKEN')).toBe(
+        'localhost/$QWEN_SERVER_TOKEN',
+      );
+    });
+  });
+
   it('should handle empty string', () => {
     const result = resolveEnvVarsInString('');
 

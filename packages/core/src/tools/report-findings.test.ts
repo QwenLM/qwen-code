@@ -39,6 +39,21 @@ function displayOf(result: { returnDisplay: unknown }): FindingsResultDisplay {
 }
 
 describe('ReportFindingsTool', () => {
+  it('does not constrain finding summaries in its tool schema', () => {
+    const tool = new ReportFindingsTool();
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        findings: {
+          items: { properties: { summary: Record<string, unknown> } };
+        };
+      };
+    };
+
+    expect(
+      schema.properties.findings.items.properties.summary,
+    ).not.toHaveProperty('maxLength');
+  });
+
   it('reports findings as a findings_list display with counts in llmContent', async () => {
     const result = await run({
       level: 'high',

@@ -20,7 +20,12 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -72,6 +77,11 @@ import {
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import {
+  isScheduledTaskRunSource,
+  parseSessionSource,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from './session-source.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
 // typing lets the bridge factory pass the full mediator instance
@@ -98,6 +108,13 @@ import {
 
 const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
 const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
+/**
+ * A per-run scheduled task prompt is the task's own prompt (already capped at
+ * the same ceiling by the scheduled-task REST route) plus a short execution
+ * context header. Allow that header on top of the ceiling so a task written at
+ * the limit still dispatches.
+ */
+const SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS = 1024;
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -813,11 +830,14 @@ export class BridgeClient implements Client {
      * Called by the A2 `current_mode_update` demux when the agent
      * switches approval mode in-session (exit_plan_mode, ProceedAlways,
      * /mode). `previous` is read from the bridge state cache.
+     * `planExecutionMode` is the validated non-Plan execution policy while
+     * modeId is Plan; undefined outside Plan or when no valid policy is sent.
      */
     private readonly onModePromoted?: (
       entry: BridgeClientSessionEntry,
       modeId: string,
       originatorClientId: string | undefined,
+      planExecutionMode?: string,
     ) => void,
     /**
      * Reverse tool channel (issue #5626, Phase 2). Resolves the
@@ -1868,14 +1888,30 @@ export class BridgeClient implements Client {
         '`prompt` must be a non-empty string',
       );
     }
+    const source = parseSessionSource(params['sourceType'], params['sourceId']);
+    if ('error' in source) {
+      throw RequestError.invalidParams(undefined, source.error);
+    }
+    if (
+      source.sourceType !== undefined &&
+      source.sourceType !== SCHEDULED_TASK_RUN_SOURCE_TYPE
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sourceType` is not settable on a sub-session',
+      );
+    }
+    const promptLimit = isScheduledTaskRunSource(source)
+      ? MAX_SUB_SESSION_PROMPT_CHARS + SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS
+      : MAX_SUB_SESSION_PROMPT_CHARS;
     // The child is a separate process; this is a trust boundary. Without a cap
     // it can hand the daemon a multi-MB string to deserialize, copy for the
     // display name, and dispatch into a new session. Same ceiling the
     // scheduled-task REST route applies to the prompts it accepts.
-    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+    if (prompt.length > promptLimit) {
       throw RequestError.invalidParams(
         undefined,
-        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+        `\`prompt\` exceeds the ${promptLimit}-character limit`,
       );
     }
     const completion = params['completion'];
@@ -1911,13 +1947,29 @@ export class BridgeClient implements Client {
       );
     }
     const model = params['model'];
+    const groupId = params['groupId'];
+    if (model !== undefined && !isValidCronTaskRoutingId(model)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`model\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters`,
+      );
+    }
+    if (
+      groupId !== undefined &&
+      (!isScheduledTaskRunSource(source) || !isValidCronTaskRoutingId(groupId))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`groupId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters and is only supported for scheduled-task runs`,
+      );
+    }
     const result = await this.onCreateSubSession({
       prompt,
       completion,
-      ...(typeof model === 'string' && model.length > 0 && model.length <= 128
-        ? { model }
-        : {}),
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...source,
       callerSessionId,
     });
     return {
@@ -2156,7 +2208,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
-   * `qwen/notify/session/terminal-sequence`, and
+   * `qwen/notify/session/terminal-sequence`,
+   * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
+   * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
@@ -2173,17 +2227,37 @@ export class BridgeClient implements Client {
     ) {
       return;
     }
+    if (method === 'qwen/notify/session/sources-changed') {
+      const sessionId = params['sessionId'];
+      const revision = params['revision'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof revision !== 'number' ||
+        !Number.isSafeInteger(revision) ||
+        revision < 0 ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'source_changed',
+        data: { sessionId, revision },
+      });
+      return;
+    }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
-        // Sessions the child claims but this channel does not own are dropped
-        // rather than rejecting the whole snapshot: the rest of it is still
-        // usable, and a channel must never influence another channel's state.
+        // Retain rows while a Session is registering so the bridge can apply
+        // a report that races the newSession response.
         this.onActiveWork?.({
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
           seq: snapshot.seq,
-          sessions: snapshot.sessions.filter((session) =>
-            this.ownsSession(session.sessionId),
+          sessions: snapshot.sessions.filter(
+            (session) =>
+              this.ownsSession(session.sessionId) ||
+              this.hasSessionSpawnInFlight(),
           ),
         });
       }
@@ -2404,6 +2478,50 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/pr-binding') {
+      // The child persists the PR sidecar itself (the daemon never sees the
+      // write); this notification only carries the catalog-clock mark so
+      // version-watching clients refetch the catalog that now includes the
+      // binding — the same propagation automatic title updates use. Validate
+      // the payload anyway: sessionId becomes a log/lookup key and the url a
+      // rendered link target on other consumers of this channel.
+      const sessionId = params['sessionId'];
+      const pr = params['pr'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        pr === null ||
+        typeof pr !== 'object' ||
+        Array.isArray(pr)
+      ) {
+        return;
+      }
+      const record = pr as Record<string, unknown>;
+      const number = record['number'];
+      const url = record['url'];
+      if (
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length === 0 ||
+        url.length > SESSION_PR_URL_MAX_LENGTH ||
+        !/^https?:\/\//i.test(url) ||
+        // Mirrors the bridge's hasControlCharacter: the url lands in an
+        // audit line, so control characters would forge log lines.
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
       return;
     }
     if (method === 'qwen/notify/session/recording-degraded') {
@@ -2770,6 +2888,14 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    const selected = params['planExecutionMode'];
+    const planExecutionMode =
+      currentModeId === 'plan' &&
+      typeof selected === 'string' &&
+      selected !== 'plan' &&
+      KNOWN_APPROVAL_MODES.has(selected)
+        ? selected
+        : undefined;
     const entry = this.resolveEntry(sessionId);
     if (!entry) {
       writeStderrLine(
@@ -2788,6 +2914,7 @@ export class BridgeClient implements Client {
         entry,
         currentModeId,
         entry.activePromptOriginatorClientId,
+        planExecutionMode,
       );
     } else {
       // Fallback path (no `onModePromoted` injected — tests / non-bridge
@@ -2811,6 +2938,7 @@ export class BridgeClient implements Client {
           previous: 'default',
           next: currentModeId,
           persisted: false,
+          ...(planExecutionMode ? { planExecutionMode } : {}),
         },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }

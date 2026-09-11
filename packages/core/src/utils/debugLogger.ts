@@ -35,6 +35,8 @@ let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 let lastAliasedKey: string | null = null;
+let aliasGeneration = 0;
+let aliasFailureStreak = 0;
 let aliasChain: Promise<void> = Promise.resolve();
 const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
@@ -164,22 +166,34 @@ export function resetDebugLoggingState(): void {
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
   lastAliasedKey = null;
+  aliasGeneration += 1;
+  aliasFailureStreak = 0;
   aliasChain = Promise.resolve();
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// After this many consecutive alias-update failures the dedup marker stays
+// sticky (one attempt per session change, the pre-retry behavior) instead of
+// retrying on every write — bounds the cost on hosts where symlinks always
+// fail. A single success resets the streak.
+const MAX_CONSECUTIVE_ALIAS_FAILURES = 3;
 
-function doUpdateLatestDebugLogAlias(sessionId: string): Promise<void> {
+async function doUpdateLatestDebugLogAlias(
+  sessionId: string,
+): Promise<boolean> {
   const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
   const targetPath = Storage.getDebugLogPath(sessionId);
 
-  return ensureDebugDirExists()
-    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
-    .catch(() => {
-      // Best-effort; don't degrade overall logging
-    });
+  await ensureDebugDirExists();
+  await updateSymlink(aliasPath, targetPath, { fallbackCopy: false });
+  try {
+    const actualTarget = await fs.readlink(aliasPath);
+    return actualTarget === path.relative(path.dirname(aliasPath), targetPath);
+  } catch {
+    return false;
+  }
 }
 
 function updateLatestDebugLogAlias(sessionId: string): void {
@@ -197,17 +211,40 @@ function updateLatestDebugLogAlias(sessionId: string): void {
     return;
   }
   lastAliasedKey = key;
+  const generation = ++aliasGeneration;
 
   // Serialize alias updates so interleaved writes from different sessions
   // don't race unlink/symlink into an inconsistent state.
-  aliasChain = aliasChain.then(() => doUpdateLatestDebugLogAlias(sessionId));
+  aliasChain = aliasChain.then(async () => {
+    let updated = false;
+    try {
+      updated = await doUpdateLatestDebugLogAlias(sessionId);
+    } catch {
+      // Best-effort; don't degrade overall logging
+    }
+    if (updated) {
+      aliasFailureStreak = 0;
+      return;
+    }
+    // Clearing the marker lets the session's next write retry a transient
+    // failure — but only below the streak cap: where symlinks never work
+    // (e.g. Windows without symlink privilege) the marker must stay sticky,
+    // or every debug line would re-run a doomed unlink/symlink cycle.
+    aliasFailureStreak += 1;
+    if (
+      aliasFailureStreak < MAX_CONSECUTIVE_ALIAS_FAILURES &&
+      aliasGeneration === generation
+    ) {
+      lastAliasedKey = null;
+    }
+  });
 }
 
 /**
  * Sets the process-wide debug log session used by createDebugLogger().
  *
- * This is the default session used when there is no async-local session bound
- * via runWithDebugLogSession().
+ * This is the fallback used when neither runWithDebugLogSession() nor
+ * sessionIdContext has bound an async-local session.
  */
 export function setDebugLogSession(
   session: DebugLogSession | null | undefined,
@@ -221,8 +258,8 @@ export function setDebugLogSession(
 /**
  * Runs a function with a session bound to the current async context.
  *
- * This is optional; createDebugLogger() falls back to the process-wide session
- * set via setDebugLogSession().
+ * This overrides both sessionIdContext and the process-wide session set via
+ * setDebugLogSession().
  */
 export function runWithDebugLogSession<T>(
   session: DebugLogSession,

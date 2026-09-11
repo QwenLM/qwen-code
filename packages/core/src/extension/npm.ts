@@ -12,7 +12,7 @@ import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
-import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { assertTarArchiveLinksAreSafe } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
@@ -602,7 +602,7 @@ export async function downloadFromNpmRegistry(
   signal?.throwIfAborted();
 
   // Extract tarball
-  await assertTarArchiveHasNoLinks(tarballPath);
+  await assertTarArchiveLinksAreSafe(tarballPath);
   signal?.throwIfAborted();
   await tar.x({
     file: tarballPath,

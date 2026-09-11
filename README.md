@@ -7,7 +7,7 @@
 
 <a href="https://trendshift.io/repositories/15287" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15287" alt="QwenLM%2Fqwen-code | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
-**The open-source AI coding agent that lives in your terminal.**
+**The open-source AI coding agent for your terminal, editor, desktop, browser, and chat.**
 
 <a href="https://qwenlm.github.io/qwen-code-docs/zh/users/overview">中文</a> |
 <a href="https://qwenlm.github.io/qwen-code-docs/de/users/overview">Deutsch</a> |
@@ -19,12 +19,14 @@
 
 </div>
 
+![Qwen Code in the terminal, desktop app, browser, editor, and chat, with VS Code, Zed, JetBrains, Telegram, DingTalk, WeChat, and Feishu integrations](https://img.alicdn.com/imgextra/i3/O1CN01l5GyhGuOPGC3XHtt_!!6000000005884-2-tps-1742-903.png)
+
 ## Why Qwen Code?
 
 - **Agentic out of the box** — Auto-Memory, Auto-Skills, SubAgents, Agent Teams, and MCP. Dynamic workflows, zero setup.
 - **Open-source, inside and out** — The framework and the Qwen models are open-source. They evolve together. No vendor lock-in.
 - **Multi-protocol** — Supports OpenAI, Anthropic, Gemini, and Qwen APIs. Any third-party provider or local model (Ollama / vLLM). Switch at runtime.
-- **Beyond the terminal** — IDE plugins, Desktop app, daemon mode, SDKs, and IM bots (Telegram / DingTalk / WeChat / Feishu).
+- **Beyond the terminal** — IDE plugins, Desktop app, Web UI, SDKs, and chat integrations (Telegram / DingTalk / WeChat / Feishu).
 
 > [!TIP]
 > Qwen Code is actively iterating on itself — using its own agent and models to file issues, submit PRs, review code, and run tests. Powered by the community, driven by AI.
@@ -64,27 +66,45 @@ brew install qwen-code
 
 ## Quick Start
 
+Open a terminal in your project and start Qwen Code:
+
 ```bash
-qwen          # Launch interactive terminal UI
-# Inside the session:
-/auth         # Configure your provider and API key
+cd /path/to/your-project
+qwen
+```
+
+Inside the session, run `/auth` to configure your provider and API key. Then try:
+
+```text
+Explain this repository and show me where to start.
 ```
 
 See the [Authentication Guide](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/) and [Settings Reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for detailed setup.
 
-![Qwen Code](https://img.alicdn.com/imgextra/i2/O1CN01K0nwj41RM1Il8kB0t_!!6000000002096-2-tps-1544-1060.png)
+<details>
+<summary>See the terminal interface</summary>
+
+![Qwen Code terminal interface](https://img.alicdn.com/imgextra/i2/O1CN01K0nwj41RM1Il8kB0t_!!6000000002096-2-tps-1544-1060.png)
+
+</details>
 
 ## How to Use Qwen Code
 
-| Mode            | Command         | Use Case                                                                                                                                                                                                                                        |
-| --------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Interactive** | `qwen`          | Terminal UI with rich rendering, `@file` references, slash commands                                                                                                                                                                             |
-| **Headless**    | `qwen -p "..."` | Scripts, CI/CD, batch processing — no UI                                                                                                                                                                                                        |
-| **IDE**         | —               | [VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/), [Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/), [JetBrains](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/) |
-| **Desktop**     | —               | [Qwen Code Desktop](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — GUI for macOS, Windows, Linux                                                                                                                            |
-| **Daemon**      | `qwen serve`    | Shared agent session over HTTP+SSE (ACP). Multiple clients, one agent. _(experimental)_ [Docs](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)                                                                                     |
-| **SDK**         | —               | [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), [Java](./packages/sdk-java/qwencode/README.md)                                                                                                    |
-| **IM Bot**      | `qwen channel`  | Connect to Telegram, DingTalk, WeChat, or Feishu                                                                                                                                                                                                |
+Choose the interface that fits your workflow:
+
+| Interface    | Get started                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Terminal** | Run `qwen` in your project — see [Quick Start](#quick-start).                                                                                                                                                                                                                                                                                                                                             |
+| **Desktop**  | [Download Qwen Code Desktop](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) for macOS, Windows, and Linux.                                                                                                                                                                                                                                                                              |
+| **Web**      | Run `qwen serve --open` to open the [Web UI](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve/) in your browser. _(experimental)_                                                                                                                                                                                                                                                              |
+| **Editor**   | Set up [VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/), [Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/), or [JetBrains](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/).                                                                                                                                                |
+| **Chat**     | Connect [Telegram](https://qwenlm.github.io/qwen-code-docs/en/users/features/channels/telegram/), [DingTalk](https://qwenlm.github.io/qwen-code-docs/en/users/features/channels/dingtalk/), [WeChat](https://qwenlm.github.io/qwen-code-docs/en/users/features/channels/weixin/), or [Feishu](https://qwenlm.github.io/qwen-code-docs/en/users/features/channels/feishu/), then run `qwen channel start`. |
+
+For automation and custom integrations:
+
+- **Headless** — Run `qwen -p "..."` in scripts, CI/CD, or batch jobs.
+- **SDKs** — Build with [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), or [Java](./packages/sdk-java/qwencode/README.md).
+- **Daemon** — Run `qwen serve` to connect clients over HTTP + SSE (ACP). _(experimental)_ [Daemon guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve/).
 
 <details>
 <summary>SDK example (Python)</summary>
@@ -134,6 +154,36 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | Agent Arena (multi-model head-to-head on same task)                |     ✓     |      —      |
 | Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
 | IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
+
+## Qwen Code Evaluation
+
+### Evaluation Configuration
+
+| Configuration           | Value                                                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| Dataset                 | `princeton-nlp/SWE-bench_Verified`, 500 cases                                                       |
+| Runs                    | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions                                  |
+| Model                   | `Qwen 3.7 Max`                                                                                      |
+| Sampling                | `temperature=1`, `top_p=0.95`                                                                       |
+| Thinking / Reasoning    | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high`                      |
+| Context / Output Limits | `context_1m=true`, `model_context_length=1,000,000`, `max_tokens=64,000`, `model_max_tokens=65,535` |
+| Harness Limits          | `max_iterations=500`, `runtime_timeout_sec=7,200`, `agent_timeout_multiplier=3.0`                   |
+
+### Scores by Qwen Code Version
+
+| Version |  Avg Score | Pass Rate | pass@3 | pass^3 |
+| ------- | ---------: | --------: | -----: | -----: |
+| 0.0.14  | **77.80%** |     84.6% |  84.6% |  69.2% |
+| 0.1.0   | **76.73%** |     84.6% |  84.6% |  68.0% |
+| 0.5.0   | **76.60%** |     83.0% |  83.0% |  68.4% |
+| 0.10.0  | **76.47%** |     84.4% |  84.4% |  67.4% |
+| 0.15.0  | **77.67%** |     84.6% |  84.6% |  68.6% |
+| 0.19.0  | **76.40%** |     85.0% |  85.0% |  65.8% |
+| 0.22.0  | **77.33%** |     84.4% |  84.4% |  68.0% |
+
+### Avg Score Trend
+
+![Qwen Code version Avg Score trend](./.github/assets/qwen-code-avg-score-trend.svg)
 
 ## Ecosystem
 
