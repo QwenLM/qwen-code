@@ -632,7 +632,7 @@ export function useQueuedPrompts({
    * still queued, so the clear is applied by the next snapshot that carries it
    * instead of being dropped on the floor.
    */
-  const clearedUnconfirmedPromptIdsRef = useRef<Set<string>>(new Set());
+  const clearedUnconfirmedPromptIdsRef = useRef<Map<string, number>>(new Map());
   /**
    * Started events that arrived while the prompt's removal was in flight.
    * The event cannot be honoured yet: a removal that succeeds means the
@@ -1106,9 +1106,15 @@ export function useQueuedPrompts({
             // either started or gone, and removing that would abort a live
             // turn, so the entry is dropped.
             const overruledClearedIds = new Set<string>();
-            for (const clearedPromptId of [
+            for (const [clearedPromptId, anchorSeq] of [
               ...clearedUnconfirmedPromptIdsRef.current,
             ]) {
+              // A flight dispatched before this clear was recorded cannot be
+              // the evidence the clear is waiting for: its snapshot predates
+              // the cancellation, so its silence proves nothing — the same
+              // staleness the boundAtSeq fence rejects. Leave the entry for a
+              // pass that can prove something rather than consuming it here.
+              if (requestSeq <= anchorSeq) continue;
               clearedUnconfirmedPromptIdsRef.current.delete(clearedPromptId);
               if (
                 !result.pendingPrompts.some(
@@ -1696,7 +1702,7 @@ export function useQueuedPrompts({
     pendingStartedByPromptIdRef.current = new Map();
     syncClaimedSubmittingRowIdsRef.current = new Set();
     pendingEchoByPromptIdRef.current = new Map();
-    clearedUnconfirmedPromptIdsRef.current = new Set();
+    clearedUnconfirmedPromptIdsRef.current = new Map();
     startedDuringRemovalRef.current = new Map();
     returnedUnboundPromptIdsRef.current = new Map();
     initialRefreshSessionIdRef.current = undefined;
@@ -1800,6 +1806,21 @@ export function useQueuedPrompts({
               clientId,
             ),
           );
+          // An in-flight attachment row is invisible to that count: the event
+          // carries no content, so the matcher refuses it outright. Since the
+          // daemon renders an attachment message as its caption, such a row
+          // can render exactly like a text row — and then a count of one is
+          // not evidence of uniqueness, so the echo degrades to nothing. Rows
+          // that render differently cannot own this event, and stay out of
+          // the way.
+          const uncountableAttachmentRow = queuedPromptsRef.current.some(
+            (item) =>
+              !item.serverPromptId &&
+              item.serverState === 'submitting' &&
+              ((item.images?.length ?? 0) > 0 ||
+                (item.files?.length ?? 0) > 0) &&
+              pendingPromptTextsMatch(item.text, eventText),
+          );
           const prompt =
             queuedPromptsRef.current.find(
               (item) =>
@@ -1822,7 +1843,9 @@ export function useQueuedPrompts({
             queuedPromptsRef.current.find(
               (item) => item.serverPromptId === promptId,
             ) ??
-            (unboundMatches.length === 1 ? unboundMatches[0] : undefined);
+            (uncountableAttachmentRow || unboundMatches.length !== 1
+              ? undefined
+              : unboundMatches[0]);
           if (prompt) {
             if (prompt.onComplete) {
               settleCompletionCallback(promptId, prompt.onComplete);
@@ -2152,7 +2175,10 @@ export function useQueuedPrompts({
                   // otherwise the message the user cancelled reappears in the
                   // queue and still runs. A snapshot that already dropped the
                   // prompt resolves the entry on its next pass.
-                  clearedUnconfirmedPromptIdsRef.current.add(result.promptId);
+                  clearedUnconfirmedPromptIdsRef.current.set(
+                    result.promptId,
+                    refreshRequestSeqRef.current,
+                  );
                 }
                 // The confirming sync may already have materialized a row for
                 // the prompt the user cleared — drop it rather than resurrect
@@ -2909,13 +2935,16 @@ export function useQueuedPrompts({
                   ...restoreAdmission,
                   midTurnState: undefined,
                   midTurnMessageId: undefined,
-                  ...(shouldHold
-                    ? {}
-                    : {
-                        serverState: 'submitting' as const,
-                        resubmittedAfterIdleRejection:
-                          result.reason === 'session_idle',
-                      }),
+                  ...(shouldHold ? {} : { serverState: 'submitting' as const }),
+                  // Provenance rather than state: the daemon has already
+                  // refused this message once at idle, so whenever it is
+                  // eventually submitted — now, or later when a hold lifts —
+                  // its body must confirm against a snapshot instead of
+                  // trusting the activity mirror, which another client's
+                  // prompt occupying the FIFO can lag.
+                  ...(result.reason === 'session_idle'
+                    ? { resubmittedAfterIdleRejection: true }
+                    : {}),
                   onComplete,
                   onAdmitted,
                 };
@@ -4009,7 +4038,10 @@ export function useQueuedPrompts({
       for (const prompt of submittingPrompts) {
         for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
           if (rowId === prompt.id) {
-            clearedUnconfirmedPromptIdsRef.current.add(promptId);
+            clearedUnconfirmedPromptIdsRef.current.set(
+              promptId,
+              refreshRequestSeqRef.current,
+            );
             handedOffClear = true;
             break;
           }

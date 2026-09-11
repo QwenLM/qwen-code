@@ -1893,6 +1893,256 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('confirms a released held row the daemon refused at idle', async () => {
+    let rejectInsert: (() => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return new Promise((resolve) => {
+          rejectInsert = () =>
+            resolve({ accepted: false, reason: 'session_idle' });
+        });
+      },
+    );
+    let resolveRelease: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRelease = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('held follow-up');
+        await Promise.resolve();
+      });
+      // A hold activates while the insert is in flight, so the idle refusal
+      // lands on a client that must not submit yet: the row goes back to
+      // held, carrying the provenance that the daemon already refused it once.
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        rejectInsert?.();
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'held follow-up' }),
+      ]);
+      // The hold lifts while the activity mirror reads idle. Another client's
+      // prompt can occupy the daemon's FIFO before this POST without its
+      // activity update having reached this browser, so the mirror is not
+      // evidence that the released message started.
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'held follow-up',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+            originatorClientId: CLIENT_ID,
+          },
+        ],
+      });
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      await act(async () => {
+        resolveRelease?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      // The admission is admission-only: the daemon queued the message behind
+      // the other client's turn. Echoing it as sent would drop the queue row
+      // that is the user's only way to edit or cancel it, and the displayed
+      // marker would stop every later snapshot from restoring that row.
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'held follow-up',
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        }),
+      ]);
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not consume a recorded clear from a flight dispatched before it', async () => {
+    let resolveStale: ((value: { pendingPrompts: [] }) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    let resolveResubmit: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResubmit = resolve;
+        }),
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('cancel me');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      // A refresh dispatched before the admission, parked: its snapshot
+      // cannot list a prompt the daemon has not been asked about yet.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveStale = resolve;
+            }),
+        );
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      // The user clears the row, then the connection drops, so the body's
+      // confirming refresh is skipped and it records the clear for the next
+      // snapshot that can actually prove something.
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+        connected: false,
+      });
+      await act(async () => {
+        resolveResubmit?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      // The stale flight lands. It was dispatched before the clear was
+      // recorded, so its empty snapshot is not evidence that the daemon
+      // dropped the prompt — it must not consume the record.
+      await act(async () => {
+        resolveStale?.({ pendingPrompts: [] });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      // Reconnect with a snapshot that lists the prompt still queued: now the
+      // recorded clear has positive evidence and must be applied.
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'cancel me',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+            originatorClientId: CLIENT_ID,
+          },
+        ],
+      });
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'prompt-1',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not let a text row claim an attachment prompt that renders alike', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt.mockImplementation(
+      () => new Promise<{ promptId: string }>(() => {}),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('continue', [
+            { data: 'QUFB', media_type: 'image/png' },
+          ]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('continue');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toHaveLength(2);
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-a',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-a',
+              text: 'continue',
+            },
+          },
+        ]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      // The daemon renders the attachment message as its caption, so the two
+      // rows are indistinguishable by rendered text — and the started event
+      // carries no content, so the matcher cannot see the attachment row at
+      // all. A count of one is therefore not evidence of uniqueness: degrade
+      // to no echo instead of appending the text row under the attachment
+      // prompt's id, which loses the image and duplicates the caption when
+      // the text row's own prompt starts. Each body echoes its own row once
+      // its admission resolves.
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('leaves rival image rows unbound when one placeholder prompt matches both', async () => {
     const image = { data: 'aGVsbG8=', media_type: 'image/png' };
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
