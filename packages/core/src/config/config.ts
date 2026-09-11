@@ -3622,8 +3622,10 @@ export class Config {
                   signal,
                 );
                 break;
-              // These three return the aggregated result; the bus carries its
-              // final output like every other event.
+              // These three return the aggregated result. The bus replies with
+              // its final output as is, which is what direct callers read
+              // (todoWrite checks `finalOutput.decision`); Stop and
+              // MessageDisplay instead wrap theirs with createHookOutput.
               case 'StopFailure':
                 result = (
                   await hookSystem.fireStopFailureEvent(

@@ -52,6 +52,24 @@ describe('SettingsSchema', () => {
       ).toEqual([...Object.values(HookEventName)].sort());
     });
 
+    it('should concatenate every hook event across settings scopes', () => {
+      const hookProperties = getSettingsSchema().hooks.properties ?? {};
+      const eventNames = Object.values(HookEventName);
+
+      expect(
+        Object.fromEntries(
+          eventNames.map((eventName) => [
+            eventName,
+            hookProperties[eventName]?.mergeStrategy,
+          ]),
+        ),
+      ).toEqual(
+        Object.fromEntries(
+          eventNames.map((eventName) => [eventName, MergeStrategy.CONCAT]),
+        ),
+      );
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
