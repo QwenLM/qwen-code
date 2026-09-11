@@ -200,6 +200,16 @@ describe('IDEServer', () => {
 
   it('should still record an empty workspace path when nothing was persisted', async () => {
     vscodeMock.workspace.workspaceFolders = [];
+    vi.mocked(mockContext.environmentVariableCollection.get).mockImplementation(
+      (name) =>
+        name === 'QWEN_CODE_IDE_SERVER_PORT'
+          ? ({
+              value: '12345',
+              type: 1,
+              options: {},
+            } as unknown as vscode.EnvironmentVariableMutator)
+          : undefined,
+    );
 
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;
@@ -234,6 +244,9 @@ describe('IDEServer', () => {
       expectedContent,
     );
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
+    expect(
+      mockContext.environmentVariableCollection.clear,
+    ).not.toHaveBeenCalled();
   });
 
   it('should restore the persisted path when folders appear after activation', async () => {
@@ -321,6 +334,9 @@ describe('IDEServer', () => {
       expectedContent,
     );
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
+    expect(
+      mockContext.environmentVariableCollection.clear,
+    ).not.toHaveBeenCalled();
   });
 
   it('should update the path when workspace folders change', async () => {
