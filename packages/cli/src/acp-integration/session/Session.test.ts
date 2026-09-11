@@ -45723,6 +45723,135 @@ describe('Session', () => {
       expect(userInputDelivered).toBe(true);
       expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
     });
+    it('reports stop_hook_active false and restarts the block count when user input is drained before a Stop check', async () => {
+      rebuildSessionWithGuard();
+      // No pending todos, so the Guard never adds a continuation of its own
+      // (which would drain input inside that continuation instead).
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      Object.defineProperty(internals.todoStopGuard, 'needsStopInspection', {
+        configurable: true,
+        get: () => true,
+      });
+      let stopCallsAtDelivery: number | undefined;
+      let sendsAtDelivery: number | undefined;
+      let stopCalls = 0;
+      mockGuardBridge(() => {
+        // Deliver on the first drain after the hook-forced continuation has
+        // been sent: the check before that turn's own Stop.
+        const sends = vi.mocked(mockChat.sendMessageStream).mock.calls.length;
+        if (
+          stopCalls === 1 &&
+          sends >= 2 &&
+          stopCallsAtDelivery === undefined
+        ) {
+          stopCallsAtDelivery = stopCalls;
+          sendsAtDelivery = sends;
+          return {
+            messages: ['also update the changelog'],
+            hasQueuedPrompt: false,
+          };
+        }
+        return { messages: [], hasQueuedPrompt: false };
+      });
+      const stopActiveFlags: unknown[] = [];
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => {
+          if (request.eventName !== 'Stop') {
+            return { success: true, output: {} };
+          }
+          stopCalls++;
+          stopActiveFlags.push(request.input?.stop_hook_active);
+          return stopCalls <= 2
+            ? {
+                success: true,
+                output: { decision: 'block', reason: `block ${stopCalls}` },
+              }
+            : { success: true, output: {} };
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+
+      await runGuardPrompt();
+
+      // Delivered after the hook-forced continuation ran, before its Stop.
+      expect(stopCallsAtDelivery).toBe(1);
+      expect(sendsAtDelivery).toBe(2);
+      // The user's turn is not hook-forced, and its block is the first of a
+      // new run rather than the second consecutive one.
+      expect(stopActiveFlags.slice(0, 2)).toEqual([false, false]);
+      expect(stopCalls).toBeGreaterThanOrEqual(3);
+      expect(agentMessageChunks()).not.toContain(
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+    });
+
+    it('restarts the consecutive-block count when user input replaces the turn after a Stop check', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      Object.defineProperty(internals.todoStopGuard, 'needsStopInspection', {
+        configurable: true,
+        get: () => true,
+      });
+      let stopCalls = 0;
+      let userInputDelivered = false;
+      mockGuardBridge(() => {
+        // The drain right after Stop 2 delivers user input, which discards
+        // that Stop's allow before it is applied.
+        if (stopCalls === 2 && !userInputDelivered) {
+          userInputDelivered = true;
+          return {
+            messages: ['also update the changelog'],
+            hasQueuedPrompt: false,
+          };
+        }
+        return { messages: [], hasQueuedPrompt: false };
+      });
+      const stopActiveFlags: unknown[] = [];
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => {
+          if (request.eventName !== 'Stop') {
+            return { success: true, output: {} };
+          }
+          stopCalls++;
+          stopActiveFlags.push(request.input?.stop_hook_active);
+          return stopCalls === 1 || stopCalls === 3
+            ? {
+                success: true,
+                output: { decision: 'block', reason: `block ${stopCalls}` },
+              }
+            : { success: true, output: {} };
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+
+      await runGuardPrompt();
+
+      expect(userInputDelivered).toBe(true);
+      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+      // Stop 3 blocked the user's turn: one block, not two consecutive ones.
+      expect(stopCalls).toBeGreaterThanOrEqual(4);
+      expect(agentMessageChunks()).not.toContain(
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+    });
+
     it('preserves a coalesced Stop-loop event when token rejection skips the final send', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
@@ -46121,12 +46250,14 @@ describe('Session', () => {
         async () => ({ claimed: false, hasQueuedPrompt: false }),
       );
       let stopCalls = 0;
+      const stopActiveFlags: unknown[] = [];
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => {
           if (request.eventName !== 'Stop') {
             return { success: true, output: {} };
           }
           stopCalls++;
+          stopActiveFlags.push(request.input?.stop_hook_active);
           if (stopCalls === 1) {
             hookReturned = true;
             return {
@@ -46148,6 +46279,8 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(stopCalls).toBe(2);
+      // Queued user input replaced the hook-forced continuation.
+      expect(stopActiveFlags).toEqual([false, false]);
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
       const userCall = vi.mocked(mockChat.sendMessageStream).mock
         .calls[2]?.[1] as { message: Part[] };
