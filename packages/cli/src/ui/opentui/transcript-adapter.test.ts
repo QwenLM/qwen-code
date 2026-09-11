@@ -119,6 +119,31 @@ describe('transcriptToEvents subtyped user records', () => {
     ]);
   });
 
+  it('strips the envelope when displayText wins the resolution chain', () => {
+    // When provenance was unavailable at submit time the persisted
+    // displayText IS the enveloped text, and displayText resolves ahead of
+    // the parts — narrowing the strip to the parts fallback must not leave
+    // this branch uncovered.
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'DIFFERENTLY WORDED PARTS TEXT' }],
+      },
+      systemPayload: {
+        displayText:
+          '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+      },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: 'my prompt' },
+      { type: 'done' },
+    ]);
+  });
+
   it('still skips side-band subtyped user records', () => {
     const events = transcriptToEvents(
       [

@@ -1619,12 +1619,17 @@ export const useLlmStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
-        // `trimmedQuery` is the model text and may carry an injected one-shot
-        // reminder envelope; everything the user reads back (transcript,
-        // ↑-recall, cancel-restore) must use this instead. The helper never
-        // returns empty for non-empty input, so an envelope-only prompt
-        // stays visible as-is.
-        const userVisibleQuery = stripLeadingSystemReminders(trimmedQuery);
+        // `trimmedQuery` is the model text and may carry an injected
+        // one-shot reminder envelope; everything the user reads back
+        // (transcript, ↑-recall, cancel-restore) must use the typed text
+        // instead. Prefer the producer-carried provenance — it is the user's
+        // text verbatim, so a user-authored leading envelope survives as
+        // content. The shape strip stays the fallback for provenance-less
+        // submits (vim, …) and never returns empty for non-empty input, so
+        // an envelope-only prompt stays visible as-is.
+        const trimmedSubmittedPrompt = submittedPrompt?.trim();
+        const userVisibleQuery =
+          trimmedSubmittedPrompt || stripLeadingSystemReminders(trimmedQuery);
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1759,6 +1764,12 @@ export const useLlmStream = (
             {
               type: MessageType.USER,
               text: userVisibleQuery,
+              // Keep the model-bound text on the item when it differs: the
+              // rewind restore re-arms the consumed one-shot envelope from
+              // it (the composer refill only has `text`).
+              ...(userVisibleQuery === trimmedQuery
+                ? {}
+                : { modelText: trimmedQuery }),
               promptId: prompt_id,
             } as HistoryItemWithoutId,
             userMessageTimestamp,

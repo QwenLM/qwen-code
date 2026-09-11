@@ -13,6 +13,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  splitLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from './historyUtils.js';
 
@@ -315,5 +316,29 @@ describe('stripLeadingSystemReminders', () => {
 
   it('returns the empty string unchanged', () => {
     expect(stripLeadingSystemReminders('')).toBe('');
+  });
+
+  it('splits the exact reminder prefix from the display rest', () => {
+    const text =
+      '<system-reminder>\na\n</system-reminder>\n\n' +
+      '<system-reminder>\nb\n</system-reminder>\n\nreview this';
+    expect(splitLeadingSystemReminders(text)).toEqual({
+      reminders:
+        '<system-reminder>\na\n</system-reminder>\n\n' +
+        '<system-reminder>\nb\n</system-reminder>\n\n',
+      rest: 'review this',
+    });
+  });
+
+  it('splits no prefix for plain or envelope-only text', () => {
+    expect(splitLeadingSystemReminders('review this')).toEqual({
+      reminders: '',
+      rest: 'review this',
+    });
+    const only = '<system-reminder>\nnote\n</system-reminder>';
+    expect(splitLeadingSystemReminders(only)).toEqual({
+      reminders: '',
+      rest: only,
+    });
   });
 });

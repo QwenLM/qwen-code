@@ -215,7 +215,6 @@ import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import {
   useMessageQueue,
-  type QueuedUserSubmission,
   type UseMessageQueueReturn,
 } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
@@ -282,6 +281,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  splitLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from './utils/historyUtils.js';
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
@@ -1481,12 +1481,19 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<
-    | (Pick<QueuedUserSubmission, 'modelText' | 'submittedPrompt'> & {
-        resubmitModelText?: string;
-      })
-    | null
-  >(null);
+  const restoredSubmissionRef = useRef<{
+    // Exactly what the composer holds; the identity token
+    // handleBufferChange/handleFinalSubmit compare the buffer against.
+    displayText: string;
+    submittedPrompt?: string;
+  } | null>(null);
+  // The one-shot reminder envelopes a restored prompt carried, re-applied to
+  // its resubmit. Their latches (recovered agents, worktree restore) were
+  // consumed by the first attempt, so the envelopes must ride again even on
+  // an edited or vim-mode resubmit — delivery is not tied to buffer
+  // identity. Kept separate from restoredSubmissionRef: vim's provenance
+  // invalidation clears that ref but must not clear this one.
+  const pendingRestoredRemindersRef = useRef<string | null>(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -1509,7 +1516,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     if (
       restoredSubmissionRef.current !== null &&
-      restoredSubmissionRef.current.modelText !== text
+      restoredSubmissionRef.current.displayText !== text
     ) {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
@@ -1544,7 +1551,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     const fetchUserMessages = async () => {
-      const pastMessagesRaw = (await logger?.getPreviousUserMessages()) || [];
+      // Legacy log entries predate the write-time strip: normalize on
+      // read too, or an old enveloped row resurfaces into the composer (and
+      // dodges the dedupe against its stripped current-session twin).
+      const pastMessagesRaw = (
+        (await logger?.getPreviousUserMessages()) || []
+      ).map(stripLeadingSystemReminders);
       const currentSessionUserMessages = realUserPromptTexts(
         historyManager.history,
       ).reverse();
@@ -2615,21 +2627,46 @@ export const AppContainer = (props: AppContainerProps) => {
     [config],
   );
 
-  // A restored submission shows the user-visible text in the composer, but
-  // an unedited resubmit must replay the exact model text: a one-shot
-  // reminder envelope it carried was consumed on the first attempt and no
-  // injector can re-arm it. `modelText` stays the identity token that
+  // A restored submission shows the user-visible text in the composer while
+  // the reminder envelopes it carried are armed for the next submit: their
+  // one-shot latches were consumed by the first attempt and no injector can
+  // re-fire them. `displayText` is the identity token
   // handleBufferChange/handleFinalSubmit compare the buffer against.
   const stashRestoredSubmission = useCallback(
-    (submission: { modelText: string; submittedPrompt?: string }): string => {
-      const displayText = stripLeadingSystemReminders(submission.modelText);
+    (submission: {
+      modelText: string;
+      displayText?: string;
+      submittedPrompt?: string;
+    }): string => {
+      // Prefer the producer-carried display text (the typed text) over
+      // shape-stripping the model text: a user-authored leading envelope is
+      // content and must stay visible. `endsWith` then recovers exactly the
+      // injected prefix the display text leaves behind; with no producer
+      // value both sides come from the same split, keeping the pair
+      // consistent.
+      const split = splitLeadingSystemReminders(submission.modelText);
+      let displayText =
+        submission.displayText ?? submission.submittedPrompt ?? split.rest;
+      let reminders: string;
+      if (
+        displayText !== submission.modelText &&
+        submission.modelText.endsWith(displayText)
+      ) {
+        reminders = submission.modelText.slice(
+          0,
+          submission.modelText.length - displayText.length,
+        );
+      } else {
+        displayText = split.rest;
+        reminders = split.reminders;
+      }
       restoredSubmissionRef.current = {
-        modelText: displayText,
+        displayText,
         ...(submission.submittedPrompt === undefined
           ? {}
           : { submittedPrompt: submission.submittedPrompt }),
-        resubmitModelText: submission.modelText,
       };
+      pendingRestoredRemindersRef.current = reminders === '' ? null : reminders;
       submittedPromptProvenanceUnavailableRef.current = false;
       return displayText;
     },
@@ -3085,18 +3122,9 @@ export const AppContainer = (props: AppContainerProps) => {
           ? undefined
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
-            : restoredSubmission.modelText === submittedValue
+            : restoredSubmission.displayText === submittedValue
               ? restoredSubmission.submittedPrompt
               : undefined;
-      // Unedited resubmit of a restored prompt: replay the exact model text
-      // of the first attempt below, after the injectors ran. Their one-shot
-      // latches were consumed back then, so without the replay the model
-      // would never see the reminder the cancelled attempt carried.
-      const restoredModelText =
-        restoredSubmission !== null &&
-        restoredSubmission.modelText === submittedValue
-          ? restoredSubmission.resubmitModelText
-          : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }
@@ -3205,8 +3233,22 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
-      if (restoredModelText !== undefined) {
-        submittedValue = restoredModelText;
+      // Re-apply the one-shot reminder envelopes a restored prompt
+      // carried: their latches were consumed by the cancelled/rewound
+      // attempt, so without this the model would never see the notice
+      // again. Applied after the injectors and independent of edits or the
+      // submit call shape (vim submits no options); a freshly re-fired
+      // injector envelope (only the un-latched steering notice can re-fire)
+      // is kept alongside — a duplicated steering hint is harmless next to
+      // a silently dropped notice.
+      const restoredReminders = pendingRestoredRemindersRef.current;
+      if (
+        restoredReminders !== null &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
+      ) {
+        pendingRestoredRemindersRef.current = null;
+        submittedValue = restoredReminders + submittedValue;
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
@@ -3502,12 +3544,12 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       const restoreCancelledPrompt = () => {
-        // `text` is the display text (stripped of any injected envelope) and
-        // stays the identity token; `modelText` is the enveloped original the
-        // model must see again on an unedited resubmit.
+        // `text` is the producer display text and stays the identity token;
+        // the envelopes `modelText` carried are armed for the resubmit.
         buffer.setText(
           stashRestoredSubmission({
             modelText: cancelledTurnUserItem.modelText,
+            displayText: cancelledTurnUserItem.text,
             ...(cancelledTurnUserItem.submittedPrompt === undefined
               ? {}
               : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
@@ -4308,9 +4350,15 @@ export const AppContainer = (props: AppContainerProps) => {
           refreshStatic();
 
           if (userItem.type === 'user' && userItem.text) {
-            restoredSubmissionRef.current = null;
-            submittedPromptProvenanceUnavailableRef.current = true;
-            buffer.setText(userItem.text);
+            // The truncate above deleted the API-side copy of the turn's
+            // envelope and its one-shot latch is spent; the stash re-arms
+            // it from the item's model text for the resubmit.
+            buffer.setText(
+              stashRestoredSubmission({
+                modelText: userItem.modelText ?? userItem.text,
+                displayText: userItem.text,
+              }),
+            );
           }
 
           historyManager.addItem(
@@ -4380,6 +4428,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loadHistoryWithLatchReconciliation,
       refreshStatic,
       buffer,
+      stashRestoredSubmission,
     ],
   );
 

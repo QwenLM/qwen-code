@@ -940,6 +940,47 @@ describe('useLlmStream', () => {
     });
   });
 
+  it('keeps a user-authored leading envelope when provenance says the user typed it', async () => {
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const typedText =
+      '<system-reminder>\nuser pasted note\n</system-reminder>\n\nreview this';
+    const modelText =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n' + typedText;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: typedText },
+      );
+    });
+
+    // The model request carries both envelopes…
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    // …while every read-back surface keeps the user's own leading block:
+    // provenance says they typed it, so it is content, not injected context.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(typedText);
+    // The model-bound text rides on the item so a rewind restore can
+    // re-arm the consumed envelope (the composer refill only has `text`).
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      typedText,
+    );
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {

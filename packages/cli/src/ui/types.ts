@@ -167,6 +167,14 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   promptId?: string;
   /**
+   * The exact model-bound text of the turn when it differs from `text` —
+   * `text` may have an injected one-shot reminder envelope stripped for
+   * display. Set only on items produced live this session; the rewind
+   * restore re-arms the consumed envelope from it so a resubmit re-delivers
+   * the notice.
+   */
+  modelText?: string;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

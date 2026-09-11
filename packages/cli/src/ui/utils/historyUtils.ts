@@ -169,6 +169,19 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
  * returned unchanged, so no caller can strip a message out of existence.
  */
 export function stripLeadingSystemReminders(text: string): string {
+  return splitLeadingSystemReminders(text).rest;
+}
+
+/**
+ * The strip split into its two halves: `rest` is the display text and
+ * `reminders` the exact prefix that was removed ('' when nothing was), so a
+ * restore path can re-arm the consumed envelopes for the next submit instead
+ * of losing them with the strip.
+ */
+export function splitLeadingSystemReminders(text: string): {
+  reminders: string;
+  rest: string;
+} {
   let rest = text;
   while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
     const close = rest.indexOf(
@@ -178,7 +191,8 @@ export function stripLeadingSystemReminders(text: string): string {
     if (close === -1) break;
     rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
   }
-  return rest === '' ? text : rest;
+  if (rest === '' || rest === text) return { reminders: '', rest: text };
+  return { reminders: text.slice(0, text.length - rest.length), rest };
 }
 
 /**
