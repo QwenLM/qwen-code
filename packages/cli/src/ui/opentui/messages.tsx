@@ -231,12 +231,22 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows above a pending card's expanded confirmation dialog: the transcript
- * rows that stay on screen above it (prompt echo plus the card's own
- * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
- * title, body margins, outcome list, footer ≈ 11).
+ * Rows an expanded confirmation dialog can count on being unavailable to the
+ * pending card above it: the dialog's chrome (frame, title, per-type question,
+ * body margins, outcome list, footer ≈ 13), the rows that stay on screen above
+ * the card (banner ≈ 7, startup/session notices ≈ 3, the prompt echo with its
+ * margin ≈ 2), and the card's own hidden-tail and awaiting rows (≈ 2). A
+ * session without a banner or notices over-reserves, which only shrinks a card
+ * whose payload the dialog is already rendering — the safe direction.
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 27;
+
+/**
+ * The confirmation dialog's collapsed body cap (dialogs-confirm TextBody).
+ * The card's expanded-dialog bound engages only when the payload is taller
+ * than this — the case where the dialog offers ctrl-s expansion at all.
+ */
+export const CONFIRMATION_BODY_MAX_ROWS = 20;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
@@ -266,14 +276,23 @@ export function pendingCardMaxRows(
   const payloadRows = Math.ceil(
     descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
   );
+  // The expanded-dialog bound engages only when the payload overflows the
+  // dialog's collapsed body — ctrl-s expansion is offered only then, and a
+  // payload the collapsed dialog already shows in full is no reason to shrink
+  // the card (a tall terminal's no-payload budget keeps the collapsed bound).
+  const expandedBound =
+    payloadRows > CONFIRMATION_BODY_MAX_ROWS
+      ? Math.floor(
+          (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) *
+            CARD_DESC_WRAP_RATIO,
+        )
+      : Number.POSITIVE_INFINITY;
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
       h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
-      Math.floor(
-        (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) * CARD_DESC_WRAP_RATIO,
-      ),
+      expandedBound,
     ),
   );
 }

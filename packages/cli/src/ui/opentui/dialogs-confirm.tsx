@@ -62,6 +62,7 @@ import {
 } from './dialogs-shared.js';
 import { renderDiffBody } from './diff-render.js';
 import {
+  CONFIRMATION_BODY_MAX_ROWS,
   headWindowPhysical,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
@@ -80,9 +81,6 @@ export interface PendingToolConfirmation {
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
 }
-
-/** Max body rows before the tail window truncates (keeps dialogs bounded). */
-const MAX_BODY_ROWS = 20;
 
 /**
  * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
@@ -276,7 +274,7 @@ export function buildConfirmationPrompt(
 /** Renders a colored diff body within a bounded row window. */
 function DiffBody({ fileDiff }: { fileDiff: string }) {
   const lines = useMemo(() => renderDiffBody(fileDiff), [fileDiff]);
-  const window = tailWindow(lines, MAX_BODY_ROWS);
+  const window = tailWindow(lines, CONFIRMATION_BODY_MAX_ROWS);
   return (
     <box flexDirection="column">
       {window.hiddenCount > 0 ? (
@@ -309,7 +307,7 @@ function TextBody({ text }: { text: string }) {
   const { width, height } = useTerminalDimensions();
   const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
   const window = useMemo(
-    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    () => headWindowPhysical(rows, width, CONFIRMATION_BODY_MAX_ROWS),
     [rows, width],
   );
   const expandedWindow = useMemo(

@@ -178,8 +178,15 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(maxHistoryItemRows(80)).toBe(320);
     expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
     expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(20);
+    // The expanded-dialog bound engages only once the payload outgrows the
+    // dialog's collapsed body (20 rows at 110 columns ≈ 20 * 108 columns of
+    // text); a fitting payload keeps the collapsed budget.
+    expect(pendingCardMaxRows(80, 20 * 108, 110)).toBe(34);
+    expect(pendingCardMaxRows(80, 21 * 108, 110)).toBe(22);
+    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the card
+    // yields enough rows for the expanded body plus the dialog chrome and the
+    // rows that stay on screen above it (banner, notices, prompt echo).
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
   });
 
   it('falls back to the settled cap on short terminals', () => {
