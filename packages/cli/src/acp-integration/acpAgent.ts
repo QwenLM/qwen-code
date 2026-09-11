@@ -6459,30 +6459,54 @@ class QwenAgent implements Agent {
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
-    this.settings = loadSettings(cwd);
+    this.settings = this.loadRequestSettings(cwd);
     return this.settings;
   }
 
   /**
+   * Load settings for a single `qwen/settings/*` / `qwen/permissions/*`
+   * request. `skipLoadEnvironment` is set because a per-request read — and, for
+   * session-scoped calls, a foreign-workspace read — must not inject that
+   * workspace's `.env` into the daemon's process-wide `process.env`; env
+   * application stays with the daemon-global reload handlers that call
+   * `reloadEnvironment` deliberately. `consumeCorruptionEnvVars` is stated
+   * explicitly because passing an options object replaces `loadSettings`'s
+   * `= true` default.
+   */
+  private loadRequestSettings(settingsCwd: string): LoadedSettings {
+    return loadSettings(settingsCwd, {
+      consumeCorruptionEnvVars: true,
+      skipLoadEnvironment: true,
+    });
+  }
+
+  /**
    * Resolve the workspace root for the `qwen/settings/*` + `qwen/permissions/*`
-   * handlers. The requesting session relocates *its own* Config (not the
-   * daemon's bootstrap `this.config`), so `session.getConfig().getTargetDir()`
-   * points at a worktree while `process.cwd()` stays pinned to the daemon's
-   * boot workspace. Falls back to the bootstrap Config when the client sends no
-   * `sessionId`, following `this.config.getTargetDir()` rather than
-   * `process.cwd()`. The two coincide at boot, but diverge once that Config has
-   * been relocated (ACP relocation uses `skipProcessChdir: true`, leaving
-   * `process.cwd()` behind), so this is not a no-op preservation for
-   * non-session-scoped calls.
+   * handlers. `sessionId` names the requesting session, whose own Config is
+   * relocated to its worktree; without one the daemon's bootstrap
+   * `this.config` is used — nothing relocates the agent-level Config, so that
+   * is the boot workspace and swapping `process.cwd()` for
+   * `this.config.getTargetDir()` is a no-op there. An unresolvable `sessionId`
+   * is rejected rather than silently retargeting the read/write to the
+   * bootstrap workspace, whose trust decision and settings the caller never
+   * selected.
    */
   private settingsCwdFor(
     requestedCwd: string | undefined,
     params: Record<string, unknown>,
   ): string {
-    const sessionId = params['sessionId'] as string | undefined;
-    const session = sessionId ? this.sessions.get(sessionId) : undefined;
-    const config = session ? session.getConfig() : this.config;
-    return requestedCwd || config.getTargetDir();
+    const sessionId = params['sessionId'];
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        throw new RequestError(-32004, `Session not found: ${sessionId}`, {
+          errorKind: 'session_not_found',
+          sessionId,
+        });
+      }
+      return requestedCwd || session.getConfig().getTargetDir();
+    }
+    return requestedCwd || this.config.getTargetDir();
   }
 
   private async buildCoreSettings(
@@ -8964,7 +8988,7 @@ class QwenAgent implements Agent {
       }
       case 'qwen/settings/getMemory': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         this.settings = settings;
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
@@ -8976,7 +9000,7 @@ class QwenAgent implements Agent {
         // other settings mutation handlers, instead of writing through the
         // possibly-stale cached `this.settings` and reading it back.
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -13375,7 +13399,7 @@ class QwenAgent implements Agent {
       }
       case 'qwen/settings/getCore': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         this.settings = settings;
         return this.buildCoreSettings(settings, settingsCwd);
       }
@@ -13391,7 +13415,7 @@ class QwenAgent implements Agent {
           );
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(
           settingKey,
@@ -13432,7 +13456,7 @@ class QwenAgent implements Agent {
           );
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13462,7 +13486,7 @@ class QwenAgent implements Agent {
           );
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13481,7 +13505,7 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13537,7 +13561,7 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13577,7 +13601,7 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'value must be a string');
         }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
-        const settings = loadSettings(settingsCwd);
+        const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: settingsCwd,
           isWorkspaceTrusted:

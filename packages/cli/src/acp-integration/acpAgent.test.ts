@@ -17485,7 +17485,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.extMethod('qwen/settings/getCore', {
       sessionId: 'worktree-session',
     });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      worktreeRoot,
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
     expect(vi.mocked(ExtensionManager)).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspaceDir: worktreeRoot }),
     );
@@ -17496,7 +17502,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       key: 'model.name',
       value: 'qwen3.7-max',
     });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      worktreeRoot,
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
 
     await agent.extMethod('qwen/settings/setMcpServer', {
       sessionId: 'worktree-session',
@@ -17508,7 +17520,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         versionNegotiation: 'auto',
       },
     });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      worktreeRoot,
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
 
     await agent.extMethod('qwen/settings/setHook', {
       sessionId: 'worktree-session',
@@ -17516,7 +17534,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       event: 'PreToolUse',
       hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
     });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      worktreeRoot,
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
 
     // getMemoryPaths must resolve through the same helper as getMemory /
     // setMemory, so the project memory file points at the worktree rather
@@ -17530,7 +17554,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     // An explicit cwd still wins over the session target dir.
     await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith('/explicit');
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/explicit',
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects an unresolvable sessionId instead of retargeting the bootstrap workspace', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // An unknown, not-yet-published or already-removed session must fail loud:
+    // falling back to the daemon's bootstrap workspace would silently persist a
+    // workspace-scoped rule into a workspace the caller never selected.
+    vi.mocked(loadSettings).mockClear();
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        sessionId: 'missing-session',
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git:*)'],
+      }),
+    ).rejects.toMatchObject({
+      code: -32004,
+      data: { errorKind: 'session_not_found' },
+    });
+    expect(vi.mocked(loadSettings)).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
