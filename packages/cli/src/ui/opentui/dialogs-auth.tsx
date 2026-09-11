@@ -20,7 +20,7 @@
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
-import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
 import type { PasteEvent } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
@@ -239,6 +239,17 @@ function useLineInputKeys(
   onChange: (next: string) => void,
   onSubmit: () => void,
 ) {
+  // Key events can land in one React batch, where the value captured by the
+  // render that registered the handler is already stale by the second
+  // keystroke. The mirror is written synchronously so each event appends to
+  // what the previous one produced, and re-synced on render so a value set
+  // from anywhere else is not lost.
+  const latest = useRef(value);
+  latest.current = value;
+  const change = (next: string) => {
+    latest.current = next;
+    onChange(next);
+  };
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
@@ -246,11 +257,11 @@ function useLineInputKeys(
       return;
     }
     if (o.name === 'backspace' || o.name === 'delete') {
-      onChange(value.slice(0, -1));
+      change(latest.current.slice(0, -1));
       return;
     }
     if (isPrintableKeyInput(key)) {
-      onChange(value + key.sequence);
+      change(latest.current + key.sequence);
     }
   });
   // Bracketed pastes arrive as one PasteEvent with no keypress per character
@@ -262,7 +273,7 @@ function useLineInputKeys(
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    onChange(value + text);
+    change(latest.current + text);
   });
 }
 

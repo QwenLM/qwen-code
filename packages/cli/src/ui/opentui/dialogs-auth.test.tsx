@@ -149,6 +149,16 @@ async function typeText(text: string): Promise<void> {
   }
 }
 
+/** Every character in one act, as a burst out of a single pty read arrives. */
+async function typeBatched(text: string): Promise<void> {
+  const handler = lastKeyboardHandler();
+  await act(async () => {
+    for (const char of text) {
+      handler(baseKeyEvent({ name: char, sequence: char }));
+    }
+  });
+}
+
 async function pressEsc(): Promise<boolean> {
   const handler = mocks.state.inputHandlers.at(-1);
   if (!handler) throw new Error('no raw input handler registered');
@@ -444,6 +454,17 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await typeText('https://api.example.com/v1');
     await press('return'); // baseUrl → apiKey
   }
+
+  it('keeps every character of a burst that shares one batch', async () => {
+    await runToApiKeyStep();
+    await typeBatched('sk-burst-key');
+    expect(
+      screen.getByText((_, element) => element?.textContent === 'sk-burst-key'),
+    ).toBeTruthy();
+    // the burst is what the wizard carries forward, not its last character
+    await press('return'); // apiKey → models
+    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+  });
 
   it('inserts a paste into the API-key input and prevents default', async () => {
     await runToApiKeyStep();
