@@ -11018,6 +11018,89 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('retries a quiet tool-result close rather than persisting the delivered prefix', async () => {
+        // The other arm of the acceptance gate's
+        // `lacksVisibleToolResultProgress` term, and the reason declining there
+        // strands no completed answer. On a tool-result send an attempt that
+        // closes carrying only a thought part made no visible progress, which
+        // #7039 owns: it retries, and the prose an earlier attempt delivered is
+        // discarded either way. The closing attempt here carries NO trailing
+        // error — only attempt 1 is cut — so the discard is the
+        // quiet-tool-result policy's doing and not the gate's: the asymmetry
+        // that made the non-continuation case a defect (there, the identical
+        // attempt without the error is accepted and persisted) does not hold on
+        // this shape. With a trailing status-less frame the same shape keeps
+        // that frame on the transport arm instead of reclassifying it onto the
+        // invalid-stream budget; see the tool-result veto witness below.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('Let me read that file. ')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: 'Reconsidering.', thought: true }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the recovered answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            {
+              message: [
+                {
+                  functionResponse: {
+                    id: 'call_quiet_tool_result_close',
+                    name: 'read_file',
+                    response: { output: 'file contents' },
+                  },
+                },
+              ],
+            },
+            'prompt-quiet-tool-result-close-no-trailing-error',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          // The quiet close rode the invalid-stream retry and recovered.
+          expect(caughtError).toBeUndefined();
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          // The turn's answer is the retry's, and the prefix the caller watched
+          // stream is in neither durable layer — with no error involved.
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'the recovered answer',
+          );
+          expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+            'Let me read that file.',
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('does not schedule a continuation over a closed finish reason on a tool-result send', async () => {
         // With a user[functionResponse] history tail every attempt is a
         // tool-result continuation, so processStreamResponse defers the
