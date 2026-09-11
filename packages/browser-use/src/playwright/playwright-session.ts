@@ -320,6 +320,7 @@ export class PlaywrightSession {
         });
         this.assertRunning();
         if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
+        if (page.isClosed()) throw staleTabError();
       } catch (error) {
         await transport.unregisterTab(provider.providerTabId);
         throw error;
