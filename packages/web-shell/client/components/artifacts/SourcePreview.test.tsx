@@ -237,7 +237,7 @@ describe('source preview', () => {
     await render(source({ type: 'attachment', attachmentId: 'image.png' }));
     expect(mock.sessionActions.readAttachment).not.toHaveBeenCalled();
   });
-  it('offers download for unsupported attachments and revokes blob URLs on removal', async () => {
+  it('places attachment download in the source header and revokes its blob URL', async () => {
     const create = vi.fn(() => 'blob:source-test');
     const revoke = vi.fn();
     Object.defineProperty(URL, 'createObjectURL', {
@@ -254,9 +254,12 @@ describe('source preview', () => {
     });
     await render(source({ type: 'attachment', attachmentId: 'data.bin' }));
     expect(mock.sessionActions.readAttachment).toHaveBeenCalledOnce();
-    expect(container.querySelector('a[download]')?.getAttribute('href')).toBe(
-      'blob:source-test',
-    );
+    const download = container.querySelector<HTMLAnchorElement>('a[download]');
+    expect(download?.getAttribute('href')).toBe('blob:source-test');
+    const sourceHeader = container.querySelector(
+      'span[title="data.bin"]',
+    )?.parentElement;
+    expect(sourceHeader?.contains(download ?? null)).toBe(true);
     await act(async () => root.render(null));
     expect(revoke).toHaveBeenCalledWith('blob:source-test');
   });
