@@ -9506,11 +9506,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         for (let i = 0; i < 3; i++) await Promise.resolve();
       });
       // The echo must come from the stashed payload: the row is gone and the
-      // event carries only the placeholder. The not-removed answer means the
-      // daemon no longer holds the prompt as removable — it started, or a
-      // peer removed it first — and the DELETE had already settled before
-      // this event arrived, so nothing was parked for a replay: the started
-      // handler finds the surviving stash and echoes it.
+      // event carries only the placeholder. The DELETE was lost, so the
+      // client cannot tell whether the daemon ever received it, and the
+      // prompt may well have started — as it does here. The request had
+      // already failed before this event arrived, so nothing was parked for
+      // a replay: the started handler finds the surviving stash and echoes
+      // it.
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         '',

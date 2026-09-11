@@ -36671,7 +36671,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toBe(true);
 
     // The removal settled the id; a same-id retry must hit the settled ring
-    // and ack, not throw session_attachments_gone (410). Hoisting the
+    // and ack, not throw session_attachment_gone (410). Hoisting the
     // reference validation above the rings — validating inputs first — turns
     // this into a 410 for a message the daemon already owns and settled.
     expect(

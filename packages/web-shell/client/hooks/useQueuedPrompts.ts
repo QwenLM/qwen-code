@@ -624,9 +624,10 @@ export function useQueuedPrompts({
    */
   const pendingEchoByPromptIdRef = useRef<Map<string, QueuedPrompt>>(new Map());
   /**
-   * Prompts the user cleared while no snapshot could say what the daemon was
-   * doing with them. Removing needs positive evidence that the prompt is still
-   * queued, so the clear is applied by the next snapshot that carries it
+   * Prompts the user cleared while nothing on hand said what the daemon was
+   * doing with them — no snapshot had arrived, or the one that had no longer
+   * listed the prompt. Removing needs positive evidence that the prompt is
+   * still queued, so the clear is applied by the next snapshot that carries it
    * instead of being dropped on the floor.
    */
   const clearedUnconfirmedPromptIdsRef = useRef<Set<string>>(new Set());
@@ -1021,7 +1022,6 @@ export function useQueuedPrompts({
         if (full) {
           appendLocalQueuedPrompt(full, promptId);
         } else {
-          displayedServerPromptIdsRef.current.add(promptId);
           store.appendLocalUserMessage(parkedText, undefined, { promptId });
         }
       }
@@ -1125,7 +1125,12 @@ export function useQueuedPrompts({
                 pendingStartedByPromptIdRef.current.has(clearedPromptId) ||
                 startedDuringRemovalRef.current.has(clearedPromptId) ||
                 completedPromptIdsRef.current.has(clearedPromptId) ||
-                settledServerPromptIdsRef.current.has(clearedPromptId)
+                settledServerPromptIdsRef.current.has(clearedPromptId) ||
+                // A removal this client already owns decides the prompt's
+                // fate: a second DELETE would answer not-removed and its
+                // `.finally` would clear the flag the owning flight still
+                // needs to park a start behind.
+                removingServerPromptIdsRef.current.has(clearedPromptId)
               ) {
                 overruledClearedIds.add(clearedPromptId);
                 continue;
@@ -1918,12 +1923,12 @@ export function useQueuedPrompts({
   ]);
 
   /**
-   * Submit one pending prompt. The returned promise (already error-handled)
-   * settles once the admission has resolved and, for an idle-rejected
-   * resubmission, once its confirming snapshot has been taken — so callers
-   * releasing several prompts can chain them and keep the daemon's queue in
-   * the order the user typed them, at the cost of a link also spanning that
-   * snapshot.
+   * Submit one pending prompt. Returns the admission promise (already
+   * error-handled) so callers releasing several prompts can chain them and
+   * keep the daemon's queue in the order the user typed them. A chain link is
+   * never an idle-rejected resubmission — those are submitted directly, and
+   * only their bodies await a confirming snapshot — so a link settles at its
+   * admission.
    */
   const submitPendingPrompt = useCallback(
     (prompt: QueuedPrompt): Promise<void> => {
@@ -2135,10 +2140,13 @@ export function useQueuedPrompts({
                   snapshotState === undefined &&
                   !displayedServerPromptIdsRef.current.has(result.promptId)
                 ) {
-                  // The user cleared this row and no snapshot could say what
-                  // the daemon is doing with it, so hand the clear to the next
-                  // snapshot instead of dropping it: otherwise the message the
-                  // user cancelled reappears in the queue and still runs.
+                  // The user cleared this row and nothing on hand says what
+                  // the daemon is doing with it — either no snapshot arrived,
+                  // or the one that did no longer lists the prompt — so hand
+                  // the clear to the next snapshot instead of dropping it:
+                  // otherwise the message the user cancelled reappears in the
+                  // queue and still runs. A snapshot that already dropped the
+                  // prompt resolves the entry on its next pass.
                   clearedUnconfirmedPromptIdsRef.current.add(result.promptId);
                 }
                 // The confirming sync may already have materialized a row for
@@ -2586,9 +2594,8 @@ export function useQueuedPrompts({
       }
       // Re-check the hold per link, not once for the whole batch: the chain
       // is built synchronously when the hold lifts, but each link runs only
-      // after the previous one settles — its admission, plus the confirming
-      // snapshot an idle-rejected resubmission awaits. A Goal resumed inside
-      // that window (or a write block) must stop the remaining links instead of
+      // after the previous admission settles. A Goal resumed inside that
+      // window (or a write block) must stop the remaining links instead of
       // POSTing them against an active Goal — they return to held, and the
       // next inactive transition re-drains them in order.
       if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
@@ -3215,9 +3222,7 @@ export function useQueuedPrompts({
       // prompt overtake it and reach the daemon's queue out of order.
       //
       // The chain is built synchronously, but each link runs only after the
-      // previous one settles — its admission, plus the confirming snapshot an
-      // idle-rejected resubmission awaits — so the session can change
-      // mid-drain.
+      // previous admission settles, so the session can change mid-drain.
       // Pinned here rather than read per link: the guard has to ask "is this
       // still the owner the chain was built for", not "is there an owner".
       const chainOwner = ownerTokenRef.current;
