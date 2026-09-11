@@ -51,6 +51,7 @@ import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
 } from '@qwen-code/acp-bridge/ndJsonStream';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
@@ -82,6 +83,8 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+// Named subpath: the core barrel pulls shell/glob/chokidar into the serve
+// pre-listen static closure.
 import {
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
@@ -226,7 +229,10 @@ import {
   sanitizeWorkerDiagnostic,
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
-import { channelSelectionNames } from './channel-selection.js';
+import {
+  channelSelectionNames,
+  normalizeServeChannelSelection,
+} from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
@@ -269,6 +275,18 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
+// Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
+// here so the serve pre-listen graph does not statically import that module.
+const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+
+function deepestErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  let deepest: Error = err;
+  while (deepest.cause instanceof Error) {
+    deepest = deepest.cause;
+  }
+  return deepest.message;
+}
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -4000,12 +4018,12 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* (${err instanceof Error ? err.message : String(err)}); ` +
+        `policy.* / serve.channels ` +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* overrides.`,
+        `to apply context.fileName / policy.* / serve.channels overrides.`,
     );
   }
-
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -4018,6 +4036,62 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  let channelSelectionFromSettings = false;
+  const reportConfiguredChannelStartupFailure = (error: unknown): void => {
+    const message = sanitizeLogText(
+      redactLogCredentials(
+        error instanceof Error ? error.message : String(error),
+      ),
+      512,
+    );
+    const detail = /[.!?]$/.test(message) ? message : `${message}.`;
+    writeStderrLine(
+      `qwen serve: workspace serve.channels was not restored: ${detail} ` +
+        `Continuing without channels.`,
+    );
+    daemonLog.warn(
+      `workspace serve.channels was not restored: ${detail} Continuing without channels`,
+    );
+  };
+  if (!opts.channelSelection && bootSettings?.serve?.channels !== undefined) {
+    try {
+      const rawChannels = bootSettings.serve.channels;
+      if (
+        !Array.isArray(rawChannels) ||
+        !rawChannels.every((name): name is string => typeof name === 'string')
+      ) {
+        throw new Error('serve.channels must be a string array.');
+      }
+      const configuredChannels = rawChannels.filter((name, index) => {
+        if (
+          !name ||
+          name !== name.trim() ||
+          sanitizeLogText(name, name.length) !== name
+        ) {
+          daemonLog.warn(
+            `ignored invalid workspace serve.channels entry at index ${index}`,
+          );
+          return false;
+        }
+        return true;
+      });
+      opts.channelSelection = normalizeServeChannelSelection(
+        configuredChannels,
+        'serve.channels',
+      );
+      if (opts.channelSelection) {
+        channelSelectionFromSettings = true;
+        channelRuntime = await ensureChannelRuntime();
+        daemonLog.info('restoring channels from workspace serve.channels', {
+          channels: channelSelectionNames(opts.channelSelection),
+          workspaceCwd: boundWorkspace,
+        });
+      }
+    } catch (error) {
+      opts.channelSelection = undefined;
+      reportConfiguredChannelStartupFailure(error);
+    }
+  }
   daemonLog.info('project memory scope resolved', {
     projectMemoryScope: resolvedMemoryProjectScope,
     projectMemoryScopeSource: memoryProjectScopeSource,
@@ -5561,6 +5635,7 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
@@ -5572,6 +5647,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6136,6 +6212,7 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
@@ -6145,6 +6222,7 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -6791,6 +6869,7 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
           ? {
               notifySentCompletion: true,
@@ -6821,6 +6900,7 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
@@ -8073,19 +8153,18 @@ async function runQwenServeImpl(
     );
   }
 
-  const channelValidationSettingsRuntime = opts.channelSelection
-    ? await loadSettingsRuntimeModules()
-    : undefined;
-  const channelValidationTrustPolicy = opts.channelSelection
-    ? await import('../config/daemon-trust-policy.js')
-    : undefined;
-  const channelValidationTrustSnapshot = channelValidationTrustPolicy
-    ? await channelValidationTrustPolicy.readDaemonTrustPolicySnapshot()
-    : undefined;
+  let channelValidationSettingsRuntime:
+    | Awaited<ReturnType<typeof loadSettingsRuntimeModules>>
+    | undefined;
+  let channelValidationTrustPolicy:
+    | typeof import('../config/daemon-trust-policy.js')
+    | undefined;
+  let channelValidationTrustSnapshot: DaemonTrustPolicySnapshot | undefined;
   const resolveChannelWorkspaceGroupsAtListen = () => {
+    const validationSettingsRuntime = channelValidationSettingsRuntime;
     if (
       !opts.channelSelection ||
-      !channelValidationSettingsRuntime ||
+      !validationSettingsRuntime ||
       !channelRuntime
     ) {
       return undefined;
@@ -8138,15 +8217,12 @@ async function runQwenServeImpl(
       }
       const effectiveEnv = runtime
         ? workspaceRuntimeEffectiveEnv(runtime, daemonRuntimeBaseEnv)
-        : channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
-            channelValidationSettingsRuntime.settings.loadSettings(
-              workspace.cwd,
-              {
-                skipLoadEnvironment: true,
-                skipWorkspaceSettings: false,
-                workspaceTrusted: true,
-              },
-            ).merged,
+        : validationSettingsRuntime.environment.buildRuntimeEnvironment(
+            validationSettingsRuntime.settings.loadSettings(workspace.cwd, {
+              skipLoadEnvironment: true,
+              skipWorkspaceSettings: false,
+              workspaceTrusted: true,
+            }).merged,
             workspace.cwd,
             daemonRuntimeBaseEnv,
             trusted,
@@ -8157,7 +8233,7 @@ async function runQwenServeImpl(
     const workspaces = workspaceInputs.map((workspace, index) => {
       const runtime = resolveRuntime(workspace.cwd);
       const trusted = resolveTrusted(workspace.cwd, index === 0, runtime);
-      const settings = channelValidationSettingsRuntime.settings.loadSettings(
+      const settings = validationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
         {
           skipLoadEnvironment: true,
@@ -8170,7 +8246,7 @@ async function runQwenServeImpl(
         workspace.cwd,
         runtime
           ? workspaceRuntimeEffectiveEnv(runtime, daemonRuntimeBaseEnv)
-          : channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
+          : validationSettingsRuntime.environment.buildRuntimeEnvironment(
               settings.merged,
               workspace.cwd,
               daemonRuntimeBaseEnv,
@@ -8202,16 +8278,29 @@ async function runQwenServeImpl(
   };
 
   if (opts.channelSelection) {
-    if (
-      opts.channelSelection.mode === 'names' &&
-      workspaceInputs.length > MAX_CHANNEL_CONTROL_WORKSPACES
-    ) {
-      const groups = resolveChannelWorkspaceGroupsAtListen();
-      assertChannelControlWorkspaceCapacity(
-        groups?.map((group) => group.workspaceCwd) ?? [],
+    try {
+      channelValidationSettingsRuntime = await loadSettingsRuntimeModules();
+      channelValidationTrustPolicy = await import(
+        '../config/daemon-trust-policy.js'
       );
+      channelValidationTrustSnapshot =
+        await channelValidationTrustPolicy.readDaemonTrustPolicySnapshot();
+      if (
+        opts.channelSelection.mode === 'names' &&
+        workspaceInputs.length > MAX_CHANNEL_CONTROL_WORKSPACES
+      ) {
+        const groups = resolveChannelWorkspaceGroupsAtListen();
+        assertChannelControlWorkspaceCapacity(
+          groups?.map((group) => group.workspaceCwd) ?? [],
+        );
+      }
+      reserveChannelServicePidfile(opts.channelSelection);
+    } catch (error) {
+      if (!channelSelectionFromSettings) throw error;
+      removeCurrentServePidfile();
+      opts.channelSelection = undefined;
+      reportConfiguredChannelStartupFailure(error);
     }
-    reserveChannelServicePidfile(opts.channelSelection);
   }
 
   return await new Promise<RunHandle>((resolve, reject) => {
@@ -8694,11 +8783,10 @@ async function runQwenServeImpl(
       const armRuntimeStartupTimer = (): void => {
         if (runtimeStartupTimeoutMs <= 0 || runtimeStartupTimer) return;
         runtimeStartupTimer = setTimeout(() => {
-          void failRuntimeStartup(
-            new Error(
-              `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
-            ),
+          const timeoutError = new Error(
+            `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
           );
+          void failRuntimeStartup(timeoutError);
         }, runtimeStartupTimeoutMs);
         runtimeStartupTimer.unref();
       };
@@ -8995,8 +9083,32 @@ async function runQwenServeImpl(
         acpHandle?.attachServer?.(server);
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
-          const manager = await ensureChannelWorkerManager!();
-          await manager.startInitial(opts.channelSelection);
+          let manager: ChannelWorkerManager | undefined;
+          try {
+            manager = await ensureChannelWorkerManager!();
+            await manager.startInitial(opts.channelSelection);
+          } catch (error) {
+            if (!channelSelectionFromSettings || runtimeStartupSettled) {
+              throw error;
+            }
+            closeServerAfterChannelWorkerStartupFailure = false;
+            opts.channelSelection = undefined;
+            reportConfiguredChannelStartupFailure(error);
+            try {
+              if (manager) {
+                await manager.stopSelection();
+              } else {
+                removeCurrentServePidfile();
+                if (channelPidfileReserved) {
+                  throw new Error(
+                    'Failed to release the channel service lease.',
+                  );
+                }
+              }
+            } catch (cleanupError) {
+              reportConfiguredChannelStartupFailure(cleanupError);
+            }
+          }
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;
@@ -9006,7 +9118,59 @@ async function runQwenServeImpl(
         clearRuntimeStartupTimer();
         markRuntimeReady();
       };
-      const startBridgePreheat = (bridge: AcpSessionBridge): void => {
+      const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
+        app: Application,
+      ): void => {
+        if (runtimeStartupError !== undefined) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: runtime startup failed',
+          );
+          return;
+        }
+        if (shuttingDown) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: shutting down',
+          );
+          return;
+        }
+        const registry = app.locals?.['workspaceRegistry'] as
+          | WorkspaceRegistry
+          | undefined;
+        const primaryEntry = registry?.primaryEntry;
+        const runtime =
+          primaryEntry?.state === 'active'
+            ? primaryEntry.current?.runtime
+            : undefined;
+        if (!runtime) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: no primary runtime',
+          );
+          return;
+        }
+        const coordinator =
+          getWorkspaceRuntimeCoordinatorIfSupported?.(runtime);
+        if (!coordinator) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: ' +
+              'workspace runtime lifecycle is not supported',
+          );
+          return;
+        }
+        void coordinator
+          .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
+          .catch((err) => {
+            if (shuttingDown || runtimeStartupError !== undefined) {
+              return;
+            }
+            daemonLog.warn(
+              `workspace runtime ensure after preheat failed: ${deepestErrorMessage(err)}`,
+            );
+          });
+      };
+      const startBridgePreheat = (
+        bridge: AcpSessionBridge,
+        app: Application,
+      ): void => {
         startup.preheat.status = 'running';
         const preheatStartedAt = performance.now();
         bridge
@@ -9016,6 +9180,7 @@ async function runQwenServeImpl(
             startup.preheat.durationMs = Math.round(
               performance.now() - preheatStartedAt,
             );
+            scheduleWorkspaceMcpDiscoveryAfterPreheat(app);
           })
           .catch((err) => {
             const message = err instanceof Error ? err.message : String(err);
@@ -9051,7 +9216,7 @@ async function runQwenServeImpl(
               return;
             }
             if (shouldPreheat && runtime.bridge) {
-              startBridgePreheat(runtime.bridge);
+              startBridgePreheat(runtime.bridge, runtime.app);
             }
             await completeRuntimeStartup(runtime.app);
           })
@@ -9499,17 +9664,22 @@ async function runQwenServeImpl(
       } catch (err) {
         removeCurrentServePidfile();
         const error = err instanceof Error ? err : new Error(String(err));
-        markServeAppStartupFailed(error);
-        void serveAppLifecycle.close().then(
-          () => reject(error),
-          (closeError: unknown) =>
-            reject(
-              closeError instanceof Error
-                ? new AggregateError([error, closeError], error.message)
-                : error,
-            ),
-        );
-        return;
+        if (channelSelectionFromSettings) {
+          opts.channelSelection = undefined;
+          reportConfiguredChannelStartupFailure(error);
+        } else {
+          markServeAppStartupFailed(error);
+          void serveAppLifecycle.close().then(
+            () => reject(error),
+            (closeError: unknown) =>
+              reject(
+                closeError instanceof Error
+                  ? new AggregateError([error, closeError], error.message)
+                  : error,
+              ),
+          );
+          return;
+        }
       }
       if (channelWorkspaceGroups) {
         for (const group of channelWorkspaceGroups) {
@@ -9521,7 +9691,9 @@ async function runQwenServeImpl(
         }
         if (opts.channelSelection?.mode === 'all') {
           writeStderrLine(
-            'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
+            channelSelectionFromSettings
+              ? 'qwen serve: workspace serve.channels selection "all" is primary-workspace only; non-primary workspace channels are not hosted.'
+              : 'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
           );
         }
       }
@@ -9604,9 +9776,10 @@ async function runQwenServeImpl(
       });
       const preparedRuntimeApp = runtimeApp ?? runtimeAppForCleanup;
       if (preparedRuntimeApp && bridgeRef && deps.bridge) {
+        runtimeApp ??= preparedRuntimeApp;
         attachLiveDiscoveryControl(preparedRuntimeApp);
         if (shouldPreheat) {
-          startBridgePreheat(bridgeRef);
+          startBridgePreheat(bridgeRef, preparedRuntimeApp);
         }
         if (opts.channelSelection && !runtimeStartupSettled) {
           armRuntimeStartupTimer();
@@ -9620,6 +9793,11 @@ async function runQwenServeImpl(
           acpHandle?.attachServer?.(server);
           markServeAppStartupReady();
           void publishLiveDiscovery(preparedRuntimeApp);
+          if (!runtimeStartupSettled) {
+            runtimeStartupSettled = true;
+            clearRuntimeStartupTimer();
+            markRuntimeReady();
+          }
         }
       } else if (deferRuntimeUntilFirstHealth) {
         scheduleRuntimeStartFallback();

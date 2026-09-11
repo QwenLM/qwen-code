@@ -2098,6 +2098,21 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.drainMessages('test-1')).toEqual([]);
     });
 
+    it('refuses messages to running one-shot agents', () => {
+      registry.register({
+        agentId: 'one-shot',
+        description: 'Codex task',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/one-shot.jsonl',
+        resumeBlockedReason: 'Start a new task.',
+      });
+      expect(registry.queueExternalInput('one-shot', 'continue')).toBe(false);
+      expect(registry.drainMessages('one-shot')).toEqual([]);
+    });
+
     it('resolves empty when the wait signal is aborted', async () => {
       registry.register({
         agentId: 'test-1',
