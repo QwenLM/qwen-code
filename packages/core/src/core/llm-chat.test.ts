@@ -26,6 +26,8 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
+import { ResponsesHttpError } from '../utils/responses-http-error.js';
+import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
@@ -1159,6 +1161,146 @@ describe('LlmChat', async () => {
       expect(modelTurn?.parts![0]!.text).toBe('Hello World!');
     });
 
+    it('preserves Responses message phases across text consolidation and JSON history', async () => {
+      const commentary = { id: 'msg_commentary', phase: 'commentary' };
+      const final = { id: 'msg_final', phase: 'final_answer' };
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          for (const part of [
+            { text: 'Working', responsesMessage: commentary },
+            { text: ' now.', responsesMessage: commentary },
+            { text: 'Done.', responsesMessage: final },
+          ]) {
+            yield {
+              candidates: [{ content: { role: 'model', parts: [part] } }],
+            } as unknown as GenerateContentResponse;
+          }
+          yield {
+            candidates: [
+              { finishReason: 'STOP', content: { role: 'model', parts: [] } },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      for await (const _ of await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'phase-test',
+      )) {
+        /* drain */
+      }
+      const history = JSON.parse(
+        JSON.stringify(chat.getHistory()),
+      ) as Content[];
+      expect(history[1]?.parts).toEqual([
+        { text: 'Working now.', responsesMessage: commentary },
+        { text: 'Done.', responsesMessage: final },
+      ]);
+      const { input } = convertGeminiContentsToResponsesInput({
+        model: 'test-model',
+        contents: history,
+      });
+      expect(
+        input.filter(
+          (item) => item.type === 'message' && item.role === 'assistant',
+        ),
+      ).toEqual([
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'Working now.',
+          phase: 'commentary',
+        },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'Done.',
+          phase: 'final_answer',
+        },
+      ]);
+    });
+
+    it.each([
+      'Request contains an invalid argument',
+      'maximum schema depth exceeded',
+    ])(
+      'honors a Responses retry directive despite legacy message %s',
+      async (message) => {
+        vi.useFakeTimers();
+        try {
+          const { retryWithBackoff } =
+            await vi.importActual<typeof import('../utils/retry.js')>(
+              '../utils/retry.js',
+            );
+          mockRetryWithBackoff.mockImplementation(retryWithBackoff);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              new ResponsesHttpError(
+                404,
+                JSON.stringify({ error: { message } }),
+                new Headers({
+                  'x-should-retry': 'true',
+                  'retry-after-ms': '1',
+                }),
+              ),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'Recovered' }] },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'retry-directive',
+          );
+          await collectStreamWithFakeTimers(stream, 100);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(chat.getHistory().at(-1)?.parts).toEqual([
+            { text: 'Recovered' },
+          ]);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([429, 503])(
+      'does not restart an HTTP %i explicitly marked nonretryable',
+      async (status) => {
+        const error = new ResponsesHttpError(
+          status,
+          '{}',
+          new Headers({ 'x-should-retry': 'false' }),
+        );
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          error,
+        );
+        const consume = async () => {
+          for await (const _ of await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'no-retry',
+          )) {
+            /* drain */
+          }
+        };
+        await expect(consume()).rejects.toBe(error);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
     it('should consolidate adjacent text parts that arrive in separate stream chunks', async () => {
       // 1. Mock the API to return a stream of multiple, adjacent text chunks.
       const multiChunkStream = (async function* () {
@@ -1792,6 +1934,194 @@ describe('LlmChat', async () => {
       expect(parts[0]!.text).toBe('planning the read');
       const functionCallPart = parts.find((p) => p.functionCall);
       expect(functionCallPart?.functionCall?.id).toBe('call_thinking_tool_use');
+    });
+
+    it.each(['throw', 'end', 'close'] as const)(
+      'persists cancelled thinking and text when the stream exits via %s',
+      async (exitMode) => {
+        const controller = new AbortController();
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const parts: Part[] = [
+          { text: 'Thinking ', thought: true },
+          { text: 'first.', thought: true },
+          { thought: true, thoughtSignature: 'signature' },
+          { text: 'Partial ' },
+          { text: 'answer.' },
+        ];
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            for (const part of parts) {
+              yield {
+                candidates: [{ content: { role: 'model', parts: [part] } }],
+              } as GenerateContentResponse;
+            }
+            if (exitMode === 'throw') throw controller.signal.reason;
+          })(),
+        );
+        const stream = await recordingChat.sendMessageStream(
+          'test-model',
+          { message: 'hello', config: { abortSignal: controller.signal } },
+          'cancelled-partial',
+        );
+        for (let i = 0; i < parts.length; i++) {
+          expect((await stream.next()).done).toBe(false);
+        }
+        controller.abort(new DOMException('Cancelled', 'AbortError'));
+        if (exitMode === 'close') {
+          await stream.return(undefined);
+        } else {
+          await expect(stream.next()).rejects.toBe(controller.signal.reason);
+        }
+        const expectedParts = [
+          {
+            text: 'Thinking first.',
+            thought: true,
+            thoughtSignature: 'signature',
+          },
+          { text: 'Partial answer.' },
+        ];
+        expect(recordingChat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'hello' }] },
+          { role: 'model', parts: expectedParts },
+        ]);
+        expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            model: 'test-model',
+            message: expectedParts,
+          }),
+        );
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['abort', 'backend'] as const)(
+      'preserves the upstream %s error and partial output during supersession',
+      async (kind) => {
+        const controller = new AbortController();
+        const originalError =
+          kind === 'abort'
+            ? new DOMException('The operation was aborted.', 'AbortError')
+            : new Error('model backend failed');
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const parts = [
+          { text: 'Partial thought', thought: true },
+          { text: 'Partial body' },
+        ];
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [{ content: { role: 'model', parts } }],
+            } as GenerateContentResponse;
+            controller.abort('qwen:new-prompt');
+            throw originalError;
+          })(),
+        );
+        const stream = await recordingChat.sendMessageStream(
+          'test-model',
+          { message: 'hello', config: { abortSignal: controller.signal } },
+          'superseded-partial',
+        );
+        expect((await stream.next()).done).toBe(false);
+        await expect(stream.next()).rejects.toBe(originalError);
+        expect(recordingChat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'hello' }] },
+          { role: 'model', parts },
+        ]);
+        expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ message: parts }),
+        );
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['throw', 'close'] as const)(
+      'retains signed reasoning episodes in order when cancellation exits via %s',
+      async (exitMode) => {
+        const controller = new AbortController();
+        const abortError = new DOMException('Cancelled', 'AbortError');
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const firstCall = {
+          functionCall: { id: 'call1', name: 'tool', args: {} },
+        };
+        const secondCall = {
+          functionCall: { id: 'call2', name: 'tool', args: {} },
+        };
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      { text: 'First thought', thought: true },
+                      { thought: true, thoughtSignature: 'sigA' },
+                      firstCall,
+                      { text: 'Second thought', thought: true },
+                      { thought: true, thoughtSignature: 'sigB' },
+                      secondCall,
+                      { text: 'Partial body' },
+                    ],
+                  },
+                },
+              ],
+            } as GenerateContentResponse;
+            throw abortError;
+          })(),
+        );
+        const stream = await recordingChat.sendMessageStream(
+          'test-model',
+          { message: 'hello', config: { abortSignal: controller.signal } },
+          'cancelled-episodes',
+        );
+        expect((await stream.next()).done).toBe(false);
+        controller.abort('qwen:user-cancel');
+        if (exitMode === 'close') await stream.return(undefined);
+        else await expect(stream.next()).rejects.toBe(abortError);
+        const parts = [
+          { text: 'First thought', thought: true, thoughtSignature: 'sigA' },
+          firstCall,
+          { text: 'Second thought', thought: true, thoughtSignature: 'sigB' },
+          secondCall,
+          { text: 'Partial body' },
+        ];
+        expect(recordingChat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'hello' }] },
+          { role: 'model', parts },
+        ]);
+        expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ message: parts }),
+        );
+      },
+    );
+
+    it('does not record an empty assistant when cancelled before any content', async () => {
+      const controller = new AbortController();
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield* [];
+          controller.abort('qwen:user-cancel');
+        })(),
+      );
+      const stream = await recordingChat.sendMessageStream(
+        'test-model',
+        { message: 'hello', config: { abortSignal: controller.signal } },
+        'empty-cancel',
+      );
+      await expect(stream.next()).rejects.toBe('qwen:user-cancel');
+      expect(recordingChat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'hello' }] },
+      ]);
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
     });
 
     it('does NOT persist partial assistant turn when stream throws before any tool_use chunk', async () => {
@@ -3830,7 +4160,9 @@ describe('LlmChat', async () => {
         parts: expect.arrayContaining([
           { text: 'continue' },
           {
-            text: expect.stringContaining('Recent images reattached'),
+            text: expect.stringContaining(
+              'Images read earlier in this session',
+            ),
           },
           {
             inlineData: {
@@ -9767,6 +10099,86 @@ describe('LlmChat', async () => {
       expect(fallbackBGenerateContentStream).not.toHaveBeenCalled();
     });
 
+    it('retains tool calls and recording when a fallback is cancelled with an ACP reason', async () => {
+      const controller = new AbortController();
+      const abortError = new DOMException(
+        'The operation was aborted.',
+        'AbortError',
+      );
+      const record = vi.fn();
+      const chatWithRecording = chatWithRecorder(record);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['fallback-a']);
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(
+        Object.assign(new Error('capacity'), { status: 503 }),
+      );
+      const fallback = {
+        ...mockContentGenerator,
+        generateContentStream: vi.fn().mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      { text: 'thinking', thought: true },
+                      {
+                        functionCall: {
+                          id: 'call-1',
+                          name: 'read_file',
+                          args: { path: 'foo' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as GenerateContentResponse;
+            controller.abort('qwen:user-cancel');
+            throw abortError;
+          })(),
+        ),
+      };
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: fallback,
+          model: 'fallback-a',
+          retryAuthType: AuthType.USE_GEMINI,
+        }),
+      } as never);
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test', config: { abortSignal: controller.signal } },
+        'test',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(abortError);
+      expect(chatWithRecording.getHistory()).toEqual([
+        expect.objectContaining({ role: 'user' }),
+        expect.objectContaining({
+          role: 'model',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionCall: expect.objectContaining({ id: 'call-1' }),
+            }),
+          ]),
+        }),
+      ]);
+      expect(record).toHaveBeenCalledOnce();
+    });
+
     it('does not fallback on non-eligible primary auth errors', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
@@ -10492,6 +10904,452 @@ describe('LlmChat', async () => {
           index
         ]![0].contents as Content[];
       }
+
+      it('keeps unfinished reasoning when a textless transport continuation is cancelled', async () => {
+        vi.useFakeTimers();
+        try {
+          const controller = new AbortController();
+          const recordAssistantTurn = vi.fn();
+          const recordingChat = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Delivered prefix.')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Still thinking', thought: true }],
+                      },
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+          const stream = await recordingChat.sendMessageStream(
+            'test-model',
+            { message: 'test', config: { abortSignal: controller.signal } },
+            'cancel-transport-thought',
+          );
+          expect((await stream.next()).value?.type).toBe(StreamEventType.CHUNK);
+          expect((await stream.next()).value).toMatchObject({
+            type: StreamEventType.RETRY,
+            isContinuation: true,
+          });
+          const resumed = stream.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect((await resumed).value?.type).toBe(StreamEventType.CHUNK);
+          controller.abort('qwen:user-cancel');
+          await stream.return(undefined);
+          const parts = [
+            { text: 'Still thinking', thought: true },
+            { text: 'Delivered prefix.' },
+          ];
+          expect(recordingChat.getHistory().at(-1)?.parts).toEqual(parts);
+          expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ message: parts }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each(['success', 'retry yield', 'resumed output'])(
+        'preserves Responses phases across a transport cut and %s',
+        async (outcome) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            const commentary = {
+              text: 'Working on the requested answer.',
+              responsesMessage: { id: 'msg_c', phase: 'commentary' },
+            };
+            const final = {
+              text: 'The completed final answer.',
+              responsesMessage: { id: 'msg_f', phase: 'final_answer' },
+            };
+            const chunk = (part: Part, finishReason?: string) =>
+              ({
+                candidates: [
+                  {
+                    content: { parts: [part] },
+                    ...(finishReason ? { finishReason } : {}),
+                  },
+                ],
+              }) as unknown as GenerateContentResponse;
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(
+                cutAfter([
+                  chunk({ ...commentary, text: 'Working on ' }),
+                  chunk({ ...commentary, text: 'the requested answer.' }),
+                ]),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield chunk(final, 'STOP');
+                })(),
+              );
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              { message: 'test', config: { abortSignal: controller.signal } },
+              'transport-phases',
+            );
+            if (outcome === 'success') {
+              await collectStreamWithFakeTimers(stream, 5_000);
+            } else {
+              expect((await stream.next()).value?.type).toBe(
+                StreamEventType.CHUNK,
+              );
+              expect((await stream.next()).value?.type).toBe(
+                StreamEventType.CHUNK,
+              );
+              expect((await stream.next()).value).toMatchObject({
+                type: StreamEventType.RETRY,
+                isContinuation: true,
+              });
+              if (outcome === 'resumed output') {
+                const resumed = stream.next();
+                await vi.advanceTimersByTimeAsync(5_000);
+                expect((await resumed).value?.type).toBe(StreamEventType.CHUNK);
+              }
+              controller.abort('qwen:user-cancel');
+              await stream.return(undefined);
+            }
+            const parts =
+              outcome === 'retry yield' ? [commentary] : [commentary, final];
+            const history = JSON.parse(
+              JSON.stringify(recordingChat.getHistory()),
+            ) as Content[];
+            expect(history.at(-1)?.parts).toEqual(parts);
+            expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ message: parts }),
+            );
+            if (outcome !== 'retry yield') {
+              expect(requestContentsOfCall(1).at(-2)?.parts).toEqual([
+                commentary,
+              ]);
+            }
+            expect(
+              convertGeminiContentsToResponsesInput({
+                model: 'test-model',
+                contents: history,
+              }).input.filter(
+                (item) => item.type === 'message' && item.role === 'assistant',
+              ),
+            ).toEqual(
+              parts.map((part) => ({
+                type: 'message',
+                role: 'assistant',
+                content: part.text,
+                phase: part.responsesMessage.phase,
+              })),
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it.each([
+        ['retry yield', 1],
+        ['retry delay', 1],
+        ['stream establishment', 1],
+        ['resumed output', 1],
+        ['retry yield', 2],
+        ['retry delay', 2],
+        ['stream establishment', 2],
+        ['resumed output', 2],
+      ] as const)(
+        'persists the prefix when cancelled at %s of continuation %s',
+        async (phase, continuation) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            const generate = vi.mocked(
+              mockContentGenerator.generateContentStream,
+            );
+            generate.mockResolvedValueOnce(
+              cutAfter([textChunk('first half ')]),
+            );
+            if (continuation === 2) {
+              generate.mockResolvedValueOnce(
+                cutAfter([textChunk(' half second part ')]),
+              );
+            }
+            let establishing = false;
+            generate.mockImplementationOnce(async () => {
+              establishing = true;
+              if (phase === 'resumed output') {
+                return (async function* () {
+                  yield textChunk('resumed tail', 'STOP');
+                })();
+              }
+              return new Promise<AsyncGenerator<GenerateContentResponse>>(
+                (_resolve, reject) => {
+                  controller.signal.addEventListener(
+                    'abort',
+                    () => reject(controller.signal.reason),
+                    { once: true },
+                  );
+                },
+              );
+            });
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              {
+                message: 'write answer',
+                config: { abortSignal: controller.signal },
+              },
+              'cancel-transport-gap',
+            );
+            let retries = 0;
+            const delivered: string[] = [];
+            while (retries < continuation) {
+              const next = stream.next();
+              if (retries > 0) await vi.advanceTimersByTimeAsync(5_000);
+              const event = await next;
+              expect(event.done).toBe(false);
+              if (event.done) break;
+              if (event.value.type === StreamEventType.RETRY) {
+                expect(event.value.isContinuation).toBe(true);
+                retries++;
+              } else if (event.value.type === StreamEventType.CHUNK) {
+                delivered.push(
+                  (event.value.value.candidates?.[0]?.content?.parts ?? [])
+                    .filter((part) => !part.thought)
+                    .map((part) => part.text ?? '')
+                    .join(''),
+                );
+              }
+            }
+            expect(delivered.join('')).toContain('first half ');
+            expect(retries).toBe(continuation);
+            expect(establishing).toBe(false);
+            if (phase === 'retry yield') {
+              controller.abort('qwen:user-cancel');
+              await stream.return(undefined);
+            } else if (phase === 'resumed output') {
+              const next = stream.next();
+              await vi.advanceTimersByTimeAsync(5_000);
+              expect(await next).toMatchObject({
+                done: false,
+                value: { type: StreamEventType.CHUNK },
+              });
+              controller.abort('qwen:user-cancel');
+              await stream.return(undefined);
+            } else {
+              const next = stream.next();
+              if (phase === 'stream establishment') {
+                await vi.advanceTimersByTimeAsync(5_000);
+                expect(establishing).toBe(true);
+              }
+              controller.abort('qwen:user-cancel');
+              await expect(next).rejects.toBe('qwen:user-cancel');
+            }
+            const message = [
+              {
+                text:
+                  (continuation === 1
+                    ? 'first half '
+                    : 'first half second part ') +
+                  (phase === 'resumed output' ? 'resumed tail' : ''),
+              },
+            ];
+            expect(recordingChat.getHistory()).toEqual([
+              { role: 'user', parts: [{ text: 'write answer' }] },
+              { role: 'model', parts: message },
+            ]);
+            expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ model: 'test-model', message }),
+            );
+            expect(generate).toHaveBeenCalledTimes(
+              continuation +
+                (phase === 'stream establishment' || phase === 'resumed output'
+                  ? 1
+                  : 0),
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it.each(['waiting', 'compressed notification'] as const)(
+        'preserves delivered text when cancelled at reactive compression %s',
+        async (phase) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            let compressing = false;
+            vi.spyOn(ChatCompressionService.prototype, 'compress')
+              .mockResolvedValueOnce({
+                newHistory: null,
+                info: {
+                  originalTokenCount: 0,
+                  newTokenCount: 0,
+                  compressionStatus: CompressionStatus.NOOP,
+                },
+              })
+              .mockImplementationOnce(async () => {
+                compressing = true;
+                if (phase === 'waiting') {
+                  return new Promise((_resolve, reject) => {
+                    controller.signal.addEventListener(
+                      'abort',
+                      () => reject(controller.signal.reason),
+                      { once: true },
+                    );
+                  });
+                }
+                return {
+                  newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+                  info: {
+                    originalTokenCount: 135_000,
+                    newTokenCount: 40_000,
+                    compressionStatus: CompressionStatus.COMPRESSED,
+                  },
+                };
+              });
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(cutAfter([textChunk('first half ')]))
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield textChunk('second half');
+                  throw new StreamContentError(
+                    'prompt is too long: 135000 tokens > 128000 maximum',
+                  );
+                })(),
+              );
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              {
+                message: 'write answer',
+                config: { abortSignal: controller.signal },
+              },
+              'cancel-reactive-compression',
+            );
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.CHUNK },
+            });
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.RETRY, isContinuation: true },
+            });
+            const resumed = stream.next();
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(await resumed).toMatchObject({
+              value: { type: StreamEventType.CHUNK },
+            });
+            const compress = stream.next();
+            const outcome = compress.catch((error) => error);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(compressing).toBe(true);
+            if (phase === 'compressed notification') {
+              expect(await outcome).toMatchObject({
+                value: { type: StreamEventType.COMPRESSED },
+              });
+            }
+            controller.abort('qwen:user-cancel');
+            if (phase === 'waiting')
+              expect(await outcome).toBe(controller.signal.reason);
+            else await stream.return(undefined);
+            const parts = [{ text: 'first half second half' }];
+            expect(
+              recordingChat
+                .getHistory()
+                .filter((turn) => turn.role === 'model'),
+            ).toEqual([{ role: 'model', parts }]);
+            expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ message: parts }),
+            );
+            expect(
+              mockContentGenerator.generateContentStream,
+            ).toHaveBeenCalledTimes(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it.each(['rate limit', 'compression'])(
+        'does not restore a discarded prefix when cancelled at a fresh %s retry',
+        async (retry) => {
+          vi.useFakeTimers();
+          try {
+            const controller = new AbortController();
+            const recordAssistantTurn = vi.fn();
+            const recordingChat = chatWithRecorder(recordAssistantTurn);
+            if (retry === 'compression') {
+              vi.spyOn(ChatCompressionService.prototype, 'compress')
+                .mockResolvedValueOnce({
+                  newHistory: null,
+                  info: {
+                    originalTokenCount: 0,
+                    newTokenCount: 0,
+                    compressionStatus: CompressionStatus.NOOP,
+                  },
+                })
+                .mockResolvedValueOnce({
+                  newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+                  info: {
+                    originalTokenCount: 135_000,
+                    newTokenCount: 40_000,
+                    compressionStatus: CompressionStatus.COMPRESSED,
+                  },
+                });
+            }
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(cutAfter([textChunk('discarded prefix')]))
+              .mockRejectedValueOnce(
+                retry === 'rate limit'
+                  ? Object.assign(new Error('rate limit'), { status: 429 })
+                  : new Error(
+                      'prompt is too long: 135000 tokens > 128000 maximum',
+                    ),
+              );
+            const stream = await recordingChat.sendMessageStream(
+              'test-model',
+              {
+                message: 'write answer',
+                config: { abortSignal: controller.signal },
+              },
+              'cancel-fresh-retry',
+            );
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.CHUNK },
+            });
+            expect(await stream.next()).toMatchObject({
+              value: { type: StreamEventType.RETRY, isContinuation: true },
+            });
+            const next = stream.next();
+            await vi.advanceTimersByTimeAsync(5_000);
+            let result = await next;
+            if (result.value?.type === StreamEventType.COMPRESSED) {
+              result = await stream.next();
+            }
+            expect(result.done).toBe(false);
+            expect(result.value).toMatchObject({ type: StreamEventType.RETRY });
+            if (result.done || result.value.type !== StreamEventType.RETRY) {
+              throw new Error('Expected a fresh retry');
+            }
+            expect(result.value.isContinuation).not.toBe(true);
+            result.value.retryInfo?.skipDelay?.();
+            controller.abort('qwen:user-cancel');
+            await stream.return(undefined);
+            expect(JSON.stringify(recordingChat.getHistory())).not.toContain(
+              'discarded prefix',
+            );
+            expect(recordAssistantTurn).not.toHaveBeenCalled();
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
 
       it('continues from the delivered text instead of failing the send', async () => {
         vi.useFakeTimers();
@@ -13327,69 +14185,86 @@ describe('LlmChat', async () => {
     });
   });
 
-  it('should discard valid partial content from a failed attempt upon retry', async () => {
-    // Mock the stream to fail on the first attempt after yielding some valid content.
-    vi.mocked(mockContentGenerator.generateContentStream)
-      .mockImplementationOnce(async () =>
-        // First attempt: yields one valid chunk, then one invalid chunk
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'This valid part should be discarded' }],
+  it.each([false, true])(
+    'discards failed partials on retry with an un-aborted signal present: %s',
+    async (withSignal) => {
+      const controller = new AbortController();
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      // Mock the stream to fail on the first attempt after yielding some valid content.
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockImplementationOnce(async () =>
+          // First attempt: yields one valid chunk, then one invalid chunk
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'This valid part should be discarded' }],
+                  },
                 },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid chunk triggers retry
-          } as unknown as GenerateContentResponse;
-        })(),
-      )
-      .mockImplementationOnce(async () =>
-        // Second attempt (the retry): succeeds
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Successful final response' }],
+              ],
+            } as unknown as GenerateContentResponse;
+            yield {
+              candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid chunk triggers retry
+            } as unknown as GenerateContentResponse;
+          })(),
+        )
+        .mockImplementationOnce(async () =>
+          // Second attempt (the retry): succeeds
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Successful final response' }],
+                  },
+                  finishReason: 'STOP',
                 },
-                finishReason: 'STOP',
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-        })(),
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      // Send a message and consume the stream
+      const stream = await recordingChat.sendMessageStream(
+        'test-model',
+        {
+          message: 'test',
+          ...(withSignal ? { config: { abortSignal: controller.signal } } : {}),
+        },
+        'prompt-id-discard-test',
       );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
 
-    // Send a message and consume the stream
-    const stream = await chat.sendMessageStream(
-      'test-model',
-      { message: 'test' },
-      'prompt-id-discard-test',
-    );
-    const events: StreamEvent[] = [];
-    for await (const event of stream) {
-      events.push(event);
-    }
+      expect(controller.signal.aborted).toBe(false);
+      expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          message: [{ text: 'Successful final response' }],
+        }),
+      );
+      // Check that a retry happened
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((e) => e.type === StreamEventType.RETRY)).toBe(true);
 
-    // Check that a retry happened
-    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
-    expect(events.some((e) => e.type === StreamEventType.RETRY)).toBe(true);
+      // Check the final recorded history
+      const history = recordingChat.getHistory();
+      expect(history.length).toBe(2); // user turn + final model turn
 
-    // Check the final recorded history
-    const history = chat.getHistory();
-    expect(history.length).toBe(2); // user turn + final model turn
-
-    const modelTurn = history[1]!;
-    // The model turn should only contain the text from the successful attempt
-    expect(modelTurn!.parts![0]!.text).toBe('Successful final response');
-    // It should NOT contain any text from the failed attempt
-    expect(modelTurn!.parts![0]!.text).not.toContain(
-      'This valid part should be discarded',
-    );
-  });
+      const modelTurn = history[1]!;
+      // The model turn should only contain the text from the successful attempt
+      expect(modelTurn!.parts![0]!.text).toBe('Successful final response');
+      // It should NOT contain any text from the failed attempt
+      expect(modelTurn!.parts![0]!.text).not.toContain(
+        'This valid part should be discarded',
+      );
+    },
+  );
 
   it('discards a completed protocol-tagged response and retries before persistence', async () => {
     const recordAssistantTurn = vi.fn();
@@ -15590,6 +16465,145 @@ describe('LlmChat', async () => {
       expect(recovery2Config.maxOutputTokens).toBeGreaterThanOrEqual(4_000);
     });
 
+    it.each([
+      ['escalation', 'throw'],
+      ['escalation', 'close'],
+      ['recovery', 'throw'],
+      ['recovery', 'close'],
+      ['later recovery', 'throw'],
+      ['later recovery', 'close'],
+    ] as const)(
+      'preserves cancelled %s output via %s without internal user messages',
+      async (phase, exitMode) => {
+        const controller = new AbortController();
+        const abortError = new DOMException('Cancelled', 'AbortError');
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const streams = [
+          makeStream([makeChunk([{ text: 'INITIAL' }], 'MAX_TOKENS')]),
+        ];
+        if (phase !== 'escalation')
+          streams.push(
+            makeStream([makeChunk([{ text: 'BASE' }], 'MAX_TOKENS')]),
+          );
+        if (phase === 'later recovery')
+          streams.push(
+            makeStream([
+              makeChunk([{ text: 'FIRST CONTINUATION' }], 'MAX_TOKENS'),
+            ]),
+          );
+        streams.push(
+          (async function* () {
+            yield makeChunk([{ text: 'CANCELLED THOUGHT', thought: true }]);
+            yield makeChunk([{ text: 'CANCELLED BODY' }]);
+            throw abortError;
+          })(),
+        );
+        let calls = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[calls++]!);
+        const stream = await recordingChat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: 'write long answer',
+            config: { abortSignal: controller.signal },
+          },
+          'cancel-output',
+        );
+        let receivedBody = false;
+        for (let i = 0; i < 20; i++) {
+          const next = await stream.next();
+          expect(next.done).toBe(false);
+          if (
+            !next.done &&
+            next.value.type === StreamEventType.CHUNK &&
+            next.value.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.text === 'CANCELLED BODY',
+            )
+          ) {
+            receivedBody = true;
+            break;
+          }
+        }
+        expect(receivedBody).toBe(true);
+        expect(calls).toBe(streams.length);
+        controller.abort('qwen:user-cancel');
+        if (exitMode === 'close') await stream.return(undefined);
+        else await expect(stream.next()).rejects.toBe(abortError);
+        const history = recordingChat.getHistory();
+        expect(history.map((entry) => entry.role)).toEqual(['user', 'model']);
+        expect(history[0]?.parts).toEqual([{ text: 'write long answer' }]);
+        expect(JSON.stringify(history[1])).toContain('CANCELLED THOUGHT');
+        expect(JSON.stringify(history[1])).toContain('CANCELLED BODY');
+        if (phase !== 'escalation')
+          expect(JSON.stringify(history[1])).toContain('BASE');
+        if (phase === 'later recovery')
+          expect(JSON.stringify(history[1])).toContain('FIRST CONTINUATION');
+        const cancelledRecords = recordAssistantTurn.mock.calls.filter(
+          ([record]) =>
+            JSON.stringify(record.message).includes('CANCELLED BODY'),
+        );
+        expect(cancelledRecords).toHaveLength(1);
+        expect(JSON.stringify(cancelledRecords[0])).toContain(
+          'CANCELLED THOUGHT',
+        );
+      },
+    );
+
+    it.each(['escalation', 'recovery'] as const)(
+      'removes internal recovery prompts when %s is cancelled before content',
+      async (phase) => {
+        const controller = new AbortController();
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const streams = [
+          makeStream([makeChunk([{ text: 'INITIAL' }], 'MAX_TOKENS')]),
+        ];
+        if (phase === 'recovery')
+          streams.push(
+            makeStream([makeChunk([{ text: 'BASE' }], 'MAX_TOKENS')]),
+          );
+        streams.push(
+          (async function* () {
+            yield* [];
+            controller.abort('qwen:user-cancel');
+          })(),
+        );
+        let calls = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[calls++]!);
+        const stream = await recordingChat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: 'write long answer',
+            config: { abortSignal: controller.signal },
+          },
+          'empty-recovery',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toBe('qwen:user-cancel');
+        expect(calls).toBe(streams.length);
+        expect(recordingChat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'write long answer' }] },
+          ...(phase === 'recovery'
+            ? [{ role: 'model', parts: [{ text: 'BASE' }] }]
+            : []),
+        ]);
+        expect(
+          recordAssistantTurn.mock.calls.every(
+            ([record]) => record.message.length > 0,
+          ),
+        ).toBe(true);
+      },
+    );
+
     it('should enter recovery loop when escalated response is also truncated', async () => {
       // Three streams: initial (MAX_TOKENS) → escalated (MAX_TOKENS) →
       // recovery (STOP).
@@ -16320,6 +17334,39 @@ describe('LlmChat', async () => {
         'Alpha shared recovery suffix and continuation',
       );
     });
+
+    it.each(['', ' and the rest of the answer'])(
+      'keeps a distinct final phase when a MAX_TOKENS continuation overlaps%s',
+      async (suffix) => {
+        const commentary = {
+          text: 'The shared recovery text is long enough to deduplicate.',
+          responsesMessage: { id: 'msg_c', phase: 'commentary' },
+        };
+        const final = {
+          text: commentary.text + suffix,
+          responsesMessage: { id: 'msg_f', phase: 'final_answer' },
+        };
+        const streams = [
+          makeStream([
+            makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS'),
+          ]),
+          makeStream([makeChunk([commentary], 'MAX_TOKENS')]),
+          makeStream([makeChunk([final], 'STOP')]),
+        ];
+        let index = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[index++]!);
+        for await (const _ of await chat.sendMessageStream(
+          'test-model',
+          { message: 'write an answer' },
+          'recovery-phases',
+        )) {
+          /* drain */
+        }
+        expect(chat.getHistory().at(-1)?.parts).toEqual([commentary, final]);
+      },
+    );
 
     it('should keep the recovery thought before the merged text part (thought-signature provenance)', async () => {
       // Thinking-model providers (Gemini 2.5+, Anthropic, OpenAI o-series)
@@ -19117,6 +20164,88 @@ describe('LlmChat', async () => {
       } as unknown as GenerateContentResponse;
     }
 
+    it.each(['xml', 'buffered-json'])(
+      'preserves a %s tool call when cancelled at its synthetic chunk',
+      async (kind) => {
+        const controller = new AbortController();
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'Thinking', thought: true }],
+                  },
+                },
+              ],
+            } as GenerateContentResponse;
+            if (kind === 'xml') {
+              yield xmlChunk(
+                '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>',
+                'STOP',
+              );
+            } else {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      role: 'model',
+                      parts: [
+                        { text: '{"ok":true}' },
+                        {
+                          functionCall: {
+                            id: 'call-pending',
+                            name: 'read_file',
+                            args: { file_path: 'a.ts' },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              } as GenerateContentResponse;
+            }
+          })(),
+        );
+        const stream = await recordingChat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: 'read the file',
+            config: { abortSignal: controller.signal },
+          },
+          'cancel-synthetic',
+        );
+        let call: Part['functionCall'];
+        for (let i = 0; i < 10; i++) {
+          const next = await stream.next();
+          expect(next.done).toBe(false);
+          if (!next.done && next.value.type === StreamEventType.CHUNK)
+            call = next.value.value.functionCalls?.[0];
+          if (call) break;
+        }
+        expect(call?.name).toBe('read_file');
+        controller.abort('qwen:user-cancel');
+        await stream.return(undefined);
+        expect(recordingChat.getHistory()[1]?.parts).toEqual(
+          expect.arrayContaining([
+            { text: 'Thinking', thought: true },
+            { functionCall: call },
+          ]),
+        );
+        expect(recordAssistantTurn).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            message: expect.arrayContaining([
+              { text: 'Thinking', thought: true },
+              { functionCall: call },
+            ]),
+          }),
+        );
+      },
+    );
+
     it('recovers XML tool calls from plain text content and updates history', async () => {
       const xml =
         '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
@@ -19885,48 +21014,55 @@ describe('LlmChat', async () => {
         return events;
       }
 
-      it('classifies a model-request 413 as recoverable and compacts once before retrying', async () => {
-        const compressSpy = noopThen({
-          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
-          info: {
-            originalTokenCount: 90_000,
-            newTokenCount: 4_000,
-            compressionStatus: CompressionStatus.COMPRESSED,
-          },
-        });
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockRejectedValueOnce(sdkStyle413())
-          .mockImplementationOnce(async () =>
-            streamResponse(
-              stopResponse([{ text: 'recovered after compaction' }]),
-            ),
+      it.each(['sdk', 'responses'])(
+        'classifies a %s model-request 413 as recoverable and compacts once before retrying',
+        async (wire) => {
+          const compressSpy = noopThen({
+            newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+            info: {
+              originalTokenCount: 90_000,
+              newTokenCount: 4_000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              wire === 'responses'
+                ? new ResponsesHttpError(413, 'Request Entity Too Large')
+                : sdkStyle413(),
+            )
+            .mockImplementationOnce(async () =>
+              streamResponse(
+                stopResponse([{ text: 'recovered after compaction' }]),
+              ),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'next prompt' },
+            'prompt-id-413-recovery',
           );
+          const events = await consumeStream(stream);
 
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'next prompt' },
-          'prompt-id-413-recovery',
-        );
-        const events = await consumeStream(stream);
-
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expect(compressSpy.mock.calls[1]?.[1]).toEqual(
-          expect.objectContaining({ requestPayloadTooLarge: true }),
-        );
-        expect(
-          events.some((event) => event.type === StreamEventType.COMPRESSED),
-        ).toBe(true);
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(true);
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        const retryRequest = vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mock.calls[1]![0] as { contents: Content[] };
-        expect(JSON.stringify(retryRequest.contents)).toContain('summary');
-      });
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expect(compressSpy.mock.calls[1]?.[1]).toEqual(
+            expect.objectContaining({ requestPayloadTooLarge: true }),
+          );
+          expect(
+            events.some((event) => event.type === StreamEventType.COMPRESSED),
+          ).toBe(true);
+          expect(
+            events.some((event) => event.type === StreamEventType.RETRY),
+          ).toBe(true);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retryRequest = vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mock.calls[1]![0] as { contents: Content[] };
+          expect(JSON.stringify(retryRequest.contents)).toContain('summary');
+        },
+      );
 
       it('anchors the reactive 413 accounting on the real history, not the context window', async () => {
         // A bare HTTP 413 carries no provider token counts. The reactive

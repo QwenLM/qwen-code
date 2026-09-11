@@ -6,6 +6,10 @@ import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
+  parseWebPreviewUrl,
+  type WebPreviewState,
+} from './components/preview/web-preview';
+import {
   forwardRef,
   memo,
   useCallback,
@@ -133,9 +137,10 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
-import type {
-  ComposerSubmitCommit,
-  EditorHandle,
+import {
+  mapRestoredInputAnnotationsAfterTextChange,
+  type ComposerSubmitCommit,
+  type EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
@@ -776,6 +781,49 @@ function getLatestUserBlock(
   return undefined;
 }
 
+/**
+ * Conversational user turns, i.e. the blocks a rewind indexes against.
+ * Background notifications are injected as user blocks but are not turns.
+ */
+function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
+  let count = 0;
+  for (const block of blocks) {
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Longest a resend waits for the rewind to land in the transcript. */
+const REWIND_APPLIED_TIMEOUT_MS = 2000;
+
+/** Wait for the rewind event before adding any new optimistic message. */
+function waitForRewindApplied(
+  getBlocks: () => readonly DaemonTranscriptBlock[],
+  targetTurnIndex: number,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + REWIND_APPLIED_TIMEOUT_MS;
+    const poll = () => {
+      if (!isCurrent()) {
+        resolve(false);
+      } else if (countUserTurns(getBlocks()) <= targetTurnIndex) {
+        resolve(true);
+      } else if (Date.now() >= deadline) {
+        resolve(false);
+      } else {
+        setTimeout(poll, 16);
+      }
+    };
+    poll();
+  });
+}
+
 function matchesUserMessageIdentity(
   block: DaemonTranscriptBlock | undefined,
   identity: TranscriptUserMessageIdentity | undefined,
@@ -1156,7 +1204,13 @@ export interface WebShellProps {
   additionalSlashCommands?: readonly CommandInfo[];
   /** Keep Context Usage available while restored-session usage is loading. */
   contextUsageAlwaysVisible?: boolean;
-  /** Let the host expose the last user turn's edit-and-resend action. */
+  /**
+   * Offer the last user turn's edit-and-resend action. On by default. Editing
+   * happens in place in the message bubble, and the rewind is deferred to send
+   * time, so abandoning the edit keeps the turns after it. Hosts that own the
+   * lifecycle pass `false`, or answer `onUserMessageEditRequest` with `true` to
+   * keep their own editor.
+   */
   userMessageEditing?: boolean;
   /**
    * Called before WebShell starts its built-in user-message edit flow. Return
@@ -1617,6 +1671,7 @@ interface ArtifactPanelPersistedState {
 }
 
 type PersistedArtifactPanelTab =
+  | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'review' }>,
       | 'id'
@@ -1847,6 +1902,19 @@ function parsePersistedArtifactPanelTab(
         parentSessionId: tab['parentSessionId'],
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
+    case 'web_preview':
+      if (
+        typeof tab['url'] !== 'string' ||
+        (tab['viewport'] !== 'desktop' && tab['viewport'] !== 'mobile')
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'web_preview',
+        url: tab['url'],
+        viewport: tab['viewport'],
+      };
     case 'terminal':
       return {
         ...common,
@@ -1881,6 +1949,10 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'web_preview':
+        return [
+          { id, title, kind: tab.kind, url: tab.url, viewport: tab.viewport },
+        ];
       case 'source':
         return [];
       case 'review':
@@ -2963,7 +3035,7 @@ export function App({
   autoSubmitSlashCommands = false,
   additionalSlashCommands = EMPTY_ADDITIONAL_SLASH_COMMANDS,
   contextUsageAlwaysVisible = false,
-  userMessageEditing = false,
+  userMessageEditing = true,
   onUserMessageEditRequest,
   cycleModeOnTab = false,
   sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
@@ -3264,7 +3336,30 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const sessionWriteBlocked = Boolean(connection.loadingTranscript);
+  const [pendingEditRewind, setPendingEditRewind] = useState<{
+    sessionKey: string | undefined;
+    turnIndex: number;
+    owner: DaemonSessionOwnerSnapshot;
+    recover: () => void;
+  } | null>(null);
+  const editRewindSyncBlocked = Boolean(
+    pendingEditRewind &&
+      pendingEditRewind.sessionKey === logicalSessionKey &&
+      pendingEditRewind.owner.isCurrent() &&
+      countUserTurns(blocks) > pendingEditRewind.turnIndex,
+  );
+  useLayoutEffect(() => {
+    if (!pendingEditRewind || editRewindSyncBlocked) return;
+    setPendingEditRewind(null);
+    if (
+      pendingEditRewind.sessionKey === logicalSessionKey &&
+      pendingEditRewind.owner.isCurrent()
+    ) {
+      pendingEditRewind.recover();
+    }
+  }, [pendingEditRewind, editRewindSyncBlocked, logicalSessionKey]);
+  const sessionWriteBlocked =
+    Boolean(connection.loadingTranscript) || editRewindSyncBlocked;
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -4641,6 +4736,8 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const webPreviewAvailable =
+    workspaceContextActive && rightPanelItems.includes('webPreview');
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -4706,6 +4803,39 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
+  const openWebPreviewTab = useCallback(() => {
+    const id = `web-preview:${crypto.randomUUID()}`;
+    setArtifactPanelTabs((tabs) => [
+      ...tabs,
+      {
+        id,
+        kind: 'web_preview',
+        title: t('webPreview.title'),
+        url: '',
+        viewport: 'desktop',
+      },
+    ]);
+    setActiveArtifactPanelTabId(id);
+    setArtifactPanelOpen(true);
+  }, [t]);
+  const updateWebPreviewTab = useCallback(
+    (tabId: string, state: WebPreviewState) => {
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.id === tabId && tab.kind === 'web_preview'
+            ? {
+                ...tab,
+                title:
+                  state.url === tab.url ? tab.title : state.url || tab.title,
+                url: state.url,
+                viewport: state.viewport,
+              }
+            : tab,
+        ),
+      );
+    },
+    [],
+  );
   const openTerminalTab = useCallback(() => {
     const id = `terminal:${crypto.randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
@@ -5883,6 +6013,7 @@ export function App({
     ).some(
       (tab) =>
         (tab.kind === 'terminal' && webTerminalAvailable) ||
+        (tab.kind === 'web_preview' && webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
           sessionAgentTraceSupported),
@@ -5977,6 +6108,7 @@ export function App({
     const deferredPersistedTabs = (persisted?.tabs ?? []).filter(
       (tab) =>
         (tab.kind === 'terminal' && !webTerminalAvailable) ||
+        (tab.kind === 'web_preview' && !webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
           !sessionAgentTraceSupported),
@@ -6058,6 +6190,8 @@ export function App({
                         }
                       : undefined;
                 }
+                case 'web_preview':
+                  return webPreviewAvailable ? tab : undefined;
                 case 'file': {
                   return tab;
                 }
@@ -6298,6 +6432,7 @@ export function App({
     sessionAgentTraceSupported,
     sessionActions,
     webTerminalAvailable,
+    webPreviewAvailable,
     workspace.baseUrl,
     workspace.client,
   ]);
@@ -6513,6 +6648,44 @@ export function App({
         );
         return;
       }
+      const previewUrl =
+        webPreviewAvailable &&
+        request.artifact.metadata?.['artifactType'] !==
+          'web_preview_snapshot' &&
+        request.artifact.storage === 'published' &&
+        request.artifact.source === 'tool' &&
+        request.artifact.toolName?.toLowerCase() === 'artifact' &&
+        request.artifact.status === 'available' &&
+        (request.artifact.kind === 'html' ||
+          request.artifact.kind === 'link') &&
+        request.artifact.url
+          ? parseWebPreviewUrl(
+              request.artifact.url,
+              window.location.href,
+              workspace.baseUrl,
+            )
+          : undefined;
+      if (previewUrl) {
+        const tab: ArtifactPanelTab = {
+          id: `web-preview:${request.sourceSessionId ?? connection.sessionId}:${request.turnId}:${request.artifactId}`,
+          kind: 'web_preview',
+          title: request.title,
+          url: previewUrl.href,
+          viewport: 'desktop',
+        };
+        rememberArtifactPanelTrigger();
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id)
+            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        return;
+      }
       // Cache the opened row so the tab keeps rendering through transient
       // gaps in the live artifact lists (an SSE reconnect, or the source
       // pane closing); the snapshot/live-list reconciles drop the copy once
@@ -6535,8 +6708,8 @@ export function App({
         artifactId: request.artifactId,
         ...(request.workspaceCwd ? { workspaceCwd: request.workspaceCwd } : {}),
         ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
-        ...(request.sourceSessionId
-          ? { sourceSessionId: request.sourceSessionId }
+        ...((request.sourceSessionId ?? connection.sessionId)
+          ? { sourceSessionId: request.sourceSessionId ?? connection.sessionId }
           : {}),
         ...(request.previewContent !== undefined
           ? { previewContent: request.previewContent }
@@ -6564,6 +6737,10 @@ export function App({
       openImagePanel,
       openAttachmentPanel,
       openSubagentPanelForSession,
+      webPreviewAvailable,
+      workspace.baseUrl,
+      connection.sessionId,
+      rememberArtifactPanelTrigger,
     ],
   );
   const openFilePreview = useCallback(
@@ -9563,6 +9740,7 @@ export function App({
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
+        beforeAdmission?: () => Promise<void>;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -9593,7 +9771,9 @@ export function App({
           ? undefined
           : prepareSubmitRef.current;
       const submitBefore = onSubmitBeforeRef.current;
-      const hasAsyncPreflight = Boolean(prepare || submitBefore);
+      const hasAsyncPreflight = Boolean(
+        prepare || submitBefore || opts?.beforeAdmission,
+      );
       const admissionSource = {
         owner: sessionOwnerGuard.capture(),
         sessionId: connectionRef.current.sessionId,
@@ -9691,8 +9871,16 @@ export function App({
       let allocatedSessionId: string | undefined;
       try {
         allocatedSessionId = await ensureSessionForPrompt();
+        if (!admissionSourceIsCurrent(allocatedSessionId)) {
+          restoreCancelledSubmitState();
+          return;
+        }
+        if (opts?.beforeAdmission) await opts.beforeAdmission();
       } finally {
-        if (appMountedRef.current && shouldShowPreparing) {
+        if (
+          appMountedRef.current &&
+          (shouldShowPreparing || opts?.beforeAdmission)
+        ) {
           finishPreparing();
         }
       }
@@ -12039,6 +12227,10 @@ export function App({
     () => showContextUsage('/context', false),
     [showContextUsage],
   );
+  const contextUsageAvailable = !shouldBlockComposerSubmit({
+    connectionStatus: connection.status,
+    hasSession: Boolean(connection.sessionId),
+  });
 
   // Stable reference: this travels through the memoized MessageList →
   // MessageItem chain, so an inline closure would defeat their memo.
@@ -13852,33 +14044,251 @@ export function App({
     [sessionActions],
   );
 
-  const editUserMessage = useCallback(
-    async (turnIndex: number, content: string) => {
-      if (onUserMessageEditRequest?.(turnIndex, content) === true) return;
+  // The inline editor is owned by the message row. This only reports whether a
+  // host takes the lifecycle over, so the row can skip its own editor.
+  const beginUserMessageEdit = useCallback(
+    (turnIndex: number, content: string) =>
+      onUserMessageEditRequest?.(turnIndex, content) === true,
+    [onUserMessageEditRequest],
+  );
 
-      const restoreComposer = () => {
-        editorRef.current?.setText(content);
-        editorRef.current?.focus();
+  const submitUserMessageEdit = useCallback(
+    async (turnIndex: number, content: string): Promise<boolean> => {
+      const trimmed = content.trim();
+      if (
+        sessionWriteBlockedRef.current ||
+        promptPreparationOwnerRef.current ||
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current
+      ) {
+        pushToast('error', t('userMessage.editBusy'));
+        return false;
+      }
+      const sessionId = connectionRef.current.sessionId;
+      if (
+        unknownPromptAdmissionRef.current?.payloadAvailable &&
+        unknownPromptAdmissionRef.current.sessionId === sessionId
+      )
+        return false;
+      const original = getLatestUserBlock(store.getSnapshot().blocks);
+      if (!sessionId || original?.kind !== 'user') return false;
+      const images: PromptImage[] | undefined = original.images?.map(
+        (image) => ({
+          data: image.data,
+          media_type: image.mimeType,
+        }),
+      );
+      const files: PromptFile[] | undefined = original.files?.map((file) => ({
+        name: file.name,
+        media_type: file.mimeType,
+        data: file.data,
+        text: file.text,
+        attachmentId: file.attachmentId,
+      }));
+      if (!trimmed && !images?.length && !files?.length) return false;
+      const inputAnnotations = mapRestoredInputAnnotationsAfterTextChange(
+        original.meta?.inputAnnotations ?? [],
+        original.text,
+        trimmed,
+      );
+      const owner = sessionOwnerGuard.capture();
+      const editRetryOwner: CancelledRetryOwner = {
+        sessionId,
+        workspaceCwd: getComposerWorkspaceCwd(),
+        sessionKey: logicalSessionKey,
+        sourceVersion: composerSourceVersionRef.current,
+        snapshot: owner,
       };
-
-      restoreComposer();
-      window.setTimeout(restoreComposer, 0);
+      const generation = sessionWriteBlockGenerationRef.current;
+      const isCurrent = () =>
+        appMountedRef.current &&
+        owner.isCurrent() &&
+        connectionRef.current.sessionId === sessionId &&
+        !sessionWriteBlockedRef.current &&
+        sessionWriteBlockGenerationRef.current === generation;
+      const assertCurrent = () => {
+        if (!isCurrent())
+          throw new DOMException('Edit session changed', 'AbortError');
+      };
+      const assertTarget = () => {
+        assertCurrent();
+        if (
+          countUserTurns(store.getSnapshot().blocks) !== turnIndex + 1 ||
+          !matchesUserMessageIdentity(
+            getLatestUserBlock(store.getSnapshot().blocks),
+            { block: original },
+            true,
+          )
+        ) {
+          throw new Error(t('userMessage.editStale'));
+        }
+      };
+      let preparedEdit: WebShellPreparedSubmit = {
+        prompt: trimmed,
+        inputAnnotations,
+      };
+      let rewindStarted = false;
+      let rewindApplied = false;
+      let admissionStarted = false;
+      let admitted = false;
+      let admissionUnknown = false;
       try {
-        const { snapshots } = await sessionActions.getRewindSnapshots();
-        const snapshot = snapshots.find(
-          (entry) => entry.turnIndex === turnIndex,
-        );
-        if (!snapshot) throw new Error(t('rewind.empty'));
-        await sessionActions.rewindSession(snapshot.promptId, {
-          rewindFiles: false,
+        await sendPrompt(trimmed, images, files, {
+          submittedPrompt: trimmed,
+          inputAnnotations,
+          clearComposerOnPromptStart: false,
+          onPreparedSubmit: (prepared) => {
+            preparedEdit = prepared;
+          },
+          beforeAdmission: async () => {
+            assertTarget();
+            for (let index = 0; index < (images?.length ?? 0); index += 1) {
+              const attachmentId = original.images![index].attachmentId;
+              if (!attachmentId) continue;
+              const attachment =
+                await sessionActions.readAttachment(attachmentId);
+              assertTarget();
+              images![index] = {
+                data: attachment.data,
+                media_type: attachment.mimeType,
+              };
+            }
+            for (const file of files ?? []) {
+              if (file.data !== undefined || file.text !== undefined) continue;
+              if (!file.attachmentId)
+                throw new Error(t('userMessage.editAttachmentUnavailable'));
+              const attachment = await sessionActions.readAttachment(
+                file.attachmentId,
+              );
+              assertTarget();
+              file.data = base64ToBlob(attachment.data, attachment.mimeType);
+              file.media_type = attachment.mimeType;
+            }
+            const { snapshots } = await sessionActions.getRewindSnapshots();
+            assertTarget();
+            const snapshot = snapshots.find(
+              (entry) => entry.turnIndex === turnIndex,
+            );
+            if (!snapshot) throw new Error(t('rewind.empty'));
+            rewindStarted = true;
+            await sessionActions.rewindSession(snapshot.promptId, {
+              rewindFiles: false,
+            });
+            assertCurrent();
+            rewindApplied = await waitForRewindApplied(
+              () => store.getSnapshot().blocks,
+              turnIndex,
+              isCurrent,
+            );
+            assertCurrent();
+            if (!rewindApplied) {
+              throw new Error(t('userMessage.editSyncFailed'));
+            }
+          },
+          onAdmissionStarted: () => {
+            admissionStarted = true;
+          },
+          onAdmitted: () => {
+            admitted = true;
+          },
         });
       } catch (error) {
-        reportError(error, t('rewind.failed', { reason: String(error) }));
+        if (!isCurrent()) return false;
+        if (
+          admissionStarted &&
+          !admitted &&
+          !isDefinitelyRejectedPromptAdmission(error)
+        ) {
+          admissionUnknown = true;
+          updateUnknownPromptAdmission({
+            sessionId,
+            text: preparedEdit.prompt,
+            images,
+            files,
+            inputAnnotations: preparedEdit.inputAnnotations
+              ? [...preparedEdit.inputAnnotations]
+              : undefined,
+            payloadAvailable: true,
+          });
+          pushToast('warning', t('queue.admissionUnknown'));
+        } else if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+          reportError(
+            error,
+            t('userMessage.editFailed', { reason: formatError(error, '') }),
+          );
+        }
       } finally {
-        restoreComposer();
+        if (rewindStarted && !admitted && !admissionUnknown && isCurrent()) {
+          const recover = () => {
+            // Only create a replacement after the old turn has been removed.
+            if (countUserTurns(store.getSnapshot().blocks) === turnIndex) {
+              store.appendLocalUserMessage(
+                preparedEdit.prompt,
+                images?.map((image) => ({
+                  data: image.data,
+                  mimeType: image.media_type,
+                })),
+                preparedEdit.inputAnnotations?.length
+                  ? { inputAnnotations: [...preparedEdit.inputAnnotations] }
+                  : undefined,
+                files?.map((file) => ({
+                  ...file,
+                  mimeType: file.media_type,
+                })),
+              );
+            }
+            const recoveryBlocks = store.getSnapshot().blocks;
+            const failedMessage = getLatestUserBlock(recoveryBlocks);
+            if (!failedMessage || failedMessage === original) return;
+            const previousMessage = getLatestUserBlock(
+              recoveryBlocks.slice(0, recoveryBlocks.indexOf(failedMessage)),
+            );
+            updateFailedPrompt({
+              sessionId,
+              messageId: failedMessage.id,
+              identity: { block: failedMessage },
+              previousIdentity: previousMessage
+                ? { block: previousMessage }
+                : undefined,
+              owner: editRetryOwner,
+              text: preparedEdit.prompt,
+              images,
+              files,
+              inputAnnotations: preparedEdit.inputAnnotations
+                ? [...preparedEdit.inputAnnotations]
+                : undefined,
+            });
+          };
+          if (
+            !rewindApplied &&
+            countUserTurns(store.getSnapshot().blocks) > turnIndex
+          ) {
+            setPendingEditRewind({
+              sessionKey: logicalSessionKey,
+              turnIndex,
+              owner,
+              recover,
+            });
+          } else {
+            recover();
+          }
+        }
       }
+      return admitted;
     },
-    [onUserMessageEditRequest, reportError, sessionActions, t],
+    [
+      pushToast,
+      reportError,
+      sendPrompt,
+      sessionActions,
+      sessionOwnerGuard,
+      store,
+      t,
+      updateUnknownPromptAdmission,
+      updateFailedPrompt,
+      getComposerWorkspaceCwd,
+      logicalSessionKey,
+    ],
   );
 
   const handleRewindError = useCallback(
@@ -16653,6 +17063,8 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenWebPreview: workspaceContextActive ? openWebPreviewTab : undefined,
+    onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
     items: rightPanelItems,
@@ -18301,11 +18713,12 @@ export function App({
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onEditUserMessage={
                                   userMessageEditing
-                                    ? (turnIndex, content) =>
-                                        void editUserMessage(
-                                          turnIndex,
-                                          content,
-                                        )
+                                    ? beginUserMessageEdit
+                                    : undefined
+                                }
+                                onSubmitUserMessageEdit={
+                                  userMessageEditing
+                                    ? submitUserMessageEdit
                                     : undefined
                                 }
                                 onBranchSession={handleBranchCurrentSession}
@@ -18911,12 +19324,18 @@ export function App({
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
-                          tokenCount={connection.tokenCount ?? 0}
-                          contextWindow={connection.contextWindow ?? 0}
+                          tokenCount={
+                            contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+                          }
+                          contextWindow={
+                            contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+                          }
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
                           }
-                          onShowContextUsage={handleShowContextUsage}
+                          onShowContextUsage={
+                            contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
