@@ -305,36 +305,6 @@ describe('IDEServer', () => {
     expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
-  it('should defer syncEnvVars until start() completes when workspace folders arrive early', async () => {
-    // Simulate Remote-SSH: folders are empty at activation, then appear
-    // while start() is still in progress.
-    vscodeMock.workspace.workspaceFolders = [];
-
-    // Kick off start() — it resolves asynchronously after the server listens
-    const startPromise = ideServer.start(mockContext);
-
-    // Simulate onDidChangeWorkspaceFolders firing before start() finishes
-    vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/remote/ws' } }];
-    await ideServer.syncEnvVars();
-
-    // syncEnvVars should have deferred because the server wasn't ready
-    expect((ideServer as unknown as { syncPending: boolean }).syncPending).toBe(
-      true,
-    );
-
-    await startPromise;
-
-    // After start() completes, the deferred sync should have replayed
-    const replaceMock = mockContext.environmentVariableCollection.replace;
-    expect(replaceMock).toHaveBeenCalledWith(
-      'QWEN_CODE_IDE_WORKSPACE_PATH',
-      '/remote/ws',
-    );
-    expect((ideServer as unknown as { syncPending: boolean }).syncPending).toBe(
-      false,
-    );
-  });
-
   it('should clear env vars and delete lock file on stop', async () => {
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;

@@ -143,7 +143,6 @@ export class IDEServer {
   private transports: { [sessionId: string]: StreamableHTTPServerTransport } =
     {};
   private openFilesManager: OpenFilesManager | undefined;
-  private syncPending = false;
   diffManager: DiffManager;
 
   constructor(log: (message: string) => void, diffManager: DiffManager) {
@@ -367,14 +366,6 @@ export class IDEServer {
               log: this.log,
             });
           }
-          // If onDidChangeWorkspaceFolders fired while start() was still
-          // in progress, syncEnvVars() could not run — the guard would fail
-          // because the server fields were not yet set. Replay the deferred
-          // sync now that the server is fully ready.
-          if (this.syncPending) {
-            this.syncPending = false;
-            await this.syncEnvVars();
-          }
         }
         resolve();
       });
@@ -410,11 +401,6 @@ export class IDEServer {
         log: this.log,
       });
       this.broadcastIdeContextUpdate();
-      this.syncPending = false;
-    } else {
-      // Server isn't ready yet (e.g. start() still in progress when
-      // onDidChangeWorkspaceFolders fired). Defer until start() completes.
-      this.syncPending = true;
     }
   }
 
