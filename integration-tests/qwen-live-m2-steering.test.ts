@@ -27,6 +27,7 @@ import {
   bootLiveStack,
   deferred,
   startLiveCall,
+  waitForLiveResponseAfter,
   withTimeout,
   type Deferred,
   type LiveStack,
@@ -56,15 +57,27 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
     callId: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> => {
-    conn.functionCall({
+    const fromIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name,
       argumentsJson: JSON.stringify(args),
       callId,
     });
+    conn.speakTranscript(`Please ${name}: ${JSON.stringify(args)}`);
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === callId,
-      { timeoutMs: 30_000, description: `${name} receipt ${callId}` },
+      {
+        fromIndex,
+        timeoutMs: 30_000,
+        description: `${name} receipt ${callId}`,
+      },
     );
+    if (name !== 'handoff')
+      await waitForLiveResponseAfter(
+        stack,
+        receiptMessage,
+        'tool_continuation',
+      );
     return JSON.parse(functionCallOutputOf(receiptMessage)!.output) as Record<
       string,
       unknown
@@ -168,6 +181,17 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
       },
     );
     expect(contextTextOf(complete)).toContain('slow task finished');
+    const spoken = await stack.fakeDash.waitForMessage(
+      (message) => {
+        const text = contextTextOf(message);
+        return (
+          text?.startsWith('[SPEAK_TO_USER] ') === true &&
+          text.includes('slow task finished')
+        );
+      },
+      { fromIndex: stack.fakeDash.inbox.indexOf(complete) + 1 },
+    );
+    await waitForLiveResponseAfter(stack, spoken, 'backend_speech');
   });
 
   it('accepts a plain handoff to the now-idle session', async () => {
@@ -184,6 +208,7 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
       ),
     ).toBe(true);
 
+    const inboxIndex = stack.fakeDash.inbox.length;
     const receipt = await handoff('call-s3', {
       task: 'one more quick task',
       session: sessionHandle,
@@ -200,6 +225,7 @@ describeE2E('qwen-live M2 — mid-turn steering', () => {
       (message) =>
         contextTextOf(message)?.includes(`[COMPLETE ${job}]`) ?? false,
       {
+        fromIndex: inboxIndex,
         timeoutMs: 30_000,
         description: `[COMPLETE ${job}] for the idle handoff`,
       },

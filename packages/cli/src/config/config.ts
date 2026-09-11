@@ -101,6 +101,8 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
   validateGoalCheckpointTimeoutSeconds,
+  validateGoalMaxActiveMinutes,
+  validateGoalMaxTurns,
   validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
@@ -1098,6 +1100,26 @@ function resolveGoalTokenBudget(settings: Settings): number | undefined {
   if (fromSettings === undefined) return undefined;
   try {
     return validateGoalTokenBudget(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxTurns(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxTurns;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxTurns(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxActiveMinutes;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxActiveMinutes(fromSettings);
   } catch (err) {
     throw new Error(`settings.json: ${(err as Error).message}`);
   }
@@ -2283,6 +2305,8 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     goalTokenBudget: resolveGoalTokenBudget(settings),
+    goalMaxTurns: resolveGoalMaxTurns(settings),
+    goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
     goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
@@ -2479,12 +2503,16 @@ export async function loadCliConfig(
 
   const config = new Config(configParams);
 
-  // Load the ACP transport only when an external subagent is requested.
+  // Load the selected transport only when an external subagent is requested.
   config.setExternalAgentExecutor({
     create: (params) =>
-      import('../external-agents/acp-subagent-executor.js').then((module) =>
-        module.acpExternalAgentExecutor.create(params),
-      ),
+      params.spec.kind === 'codex'
+        ? import('../external-agents/codex-subagent-executor.js').then(
+            (module) => module.codexExternalAgentExecutor.create(params),
+          )
+        : import('../external-agents/acp-subagent-executor.js').then((module) =>
+            module.acpExternalAgentExecutor.create(params),
+          ),
   });
 
   if (lspEnabled) {
