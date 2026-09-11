@@ -39,13 +39,17 @@ export interface TranscriptCursor {
  * `lastReason` — that stays the human-readable half, this is the half a client
  * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
  * window: the objective and revision carry over, but evidence recorded before
- * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
- * authorization that a resume re-arms.
+ * the resume is no longer citable. The three budget kinds each mark a spent
+ * autonomous authorization that a resume re-arms: `token_budget` for model
+ * spend, `turn_budget` for finished turns, `time_budget` for active wall time.
+ * Older daemons never send the last two.
  */
 export type GoalLimitKind =
   | 'evidence_catalog'
   | 'checkpoint_request'
-  | 'token_budget';
+  | 'token_budget'
+  | 'turn_budget'
+  | 'time_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -68,8 +72,37 @@ export interface GoalRecord {
    * daemon's snapshot looks like.
    */
   tokenBudget?: number;
+  /**
+   * The count `turnCount` may reach before the Goal stops and waits for the
+   * user. Absent means no turn ceiling, which is both the default and what an
+   * older daemon's snapshot looks like.
+   */
+  turnBudget?: number;
+  /**
+   * The ceiling on `activeTimeMs` -- wall time spent running -- before the
+   * Goal stops and waits for the user, in milliseconds. Absent means no time
+   * ceiling, which is both the default and what an older daemon sends.
+   */
+  activeTimeBudgetMs?: number;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Consecutive evidence checkpoints that failed to relieve an overflowing
+   * window; the Goal stops when this reaches three. Absent means zero, which
+   * is also what an older daemon's snapshot looks like.
+   */
+  checkpointStalls?: number;
+  /**
+   * A one-line diagnostic for the most recent checkpoint check that gave no
+   * relief: `ErrorName: message` for a check that failed, or the runtime's own
+   * phrase for one that answered with a full claim list while the window
+   * overflowed, so it does not always mean the check threw. Cleared by a check
+   * that finds room or writes a checkpoint without stalling, by every control
+   * action that clears `checkpointStalls`, and by a checkpoint stop whose cause
+   * is not itself a check, so it can be absent while `checkpointStalls` is
+   * still non-zero. Also absent when the daemon predates the field.
+   */
+  lastCheckpointFailure?: string;
   lastReason?: string;
   limitKind?: GoalLimitKind;
 }
@@ -93,6 +126,13 @@ export interface GoalSnapshotV2 {
  * `GOAL_PAUSE_REASON_MAX_CHARACTERS`, or the daemon rejects the request.
  */
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+
+/**
+ * How many consecutive stalled evidence checkpoints stop a Goal, duplicated so
+ * a client can show `checkpointStalls` against it. It must match
+ * `GOAL_CHECKPOINT_STALL_LIMIT` in `packages/core/src/goals/goal-protocol.ts`.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 
 export type GoalControlRequest =
   | { action: 'create'; objective: string }

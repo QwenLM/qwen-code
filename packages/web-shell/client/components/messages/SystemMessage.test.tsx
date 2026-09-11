@@ -32,6 +32,43 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it.each([
+    ['zh-CN', 10999, '你在 11 秒后取消了请求'],
+    ['zh-CN', 999, '你在 1 秒后取消了请求'],
+    ['zh-CN', 0, '你在 0 秒后取消了请求'],
+    ['zh-CN', 7069, '你在 8 秒后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11 seconds'],
+  ] as const)('renders elapsed seconds in %s', (language, elapsedMs, text) => {
+    const container = render(
+      <SystemMessage
+        content=""
+        variant="info"
+        source="prompt_cancelled"
+        data={{ elapsedMs }}
+      />,
+      language,
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(text);
+  });
+
+  it.each(['1000', -1, NaN, Infinity])(
+    'falls back for invalid elapsed time %s',
+    (elapsedMs) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs }}
+        />,
+        'zh-CN',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        '你已取消请求',
+      );
+    },
+  );
+
   it('renders the user-cancelled marker as a status region', () => {
     const container = render(
       <SystemMessage content="" variant="info" source="prompt_cancelled" />,

@@ -1523,6 +1523,24 @@ describe('ChatRecordingService', () => {
       ).toBe(false);
     });
 
+    it.each([
+      [undefined, true],
+      [1_500, true],
+      [NaN, false],
+      [Infinity, false],
+      ['1500', false],
+    ])('validates cancellation timestamp %s', (cancelledAt, valid) => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1_000,
+          cancelledAt,
+          endedAt: 2_000,
+        }),
+      ).toBe(valid);
+    });
+
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
       const oversized = 'x'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS + 1);
       expect(

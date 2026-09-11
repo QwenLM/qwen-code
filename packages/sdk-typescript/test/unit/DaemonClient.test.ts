@@ -498,6 +498,41 @@ describe('DaemonClient', () => {
   });
 
   describe('session artifacts', () => {
+    it('reads saved HTML with encoded identities and daemon authentication', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '<h1>Saved</h1>'),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      await expect(
+        client.readSessionArtifactContent('session/1', 'artifact/1', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toBe('<h1>Saved</h1>');
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/content',
+        method: 'GET',
+        headers: {
+          authorization: 'Bearer secret',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+    });
+
+    it('surfaces missing saved HTML without a fallback request', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'artifact_snapshot_unavailable' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.readSessionArtifactContent('s', 'a'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+      expect(calls).toHaveLength(1);
+    });
+
     it('lists session artifacts with an encoded session id', async () => {
       const envelope = {
         v: 1 as const,

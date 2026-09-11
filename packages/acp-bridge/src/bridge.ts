@@ -141,6 +141,7 @@ import {
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
   isReservedStandaloneSessionSourceType,
+  isScheduledTaskRunSource,
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
   STANDALONE_SESSION_SOURCE_TYPE,
@@ -184,6 +185,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   activeWorkCloseRetryDelayMs,
@@ -1867,6 +1869,23 @@ function broadcastTurnComplete(
             checkpointUuid: rawBranchPoint['checkpointUuid'],
           }
         : undefined;
+    const rawPromptCancelled =
+      meta?.['qwen.promptCancelled'] &&
+      typeof meta['qwen.promptCancelled'] === 'object'
+        ? (meta['qwen.promptCancelled'] as Record<string, unknown>)
+        : undefined;
+    const promptCancelled =
+      promptResult.stopReason === 'cancelled' &&
+      typeof rawPromptCancelled?.['cancelledAt'] === 'number' &&
+      Number.isFinite(rawPromptCancelled['cancelledAt']) &&
+      typeof rawPromptCancelled['elapsedMs'] === 'number' &&
+      Number.isFinite(rawPromptCancelled['elapsedMs']) &&
+      rawPromptCancelled['elapsedMs'] >= 0
+        ? {
+            cancelledAt: rawPromptCancelled['cancelledAt'],
+            elapsedMs: rawPromptCancelled['elapsedMs'],
+          }
+        : undefined;
     const published = entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
@@ -1875,6 +1894,7 @@ function broadcastTurnComplete(
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
         ...(branchPoint ? { branchPoint } : {}),
+        ...(promptCancelled ? { promptCancelled } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -5902,11 +5922,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // model_switched right beside the model_switch_failed below.
       let succeeded = false;
       try {
+        const persistDefault = !isScheduledTaskRunSource({
+          sourceType: entry.sourceType,
+          sourceId: entry.sourceId,
+        });
         const result = await Promise.race([
           withTimeout(
             conn.unstable_setSessionModel({
               sessionId: entry.sessionId,
               modelId,
+              ...(!persistDefault
+                ? {
+                    _meta: {
+                      [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false,
+                    },
+                  }
+                : {}),
             }),
             timeoutMs,
             'setSessionModel',
@@ -5914,7 +5945,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
-        if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+        if (
+          persistDefault &&
+          !isReservedStandaloneSessionSourceType(entry.sourceType)
+        ) {
           broadcastWorkspaceEvent({
             type: 'settings_changed',
             data: {
@@ -6792,10 +6826,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ]);
       return response['closed'] === true;
     } catch (err) {
+      // The child's close refusal crosses the ACP wire as a JSON-RPC
+      // error record (plain object with `code`/`message`), not an `Error`
+      // instance — `String()` would collapse it to `[object Object]`.
       writeStderrLine(
         `qwen serve: ${label} ACP session close notification failed ` +
-          `for session ${JSON.stringify(entry.sessionId)}: ${String(
-            err instanceof Error ? err.message : err,
+          `for session ${JSON.stringify(entry.sessionId)}: ${extractErrorMessage(
+            err,
           )}`,
       );
       if (opts?.throwOnFailure === true) {
@@ -7154,6 +7191,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       artifacts: new SessionArtifactStore({
         sessionId,
         workspaceCwd,
+        runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
       artifactWorkspaceCwd: workspaceCwd,
@@ -11458,8 +11496,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 );
               }
             } catch (cleanupErr) {
+              // Same wire-shape hazard as `notifyAgentSessionClose`: a
+              // child refusal arrives as a plain JSON-RPC error record.
               writeStderrLine(
-                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${extractErrorMessage(cleanupErr)}`,
               );
             }
             throw restoreErr;
@@ -11738,6 +11778,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const artifacts = new SessionArtifactStore({
           sessionId,
           workspaceCwd: expectation.child.canonicalPath,
+          runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
           persistence: createSessionArtifactPersistence(
             entry.connection,
             sessionId,

@@ -1,6 +1,6 @@
 # Web Shell 浏览器任务通知：独立实现设计
 
-状态：独立浏览器通知已实现，构建和自动化验证通过。调研及实现日期：2026-09-08。
+状态：2026-09-08 基础版历史设计。以下默认关闭、通用文案、点击仅聚焦、不增加公共 API 等条款描述 #11398 当时的基线；当前行为已由[通知内容与会话导航](web-shell-browser-notification-details.zh-CN.md)及[可配置品牌](web-shell-browser-notification-branding.zh-CN.md)取代，英文对应文档通过两份设计的语言链接提供。
 
 ## 决策与范围
 
