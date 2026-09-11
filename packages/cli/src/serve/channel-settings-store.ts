@@ -145,11 +145,7 @@ function assertSharedField(
     }
     return true;
   }
-  if (
-    ['model', 'cwd', 'approvalMode', 'instructions', 'messagePrefix'].includes(
-      key,
-    )
-  ) {
+  if (['model', 'cwd', 'approvalMode', 'instructions'].includes(key)) {
     if (typeof value !== 'string') {
       throw invalidConfig(`Channel field "${key}" must be a string.`);
     }

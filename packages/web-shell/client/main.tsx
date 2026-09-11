@@ -313,7 +313,10 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         );
       }}
     >
-      <BrowserTurnNotifications language={language}>
+      <BrowserTurnNotifications
+        language={language}
+        options={{ defaultEnabled: true }}
+      >
         <WorkspaceHostsEnabled.Provider value={true}>
           <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
             <WorkspaceSessionProvider

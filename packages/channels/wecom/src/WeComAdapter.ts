@@ -463,9 +463,6 @@ export class WeComChannel extends ChannelBase {
     let processStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) {
-        if (rawMessageId && this.wasMessagePrefixRejected(envelope)) {
-          this.seenMessages.set(rawMessageId, Date.now());
-        }
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
         );

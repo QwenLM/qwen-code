@@ -1754,7 +1754,7 @@ function extractJsonObject(text: string, start: number): string | null {
   return null;
 }
 
-function splitInsightSegments(text: string): InsightSegment[] | null {
+export function splitInsightSegments(text: string): InsightSegment[] | null {
   const segments: InsightSegment[] = [];
   let lastIndex = 0;
   let pos = 0;
