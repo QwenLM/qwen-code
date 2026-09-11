@@ -452,11 +452,14 @@ Qwen does not control whether a hook process, endpoint, callback, or model provi
   "transcript_path": "string",
   "cwd": "string",
   "hook_event_name": "string",
-  "timestamp": "string"
+  "timestamp": "string",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
+  "agent_id": "string (only when the event fires inside a subagent)",
+  "prompt_id": "string (when the event belongs to a model turn)"
 }
 ```
 
-Event-specific fields are added based on the hook type. When running in a subagent, `agent_id` and `agent_type` are additionally included.
+Event-specific fields are added based on the hook type. `permission_mode` is the session's approval mode unless the event reports the mode that applied to it, as tool and subagent events do. `agent_id` is present only when the event fires inside a subagent; `agent_type` is reported on `SessionStart`, `SubagentStart` and `SubagentStop`.
 
 Hook input is a forward-extensible JSON contract: new optional fields can be added to existing events. Consumers should ignore unknown fields. A strict decoder that rejects unknown properties must be updated to explicitly allow each new optional field before upgrading Qwen Code. For security-sensitive hooks, a decoder failure can change fail-open or fail-closed behavior, so administrators must validate the upgraded payload against the deployed hook before rollout.
 
@@ -466,11 +469,11 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 
 **Exit Code Behavior (Command Hooks):**
 
-| Exit Code | Behavior                                                                              |
-| :-------- | :------------------------------------------------------------------------------------ |
-| `0`       | Success. Parse JSON in `stdout` to control behavior.                                  |
-| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model. |
-| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.           |
+| Exit Code | Behavior                                                                                                                                                                                                                                                                                                                                                                       |
+| :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
+| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
+| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
 
 **Output Structure:**
 
@@ -553,7 +556,8 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
   "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
-  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
+  "duration_ms": "tool execution time in milliseconds, excluding approval (optional)"
 }
 ```
 
@@ -589,7 +593,8 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
   "tool_name": "name of the tool that failed",
   "tool_input": "object containing the tool's input parameters",
   "error": "error message describing the failure",
-  "is_interrupt": "boolean indicating if failure was due to user interruption (optional)"
+  "is_interrupt": "boolean indicating if failure was due to user interruption (optional)",
+  "duration_ms": "tool execution time in milliseconds when execution had started (optional)"
 }
 ```
 
