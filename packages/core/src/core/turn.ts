@@ -75,6 +75,7 @@ export enum LlmEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  GoalSettlementFailed = 'goal_settlement_failed',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
@@ -493,6 +494,11 @@ export type ServerLlmHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerLlmGoalSettlementFailedEvent = {
+  type: LlmEventType.GoalSettlementFailed;
+  value: string;
+};
+
 export type ServerLlmUserPromptSubmitBlockedEvent = {
   type: LlmEventType.UserPromptSubmitBlocked;
   value: {
@@ -530,6 +536,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmContentEvent
   | ServerLlmErrorEvent
   | ServerLlmFinishedEvent
+  | ServerLlmGoalSettlementFailedEvent
   | ServerLlmHookSystemMessageEvent
   | ServerLlmUserPromptSubmitBlockedEvent
   | ServerLlmStopHookLoopEvent

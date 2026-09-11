@@ -442,6 +442,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -6120,7 +6121,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -6310,6 +6313,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
@@ -6321,6 +6325,13 @@ class QwenAgent implements Agent {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta['qwen.goalProposalApproval'];
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedGoalProposalApproval === true
+    ) {
+      meta['qwen.goalProposalApproval'] = true;
+    }
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
@@ -14327,6 +14338,9 @@ class QwenAgent implements Agent {
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
+    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
+      config.setGoalProposalHostSupported(true);
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);

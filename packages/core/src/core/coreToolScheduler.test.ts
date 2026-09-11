@@ -7231,6 +7231,35 @@ describe('CoreToolScheduler', () => {
   });
 
   describe('getToolSuggestion', () => {
+    it('does not suggest a tool that is unavailable for the current turn', () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['propose_goal', 'read_file'],
+        isToolDeclared: (name: string) => name !== 'propose_goal',
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => false,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // @ts-expect-error accessing private method
+      const suggestion = scheduler.getToolSuggestion('propose_goals');
+
+      expect(suggestion).not.toContain('propose_goal');
+      expect(suggestion).toContain('read_file');
+    });
+
     it('should suggest the top N closest tool names for a typo', () => {
       // Create mocked tool registry
       const mockToolRegistry = {

@@ -21,6 +21,7 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
+import { ToolNames } from './tool-names.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -36,7 +37,6 @@ import {
   ToolMode,
   type CodeModeBindingPlan,
 } from './code-mode.js';
-import { ToolNames } from './tool-names.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -846,6 +846,7 @@ export class ToolRegistry {
     }
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter((tool) => this.isToolDeclared(tool.name))
       .filter(
         (tool) =>
           includeDeferred ||
@@ -1001,6 +1002,7 @@ export class ToolRegistry {
       if (
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
+        this.isToolDeclared(tool.name) &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
         summary.push({
@@ -1100,11 +1102,17 @@ export class ToolRegistry {
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
       const tool = this.tools.get(name);
-      if (tool) {
+      if (tool && this.isToolDeclared(tool.name)) {
         declarations.push(tool.schema);
       }
     }
     return declarations;
+  }
+
+  isToolDeclared(name: string): boolean {
+    return (
+      name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
+    );
   }
 
   /**
