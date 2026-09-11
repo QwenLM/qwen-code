@@ -17,6 +17,10 @@ import {
   ROUTER_CHAR_BUDGET,
   toAutoMemoryRef,
 } from './tree.js';
+import {
+  AUTO_MEMORY_TREE_CATEGORIES,
+  AUTO_MEMORY_UNCATEGORIZED,
+} from './types.js';
 
 const sourceStatus: MemorySourceStatus = {
   requestedScopes: ['project'],
@@ -121,6 +125,28 @@ describe('auto memory tree rendering', () => {
 
     expect(routerPrompt.length).toBeLessThanOrEqual(ROUTER_CHAR_BUDGET);
     expect(routerPrompt).toContain('use search_memory to find them');
+  });
+
+  it('bounds the router prompt when leaves span every category', () => {
+    const manyDocs = [
+      ...AUTO_MEMORY_TREE_CATEGORIES,
+      AUTO_MEMORY_UNCATEGORIZED,
+    ].flatMap((category) =>
+      Array.from({ length: 8 }, (_, index) =>
+        doc(`project/${category}-${index}.md`, {
+          category,
+          title: `${category} memory ${index}`,
+          mtimeMs: index,
+        }),
+      ),
+    );
+
+    const { routerPrompt } = createAutoMemoryTreeSnapshot(
+      manyDocs,
+      sourceStatus,
+    );
+
+    expect(routerPrompt.length).toBeLessThanOrEqual(ROUTER_CHAR_BUDGET);
   });
 
   it('renders every leaf uncapped when the router fits the budget', () => {

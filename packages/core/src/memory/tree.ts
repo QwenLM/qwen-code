@@ -395,17 +395,24 @@ function renderAutoMemoryGlobalRouter(
   let omitted = 0;
   let firstVisibleCategory = true;
   tree.categories.forEach((category) => {
+    // The category header line and its blank separator occupy the rendered
+    // prompt too, so reserve them before charging leaves — otherwise a tree
+    // spanning many categories exceeds ROUTER_CHAR_BUDGET by its header lines.
+    const categoryOverhead =
+      category.category.length + 1 + (firstVisibleCategory ? 0 : 1);
+    let categoryRemaining = remaining - categoryOverhead;
     const visibleLeaves: AutoMemoryTreeLeaf[] = [];
     for (const leaf of category.leaves) {
       const line = `├── [${leaf.memoryRef}] ${leaf.title}`;
-      if (line.length + 1 > remaining) {
+      if (line.length + 1 > categoryRemaining) {
         omitted += 1;
         continue;
       }
-      remaining -= line.length + 1;
+      categoryRemaining -= line.length + 1;
       visibleLeaves.push(leaf);
     }
     if (visibleLeaves.length === 0) return;
+    remaining = categoryRemaining;
     if (!firstVisibleCategory) lines.push('');
     firstVisibleCategory = false;
     lines.push(category.category);
