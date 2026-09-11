@@ -679,6 +679,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       effectiveEffort,
       sampling.max_tokens,
     );
+    if (
+      thinking?.type === 'enabled' &&
+      request.config?.thinkingConfig?.includeThoughts === false
+    )
+      sampling.temperature = 1;
     const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig

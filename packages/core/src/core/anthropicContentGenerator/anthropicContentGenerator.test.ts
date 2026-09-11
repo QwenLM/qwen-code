@@ -1628,6 +1628,47 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).not.toHaveProperty('thinking');
     });
 
+    it('uses compatible sampling when a bounded side query must keep manual thinking', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-5',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: {},
+          schemaCompliance: 'auto',
+          thinkingMandatory: true,
+          reasoningConfig: { profile: 'anthropic-manual' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: {
+          temperature: 0,
+          maxOutputTokens: 4096,
+          thinkingConfig: { includeThoughts: false },
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toMatchObject({
+        max_tokens: 4096,
+        temperature: 1,
+        thinking: { type: 'enabled', budget_tokens: 4095 },
+      });
+    });
+
     // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
     // converter passes it through to output_config.effort and bumps the
     // thinking budget accordingly.
