@@ -848,11 +848,13 @@ describe('LoggingContentGenerator', () => {
 
   it('omits request_text and response_text from API telemetry when logPrompts is false', async () => {
     const wrapped = createWrappedGenerator(
-      vi.fn().mockResolvedValue(
-        createResponse('resp-noprompts', 'test-model', [
-          { text: 'SENSITIVE_RESPONSE_MARKER' },
-        ]),
-      ),
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-noprompts', 'test-model', [
+            { text: 'SENSITIVE_RESPONSE_MARKER' },
+          ]),
+        ),
       vi.fn(),
     );
     const generator = new LoggingContentGenerator(
@@ -885,11 +887,13 @@ describe('LoggingContentGenerator', () => {
 
   it('keeps request_text and response_text in API telemetry when logPrompts is true', async () => {
     const wrapped = createWrappedGenerator(
-      vi.fn().mockResolvedValue(
-        createResponse('resp-prompts', 'test-model', [
-          { text: 'KEEP_RESPONSE_MARKER' },
-        ]),
-      ),
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-prompts', 'test-model', [
+            { text: 'KEEP_RESPONSE_MARKER' },
+          ]),
+        ),
       vi.fn(),
     );
     const generator = new LoggingContentGenerator(
@@ -904,9 +908,7 @@ describe('LoggingContentGenerator', () => {
     await generator.generateContent(
       {
         model: 'test-model',
-        contents: [
-          { role: 'user', parts: [{ text: 'KEEP_REQUEST_MARKER' }] },
-        ],
+        contents: [{ role: 'user', parts: [{ text: 'KEEP_REQUEST_MARKER' }] }],
       } as unknown as GenerateContentParameters,
       'prompt-prompts',
     );
@@ -916,6 +918,82 @@ describe('LoggingContentGenerator', () => {
 
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_text).toBe('KEEP_RESPONSE_MARKER');
+  });
+
+  it('omits request_text and response_text from API telemetry for streaming when logPrompts is false', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-stream-noprompts', 'test-model', [
+          { text: 'SENSITIVE_RESPONSE_MARKER' },
+        ]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: false }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [
+          { role: 'user', parts: [{ text: 'SENSITIVE_REQUEST_MARKER' }] },
+        ],
+      } as unknown as GenerateContentParameters,
+      'prompt-stream-noprompts',
+    );
+    for await (const _ of stream) {
+      // Drain the stream so response logging finalizes.
+    }
+
+    expect(logApiRequest).toHaveBeenCalledTimes(1);
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toBeUndefined();
+
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
+  });
+
+  it('keeps request_text and response_text in API telemetry for streaming when logPrompts is true', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-stream-prompts', 'test-model', [
+          { text: 'KEEP_RESPONSE_MARKER' },
+        ]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'KEEP_REQUEST_MARKER' }] }],
+      } as unknown as GenerateContentParameters,
+      'prompt-stream-prompts',
+    );
+    for await (const _ of stream) {
+      // Drain the stream so response logging finalizes.
+    }
+
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toContain('KEEP_REQUEST_MARKER');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toContain('KEEP_RESPONSE_MARKER');
   });
 
   it('creates and closes the non-stream API span on success', async () => {
