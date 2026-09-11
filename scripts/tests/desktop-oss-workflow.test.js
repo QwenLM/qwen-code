@@ -171,12 +171,24 @@ describe('Desktop OSS mirror workflow', () => {
       getWorkflowJob(releaseWorkflow, 'prepare'),
       'Resolve Qwen Code source',
     );
+    expect(source).toContain(
+      'if [ "$GITHUB_REF_NAME" != \'main\' ] && [ "$GITHUB_EVENT_NAME" != \'release\' ]; then',
+    );
+    expect(source).toContain(
+      '::error::Published desktop releases must run from main or follow a published release.',
+    );
     expect(source).toContain('ancestor="$sha"');
     expect(source).toContain('if [ "$GITHUB_EVENT_NAME" = \'release\' ]; then');
     expect(source).toContain('ancestor="$(git rev-parse "${sha}^")"');
     expect(source).toContain(
       'git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main',
     );
+    expect(
+      source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
+    ).toBeGreaterThan(source.indexOf('ancestor="$sha"'));
+    expect(
+      source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
+    ).toBeLessThan(source.indexOf('git merge-base --is-ancestor "$ancestor"'));
   });
 });
 
@@ -188,6 +200,12 @@ describe('Desktop release sync caller', () => {
     expect(publish).toContain("vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true'");
     expect(publish).toContain("startsWith(github.event.release.tag_name, 'v')");
     expect(publish).toContain('github.event.release.prerelease == false');
+    expect(publish).toContain(
+      "github.repository == 'QwenLM/qwen-code' &&\n" +
+        "        vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true' &&\n" +
+        "        startsWith(github.event.release.tag_name, 'v') &&\n" +
+        '        github.event.release.prerelease == false',
+    );
     for (const withValue of [
       "version: '${{ github.event.release.tag_name }}'",
       "qwen_code_ref: '${{ github.event.release.tag_name }}'",
@@ -206,9 +224,14 @@ describe('Desktop release sync caller', () => {
   });
 
   it('uses a concurrency group distinct from the callee publish group', () => {
+    const calleeFallback =
+      /group: "desktop-release-\$\{\{[^}]*\|\| '([^']+)' \}\}"/.exec(
+        releaseWorkflow,
+      )?.[1];
+    expect(calleeFallback).toBe('publish');
     expect(syncCallerWorkflow).toContain("group: 'desktop-release-sync'");
-    expect(syncCallerWorkflow).not.toContain(
-      "group: 'desktop-release-publish'",
+    expect(`desktop-release-${calleeFallback}`).not.toBe(
+      'desktop-release-sync',
     );
   });
 
