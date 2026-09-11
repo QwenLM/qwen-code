@@ -93,6 +93,7 @@ describe('activate', () => {
       subscriptions: [],
       environmentVariableCollection: {
         replace: vi.fn(),
+        get: vi.fn(),
       },
       globalState: {
         get: vi.fn(),

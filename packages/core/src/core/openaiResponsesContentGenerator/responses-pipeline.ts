@@ -46,6 +46,7 @@ import {
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { ResponsesHttpError } from '../../utils/responses-http-error.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -701,11 +702,18 @@ export class ResponsesPipeline {
         // A truncated URL authority can end before the credential's '@'.
         diagnosticBody = diagnosticBody.replace(/\/\/[^/\s]*$/, '//<redacted>');
       }
-      const excerpt = redactProxyCredentials(diagnosticBody).substring(0, 500);
-      const err = new Error(
-        `Responses API error ${response.status}: ${excerpt}`,
+      diagnosticBody = redactProxyCredentials(diagnosticBody);
+      const err = new ResponsesHttpError(
+        response.status,
+        diagnosticBody,
+        response.headers,
+        [
+          apiKey,
+          headers['authorization'],
+          headers['authorization']?.replace(/^Bearer\s+/i, ''),
+          headers['api-key'],
+        ],
       ) as ResponsesApiError;
-      err.status = response.status;
       err.reasoningIdRejection = rejection;
       err.encryptedReasoningRejected = isEncryptedReasoningRejection(
         response.status,
@@ -1103,8 +1111,7 @@ function sanitizePromptCacheKey(key: string): string {
     .slice(0, PROMPT_CACHE_KEY_MAX_LENGTH);
 }
 
-interface ResponsesApiError extends Error {
-  status: number;
+interface ResponsesApiError extends ResponsesHttpError {
   reasoningIdRejection?: ReasoningIdRejection;
   encryptedReasoningRejected?: boolean;
 }

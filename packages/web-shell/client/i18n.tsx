@@ -2947,6 +2947,18 @@ const EN: Messages = {
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
+  'userMessage.edit': 'Edit message',
+  'userMessage.editSubmit': 'Send',
+  'userMessage.editSending': 'Sending…',
+  'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
+  'userMessage.editStale':
+    'The message changed. Reopen the editor and try again.',
+  'userMessage.editAttachmentUnavailable':
+    'An attachment is unavailable. The message was not rewound.',
+  'userMessage.editSyncFailed':
+    'Could not confirm the rewind. Your edit is retained while waiting for synchronization.',
+  'userMessage.editFailed': (v) =>
+    `Could not resend the edited message: ${v?.reason ?? ''}`,
   'turn.processed': 'Processed',
   'turn.processing': 'Processing',
   'turn.collapse': 'Collapse steps',
@@ -6458,6 +6470,15 @@ const ZH: Messages = {
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
+  'userMessage.edit': '编辑消息',
+  'userMessage.editSubmit': '发送',
+  'userMessage.editSending': '发送中…',
+  'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
+  'userMessage.editStale': '消息已发生变化，请重新打开编辑器后再试。',
+  'userMessage.editAttachmentUnavailable': '附件内容不可用，消息尚未回退。',
+  'userMessage.editSyncFailed':
+    '无法确认回退已同步。编辑内容已暂存，正在等待同步。',
+  'userMessage.editFailed': (v) => `无法重发编辑的消息：${v?.reason ?? ''}`,
   'turn.processed': '已处理',
   'turn.processing': '处理中',
   'turn.collapse': '折叠步骤',
