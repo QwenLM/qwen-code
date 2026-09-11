@@ -42,8 +42,8 @@ async function privateDirectory(path: string): Promise<void> {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    // Windows reports every directory with group/other bits set; NTFS ACLs
-    // on the per-user temp directory provide the isolation instead.
+    // Windows reports every directory with group/other bits set, so POSIX
+    // mode bits cannot reject a shared directory there.
     (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
     (process.getuid && stat.uid !== process.getuid())
   )
@@ -200,13 +200,21 @@ export class MonitorDebugStore {
     );
     this.lastCreatedAt = Math.max(this.lastCreatedAt, owned[0]?.createdAt ?? 0);
     for (const entry of owned.slice(10)) {
-      for (const recorder of this.recorders)
-        if (recorder.directory === entry.directory) recorder.evict();
-      await privateDirectory(entry.directory);
-      await rm(entry.directory, { recursive: true, force: true });
-      this.emit('proactive.monitor_debug_pruned', {
-        directory: entry.directory,
-      });
+      try {
+        for (const recorder of this.recorders)
+          if (recorder.directory === entry.directory) recorder.evict();
+        await privateDirectory(entry.directory);
+        await rm(entry.directory, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+        this.emit('proactive.monitor_debug_pruned', {
+          directory: entry.directory,
+        });
+      } catch {
+        /* One undeletable archive must not wedge the remaining prune. */
+      }
     }
   }
 }

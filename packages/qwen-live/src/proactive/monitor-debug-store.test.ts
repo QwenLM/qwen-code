@@ -26,6 +26,26 @@ import {
   type MonitorDebugRecorder,
 } from './monitor-debug-store.js';
 
+const rmFailures = vi.hoisted(() => new Map<string, number>());
+
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    rm: async (
+      path: Parameters<typeof fs.rm>[0],
+      options?: Parameters<typeof fs.rm>[1],
+    ) => {
+      const remaining = rmFailures.get(String(path));
+      if (remaining) {
+        rmFailures.set(String(path), remaining - 1);
+        throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      }
+      return fs.rm(path, options);
+    },
+  };
+});
+
 const INFO: MonitorDebugInfo = {
   taskId: 'monitor-1',
   taskGeneration: 3,
@@ -78,6 +98,7 @@ describe('MonitorDebugStore', () => {
   afterEach(async () => {
     await Promise.all(stores.map((item) => item.flush()));
     vi.restoreAllMocks();
+    rmFailures.clear();
     await rm(temporary, { recursive: true, force: true });
   });
 
@@ -225,9 +246,31 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
-    // Windows has no POSIX permission bits; privateDirectory skips the mode
-    // check there (see monitor-debug-store.ts).
-    if (process.platform !== 'win32') {
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_request_saved',
+      expect.objectContaining({
+        directory: archive.directory,
+        requestDirectory: directory,
+        imageFrames: 2,
+        audioBytes: audio.length + silence.length,
+      }),
+    );
+  });
+
+  // Windows has no POSIX permission bits, so skip (reportedly) rather than
+  // passing a test that asserted nothing.
+  it.skipIf(process.platform === 'win32')(
+    'archives monitor recordings with private permissions',
+    async () => {
+      const archive = await recorder();
+      sendImage(archive, Buffer.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]));
+      sendImage(archive, Buffer.from([0xff, 0xd8, 3, 4, 0xff, 0xd9]));
+      sendAudio(archive, Buffer.from([0, 0, 0xff, 0x7f, 0, 0x80]));
+      commit(archive);
+      archive.result({ status: 'completed', text: 'reply' });
+      await store.flush();
+
+      const directory = join(archive.directory, 'requests', '000001');
       for (const path of [
         root,
         archive.directory,
@@ -248,17 +291,8 @@ describe('MonitorDebugStore', () => {
       ]) {
         expect((await lstat(path)).mode & 0o777).toBe(0o600);
       }
-    }
-    expect(log).toHaveBeenCalledWith(
-      'proactive.monitor_request_saved',
-      expect.objectContaining({
-        directory: archive.directory,
-        requestDirectory: directory,
-        imageFrames: 2,
-        audioBytes: audio.length + silence.length,
-      }),
-    );
-  });
+    },
+  );
 
   it('separates requests and transports without copying old media or cleared inputs', async () => {
     const archive = await recorder();
@@ -408,6 +442,25 @@ describe('MonitorDebugStore', () => {
     });
   });
 
+  it('keeps pruning and recording when one stale archive cannot be deleted', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 12; time += 1)
+      owned.push(await ownedDirectory(time));
+    // Every rm of the oldest archive reports a held handle.
+    rmFailures.set(owned[0]!, Number.POSITIVE_INFINITY);
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[1]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[0]!)).isDirectory()).toBe(true);
+    const recorder = store.create(INFO);
+    expect(recorder).toBeDefined();
+    await recorder!.start();
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_failed',
+      expect.objectContaining({ reason: 'initialization_failed' }),
+    );
+  });
+
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
     await writeFile(join(root, 'keep.txt'), 'keep');
@@ -434,6 +487,12 @@ describe('MonitorDebugStore', () => {
     // Stand-in for Windows reporting every directory with group/other bits.
     await chmod(root, 0o755);
     expect(await store.initialize()).toBe(true);
+
+    // Symlink rejection is not platform-gated and must still apply.
+    const linked = new MonitorDebugStore(log, join(temporary, 'linked-win32'));
+    stores.push(linked);
+    await symlink(root, linked.root);
+    expect(await linked.initialize()).toBe(false);
   });
 
   it('does not recreate an active directory pruned by another store', async () => {

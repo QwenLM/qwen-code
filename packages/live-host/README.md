@@ -267,7 +267,9 @@ daemon 的 debug 模式另外为视觉 Monitor 保存真实请求，目录为系
 `proactive.monitor_debug_started` 和 `proactive.monitor_request_saved` 日志给出绝对路径。
 仅 daemon debug 开启；Host 的 `--live-debug` 单独启用不会录制，纯音频 Monitor 也不录制。
 启动及新建 Monitor 时清理，只保留最近创建的 10 个 Monitor（不是最近 10 次请求）。
-被清理的 Monitor 继续运行但停止录制；文件仅当前用户可访问。内容包含真实屏幕／摄像头、
+被清理的 Monitor 继续运行但停止录制。文件仅在 macOS／Linux 上保证仅当前用户可访问
+（0700/0600 强制执行，不满足则拒绝）；Windows 无法校验 POSIX 权限位，
+隔离性仅取决于系统临时目录自身继承的 ACL。内容包含真实屏幕／摄像头、
 任务文本和混合 Monitor 的麦克风输入，虽然不保存连接凭据，画面或音频中的秘密不会被脱敏。
 录制失败会单独报错而不影响通话；长时间 debug 可能占用较多磁盘，诊断完请关闭 debug。
 完整格式与清理规则见 [Qwen Live README](../qwen-live/README.md)。
