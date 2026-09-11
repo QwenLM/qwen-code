@@ -693,6 +693,46 @@ describe('HookRunner', () => {
       expect(secondInput.submitted_prompt).toBe('Submitted prompt');
     });
 
+    it('should chain plain-text UserPromptSubmit stdout into the next hook input', async () => {
+      const firstProcess = createMockProcess(0, 'Plain hook context\n');
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt\n\nPlain hook context');
+    });
+
     it('should not append empty UserPromptSubmit additional context', async () => {
       const firstProcess = createMockProcess(
         0,
@@ -1006,6 +1046,98 @@ describe('HookRunner', () => {
       expect(result.success).toBe(true);
       expect(result.output?.decision).toBe('allow');
       expect(result.output?.systemMessage).toBe('plain text response');
+    });
+
+    it.each([
+      HookEventName.SessionStart,
+      HookEventName.UserPromptSubmit,
+      HookEventName.UserPromptExpansion,
+    ])(
+      'should route plain-text stdout to additionalContext on %s',
+      async (eventName) => {
+        const mockProcess = createMockProcess(0, 'context from hook\n');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo context',
+            source: HooksConfigSource.Project,
+          },
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.output?.decision).toBe('allow');
+        expect(result.output?.systemMessage).toBeUndefined();
+        expect(result.output?.hookSpecificOutput).toEqual({
+          hookEventName: eventName,
+          additionalContext: 'context from hook',
+        });
+      },
+    );
+
+    it.each([
+      HookEventName.PreToolUse,
+      HookEventName.Stop,
+      HookEventName.Notification,
+    ])(
+      'should keep plain-text stdout as a system message on %s',
+      async (eventName) => {
+        const mockProcess = createMockProcess(0, 'plain text response');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo text',
+            source: HooksConfigSource.Project,
+          },
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+
+        expect(result.output?.systemMessage).toBe('plain text response');
+        expect(result.output?.hookSpecificOutput).toBeUndefined();
+      },
+    );
+
+    it('should not promote the stderr fallback into SessionStart context', async () => {
+      const mockProcess = createMockProcess(0, '', 'diagnostic noise');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo noise >&2',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.SessionStart,
+        createMockInput({ hook_event_name: HookEventName.SessionStart }),
+      );
+
+      expect(result.output?.systemMessage).toBe('diagnostic noise');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
+
+    it('should keep plain-text stdout of a failed SessionStart hook as a warning', async () => {
+      const mockProcess = createMockProcess(1, 'partial output');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo partial && exit 1',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.SessionStart,
+        createMockInput({ hook_event_name: HookEventName.SessionStart }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.systemMessage).toBe('Warning: partial output');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
     });
 
     it('should treat non-blocking non-zero exit codes as non-blocking warnings', async () => {

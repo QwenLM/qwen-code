@@ -254,6 +254,17 @@ let parentExitCleanupRegistered = false;
 const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
+/**
+ * Events whose plain-text stdout on a successful exit is handed to the model
+ * as additional context. On every other event plain text stays a system
+ * message, since those events have no prompt to attach context to.
+ */
+const PLAIN_TEXT_CONTEXT_EVENTS: ReadonlySet<HookEventName> = new Set([
+  HookEventName.SessionStart,
+  HookEventName.UserPromptSubmit,
+  HookEventName.UserPromptExpansion,
+]);
+
 function isNoSuchProcessError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === 'ESRCH';
 }
@@ -1358,9 +1369,13 @@ export class HookRunner {
         const isBlockingError = exitCode === 2;
 
         // For exit code 2, only use stderr (ignore stdout)
+        const stdoutText = stdout.trim();
         const textToParse = isBlockingError
           ? stderr.trim()
-          : stdout.trim() || stderr.trim();
+          : stdoutText || stderr.trim();
+        // Only stdout is hook output. The stderr fallback is diagnostics and
+        // must never be promoted into model context.
+        const parsedFromStdout = !isBlockingError && stdoutText !== '';
 
         if (textToParse) {
           // Try parsing as JSON to preserve structured output like
@@ -1382,6 +1397,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
+              parsedFromStdout ? eventName : undefined,
             );
           }
         }
@@ -1438,14 +1454,28 @@ export class HookRunner {
   }
 
   /**
-   * Convert plain text output to structured HookOutput
+   * Convert plain text output to structured HookOutput.
+   *
+   * @param stdoutEvent The firing event, passed only when `text` is the
+   *   hook's stdout. On a successful exit, stdout of a
+   *   {@link PLAIN_TEXT_CONTEXT_EVENTS} event becomes additional context.
    */
   private convertPlainTextToHookOutput(
     text: string,
     exitCode: number,
+    stdoutEvent?: HookEventName,
   ): HookOutput {
     if (exitCode === EXIT_CODE_SUCCESS) {
-      // Success - treat as system message or additional context
+      if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
+        return {
+          decision: 'allow',
+          reason: 'Hook executed successfully',
+          hookSpecificOutput: {
+            hookEventName: stdoutEvent,
+            additionalContext: text,
+          },
+        };
+      }
       return {
         decision: 'allow',
         reason: 'Hook executed successfully',

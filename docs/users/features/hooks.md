@@ -466,11 +466,11 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 
 **Exit Code Behavior (Command Hooks):**
 
-| Exit Code | Behavior                                                                              |
-| :-------- | :------------------------------------------------------------------------------------ |
-| `0`       | Success. Parse JSON in `stdout` to control behavior.                                  |
-| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model. |
-| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.           |
+| Exit Code | Behavior                                                                                                                                                                                                              |
+| :-------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`       | Success. Parse JSON in `stdout` to control behavior. Plain-text `stdout` is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. |
+| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                 |
+| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                           |
 
 **Output Structure:**
 
