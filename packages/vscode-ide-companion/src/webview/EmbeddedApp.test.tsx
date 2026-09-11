@@ -153,7 +153,6 @@ function postMessagesOfType(
 
 beforeAll(async () => {
   document.body.dataset.qwenDaemonBaseUrl = 'http://localhost:4141';
-  document.body.dataset.qwenDaemonToken = 'test-token';
   document.body.dataset.qwenWorkspaceCwd = '/workspace';
   document.body.dataset.qwenSessionId = 'session-1';
   document.body.dataset.qwenHostKind = 'panel';

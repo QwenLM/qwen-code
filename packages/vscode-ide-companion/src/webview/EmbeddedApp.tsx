@@ -1614,8 +1614,8 @@ export function EmbeddedApp() {
               try {
                 ({ snapshots } =
                   await daemonClient.getRewindSnapshots(sessionId));
-              } catch {
-                throw new Error(t('composer.editFailed'));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
               }
               const snapshot =
                 editingMessage.turnIndex === undefined
@@ -1637,8 +1637,8 @@ export function EmbeddedApp() {
                   clientId: runtime.clientId,
                   rewindFiles: false,
                 });
-              } catch {
-                throw new Error(t('composer.editFailed'));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
               }
               setEditingMessage(undefined);
               clearInsight();
