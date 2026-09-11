@@ -1138,6 +1138,7 @@ import type {
   NewSessionResponse,
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
+import { ExtensionManager } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   reloadEnvironment,
@@ -17462,33 +17463,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return { agent, agentPromise };
   }
 
-  it('qwen/settings getCore and setCoreValue resolve the active target dir when cwd is omitted', async () => {
+  it('qwen/settings handlers resolve the active session target dir when cwd is omitted', async () => {
     const settings = makeCoreSettings();
-    vi.mocked(loadSettings).mockReturnValue(settings);
-    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/worktree/.qwen');
-    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
-    await agent.extMethod('qwen/settings/getCore', {});
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
-      '/worktree/.qwen',
+    // The bootstrap Config stays at the project root (`mockConfig`); the
+    // requesting session's own Config points at a worktree.
+    const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'worktree-session',
+      {
+        getId: () => 'worktree-session',
+        getConfig: () => ({
+          ...mockConfig,
+          getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+        }),
+      },
+    );
+
+    await agent.extMethod('qwen/settings/getCore', {
+      sessionId: 'worktree-session',
+    });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+    expect(vi.mocked(ExtensionManager)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceDir: worktreeRoot }),
     );
 
     await agent.extMethod('qwen/settings/setCoreValue', {
+      sessionId: 'worktree-session',
       scope: 'workspace',
       key: 'model.name',
       value: 'qwen3.7-max',
     });
-    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
-      '/worktree/.qwen',
-    );
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
 
-    // An explicit cwd still wins over the target dir.
+    await agent.extMethod('qwen/settings/setMcpServer', {
+      sessionId: 'worktree-session',
+      scope: 'workspace',
+      name: 'local',
+      server: {
+        transport: 'stdio',
+        command: 'node',
+        versionNegotiation: 'auto',
+      },
+    });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+
+    await agent.extMethod('qwen/settings/setHook', {
+      sessionId: 'worktree-session',
+      scope: 'workspace',
+      event: 'PreToolUse',
+      hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
+    });
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(worktreeRoot);
+
+    // An explicit cwd still wins over the session target dir.
     await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });
     expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith('/explicit');
 

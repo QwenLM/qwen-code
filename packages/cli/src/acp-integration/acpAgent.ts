@@ -6463,6 +6463,25 @@ class QwenAgent implements Agent {
     return this.settings;
   }
 
+  /**
+   * Resolve the workspace root for the `qwen/settings/*` + `qwen/permissions/*`
+   * handlers. The requesting session relocates *its own* Config (not the
+   * daemon's bootstrap `this.config`), so `session.getConfig().getTargetDir()`
+   * points at a worktree while `process.cwd()` stays pinned to the daemon's
+   * boot workspace. Falls back to the bootstrap Config when the client sends no
+   * `sessionId`, matching the previous `process.cwd()` behaviour for
+   * non-session-scoped calls.
+   */
+  private settingsCwdFor(
+    requestedCwd: string | undefined,
+    params: Record<string, unknown>,
+  ): string {
+    const sessionId = params['sessionId'] as string | undefined;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    const config = session ? session.getConfig() : this.config;
+    return requestedCwd || config.getTargetDir();
+  }
+
   private async buildCoreSettings(
     settings: LoadedSettings,
     cwd: string,
@@ -8941,7 +8960,8 @@ class QwenAgent implements Agent {
         return setManagedSkillEnabled(this.config, params, requestedCwd);
       }
       case 'qwen/settings/getMemory': {
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         this.settings = settings;
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
@@ -8952,7 +8972,8 @@ class QwenAgent implements Agent {
         // Mutate a freshly loaded settings object and adopt it, mirroring the
         // other settings mutation handlers, instead of writing through the
         // possibly-stale cached `this.settings` and reading it back.
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -13346,7 +13367,7 @@ class QwenAgent implements Agent {
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
-        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = loadSettings(settingsCwd);
         this.settings = settings;
         return this.buildCoreSettings(settings, settingsCwd);
@@ -13362,7 +13383,7 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
-        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = loadSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(
@@ -13403,7 +13424,8 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13422,7 +13444,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeMcpServer': {
         const name = params['name'];
@@ -13432,7 +13454,8 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13443,14 +13466,15 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setHook': {
         const event = params['event'];
         if (!isHookEvent(event)) {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13490,7 +13514,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeHook': {
         const event = params['event'];
@@ -13505,7 +13529,8 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13526,7 +13551,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setExtensionSetting': {
         const extensionId = params['extensionId'];
@@ -13544,9 +13569,10 @@ class QwenAgent implements Agent {
         if (typeof value !== 'string') {
           throw RequestError.invalidParams(undefined, 'value must be a string');
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = loadSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
-          workspaceDir: cwd,
+          workspaceDir: settingsCwd,
           isWorkspaceTrusted:
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
@@ -13574,10 +13600,11 @@ class QwenAgent implements Agent {
         // so `settings` here is just the snapshot loaded above and is reused to
         // build the response.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/permissions/getSettings': {
-        const settings = this.loadPermissionSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadPermissionSettings(settingsCwd);
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
@@ -13599,7 +13626,8 @@ class QwenAgent implements Agent {
           );
         }
 
-        const settings = this.loadPermissionSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadPermissionSettings(settingsCwd);
         const before = readPermissionRuleSet(settings.merged);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
