@@ -153,7 +153,7 @@ describe('package scripts', () => {
     });
   });
 
-  it('checks both lockfiles for integrity', () => {
+  it('checks both lockfiles for integrity and agreement', () => {
     const result = spawnSync(
       process.execPath,
       [path.join(root, 'scripts/check-lockfile.js')],
@@ -163,6 +163,10 @@ describe('package scripts', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Lockfile check passed.');
     expect(result.stdout).toContain('pnpm lockfile check passed.');
+    expect(result.stdout).toContain('pnpm lockfile matches package-lock.json.');
+    expect(result.stdout).toContain(
+      'pnpm build approvals cover every install script.',
+    );
   });
 
   it('keeps the internal release-age exception independent of the version', () => {
