@@ -92,6 +92,17 @@ interface DingTalkRichTextPart {
   text?: string;
   downloadCode?: string;
   atName?: string;
+  atUserId?: string;
+}
+
+function renderRichTextAt(part: DingTalkRichTextPart): string {
+  const value = [part.text, part.atName, part.atUserId].find(
+    (candidate): candidate is string =>
+      typeof candidate === 'string' && candidate.length > 0,
+  );
+  if (!value) return '';
+  const label = value.startsWith('@') ? value : `@${value}`;
+  return /\s$/u.test(label) ? label : `${label} `;
 }
 
 interface DingTalkMessageContent {
@@ -851,6 +862,57 @@ function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   }
 
   return [...mentions];
+}
+
+function extractLeadingMentionFromText(text: string): string | undefined {
+  const separator = /[\s\p{Cf}]/u;
+  let cursor = 0;
+  while (cursor < text.length && separator.test(text[cursor]!)) cursor += 1;
+  if (text[cursor] !== '@') return undefined;
+
+  cursor += 1;
+  const labelStart = cursor;
+  while (
+    cursor < text.length &&
+    !separator.test(text[cursor]!) &&
+    text[cursor] !== '['
+  ) {
+    cursor += 1;
+  }
+  if (cursor === labelStart) return undefined;
+  while (cursor < text.length && separator.test(text[cursor]!)) cursor += 1;
+
+  const bodyText = text.slice(cursor).trim();
+  return bodyText || undefined;
+}
+
+function extractLeadingMentionFromRichText(
+  parts: DingTalkRichTextPart[],
+): string | undefined {
+  let body = '';
+  let sawMention = false;
+  let bodyStarted = false;
+
+  for (const part of parts) {
+    const partType = part.type || 'text';
+    if (sawMention) {
+      if (partType === 'text' && typeof part.text === 'string') {
+        body += part.text;
+      } else if (partType === 'at') {
+        body += renderRichTextAt(part);
+      }
+      if (body.trim().length > 0) bodyStarted = true;
+      continue;
+    }
+    if (partType === 'at') {
+      sawMention = true;
+      continue;
+    }
+    if (partType !== 'text' || typeof part.text !== 'string') continue;
+    if (part.text.trim().length > 0) return undefined;
+  }
+
+  return sawMention && bodyStarted ? body.trim() || undefined : undefined;
 }
 
 interface DingTalkTokenResponse {
@@ -2963,8 +3025,9 @@ export class DingtalkChannel extends ChannelBase {
           parts.push(part.text);
         } else if (partType === 'picture') {
           parts.push('[image]');
-        } else if (partType === 'at' && part.atName) {
-          parts.push(`@${part.atName}`);
+        } else if (partType === 'at') {
+          const label = renderRichTextAt(part);
+          if (label) parts.push(label);
         }
       }
       const summary = parts.join('').trim();
@@ -3018,6 +3081,7 @@ export class DingtalkChannel extends ChannelBase {
     fileName?: string;
     placeholder?: string;
     syntheticText: boolean;
+    localControlText?: string;
   } {
     const msgtype = data.msgtype || 'text';
 
@@ -3027,11 +3091,15 @@ export class DingtalkChannel extends ChannelBase {
         return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
+      let userText = '';
       const codes: string[] = [];
       for (const part of richText) {
         const partType = part.type || 'text';
         if (partType === 'text' && part.text) {
           text += part.text;
+          userText += part.text;
+        } else if (partType === 'at') {
+          text += renderRichTextAt(part);
         } else if (partType === 'picture' && part.downloadCode) {
           codes.push(part.downloadCode);
         }
@@ -3040,7 +3108,8 @@ export class DingtalkChannel extends ChannelBase {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
-        syntheticText: text.trim().length === 0 && codes.length > 0,
+        syntheticText: richText.length > 0 && userText.trim().length === 0,
+        localControlText: extractLeadingMentionFromRichText(richText),
       };
     }
 
@@ -3123,8 +3192,9 @@ export class DingtalkChannel extends ChannelBase {
    * this message's own media — `(audio)`, `(video)`, `(file: name)`. Only the
    * direct-media call site has one, and only that call may erase it: on the
    * quoted-media path `envelope.text` is the user's own reply, and a reply
-   * that happens to read exactly like a placeholder must survive (a group
-   * `@Bot (audio)` reaches here as exactly `(audio)` after mention removal).
+   * that happens to read exactly like a placeholder must survive. The native
+   * callback can already omit the bot mention, so a reply reading `(audio)`
+   * still reaches this method verbatim.
    */
   private async attachMedia(
     envelope: Envelope,
@@ -3319,28 +3389,20 @@ export class DingtalkChannel extends ChannelBase {
 
       // Extract text and media info from message
       const content = this.extractContent(data);
-      let cleanText = content.text;
-
-      // Strip first @mention (the bot) from text, keep other @mentions intact.
-      // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7402).
-      if (isMentioned) {
-        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
-      }
 
       // Extract quoted message context
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
 
-      // After stripping the bot @mention, cleanText may legitimately be empty
-      // (user pinged the bot with no other text). Don't fall back to the
-      // original text in that case — it would re-introduce the @mention.
-      const messageText = isMentioned ? cleanText : cleanText || content.text;
-      // Carry mention targets as a structured envelope field (like
-      // referencedText) so ChannelBase renders the marker after prompt
-      // sanitization and slash-command parsing sees the body alone.
+      // Carry non-bot mention targets separately so ChannelBase can render a
+      // stable marker after prompt sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
+      const localControlText =
+        isGroup && isMentioned
+          ? (content.localControlText ??
+            extractLeadingMentionFromText(content.text))
+          : undefined;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -3352,7 +3414,8 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: messageText,
+        text: content.text,
+        ...(localControlText ? { localControlText } : {}),
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,

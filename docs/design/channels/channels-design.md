@@ -1,5 +1,7 @@
 # Channels Design
 
+[English](channels-design.md) | [简体中文](channels-design.zh-CN.md)
+
 > External messaging integrations for Qwen Code — interact with an agent from Telegram, WeChat, and more.
 >
 > User documentation: [Channels Overview](../../users/features/channels/overview.md).
@@ -47,10 +49,10 @@ A **channel** connects an external messaging platform to a Qwen Code agent. Conf
 Normalized message format all platforms convert to:
 
 - **Identity**: `senderId`, `senderName`, `chatId`, `channelName`
-- **Content**: `text`, optional `imageBase64`/`imageMimeType`, optional `referencedText`
+- **Content**: `text`, optional `localControlText`, optional `imageBase64`/`imageMimeType`, optional `referencedText`
 - **Context**: `isGroup`, `isMentioned`, `isReplyToBot`, optional `threadId`
 
-Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic; @mentions stripped from `text`.
+Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic; `text` contains the adapter-normalized message. An adapter that preserves a leading routing mention in `text` may also provide `localControlText`, the trimmed suffix after that one mention, so local controls and safety checks can use the body without changing display, history, or normal model input.
 
 ### Message Flow
 

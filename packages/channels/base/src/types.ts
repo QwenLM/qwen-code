@@ -91,8 +91,15 @@ export interface Envelope {
   chatName?: string;
   text: string;
   /**
-   * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
-   * message)`, `(file: …)`) rather than something the user typed.
+   * Non-empty adapter-provided body after a leading routing mention. It must be
+   * the trimmed suffix of `text`. Used for channel-memory controls, recall
+   * matching, slash-command routing, and the group/shared-session `!` safety
+   * gate. Display, history, and normal model prompting continue to use `text`.
+   */
+  localControlText?: string;
+  /**
+   * `text` has no user-authored text, such as an adapter-synthesized media
+   * placeholder or rendered mention label.
    *
    * It is never recorded as quoted group history, where it would reach
    * the next prompt as if a member had typed it.
@@ -109,10 +116,10 @@ export interface Envelope {
   /**
    * Stable identifiers (staffId preferred, platform ID fallback) of non-bot
    * members mentioned alongside the bot in a group message, deduplicated and
-   * excluding the bot itself. Kept separate from `text` (like `metadata`) so
-   * slash-command parsing sees the message body alone; ChannelBase renders it
-   * as a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered
-   * format stays uniform regardless of the identifier list length.
+   * excluding the bot itself. Kept separate from `text` (like `metadata`);
+   * ChannelBase renders it as a `[Mentioned …]` wrapper AFTER prompt
+   * sanitization so the delivered format stays uniform regardless of the
+   * identifier list length.
    * Rendered only when sender attribution is rendered (group/single-scope,
    * not `alreadyPrefixed`, not a recognized slash command) — self-prefixing
    * adapters must render it themselves. Group history backfill records the
