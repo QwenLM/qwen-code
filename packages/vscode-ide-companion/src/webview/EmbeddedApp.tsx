@@ -346,6 +346,7 @@ export function EmbeddedApp() {
   const [sessionCursor, setSessionCursor] = useState<string>();
   const [sessionListLoading, setSessionListLoading] = useState(false);
   const [sessionListError, setSessionListError] = useState<string>();
+  const [sessionListTruncated, setSessionListTruncated] = useState(false);
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
@@ -443,15 +444,15 @@ export function EmbeddedApp() {
         //
         // Dropping the source scope also moves this request off the daemon's
         // metadata list path and onto `SessionService.listSessions`, whose
-        // cursor is a strict `mtime <` keyset that can silently skip rows
-        // sharing an mtime with a page boundary (e.g. a bulk-copied chats
-        // directory). Where mtimes do collide the loss is not marginal — a
-        // measured tie group dropped about a third of the catalog. The
-        // tie-safe alternative is the `organized` view, which full-scans the
-        // catalog on every open; the weaker cursor is accepted here because
-        // losing a tied row is recoverable (the row is still reachable from
-        // the CLI and the browser Web Shell) while a full scan is not
-        // affordable for a dropdown that reopens constantly.
+        // cursor is a strict `mtime <` keyset. A group of transcripts that
+        // shares an mtime with a page boundary is silently skipped; in the
+        // degenerate case a tie group at the boundary makes the next cursor
+        // page come back empty while rows remain on disk, so the daemon
+        // reports the catalog exhausted. A dropped `vscode`-stamped row is
+        // not recoverable from any other GUI (the browser Web Shell scopes to
+        // `'default'`, which excludes it, and the CLI resume picker pages the
+        // same strict cursor), so an empty cursor page surfaces a truncation
+        // notice below instead of presenting a short list as complete.
         //
         // The unfiltered catalog also returns rows another surface owns
         // (channel conversations, Live voice threads, scheduled-task
@@ -464,18 +465,42 @@ export function EmbeddedApp() {
         const MAX_HISTORY_SCAN_PAGES = 10;
         let pages = 0;
         let nextCursor = cursor;
+        let truncated = false;
         const collected: DaemonSessionSummary[] = [];
         do {
-          const page = await daemonClient
-            .workspaceByCwd(runtime.workspaceCwd)
-            .listWorkspaceSessionsPage({
-              pageSize: HISTORY_PAGE_SIZE,
-              cursor: nextCursor,
-              archiveState: 'active',
-            });
-          const pageSessions = Array.isArray(page.sessions)
-            ? page.sessions.filter(isPresentableHistorySession)
+          const pageCursor = nextCursor;
+          const page = await (async () => {
+            try {
+              return await daemonClient
+                .workspaceByCwd(runtime.workspaceCwd)
+                .listWorkspaceSessionsPage({
+                  pageSize: HISTORY_PAGE_SIZE,
+                  cursor: pageCursor,
+                  archiveState: 'active',
+                });
+            } catch (error) {
+              // A rejection on a later page must not throw away the rows
+              // already fetched; keep them and surface the error.
+              setSessionListError(
+                error instanceof Error
+                  ? error.message
+                  : t('session.loadFailed'),
+              );
+              return undefined;
+            }
+          })();
+          if (!page) break;
+          const rawSessions = Array.isArray(page.sessions)
+            ? page.sessions
             : [];
+          const pageSessions = rawSessions.filter(isPresentableHistorySession);
+          // A cursor page that comes back empty means the strict `mtime <`
+          // keyset dropped a whole tie group; the rest of the history is
+          // unreachable through this cursor, so flag it rather than report
+          // the catalog as exhausted.
+          if (pageCursor !== undefined && rawSessions.length === 0) {
+            truncated = true;
+          }
           collected.push(...pageSessions);
           nextCursor = page.nextCursor;
           pages += 1;
@@ -484,6 +509,16 @@ export function EmbeddedApp() {
           collected.length < HISTORY_PAGE_SIZE &&
           pages < MAX_HISTORY_SCAN_PAGES
         );
+        // The page cap is a per-open bound, not a completeness signal: when
+        // it stops a short page with a live cursor, the remainder is still on
+        // disk but unreachable without an explicit control.
+        if (
+          nextCursor &&
+          pages >= MAX_HISTORY_SCAN_PAGES &&
+          collected.length < HISTORY_PAGE_SIZE
+        ) {
+          truncated = true;
+        }
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),
@@ -505,6 +540,7 @@ export function EmbeddedApp() {
           return Array.from(merged.values());
         });
         setSessionCursor(nextCursor);
+        setSessionListTruncated(truncated);
       } catch (error) {
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),
@@ -1009,6 +1045,7 @@ export function EmbeddedApp() {
           loading={sessionListLoading}
           hasMore={Boolean(sessionCursor)}
           error={sessionListError}
+          truncated={sessionListTruncated}
           onSearchChange={setSessionSearchQuery}
           onClose={closeSessionHistory}
           onLoadMore={() => void loadSessionHistory(sessionCursor)}

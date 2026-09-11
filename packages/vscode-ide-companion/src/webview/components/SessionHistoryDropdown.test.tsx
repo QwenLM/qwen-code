@@ -160,3 +160,78 @@ describe('SessionHistoryDropdown focus management', () => {
     outside.remove();
   });
 });
+
+describe('SessionHistoryDropdown load-more control', () => {
+  it('renders a focusable load-more control when hasMore is true and the list is too short to scroll', async () => {
+    const onLoadMore = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(
+        <SessionHistoryDropdown
+          t={t}
+          sessions={[makeSession('s1', 'Only')]}
+          currentSessionId="s1"
+          searchQuery=""
+          loading={false}
+          hasMore={true}
+          onSearchChange={() => {}}
+          onSelect={() => {}}
+          onRename={async () => {}}
+          onDelete={async () => {}}
+          onLoadMore={onLoadMore}
+          onClose={() => {}}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const loadMore = container.querySelector(
+      'button[data-load-more]',
+    ) as HTMLButtonElement;
+    expect(loadMore).not.toBeNull();
+    expect(loadMore.disabled).toBe(false);
+
+    await act(async () => {
+      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a truncation notice when truncated and omits load-more when hasMore is false', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(
+        <SessionHistoryDropdown
+          t={t}
+          sessions={[makeSession('s1', 'Only')]}
+          currentSessionId="s1"
+          searchQuery=""
+          loading={false}
+          hasMore={false}
+          truncated
+          onSearchChange={() => {}}
+          onSelect={() => {}}
+          onRename={async () => {}}
+          onDelete={async () => {}}
+          onLoadMore={() => {}}
+          onClose={() => {}}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      'Some conversations may not be shown.',
+    );
+    expect(container.querySelector('button[data-load-more]')).toBeNull();
+  });
+});

@@ -17,6 +17,7 @@ interface SessionHistoryDropdownProps {
   loading: boolean;
   hasMore: boolean;
   error?: string;
+  truncated?: boolean;
   onSearchChange: (query: string) => void;
   onSelect: (session: DaemonSessionSummary) => void;
   onRename: (session: DaemonSessionSummary, title: string) => Promise<void>;
@@ -108,6 +109,7 @@ export function SessionHistoryDropdown({
   loading,
   hasMore,
   error,
+  truncated,
   onSearchChange,
   onSelect,
   onRename,
@@ -610,6 +612,38 @@ export function SessionHistoryDropdown({
             </div>
           )}
         </div>
+        {truncated && !loading && (
+          <div
+            style={{
+              padding: '6px 10px',
+              borderTop: '1px solid var(--vscode-panel-border)',
+              color: 'var(--vscode-descriptionForeground)',
+              fontSize: 12,
+            }}
+          >
+            {t('session.historyTruncated')}
+          </div>
+        )}
+        {hasMore && !loading && (
+          <button
+            type="button"
+            data-load-more
+            onClick={onLoadMore}
+            style={{
+              padding: '6px 10px',
+              border: 0,
+              borderTop:
+                '1px solid var(--vscode-menu-separatorBackground, var(--vscode-panel-border))',
+              background: 'transparent',
+              color:
+                'var(--vscode-textLink-foreground, var(--vscode-focusBorder))',
+              cursor: 'pointer',
+              font: 'inherit',
+            }}
+          >
+            {t('session.loadMore')}
+          </button>
+        )}
       </div>
     </>
   );

@@ -988,7 +988,9 @@ describe('EmbeddedApp host wiring', () => {
     // A workspace dominated by machine-owned rows (channel workers,
     // scheduled-task fires) must not walk the entire catalog on every
     // dropdown open. The scan caps at 10 pages so the worst case is
-    // bounded; "Load more" resumes from the cursor.
+    // bounded; the residual cursor stays reachable through the explicit
+    // load-more control, and a capped short page surfaces a truncation
+    // notice instead of looking like a complete, short history.
     sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => ({
       sessions: [
         {
@@ -1018,6 +1020,221 @@ describe('EmbeddedApp host wiring', () => {
 
     // Must stop at 10 pages, not walk forever.
     expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(10);
+
+    // The capped scan left a live cursor and a short (empty) page: the rest
+    // of the history is reachable only through an explicit control, and the
+    // panel must not present that as a complete list.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain(
+        'Some conversations may not be shown.',
+      );
+    });
+    expect(container.querySelector('button[data-load-more]')).not.toBeNull();
+  });
+
+  it('advances the scan cursor across pages and accumulates presentable rows', async () => {
+    // A machine-owned-only first page must not stop the scan: the cursor has
+    // to advance so the next page is requested and its presentable rows land
+    // in the list.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
+      cursor === undefined
+        ? {
+            sessions: [
+              {
+                sessionId: 'machine-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Channel worker',
+                sourceType: 'channel',
+                updatedAt: '2026-09-08T12:00:00.000Z',
+              },
+            ],
+            nextCursor: 'c1',
+          }
+        : {
+            sessions: [
+              {
+                sessionId: 'chat-1',
+                workspaceCwd: '/workspace',
+                displayName: 'My chat',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="chat-1"]'),
+      ).not.toBeNull();
+    });
+
+    // The second page was requested with the cursor the first page returned.
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(
+      (sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
+        cursor?: string;
+      }).cursor,
+    ).toBe('c1');
+    // Machine-owned rows stay filtered, presentable rows render.
+    expect(
+      document.querySelector('[data-session-id="machine-1"]'),
+    ).toBeNull();
+    expect(document.querySelector('[data-session-id="chat-1"]')).not.toBeNull();
+  });
+
+  it('stops after one page when it is full and reuses the cursor on load-more', async () => {
+    const presentable = Array.from({ length: 20 }, (_, index) => ({
+      sessionId: `sess-${index}`,
+      workspaceCwd: '/workspace',
+      displayName: `Session ${index}`,
+      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+    }));
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
+      cursor === undefined
+        ? { sessions: presentable, nextCursor: 'c2' }
+        : {
+            sessions: [
+              {
+                sessionId: 'sess-extra',
+                workspaceCwd: '/workspace',
+                displayName: 'Extra',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    });
+
+    // A full first page stops the scan without walking further pages.
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+
+    // The residual cursor is reachable via the explicit load-more control.
+    const loadMore = document.querySelector(
+      'button[data-load-more]',
+    ) as HTMLButtonElement;
+    expect(loadMore).not.toBeNull();
+    await act(async () => {
+      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      (sdkMocks.listWorkspaceSessionsPage.mock.calls[1][0] as {
+        cursor?: string;
+      }).cursor,
+    ).toBe('c2');
+    expect(
+      document.querySelector('[data-session-id="sess-extra"]'),
+    ).not.toBeNull();
+  });
+
+  it('flags an empty cursor page as truncation instead of exhaustion', async () => {
+    const presentable = Array.from({ length: 20 }, (_, index) => ({
+      sessionId: `sess-${index}`,
+      workspaceCwd: '/workspace',
+      displayName: `Session ${index}`,
+      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+    }));
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
+      cursor === undefined
+        ? { sessions: presentable, nextCursor: 'c1' }
+        : { sessions: [], nextCursor: undefined },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    });
+
+    const loadMore = document.querySelector(
+      'button[data-load-more]',
+    ) as HTMLButtonElement;
+    expect(loadMore).not.toBeNull();
+    await act(async () => {
+      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    // A cursor page that comes back empty is a tie-drop, not a complete
+    // catalog — the panel must say so rather than silently truncating.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain(
+        'Some conversations may not be shown.',
+      );
+    });
+  });
+
+  it('keeps rows fetched before a later page rejects', async () => {
+    let calls = 0;
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          sessions: [
+            {
+              sessionId: 'page-1-row',
+              workspaceCwd: '/workspace',
+              displayName: 'First page row',
+              updatedAt: '2026-09-09T12:00:00.000Z',
+            },
+          ],
+          nextCursor: 'c1',
+        };
+      }
+      throw new Error('daemon gone');
+    });
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    // Rows from the successful first page survive the rejection on page 2.
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="page-1-row"]'),
+      ).not.toBeNull();
+    });
+    expect(container.textContent).toContain('daemon gone');
   });
 });
 
