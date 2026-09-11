@@ -55,6 +55,7 @@ interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
+  inputTarget?: { tabId: number; sessionId?: string };
 }
 
 interface SocketIdentity {
@@ -162,7 +163,27 @@ export class ChromeExtensionTransport implements ChromeBridge {
           ),
         );
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, {
+        resolve,
+        reject,
+        timer,
+        ...(method === 'cdp.send' &&
+        typeof params.tabId === 'number' &&
+        (params.sessionId === undefined ||
+          typeof params.sessionId === 'string') &&
+        (params.method === 'Input.dispatchMouseEvent' ||
+          params.method === 'Input.dispatchKeyEvent' ||
+          params.method === 'Input.insertText')
+          ? {
+              inputTarget: {
+                tabId: params.tabId,
+                ...(typeof params.sessionId === 'string'
+                  ? { sessionId: params.sessionId }
+                  : {}),
+              },
+            }
+          : {}),
+      });
     });
     try {
       socket.write(frame);
@@ -311,6 +332,21 @@ export class ChromeExtensionTransport implements ChromeBridge {
           listener(event);
         } catch {
           // A listener failure must not break the transport.
+        }
+      }
+      if (event.method === 'Page.javascriptDialogOpening') {
+        // Chrome defers input acknowledgements until the modal is handled.
+        // Release only inputs already sent to this target, after notifying
+        // Playwright about the dialog; locator auto-waits must keep waiting.
+        for (const [id, pending] of this.pending) {
+          if (
+            pending.inputTarget?.tabId === event.tabId &&
+            pending.inputTarget.sessionId === event.sessionId
+          ) {
+            this.pending.delete(id);
+            clearTimeout(pending.timer);
+            pending.resolve({});
+          }
         }
       }
       return;

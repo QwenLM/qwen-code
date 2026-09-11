@@ -205,10 +205,16 @@ export class PlaywrightRuntime {
       case 'tab.title':
         return await this.tab(args).page.title();
       case 'tab.back':
-        await this.tab(args).page.goBack();
+        await this.tab(args).page.goBack({
+          waitUntil: 'commit',
+          timeout: 30_000,
+        });
         return null;
       case 'tab.forward':
-        await this.tab(args).page.goForward();
+        await this.tab(args).page.goForward({
+          waitUntil: 'commit',
+          timeout: 30_000,
+        });
         return null;
       case 'tab.reload':
         await this.tab(args).page.reload();

@@ -153,12 +153,20 @@ describe('PlaywrightRuntime command contracts', () => {
       url: 'https://example.com/next',
     });
     await fixture.runtime.dispatch('tab.back', { tabId: tab.id });
+    await fixture.runtime.dispatch('tab.forward', { tabId: tab.id });
     await fixture.runtime.dispatch('tab.reload', {
       tabId: tab.id,
     });
 
     expect(fixture.page.goto).toHaveBeenCalledWith('https://example.com/next');
-    expect(fixture.page.goBack).toHaveBeenCalledWith();
+    expect(fixture.page.goBack).toHaveBeenCalledExactlyOnceWith({
+      waitUntil: 'commit',
+      timeout: 30_000,
+    });
+    expect(fixture.page.goForward).toHaveBeenCalledExactlyOnceWith({
+      waitUntil: 'commit',
+      timeout: 30_000,
+    });
     expect(fixture.page.reload).toHaveBeenCalledWith();
   });
 
@@ -1875,6 +1883,7 @@ function fakePage(
     title: ReturnType<typeof vi.fn>;
     goto: ReturnType<typeof vi.fn>;
     goBack: ReturnType<typeof vi.fn>;
+    goForward: ReturnType<typeof vi.fn>;
     reload: ReturnType<typeof vi.fn>;
     context: ReturnType<typeof vi.fn>;
     locator: ReturnType<typeof vi.fn>;
