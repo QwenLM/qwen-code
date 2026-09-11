@@ -6,6 +6,7 @@
 
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -19,7 +20,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parse } from 'yaml';
+import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
@@ -167,6 +168,165 @@ describe('package scripts', () => {
     expect(result.stdout).toContain(
       'pnpm build approvals cover every install script.',
     );
+  });
+
+  describe('check-lockfile failure branches', () => {
+    // Each case runs the real script against a temp root holding copies of
+    // the committed lockfiles with one mutation, so the detectors — not
+    // today's lockfile data — are what the assertions pin.
+    function runCheckLockfile(mutate) {
+      const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'check-lockfile-'));
+      try {
+        for (const file of [
+          'package-lock.json',
+          'pnpm-lock.yaml',
+          'pnpm-workspace.yaml',
+        ]) {
+          copyFileSync(path.join(root, file), path.join(fixtureRoot, file));
+        }
+        mutate(fixtureRoot);
+        return spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/check-lockfile.js')],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, CHECK_LOCKFILE_ROOT: fixtureRoot },
+          },
+        );
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true });
+      }
+    }
+
+    function mutatePackageLock(fixtureRoot, mutate) {
+      const file = path.join(fixtureRoot, 'package-lock.json');
+      const lock = JSON.parse(readFileSync(file, 'utf8'));
+      mutate(lock);
+      writeFileSync(file, JSON.stringify(lock));
+    }
+
+    function mutatePnpmLock(fixtureRoot, mutate) {
+      const file = path.join(fixtureRoot, 'pnpm-lock.yaml');
+      const lock = parse(readFileSync(file, 'utf8'));
+      mutate(lock);
+      writeFileSync(file, stringify(lock));
+    }
+
+    function mutatePnpmWorkspace(fixtureRoot, mutate) {
+      const file = path.join(fixtureRoot, 'pnpm-workspace.yaml');
+      const workspace = parse(readFileSync(file, 'utf8'));
+      mutate(workspace);
+      writeFileSync(file, stringify(workspace));
+    }
+
+    it('fails when pnpm resolves a version npm has not locked', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages['bogus-package@9.9.9'] = {
+            resolution: { integrity: 'sha512-bogus' },
+          };
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        'versions that package-lock.json does not lock',
+      );
+      expect(result.stderr).toContain('- bogus-package@9.9.9');
+    });
+
+    it('fails when a knownNpmLockGaps entry no longer describes a gap', () => {
+      // mime-db@1.52.0 is the committed exception; npm locking it makes the
+      // exception stale.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePackageLock(fixtureRoot, (lock) => {
+          lock.packages['node_modules/mime-types/node_modules/mime-db'] = {
+            version: '1.52.0',
+            resolved: 'https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz',
+            integrity: 'sha512-bogus',
+          };
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        'remove these entries from knownNpmLockGaps',
+      );
+      expect(result.stderr).toContain('- mime-db@1.52.0');
+    });
+
+    it('fails when an install script has no allowBuilds decision', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.esbuild;
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no allowBuilds entry');
+      expect(result.stderr).toContain('- esbuild');
+    });
+
+    it('fails closed when pnpm-lock.yaml has no packages section', () => {
+      const result = runCheckLockfile((fixtureRoot) => {
+        writeFileSync(
+          path.join(fixtureRoot, 'pnpm-lock.yaml'),
+          "lockfileVersion: '9.0'\n",
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('has no packages section');
+    });
+
+    it('accepts a git dependency pnpm keys by source instead of version', () => {
+      const resolved = 'git+https://github.com/example/git-dep.git#7ae66ab2';
+      const result = runCheckLockfile((fixtureRoot) => {
+        mutatePackageLock(fixtureRoot, (lock) => {
+          lock.packages['node_modules/git-dep'] = {
+            version: '1.2.3',
+            resolved,
+          };
+        });
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages[`git-dep@${resolved}`] = {
+            resolution: { type: 'git' },
+          };
+        });
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'pnpm lockfile matches package-lock.json.',
+      );
+    });
+
+    it('counts a spec-scoped allowBuilds key as a decision for the package', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.esbuild;
+          workspace.allowBuilds['esbuild@^0.25.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'pnpm build approvals cover every install script.',
+      );
+    });
+
+    it('ignores an allowBuilds placeholder that decides nothing', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          // pnpm writes this string for an install whose build it skipped.
+          workspace.allowBuilds.esbuild = 'set this to true or false';
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no allowBuilds entry');
+      expect(result.stderr).toContain('- esbuild');
+    });
   });
 
   it('keeps the internal release-age exception independent of the version', () => {
@@ -784,12 +944,15 @@ describe('package scripts', () => {
     const workflow = parse(
       readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
     );
+    // package-lock.json is deliberately absent: no step in this job reads
+    // it (the install validates pnpm-lock.yaml against the workspace
+    // manifests), and npm/pnpm version agreement is gated by the 'Check
+    // lockfile' step in ci.yml.
     const expectedPaths = [
       '.github/workflows/pnpm-worktree-smoke.yml',
       '.npmrc',
       '.pnpmfile.mjs',
       'package.json',
-      'package-lock.json',
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',

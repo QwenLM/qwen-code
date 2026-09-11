@@ -43,11 +43,11 @@ developer Macs.
 3. For each method below, record the change in the `df` used column and the
    wall time. Use `df`, not `du`: `du` counts cloned files at full size.
 
-   | Method       | Command in the new worktree                                                                                                                     |
-   | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-   | npm          | `QWEN_SKIP_PREPARE=1 npm ci --prefer-offline`                                                                                                   |
-   | pnpm         | `node scripts/setup-worktree.js`                                                                                                                |
-   | reflink copy | copy the primary's `node_modules` and each `packages/*/node_modules`, using `cp -c -R` on APFS or `cp -R --reflink=always` on btrfs/XFS reflink |
+   | Method       | Command in the new worktree                                                                                                                                                                                                                 |
+   | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | npm          | `QWEN_SKIP_PREPARE=1 QWEN_SKIP_NOTICE_GENERATION=1 npm ci --prefer-offline` (the guard pair `scripts/setup-worktree.js` sets, so the step only installs dependencies)                                                                       |
+   | pnpm         | `node scripts/setup-worktree.js`                                                                                                                                                                                                            |
+   | reflink copy | copy the primary's `node_modules` and every workspace root's own — `packages/*/node_modules`, `packages/channels/*/node_modules`, `integrations/*/node_modules` — using `cp -c -R` on APFS or `cp -R --reflink=always` on btrfs/XFS reflink |
 
 4. For the reflink copy, confirm the workspace links point into the new
    worktree:
@@ -55,9 +55,18 @@ developer Macs.
      `../../packages/core`.
    - `node -p "require.resolve('@qwen-code/qwen-code-core/package.json')"`,
      run in the worktree, prints a path inside that worktree.
+   - `node -p "require.resolve('@larksuiteoapi/node-sdk/package.json', { paths: ['packages/channels/feishu'] })"`
+     prints a path inside that worktree. The two checks above resolve
+     through the root `node_modules/@qwen-code/qwen-code-core` symlink, so
+     they pass even when a nested workspace root's `node_modules` was not
+     copied; this one does not.
 
-5. Record the peak number of concurrent worktrees per host over a week, for
-   example by sampling `git worktree list | wc -l` daily.
+5. Record the peak number of concurrent worktrees per host over a week:
+   sample `git worktree list | wc -l` at most 5 minutes apart (for example
+   with cron) and keep the maximum. Worktrees on these hosts can live for
+   under an hour — review worktrees under `.qwen/tmp` are created and swept
+   within a single run — so a daily sample reports the floor between runs,
+   not the peak.
 
 **Report:** a table of host, filesystem, method, `df` delta and wall time;
 the peak concurrent worktree count; and free disk per host.
@@ -72,14 +81,22 @@ not an option on that filesystem.
 run unchanged on a pnpm-installed tree. Stage 2 would then need almost no
 script changes.
 
-1. On a scratch branch, add these steps to the `ubuntu-latest` job of
-   `.github/workflows/pnpm-worktree-smoke.yml`, after the install step:
-   `npm run build`, `npm run typecheck`, `npm run lint:ci`, `npm run test:ci`,
+1. On a scratch branch, create a throwaway workflow: a copy of
+   `.github/workflows/pnpm-worktree-smoke.yml` restricted to
+   `on: workflow_dispatch`, a single `runs-on: ubuntu-latest` job (no
+   matrix), and `timeout-minutes: 150`. Do not edit the smoke workflow
+   itself — its job runs on three operating systems under a 20-minute
+   ceiling the chain below far exceeds, and the scripts tests assert it
+   contains no build step. After the install step, add `npm run build`,
+   `npm run typecheck`, `npm run lint:ci`, `npm run test:ci`,
    `npm run bundle`, and `npm run check:serve-fast-path-bundle`.
-2. Run the job with
-   `gh workflow run pnpm-worktree-smoke.yml --ref <branch>`.
-3. Repeat the run with the install step replaced by `npm ci`. This is the
-   npm baseline on the same runner class.
+2. Run the workflow with `gh workflow run <workflow-file> --ref <branch>`.
+3. Repeat the run with the install step replaced by
+   `QWEN_SKIP_PREPARE=1 QWEN_SKIP_NOTICE_GENERATION=1 npm ci --prefer-offline`,
+   the same guard pair `scripts/setup-worktree.js` sets — a bare `npm ci`
+   also runs the root `prepare` (husky, `npm run build`, `npm run bundle`)
+   inside the step being timed. This is the npm baseline on the same runner
+   class.
 
 **Report:** pass or fail and duration for each step under both installers,
 the first failure's log for any step that fails only under pnpm, and the

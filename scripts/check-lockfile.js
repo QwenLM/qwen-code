@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '..');
+// Tests point the gate at a fixture root; the default stays the repository.
+const root = process.env.CHECK_LOCKFILE_ROOT ?? join(__dirname, '..');
 const lockfilePath = join(root, 'package-lock.json');
 
 function readJsonFile(filePath) {
@@ -131,6 +132,7 @@ function pnpmPackageName(key) {
 console.log('Checking pnpm lockfile against package-lock.json...');
 
 const npmLockedVersions = new Set();
+const npmLockedSources = new Set();
 for (const [location, details] of Object.entries(packages)) {
   if (details.link === true || !location.includes('node_modules/')) {
     continue;
@@ -138,6 +140,17 @@ for (const [location, details] of Object.entries(packages)) {
   npmLockedVersions.add(
     `${npmPackageName(location, details)}@${details.version}`,
   );
+  // pnpm keys a git or file: dependency by its source instead of a version
+  // (`name@git+https://…#hash`), so those keys can only ever match npm's
+  // `resolved`.
+  if (
+    details.resolved?.startsWith('git') ||
+    details.resolved?.startsWith('file:')
+  ) {
+    npmLockedSources.add(
+      `${npmPackageName(location, details)}@${details.resolved}`,
+    );
+  }
 }
 
 // form-data nests mime-types@2.1.35, which requires exactly mime-db 1.52.0,
@@ -151,8 +164,17 @@ const knownNpmLockGaps = new Set(['mime-db@1.52.0']);
 // never equal. The direction that matters is this one: a pnpm worktree must
 // not run a dependency version that CI's npm install has not locked.
 const pnpmVersions = Object.keys(pnpmLockfile?.packages ?? {});
+if (pnpmVersions.length === 0) {
+  console.error(
+    'Error: pnpm-lock.yaml has no packages section; the version agreement gate read nothing.',
+  );
+  process.exit(1);
+}
 const unlockedPnpmVersions = pnpmVersions.filter(
-  (key) => !npmLockedVersions.has(key) && !knownNpmLockGaps.has(key),
+  (key) =>
+    !npmLockedVersions.has(key) &&
+    !npmLockedSources.has(key) &&
+    !knownNpmLockGaps.has(key),
 );
 const staleNpmLockGaps = [...knownNpmLockGaps].filter(
   (key) => !pnpmVersions.includes(key) || npmLockedVersions.has(key),
@@ -191,7 +213,11 @@ try {
 // allowBuilds approves it. Requiring an entry for each script npm runs keeps
 // that difference a reviewed decision instead of a silent one.
 const decidedBuilds = new Set(
-  Object.keys(pnpmWorkspace?.allowBuilds ?? {}).map(pnpmPackageName),
+  Object.entries(pnpmWorkspace?.allowBuilds ?? {})
+    // pnpm itself records an undecided entry as the string 'set this to true
+    // or false'; only a boolean runs or skips a build.
+    .filter(([, decision]) => typeof decision === 'boolean')
+    .map(([key]) => pnpmPackageName(key)),
 );
 const undecidedBuilds = new Set();
 for (const [location, details] of Object.entries(packages)) {
