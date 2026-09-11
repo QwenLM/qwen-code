@@ -6154,7 +6154,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       try {
         await runOwnerRuntimeActivity(runtime, async () => {
-          res.status(200).set('Cache-Control', 'no-store').json({
+          res.status(200).json({
             v: 1,
             sessionId,
             availableCommands: [],
@@ -6175,7 +6175,6 @@ export function registerSessionRoutes(
           await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
-          .set('Cache-Control', 'no-store')
           .json(
             runtime.trusted
               ? status

@@ -2113,6 +2113,7 @@ export class Session implements SessionContext {
   private activeGoalTurn: AcpGoalTurn | undefined;
   private goalHostUnbind?: () => void;
   private goalRuntimeUnsubscribe?: () => void;
+  private removeSkillChangeListener?: () => void;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -2320,6 +2321,9 @@ export class Session implements SessionContext {
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
+    this.removeSkillChangeListener = this.config
+      .getSkillManager()
+      ?.addChangeListener(() => this.sendAvailableCommandsUpdate());
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -4299,6 +4303,8 @@ export class Session implements SessionContext {
     this.goalHostUnbind = undefined;
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
+    this.removeSkillChangeListener?.();
+    this.removeSkillChangeListener = undefined;
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
