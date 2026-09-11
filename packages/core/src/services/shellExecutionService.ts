@@ -960,6 +960,12 @@ export class ShellExecutionService {
           signal: NodeJS.Signals | null,
         ) => {
           const { finalBuffer } = cleanup();
+          // A timeout abort keeps merge-base semantics: shell.ts keys its
+          // timeout copy off `aborted`, so a command that trap-exits 0 on
+          // the timeout kill must not read as plain success.
+          const timeoutAbort =
+            (abortSignal.reason as { name?: unknown } | null)?.name ===
+            'TimeoutError';
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
           const combinedOutput =
@@ -989,7 +995,24 @@ export class ShellExecutionService {
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
             error,
-            aborted: cancelKillDispatched,
+            // A cancel that lands in the zombie window (kernel reaped the
+            // child, Node has not delivered 'exit' yet) cannot be seen by
+            // performCancelKill's guard, so cancelKillDispatched alone
+            // retro-flags a completed command. Classify at settlement from
+            // what the exit itself says: a kill-caused death carries a
+            // signal (POSIX SIGTERM/SIGKILL) or a non-zero taskkill exit
+            // code (win32); a natural exit 0 that was already pending
+            // resolves aborted: false and keeps its output. Ceilings: a
+            // natural NON-zero exit racing a cancel still reads as
+            // cancelled (harm ≈ merge-base baseline), and a kill-caused
+            // graceful exit 0 on a user cancel reads as completed (the
+            // trade R25-1 prescribed); timeout aborts are exempt via
+            // timeoutAbort so the timeout copy never loses `aborted`.
+            // Closing either needs kernel-side pending-exit insight, not a
+            // liveness probe (a zombie answers kill(pid, 0) successfully).
+            aborted:
+              (cancelKillDispatched && (signal !== null || code !== 0)) ||
+              timeoutAbort,
             pid: undefined,
             executionMethod: 'child_process',
           });

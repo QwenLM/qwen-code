@@ -3444,8 +3444,62 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // The natural exit 0 settled the command with no kill-caused death
+      // observable, so the settlement gate resolves aborted: false; the pin
+      // here is the `if (!exited)` guard, not the flag.
+      expect(result.aborted).toBe(false);
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('a cancel in the post-exit zombie window does not retro-flag a completed command', async () => {
+      // The kernel reaped the child but Node has not delivered 'exit' yet:
+      // performCancelKill's guard is blind in this window and dispatches the
+      // kill, so the settlement gate (signal !== null || code !== 0) is the
+      // only thing standing between a completed `git push` and
+      // BEFORE-completion cancel copy. See R25-1.
+      const { result } = await simulateExecution(
+        'git push',
+        (cp, abortController) => {
+          cp.stdout?.emit('data', Buffer.from('pushed\n'));
+          abortController.abort();
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.executionMethod).toBe('child_process');
+      expect(result.aborted).toBe(false);
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain('pushed');
+    });
+
+    it('a cancel that actually kills the child still resolves aborted', async () => {
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          cp.emit('exit', null, 'SIGTERM');
+          cp.emit('close', null, 'SIGTERM');
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+    });
+
+    it('a timeout abort keeps aborted even when the command trap-exits 0', async () => {
+      // shell.ts keys its timeout copy off `aborted`; a graceful-shutdown
+      // command exiting 0 on the timeout kill must not read as plain
+      // success (merge-base reported aborted for any timeout abort).
+      const { result } = await simulateExecution(
+        'serve --graceful',
+        (cp, abortController) => {
+          abortController.abort(new DOMException('Timed out', 'TimeoutError'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
