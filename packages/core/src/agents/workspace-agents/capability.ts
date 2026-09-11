@@ -33,6 +33,11 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.GREP]: 'allow',
   [ToolNames.GLOB]: 'allow',
   [ToolNames.SHELL]: 'deny',
+  // `exec` is the code-mode entry point: every ordinary tool is reached from
+  // inside an exec program as `tools.<name>(args)`. Allowing it would let an
+  // Agent call `tools.run_shell_command(...)` and any other denied tool through
+  // the wrapper, which is the whole classification table undone in one line.
+  [ToolNames.EXEC]: 'deny',
   [ToolNames.TODO_WRITE]: 'deny',
   [ToolNames.MEMORY]: 'deny',
   [ToolNames.AGENT]: 'deny',
