@@ -13,7 +13,7 @@ import {
   beforeEach,
   afterEach,
 } from 'vitest';
-import type { GenerateContentParameters } from '@google/genai';
+import type { Content, GenerateContentParameters } from '@google/genai';
 import { FunctionCallingConfigMode, FinishReason } from '@google/genai';
 import { inspect } from 'node:util';
 import {
@@ -1243,6 +1243,70 @@ describe('ResponsesPipeline', () => {
     }
   });
 
+  it('preserves structured gateway diagnostics past 500 characters and safe response headers', async () => {
+    const message = `${'x'.repeat(700)} resource missing; test-key`;
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          routify_response: {
+            padding: 'x'.repeat(700),
+            trace_id: 'trace-after-500',
+            request_id: 'body-request',
+            model_name: 'test-model',
+            ak_quota: { api_key: 'never-log-this-upstream-key' },
+            error_detail: {
+              error: {
+                message,
+                code: 'not_found',
+                type: 'upstream_error',
+                param: 'model',
+              },
+            },
+          },
+        }),
+        {
+          status: 404,
+          headers: {
+            'x-request-id': 'header-request',
+            'retry-after': '3',
+            'x-should-retry': 'true',
+            'set-cookie': 'secret-cookie',
+            authorization: 'Bearer response-secret',
+          },
+        },
+      ),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const error = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      status: 404,
+      requestId: 'header-request',
+      code: 'not_found',
+      type: 'upstream_error',
+      param: 'model',
+    });
+    const rendered = `${inspect(error)} ${JSON.stringify(error)}`;
+    expect(rendered).toContain('trace-after-500');
+    expect(rendered).toContain('resource missing');
+    for (const secret of [
+      'test-key',
+      'never-log-this-upstream-key',
+      'secret-cookie',
+      'response-secret',
+    ]) {
+      expect(rendered).not.toContain(secret);
+    }
+    const headers = (error as { headers: Headers }).headers;
+    expect(headers.get('retry-after')).toBe('3');
+    expect(headers.get('x-should-retry')).toBe('true');
+    expect(headers.has('authorization')).toBe(false);
+  });
+
   it('connectStream rejects on a connection-time HTTP error so retry sees it', async () => {
     // A 5xx at request time must reject the awaited promise (which
     // generateContentStream returns into retryWithBackoff) rather than
@@ -2071,6 +2135,119 @@ describe('ResponsesPipeline', () => {
       expect(second.input).toEqual(retryInput);
       expect({ ...second, input: null }).toEqual({ ...first, input: null });
     }
+
+    const encryptedError = {
+      error: {
+        type: 'invalid_request_error',
+        code: 'invalid_encrypted_content',
+        message: 'The encrypted content could not be decrypted or parsed.',
+      },
+    };
+    const encryptedBodies = [
+      JSON.stringify(encryptedError),
+      'data: ' +
+        JSON.stringify({
+          routify_response: {
+            success: false,
+            status: 400,
+            error_detail: encryptedError,
+          },
+        }) +
+        '\n\n',
+    ];
+
+    it.each(encryptedBodies)(
+      'recovers once from rejected encrypted replay: %s',
+      async (body) => {
+        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
+        fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+        const request = replayRequest();
+        const original = structuredClone(request);
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(await drain(pipeline, request)).toBeUndefined();
+        expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+        expect(request).toEqual(original);
+      },
+    );
+
+    it('preserves tool call/result pairs when recovering encrypted replay', async () => {
+      fetchMock.mockResolvedValueOnce(errorResponse(400, encryptedBodies[0]!));
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const request = replayRequest();
+      request.contents = [
+        ...(request.contents as Content[]),
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'lookup',
+                args: { value: 1 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'lookup',
+                response: { output: 'found' },
+              },
+            },
+          ],
+        },
+      ];
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, request)).toBeUndefined();
+      const first = parsedCall(0);
+      const second = parsedCall(1);
+      expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(3);
+      expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
+        0,
+      );
+      expect(second.input.slice(-2)).toEqual(first.input.slice(-2));
+      expect(second.input.slice(-2).map((i) => i.type)).toEqual([
+        'function_call',
+        'function_call_output',
+      ]);
+    });
+
+    it('surfaces the second encrypted rejection without looping', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, replayRequest())).toMatchObject({
+        status: 400,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry encrypted rejection without reasoning in the request', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(
+        await drain(pipeline, {
+          model: 'gpt-5',
+          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        }),
+      ).toMatchObject({ status: 400 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
 
     // ── RED behaviors ────────────────────────────────────────────────────
 
