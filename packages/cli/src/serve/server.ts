@@ -1591,7 +1591,7 @@ export function createServeApp(
     liveBoundRuntime = runtime;
     try {
       setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
-        liveCoordinator.captureScreenContext(callerSessionId),
+        liveCoordinator.captureVisualContext(callerSessionId),
       );
       setTaskHandler.call(runtime.bridge, (info) =>
         liveTaskService.handle(info),
