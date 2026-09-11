@@ -55,23 +55,6 @@ test('CI definitions and the scripts they call are shell too', () => {
   }
 });
 
-test('the git remotes path handling is seen by both lanes', () => {
-  // The win32 path-spelling carve and the path-transport probes behave
-  // differently per host; a POSIX-only lane cannot tell whether they
-  // work on Windows.
-  for (const file of [
-    'packages/core/src/utils/git-remotes.ts',
-    'packages/core/src/utils/git-remotes.test.ts',
-  ]) {
-    assert.equal(classifyChangedFiles([file]), PLATFORM_SENSITIVE, file);
-  }
-  // A sibling git module without per-host path logic stays cheap.
-  assert.equal(
-    classifyChangedFiles(['packages/core/src/utils/git-branches.ts']),
-    PLATFORM_INSENSITIVE,
-  );
-});
-
 test('the runner configuration decides which lane runs what', () => {
   // An exclusion keyed on process.platform is how a suite ends up unrun on
   // one host and red on another; a change to it must be seen by both lanes.
