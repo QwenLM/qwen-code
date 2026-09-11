@@ -232,24 +232,38 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Rows an expanded confirmation dialog can count on being unavailable to the
- * pending card above it. Above the card: the banner (≈ 6), the startup
- * notices a fresh session shows (≈ 3), and the prompt echo with its turn
- * margin (2). On the card itself: the hidden-tail and awaiting rows (2). In
- * the dialog, around the body: the frame's border and padding (4), title (1),
- * body margins (2), question row (1), outcome list (2–4), footer hint (1)
- * ≈ 11–13. A session without a banner or notices over-reserves, which only
- * shrinks a card whose payload the dialog is already rendering — the safe
- * direction. At the pre-fix value of 14 the expanded tail and the outcome
- * list ran off the bottom of the screen (mem0 e2e regression).
+ * Rows on screen an expanded confirmation dialog never gets for its body,
+ * charged to the pending card above it: the banner (≈ 6), the startup
+ * notices a fresh session shows (≈ 3), the prompt echo with its turn margin
+ * (2), and the card's own hidden-tail and awaiting rows (2). A session
+ * without a banner or notices over-reserves, which only shrinks a card
+ * whose payload the dialog is already rendering — the safe direction.
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 27;
+export const DIALOG_ABOVE_CARD_RESERVE_ROWS = 13;
+
+/**
+ * Rows the confirmation dialog spends around its body: the frame's border
+ * and padding (4), title (1), body margins (2), question row (1), outcome
+ * list (2–4), footer hint (1) ≈ 12–14. dialogs-confirm.test.tsx pins a real
+ * render against exactly this share, so growing the dialog's chrome means
+ * growing it here first.
+ */
+export const DIALOG_CHROME_RESERVE_ROWS = 14;
+
+/**
+ * Rows an expanded confirmation dialog can count on being unavailable to the
+ * pending card above it — the two shares above, split so the halves sum to
+ * it by construction and the chrome half can be pinned on its own. At the
+ * pre-fix value of 14 the expanded tail and the outcome list ran off the
+ * bottom of the screen (mem0 e2e regression).
+ */
+export const DIALOG_EXPANDED_RESERVE_ROWS =
+  DIALOG_ABOVE_CARD_RESERVE_ROWS + DIALOG_CHROME_RESERVE_ROWS;
 
 /**
  * The confirmation dialog's collapsed body cap (dialogs-confirm TextBody and
- * DiffBody). The card's dialog-body bound engages only when the dialog's
- * payload body is taller than this — for a TextBody that is exactly the case
- * where the dialog offers ctrl-s expansion at all.
+ * DiffBody); past it the dialog windows the body and offers ctrl-s
+ * expansion.
  */
 export const CONFIRMATION_BODY_MAX_ROWS = 20;
 
@@ -265,9 +279,10 @@ const CARD_DESC_WRAP_RATIO = 0.7;
 /**
  * Description budget for a pending tool card, bounded three ways: never
  * past the ink-parity history cap, never so tall that the confirmation
- * dialog's collapsed body overflows the viewport, and — when the pending
- * dialog's payload body is tall enough to hide rows — shrunk so the body
- * plus the dialog chrome still fits. `dialogBody` is the text the dialog
+ * dialog's collapsed body overflows the viewport, and never so tall that
+ * the card plus the dialog (reserve rows and payload body) overflows it
+ * either — the third bound converts those painted rows into budget rows.
+ * `dialogBody` is the text the dialog
  * renders as its payload body (a hook confirmation's reason, a plan, or an
  * exec command, threaded onto the live item as `confirmBody`); it is
  * undefined for the types whose dialog carries no payload text — an mcp
@@ -295,23 +310,22 @@ export function pendingCardMaxRows(
     (sum, row) => sum + physicalRowCount(row, Math.max(width + 2, 10)),
     0,
   );
-  // The bound engages only when the dialog's payload body outgrows the
-  // collapsed window: info/plan bodies cap at CONFIRMATION_BODY_MAX_ROWS and
-  // offer ctrl-s expansion past it, and an exec body renders uncapped. A
-  // body the collapsed window already shows in full is no reason to shrink
-  // the card.
-  const expandedBound =
-    bodyRows > CONFIRMATION_BODY_MAX_ROWS
-      ? Math.floor(
-          (h - DIALOG_EXPANDED_RESERVE_ROWS - bodyRows) * CARD_DESC_WRAP_RATIO,
-        )
-      : Number.POSITIVE_INFINITY;
+  // The dialog bound charges reserve AND body, converted from painted rows
+  // at CARD_DESC_WRAP_RATIO: a budget row paints ~1/0.7 screen rows, so an
+  // unconverted operand leaves the card ~1.4x taller than the rows the
+  // dialog was charged and its outcome list falls off the viewport (R1-3).
+  // It applies unconditionally — gating it on the body outgrowing the
+  // collapsed window made the UNCONVERTED collapsed bound the binding one
+  // exactly inside that window.
+  const dialogBound = Math.floor(
+    (h - DIALOG_EXPANDED_RESERVE_ROWS - bodyRows) * CARD_DESC_WRAP_RATIO,
+  );
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
       h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
-      expandedBound,
+      dialogBound,
     ),
   );
 }

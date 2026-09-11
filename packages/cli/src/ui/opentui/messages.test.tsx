@@ -170,27 +170,35 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
 
   it('budgets a pending card below the confirmation dialog footprint', () => {
     // At 80 rows the ink-parity cap is 320 — 4x past the viewport. The
-    // pending budget is bounded by the collapsed dialog footprint, and —
-    // when the pending dialog's payload body is tall enough to hide rows —
-    // by the rows the dialog needs for that body: a hook-forced confirmation
-    // renders its reason in the dialog body and an exec dialog renders the
-    // command uncapped, so a tall body must shrink the card or the expanded
-    // dialog pushes off screen (mem0 e2e regression). Width 106 is the
-    // card's production basis on a 110-column terminal; the dialog body
+    // pending budget is bounded by the collapsed dialog footprint and by
+    // the painted rows the dialog needs below the card — its reserve plus
+    // its payload body — converted into budget rows at the card's wrap
+    // ratio: a hook-forced confirmation renders its reason in the dialog
+    // body and an exec dialog renders the command uncapped, so those rows
+    // must shrink the card or the dialog pushes off screen (mem0 e2e
+    // regression). Width 106 is the card's production basis on a 110-column
+    // terminal; the dialog body
     // measures two columns wider (headWindowPhysical reads the raw terminal
     // width), so the boundary bodies below are calibrated at 108 columns.
     expect(maxHistoryItemRows(80)).toBe(320);
     // No payload body (an mcp dialog shows only the server and tool names):
-    // the collapsed-dialog bound (80 - 46) is the tight one — the card is
-    // the only surface carrying the arguments (R5-9).
+    // the collapsed-dialog bound (80 - 46) is the tight one at 80 rows —
+    // the card is the only surface carrying the arguments (R5-9). At 100
+    // rows the converted empty-body bound floor((100 - 27) * 0.7) = 51
+    // undercuts the collapsed bound (54).
     expect(pendingCardMaxRows(80, undefined, 106)).toBe(34);
-    expect(pendingCardMaxRows(100, undefined, 106)).toBe(54);
-    // A body that fits the dialog's collapsed window (20 rows at 108
-    // columns) keeps the collapsed budget: the dialog already shows it in
-    // full, so there is no expansion to yield for. Measured at the card's
-    // own text width (104) this body would be 21 rows and wrongly engage.
-    expect(pendingCardMaxRows(80, 'x'.repeat(20 * 108), 106)).toBe(34);
-    // One row past the window engages the bound: (80 - 27 - 21) * 0.7.
+    expect(pendingCardMaxRows(100, undefined, 106)).toBe(51);
+    // A 14-row hook reason fits the dialog's collapsed window, yet the
+    // collapsed bound alone would budget 34 rows that paint ~49: the dialog
+    // bound charges the body too — floor((80 - 27 - 14) * 0.7) — or the
+    // outcome list falls off an 80-row viewport (R1-3).
+    expect(pendingCardMaxRows(80, 'x'.repeat(14 * 108), 106)).toBe(27);
+    // A body that fills the collapsed window (20 rows at 108 columns) is
+    // charged the same way: floor((80 - 27 - 20) * 0.7). Measured at the
+    // card's own text width (104) this body would be 21 rows — one row
+    // overcharged.
+    expect(pendingCardMaxRows(80, 'x'.repeat(20 * 108), 106)).toBe(23);
+    // One row past the window: floor((80 - 27 - 21) * 0.7).
     expect(pendingCardMaxRows(80, 'x'.repeat(21 * 108), 106)).toBe(22);
     // A ~3.9k-column hook reason wraps to 37 dialog rows; the card yields
     // enough rows for the expanded body plus the dialog chrome and the rows

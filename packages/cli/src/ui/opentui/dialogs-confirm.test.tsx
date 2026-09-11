@@ -79,7 +79,7 @@ import {
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import {
-  DIALOG_EXPANDED_RESERVE_ROWS,
+  DIALOG_CHROME_RESERVE_ROWS,
   PENDING_CARD_VIEWPORT_RESERVE_ROWS,
 } from './messages.js';
 
@@ -636,9 +636,13 @@ describe('OpenTuiToolConfirmation', () => {
     // (one per span, with each DialogSelect row's three spans counting once)
     // and add the chrome the harness cannot show: the frame's border and
     // padding (4), the body box's margins (2), and the footer's margin (1).
-    // The above-card share of DIALOG_EXPANDED_RESERVE_ROWS (banner, notices,
-    // prompt echo ≈ 12) is not reachable from a single-component render —
-    // only the dialog's own chrome is pinned here.
+    // The chrome assertion charges DIALOG_CHROME_RESERVE_ROWS — the dialog's
+    // own share of the expanded reserve. The above-card share (banner,
+    // notices, prompt echo, the card's hidden-tail and awaiting rows) is not
+    // reachable from a single-component render, and comparing against the
+    // whole sum would hand the chrome 13 rows of slack it does not have:
+    // chrome growth would push the outcome list off the viewport while this
+    // case stayed green.
     const INVISIBLE_CHROME_ROWS = 7;
     const countRows = (container: HTMLElement): number => {
       const spans = [...container.querySelectorAll('span')];
@@ -681,6 +685,6 @@ describe('OpenTuiToolConfirmation', () => {
 
     // The chrome is the whole dialog minus its one-row body.
     const chromeRows = renderInfoDialog('fits') - 1 + INVISIBLE_CHROME_ROWS;
-    expect(chromeRows).toBeLessThanOrEqual(DIALOG_EXPANDED_RESERVE_ROWS);
+    expect(chromeRows).toBeLessThanOrEqual(DIALOG_CHROME_RESERVE_ROWS);
   });
 });
