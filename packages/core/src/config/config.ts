@@ -799,8 +799,13 @@ export {
 } from './mcp-server-config.js';
 
 export interface SandboxConfig {
-  command: 'docker' | 'podman' | 'sandbox-exec';
-  image: string;
+  command: 'docker' | 'podman' | 'sandbox-exec' | 'bwrap';
+  /**
+   * Container image, required by `docker` and `podman`. The in-place backends
+   * (`sandbox-exec`, `bwrap`) confine the current process instead of starting a
+   * container, so `loadSandboxConfig` leaves this unset for them.
+   */
+  image?: string;
 }
 
 /**

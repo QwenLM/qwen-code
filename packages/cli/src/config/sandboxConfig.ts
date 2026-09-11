@@ -26,7 +26,21 @@ const VALID_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
   'docker',
   'podman',
   'sandbox-exec',
+  'bwrap',
 ];
+
+/**
+ * Backends that start a container and therefore need an image. The others
+ * confine the current process in place.
+ */
+const CONTAINER_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
+  'docker',
+  'podman',
+];
+
+function isContainerSandboxCommand(command: SandboxConfig['command']): boolean {
+  return CONTAINER_SANDBOX_COMMANDS.includes(command);
+}
 
 function isSandboxCommand(value: string): value is SandboxConfig['command'] {
   return (VALID_SANDBOX_COMMANDS as readonly string[]).includes(value);
@@ -36,6 +50,27 @@ function isSandboxCommand(value: string): value is SandboxConfig['command'] {
 // an order of magnitude of headroom. Keeping it tight matters because a wedged
 // daemon blocks startup for the full cap.
 const SANDBOX_PROBE_TIMEOUT_MS = 5_000;
+
+// `bwrap` is on PATH long before it is usable: `kernel.unprivileged_userns_clone=0`
+// or an LSM that denies `mount` both leave the binary in place and make every
+// launch fail. Only actually entering a minimal confinement proves the host can
+// run the profile, so the probe runs the same namespace-affecting flags the
+// profile uses (no `--bind`/`--chdir`: those depend on resolved roots, not on
+// host capability).
+const BWRAP_PROBE_ARGS: readonly string[] = [
+  '--ro-bind',
+  '/',
+  '/',
+  '--dev',
+  '/dev',
+  '--die-with-parent',
+  '--',
+  'true',
+];
+
+function probeArgsFor(command: SandboxConfig['command']): readonly string[] {
+  return command === 'bwrap' ? BWRAP_PROBE_ARGS : ['version'];
+}
 
 // `loadSandboxConfig` runs twice on a sandboxed startup — once for the sandbox
 // hop and once inside loadCliConfig — so selection is entered more than once
@@ -55,7 +90,9 @@ export function resetSandboxProbeCacheForTest(): void {
  * PATH. A present container CLI is not a usable one: Docker Desktop may be
  * stopped, the daemon may be unreachable, or the user may not be in the
  * `docker` group. `version` is the cheapest command that still contacts the
- * daemon, so it fails exactly when the runtime would fail later.
+ * daemon, so it fails exactly when the runtime would fail later. `bwrap` has no
+ * daemon but the same gap between presence and usability, so it is probed by
+ * entering a minimal confinement (see {@link BWRAP_PROBE_ARGS}).
  *
  * `sandbox-exec` is a kernel facility rather than a daemon-backed client, so
  * its presence on PATH is already sufficient.
@@ -81,7 +118,7 @@ function runSandboxProbe(
   command: SandboxConfig['command'],
 ): string | undefined {
   try {
-    const result = spawnSync(command, ['version'], {
+    const result = spawnSync(command, [...probeArgsFor(command)], {
       encoding: 'utf8',
       stdio: 'pipe',
       timeout: SANDBOX_PROBE_TIMEOUT_MS,
@@ -103,7 +140,11 @@ function runSandboxProbe(
     // control characters strips to '', which is falsy — return that and the
     // caller reads the broken runtime as usable, the very bug this guards.
     const stripped = firstLine ? stripAnsiAndControl(firstLine).trim() : '';
-    return stripped || `'${command} version' exited with ${result.status}`;
+    // Name what was actually run: `docker version` for the daemon clients, the
+    // bare command for bwrap (whose probe is a confinement launch, not a
+    // subcommand).
+    const probeLabel = command === 'bwrap' ? command : `${command} version`;
+    return stripped || `'${probeLabel}' exited with ${result.status}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -230,5 +271,15 @@ export async function loadSandboxConfig(
     settings.tools?.sandboxImage ??
     packageJson?.config?.sandboxImageUri;
 
-  return command && image ? { command, image } : undefined;
+  if (!command) {
+    return undefined;
+  }
+  // A container backend cannot start without an image, so a missing one still
+  // means "no sandbox" for it. The in-place backends never pull an image, and
+  // gating them on one would drop confinement the user explicitly asked for
+  // whenever the packaged image URI is unreadable — a silent fail-open.
+  if (isContainerSandboxCommand(command)) {
+    return image ? { command, image } : undefined;
+  }
+  return { command };
 }

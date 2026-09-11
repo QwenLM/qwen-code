@@ -406,12 +406,30 @@ ${taskManagementToolGuidance}- **Parallel Tool Calls:** You can call multiple to
 ${(function () {
   // Determine sandbox status based on environment variables
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
+  // The in-place Linux backends confine this process behind a read-only host
+  // root rather than running a container, and their denials read "Read-only
+  // file system" instead of "Operation not permitted" — so they need their own
+  // section rather than the container wording below.
+  const isKernelSandbox =
+    process.env['SANDBOX'] === 'bwrap' ||
+    process.env['SANDBOX'] === 'qwen-landlock-run';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (isSandboxExec) {
     return `
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
+`;
+  } else if (isKernelSandbox) {
+    const backend = process.env['SANDBOX'];
+    const partialNote =
+      process.env['SANDBOX_ENFORCEMENT'] === 'partial'
+        ? ' Enforcement is only partial on this kernel, so some operations are not governed at all.'
+        : '';
+    return `
+# Kernel Sandbox (${backend})
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY except for the project directory, the system temp directory, the Qwen configuration and runtime directories, the git directories of the current checkout, and any directories the user added explicitly.${partialNote} A refused write fails with 'Read-only file system' (EROFS) or 'Permission denied' (EACCES). Network reachability follows the configured sandbox network mode.
+When a command fails with one of those errors, treat the sandbox as the likely cause: report it to the user, name the path that was refused, and explain that they can add that path to the sandbox or run without one. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
     return `
