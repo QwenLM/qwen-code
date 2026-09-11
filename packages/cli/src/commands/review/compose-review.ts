@@ -7394,10 +7394,19 @@ function composeReviewBody(
       // public PR. The twin of this rule lives in `check-coverage`'s
       // `missingChunks` line, and the two must not wear each other's
       // message: fixing one and leaving the other is how they drift.
-      const everyOneUnlaunched = unexplainedReceipts.every(
-        (id) =>
-          chunkLedger.find((i) => i.id === id)?.classification === 'no-agent',
-      );
+      //
+      // Reads the shared set rather than spelling `no-agent` here. Measured,
+      // that is a no-op today: `blind-prompt`, `idle` and `unopened` chunks
+      // always carry their own disclosure entry, so `unexplainedReceipts`
+      // filters them out before this line and only `no-agent` and the
+      // read-something residue reach it. But that equivalence is an emergent
+      // property of two independent filters, enforced nowhere — and a
+      // definition with three homes is what let this family drift in the
+      // first place. One home, three readers.
+      const everyOneUnlaunched = unexplainedReceipts.every((id) => {
+        const cls = chunkLedger.find((i) => i.id === id)?.classification;
+        return cls !== undefined && READ_NOTHING_CLASSES.has(cls);
+      });
       notReviewedParts.push(
         coverageSealRefusedAll
           ? {

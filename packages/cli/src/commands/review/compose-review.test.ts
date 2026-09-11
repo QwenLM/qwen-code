@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
@@ -18103,6 +18104,43 @@ describe('terminalState — coverage, not verdict', () => {
     expect(r.capAxes.coverage).toContain('uncoverable-chunk');
     expect(r.terminalState).toBe('complete');
     expect(r.chunkLedger.every((i) => i.outcome === 'covered')).toBe(true);
+  });
+
+  it('states "read nothing" from ONE definition in every channel', () => {
+    // Three channels say whether a missing chunk's agents read anything —
+    // `check-coverage`'s stderr line, this body's `Not reviewed:` sentence,
+    // and `verdictLine`'s cap reason — and each once carried its own
+    // predicate. Two of them learned the distinction and the third did not,
+    // and the drift was visible inside one report.
+    //
+    // A structural assertion, not a behavioural one, because the drift is
+    // structural: a fourth channel, or a revert of one of the three to a
+    // hand-spelled `=== 'no-agent'`, is invisible to any single output.
+    // What it forbids is a literal class name being tested against a
+    // classification anywhere outside the module that owns the vocabulary.
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const file of ['check-coverage.ts', 'compose-review.ts']) {
+      const src = readFileSync(join(here, file), 'utf8');
+      const handSpelled = src
+        .split('\n')
+        .map((line, n) => [n + 1, line] as const)
+        .filter(
+          ([, line]) =>
+            /classification[^\n]*===\s*'(no-agent|blind-prompt|idle|unopened)'/.test(
+              line,
+            ) ||
+            /'(no-agent|blind-prompt|idle|unopened)'\s*===[^\n]*classification/.test(
+              line,
+            ),
+        );
+      expect({ file, handSpelled }).toEqual({ file, handSpelled: [] });
+      // ...and each file does consult the shared set, so the check above is
+      // not passing because the channel disappeared.
+      expect({ file, uses: src.includes('READ_NOTHING_CLASSES') }).toEqual({
+        file,
+        uses: true,
+      });
+    }
   });
 
   it('says the same thing in the body and the verdict line', () => {
