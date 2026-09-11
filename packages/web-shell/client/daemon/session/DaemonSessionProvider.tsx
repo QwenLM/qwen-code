@@ -139,7 +139,10 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
-import { useTurnNotificationBinding } from './turn-notification-context.js';
+import {
+  getTurnNotificationContent,
+  useTurnNotificationBinding,
+} from './turn-notification-context.js';
 import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
 import {
   createDaemonTurnNavigationStore,
@@ -197,7 +200,6 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
-  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
   unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
@@ -411,11 +413,16 @@ function materializeTranscriptHistory(
       break;
     }
   }
-  let pageBytes = 0;
-  for (const block of pageBlockList) {
-    pageBytes += estimateDaemonTranscriptBlockBytes(block);
-  }
-  const pageBlocks = pageBlockList.length;
+  const mergedBlocks = mergeTranscriptHistoryBlocks(
+    current.blocks,
+    pageBlockList,
+  );
+  const pageBytes =
+    mergedBlocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ) - current.retainedBytes;
+  const pageBlocks = mergedBlocks.length - current.blocks.length;
   // `impossible` must be evaluated across BOTH dimensions, regardless of
   // which branch rejects: a page that alone fills the whole block window can
   // never be admitted (an anchored window always retains at least one block),
@@ -454,7 +461,6 @@ function materializeTranscriptHistory(
     materialization: {
       blocks: pageBlockList,
       nextOrdinal: history.nextOrdinal,
-      retainedBytes: pageBytes,
       toolBlockByCallId: history.toolBlockByCallId,
       permissionBlockByRequestId: history.permissionBlockByRequestId,
       // History pages can carry frames recorded by newer daemon versions, exactly
@@ -463,6 +469,44 @@ function materializeTranscriptHistory(
       unrecognizedDiagnostics: history.unrecognizedDiagnostics,
     },
   };
+}
+
+function mergeTranscriptHistoryBlocks(
+  current: readonly DaemonTranscriptBlock[],
+  history: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock[] {
+  const cancellations = new Map(
+    history
+      .filter((block) => block.kind === 'prompt_cancelled' && block.promptId)
+      .map((block) => [block.promptId, block]),
+  );
+  const displayedCancelledPromptIds = new Set<string>();
+  const updated = current.map((block) => {
+    if (block.kind !== 'prompt_cancelled' || !block.promptId) return block;
+    displayedCancelledPromptIds.add(block.promptId);
+    const persisted = cancellations.get(block.promptId);
+    if (
+      persisted?.kind !== 'prompt_cancelled' ||
+      persisted.elapsedMs === undefined
+    ) {
+      return block;
+    }
+    return {
+      ...block,
+      elapsedMs: persisted.elapsedMs,
+      serverTimestamp: persisted.serverTimestamp,
+      sourceRecordIds: persisted.sourceRecordIds,
+    };
+  });
+  return [
+    ...history.filter(
+      (block) =>
+        block.kind !== 'prompt_cancelled' ||
+        !block.promptId ||
+        !displayedCancelledPromptIds.has(block.promptId),
+    ),
+    ...updated,
+  ];
 }
 
 function applyTranscriptHistory(
@@ -513,10 +557,14 @@ function applyTranscriptHistory(
     }
     permissionBlockByRequestId[requestId] = blockId;
   }
+  const blocks = mergeTranscriptHistoryBlocks(current.blocks, history.blocks);
   return {
     ...current,
-    blocks: [...history.blocks, ...current.blocks],
-    retainedBytes: current.retainedBytes + history.retainedBytes,
+    blocks,
+    retainedBytes: blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ),
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId,
     trimmedToolNotificationByCallId,
@@ -2849,7 +2897,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
-                turnNotifications.observe(activeSession, event, true);
+                turnNotifications.observe(activeSession, event, true, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    getSessionDisplayName(activeSession.state),
+                  ),
+                );
               }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
@@ -3433,6 +3487,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
                 if (
+                  event.type === 'prompt_cancelled' &&
                   uiEvent.type === 'prompt.cancelled' &&
                   (restoredActivePrompt ||
                     uiEvent.originatorClientId !== activeSession.clientId)
@@ -3533,7 +3588,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
-                turnNotifications.observe(activeSession, event);
+                turnNotifications.observe(activeSession, event, false, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    connectionRef.current.sessionId === activeSession.sessionId
+                      ? connectionRef.current.displayName
+                      : getSessionDisplayName(activeSession.state),
+                  ),
+                );
               }
               const pendingRepair = liveJournalRepairRef.current;
               if (
@@ -4471,7 +4534,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         },
         onPromptAdmitted: (owner, admission) => {
           if (sessionRef.current === owner)
-            turnNotifications.admit(owner, admission.promptId);
+            turnNotifications.admit(owner, admission.promptId, admission.label);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4969,7 +5032,10 @@ function normalizeAndFilterEvent(
   });
   const goalStatusEvent = normalizeGoalStatusEvent(event);
   if (isPromptLifecycleTurnEvent(event)) {
-    return goalStatusEvent ? [goalStatusEvent] : [];
+    const cancellation = normalized.filter(
+      (item) => item.type === 'prompt.cancelled',
+    );
+    return goalStatusEvent ? [...cancellation, goalStatusEvent] : cancellation;
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
 }

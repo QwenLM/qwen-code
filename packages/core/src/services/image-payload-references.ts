@@ -130,9 +130,7 @@ export function buildReattachParts(
   if (recent.length === 0) return [];
   return [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        recent.map((img) => `Image #${img.id}`).join(', '),
+      text: reattachContextText(recent.map((img) => img.id)),
     },
     ...recent.map(storedImageToPart),
   ];
@@ -201,9 +199,7 @@ export function prepareImagePayloadsForRequest(
 
   const reattachParts: Part[] = [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
+      text: reattachContextText([...reattachById.keys()]),
     },
     ...[...reattachById.values()].map(storedImageToPart),
   ];
@@ -333,6 +329,13 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 
 function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function reattachContextText(ids: readonly string[]): string {
+  return (
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    ids.map((id) => `Image #${id}`).join(', ')
+  );
 }
 
 function safeImageMimeType(mimeType: string): string {

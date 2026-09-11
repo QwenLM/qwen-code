@@ -67,7 +67,6 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
-import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -2916,6 +2915,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          data-at-panel-open={hasAtMenu || undefined}
           data-upload-drag-active={uploadDragActive || undefined}
           data-image-drag-active={
             (core.imageDragActive && !uploadDragActive) || undefined
@@ -3667,15 +3667,79 @@ export const ChatEditor = memo(
                                 }
                               />
                             </span>
+                            {contextWindow > 0 && tokenCount > 0 && (
+                              <span
+                                className={styles.contextUsagePercentage}
+                                data-level={getContextUsageLevel(
+                                  (tokenCount / contextWindow) * 100,
+                                )}
+                                aria-hidden="true"
+                              >
+                                {((tokenCount / contextWindow) * 100).toFixed(
+                                  1,
+                                )}
+                                %
+                              </span>
+                            )}
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent side="top">
-                          {contextWindow > 0 && tokenCount > 0
-                            ? formatContextUsageDetail(
-                                tokenCount,
-                                contextWindow,
-                              )
-                            : t('contextUsage.title')}
+                        <TooltipContent
+                          side="top"
+                          className={styles.contextTooltip}
+                          aria-label={
+                            contextWindow > 0 && tokenCount > 0
+                              ? t('contextUsage.accessibleUsage', {
+                                  used: tokenCount.toLocaleString(),
+                                  total: contextWindow.toLocaleString(),
+                                })
+                              : t('contextUsage.title')
+                          }
+                        >
+                          <div className={styles.contextTooltipHeader}>
+                            <span>{t('contextUsage.title')}</span>
+                            {contextWindow > 0 && tokenCount > 0 && (
+                              <strong>
+                                {((tokenCount / contextWindow) * 100).toFixed(
+                                  1,
+                                )}
+                                %
+                              </strong>
+                            )}
+                          </div>
+                          {contextWindow > 0 && tokenCount > 0 && (
+                            <>
+                              <div
+                                className={styles.contextTooltipMeter}
+                                aria-hidden="true"
+                              >
+                                <span
+                                  data-level={getContextUsageLevel(
+                                    (tokenCount / contextWindow) * 100,
+                                  )}
+                                  style={{
+                                    width: `${Math.min((tokenCount / contextWindow) * 100, 100)}%`,
+                                  }}
+                                />
+                              </div>
+                              <dl className={styles.contextTooltipStats}>
+                                <dt>{t('contextUsage.used')}</dt>
+                                <dd>
+                                  {tokenCount.toLocaleString()}{' '}
+                                  {t('contextUsage.tokens')}
+                                </dd>
+                                <dt>{t('contextUsage.contextWindow')}</dt>
+                                <dd>
+                                  {contextWindow.toLocaleString()}{' '}
+                                  {t('contextUsage.tokens')}
+                                </dd>
+                              </dl>
+                            </>
+                          )}
+                          {onShowContextUsage && (
+                            <div className={styles.contextTooltipHint}>
+                              {t('contextUsage.viewInConversation')}
+                            </div>
+                          )}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>

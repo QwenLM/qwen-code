@@ -243,6 +243,45 @@ describe('buildModelEntries', () => {
     expect(runtime?.model?.id).toBe('rt1');
   });
 
+  it('synthesizes the row description ink folds the markers into', () => {
+    const config = stubConfig({
+      getAllConfiguredModels: (() => [
+        { id: 'bare', label: 'Bare', authType: AuthType.USE_OPENAI },
+        {
+          id: 'rt',
+          label: 'Rt',
+          authType: AuthType.USE_OPENAI,
+          isRuntimeModel: true,
+          runtimeSnapshotId: '$runtime|openai|rt',
+        },
+        {
+          id: 'rt2',
+          label: 'Rt2',
+          authType: AuthType.USE_OPENAI,
+          description: 'Served live',
+          isRuntimeModel: true,
+          runtimeSnapshotId: '$runtime|openai|rt2',
+        },
+        { id: 'oa', label: 'Oa', authType: AuthType.QWEN_OAUTH },
+      ]) as Config['getAllConfiguredModels'],
+      getAuthType: () => AuthType.QWEN_OAUTH,
+    } as Partial<Config>);
+    const byId = new Map(
+      buildModelEntries(config, 'primary').map((entry) => [
+        entry.modelId,
+        entry.description,
+      ]),
+    );
+    // A plain row keeps no line under its title…
+    expect(byId.get('bare')).toBeUndefined();
+    // …a runtime row always gets one, and an OAuth row the switch-away notice.
+    expect(byId.get('rt')).toBe('Runtime model');
+    expect(byId.get('rt2')).toBe('Served live (Runtime)');
+    expect(byId.get('oa')).toBe(
+      'Discontinued — switch to Coding Plan or API Key',
+    );
+  });
+
   it('drops image rows the runtime cannot resolve', () => {
     const noResolver = stubConfig({
       getAllConfiguredModels: (() =>
