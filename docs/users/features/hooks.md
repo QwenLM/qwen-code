@@ -469,11 +469,11 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 
 **Exit Code Behavior (Command Hooks):**
 
-| Exit Code | Behavior                                                                              |
-| :-------- | :------------------------------------------------------------------------------------ |
-| `0`       | Success. Parse JSON in `stdout` to control behavior.                                  |
-| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model. |
-| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.           |
+| Exit Code | Behavior                                                                                                                                                                                                                                                                                                                                                                       |
+| :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
+| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
+| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
 
 **Output Structure:**
 

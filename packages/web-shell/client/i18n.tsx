@@ -2940,6 +2940,10 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
+  'turn.stoppedAfter': (v) => {
+    const seconds = v?.seconds ?? 0;
+    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
+  },
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -3785,6 +3789,7 @@ const ZH: Messages = {
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
+  'toolName.exec': '执行代码',
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
@@ -6414,6 +6419,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
+  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',

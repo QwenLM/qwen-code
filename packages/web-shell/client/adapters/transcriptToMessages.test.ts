@@ -4242,6 +4242,20 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('preserves cancellation duration for rendering', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        ...promptCancelledBlock('cancel-1', 20),
+        elapsedMs: 10999,
+        promptId: 'p1',
+      },
+    ]);
+    expect(messages[0]).toMatchObject({
+      source: 'prompt_cancelled',
+      data: { elapsedMs: 10999 },
+    });
+  });
+
   it('renders localized prompt cancellation messages', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [promptCancelledBlock('cancel-1', 20)],
