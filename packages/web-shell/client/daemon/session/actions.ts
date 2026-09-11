@@ -1120,8 +1120,13 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
         };
         options?.onAdmissionStarted?.();
-        if (inputAnnotations) {
-          promptRequest['_meta'] = { inputAnnotations };
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
@@ -1287,8 +1292,13 @@ export function createDaemonSessionActions({
       const promptRequest: Record<string, unknown> = {
         prompt: uploaded.content,
       };
-      if (inputAnnotations) {
-        promptRequest['_meta'] = { inputAnnotations };
+      if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+        promptRequest['_meta'] = {
+          ...(typeof options?.submittedPrompt === 'string'
+            ? { 'qwen.submittedPrompt': options.submittedPrompt }
+            : {}),
+          ...(inputAnnotations ? { inputAnnotations } : {}),
+        };
       }
       if (options?.retry) {
         promptRequest['retry'] = true;

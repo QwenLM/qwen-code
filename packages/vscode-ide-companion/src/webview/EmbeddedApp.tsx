@@ -419,7 +419,6 @@ export function EmbeddedApp() {
   const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
-  const previousActiveFilePathRef = useRef<string | undefined>(undefined);
   const daemonBaseUrl = runtime?.baseUrl;
   const daemonToken = runtime?.token;
   const daemonClient = useMemo(
@@ -954,16 +953,8 @@ export function EmbeddedApp() {
             filePath: data.filePath,
             selection: data.selection,
           });
-          // The host fires this on every selection change, including plain
-          // cursor moves; only an actual file change may re-arm inclusion,
-          // or a click silently undoes the user's explicit exclusion.
-          if (previousActiveFilePathRef.current !== data.filePath) {
-            setIncludeActiveFile(true);
-          }
-          previousActiveFilePathRef.current = data.filePath;
         } else {
           setActiveFile(undefined);
-          previousActiveFilePathRef.current = undefined;
         }
       } else if (
         message.type === 'modeChanged' ||
@@ -1617,8 +1608,15 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               const snapshot =
                 editingMessage.turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
@@ -1634,10 +1632,14 @@ export function EmbeddedApp() {
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
+              try {
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  clientId: runtime.clientId,
+                  rewindFiles: false,
+                });
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               setEditingMessage(undefined);
               clearInsight();
             }
