@@ -222,6 +222,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -453,6 +454,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -649,9 +651,10 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         // Not the primary model id: the search runs on the documented
         // search model at the same endpoint.
-        modelId: 'qwen3.6-plus',
+        modelId: 'qwen3.8-flash',
         apiKeyEnvKey: STANDARD.envKey,
         baseUrl: STANDARD.baseUrl,
         webExtractor: true,
@@ -668,7 +671,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend.baseUrl).toBe(TOKEN_PLAN.baseUrl);
-      expect(gate.backend.modelId).toBe('qwen3.6-plus');
+      expect(gate.backend.modelId).toBe('qwen3.8-flash');
     }
   });
 
@@ -1240,7 +1243,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
       }),
     );
     expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.6-plus');
+    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.8-flash');
   });
 
   it('stays silently off instead of throwing when the config surface is incomplete', () => {

@@ -141,6 +141,93 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
+  it('waits for the primary workspace before mounting an initial session', async () => {
+    const capabilities = mocks.workspace.capabilities;
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'connecting',
+      capabilities: undefined,
+    };
+    const renderSession = () =>
+      act(async () => {
+        root.render(
+          <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+        );
+      });
+
+    await renderSession();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'connected',
+      capabilities,
+    };
+    await renderSession();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+    });
+  });
+
+  it('shows a retry when initial session workspace discovery fails', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain(
+      'The workspace service could not be reached.',
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => retry?.click());
+    expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      language: 'en',
+      guidance:
+        'The workspace service could not be reached. Check the daemon and try again.',
+    },
+    {
+      language: 'zh-CN',
+      guidance: '无法连接工作区服务，请检查守护进程后重试。',
+    },
+  ] as const)(
+    'shows guidance and the discovery error in $language',
+    async ({ language, guidance }) => {
+      mocks.workspace = {
+        ...mocks.workspace,
+        status: 'error',
+        capabilities: undefined,
+        error: new Error('502 Daemon restarting'),
+      };
+      await act(async () => {
+        root.render(
+          <WorkspaceSessionProvider
+            sessionId="session-a"
+            webShellProps={{ language }}
+          />,
+        );
+      });
+      expect(mocks.providerMounts).toBe(0);
+      expect(container.textContent).toContain('502 Daemon restarting');
+      expect(container.textContent).toContain(guidance);
+    },
+  );
+
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     const app = container.querySelector('output');
@@ -390,12 +477,10 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
-  it('does not remount when an unknown daemon resolves as modern', async () => {
+  it('keeps an empty composer mounted while discovering the workspace', async () => {
     mocks.workspace = { ...mocks.workspace, capabilities: undefined };
     await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
-      );
+      root.render(<WorkspaceSessionProvider webShellProps={{}} />);
     });
     expect(mocks.providerMounts).toBe(1);
 
@@ -408,9 +493,7 @@ describe('WorkspaceSessionProvider targets', () => {
       },
     };
     await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
-      );
+      root.render(<WorkspaceSessionProvider webShellProps={{}} />);
     });
 
     expect(mocks.providerMounts).toBe(1);

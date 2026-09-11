@@ -165,7 +165,7 @@ export class SkillCommandLoader implements ICommandLoader {
             // Skill tool does when the model invokes it. Registering only the
             // allowedTools here let a skill's PreToolUse gate silently fail
             // open on this path (#11067).
-            applySkillSideEffects(this.config, skill);
+            await applySkillSideEffects(this.config, skill);
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

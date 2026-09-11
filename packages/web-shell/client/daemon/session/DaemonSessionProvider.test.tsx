@@ -154,6 +154,7 @@ interface MockSession {
 interface MockClient {
   createOrAttachSession: (req: unknown) => Promise<MockSession>;
   capabilities: () => Promise<unknown>;
+  brand: () => Promise<unknown>;
   workspaceProviders: () => Promise<unknown>;
   listWorkspaceSessions: () => Promise<unknown[]>;
   listStandaloneSessions: () => Promise<unknown[]>;
@@ -223,6 +224,7 @@ const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
   const daemonClientOptions: unknown[] = [];
   const capabilities = vi.fn();
+  const brand = vi.fn();
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const listStandaloneSessions = vi.fn();
@@ -271,6 +273,7 @@ const sdkMocks = vi.hoisted(() => {
       MockDaemonSessionClient.createOrAttach(this, req),
     );
     capabilities = capabilities;
+    brand = brand;
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     listStandaloneSessions = listStandaloneSessions;
@@ -360,6 +363,7 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     daemonClientOptions,
     capabilities,
+    brand,
     workspaceProviders,
     workspaceSkills,
     workspaceConfigSkills,
@@ -388,6 +392,8 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         features: [],
       });
+      brand.mockReset();
+      brand.mockResolvedValue({});
       workspaceProviders.mockReset();
       workspaceProviders.mockResolvedValue({
         v: 1,
@@ -2262,6 +2268,98 @@ describe('DaemonSessionProvider', () => {
       sessionContext: { kind: 'workspace', cwd: '/private/tmp' },
       workspaceCwd: '/private/tmp',
     });
+  });
+
+  it('forwards the host source type on workspace session restore', async () => {
+    // The VS Code companion claims its pre-attribution sessions back through
+    // this: the daemon fills in missing source metadata from the restore
+    // request instead of leaving the session invisible to the host's catalog.
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'legacy-unattributed',
+        workspaceCwd: '/mock-workspace',
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionSourceType: 'vscode',
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('legacy-unattributed');
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'legacy-unattributed',
+      {
+        workspaceCwd: '/mock-workspace',
+        timeoutMs: 70_000,
+        sourceType: 'vscode',
+      },
+      expect.any(String),
+    );
+  });
+
+  it('omits restore-time attribution for standalone sessions', async () => {
+    // BridgeStandaloneRestoreSessionRequest deliberately omits sourceType; the
+    // host's restore-time attribution must not leak into that path.
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-target',
+        workspaceCwd: '/private/standalone-target',
+        session: {
+          sessionId: 'standalone-target',
+          workspaceCwd: '/private/standalone-target',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-target',
+          workingDirectory: { state: 'ready' },
+        },
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+      sessionSourceType: 'vscode',
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('standalone-target', {
+        sessionContext: { kind: 'standalone' },
+      });
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'standalone-target',
+      expect.not.objectContaining({ sourceType: expect.anything() }),
+      expect.any(String),
+    );
   });
 
   it('does not inherit a failed controlled target in a baseUrl-only provider', async () => {
@@ -5377,6 +5475,142 @@ describe('DaemonSessionProvider', () => {
       ),
     ).toBe(false);
   });
+
+  it('preserves the Plan execution mode when prompt restart reuses metadata', async () => {
+    const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const turnEvents = createTurnCompleteEvents(turnComplete);
+    const events = vi.fn(async function* planEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 2) secondSubscriptionStarted.resolve();
+      yield* turnEvents(opts);
+    });
+    const session = createMockSession({
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {
+          modes: {
+            currentModeId: 'plan',
+            _meta: { planExecutionMode: 'yolo' },
+          },
+        },
+      })),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      restartEventStreamOnPrompt: true,
+    });
+    expect(connection).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+    const contextCalls = vi.mocked(session.context).mock.calls.length;
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('execute the plan');
+      await secondSubscriptionStarted.promise;
+    });
+    const connectionAfterRestart = connection;
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
+    expect(session.context).toHaveBeenCalledTimes(contextCalls);
+    turnComplete.resolve();
+    await act(async () => {
+      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+    expect(connectionAfterRestart).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+  });
+
+  it.each([
+    ['rejected', 'default'],
+    ['missing modes', 'plan'],
+  ])(
+    'preserves live Plan policy when context is %s and workspace mode is %s',
+    async (contextResult, workspaceMode) => {
+      sdkMocks.workspaceProviders.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        approvalMode: workspaceMode,
+        providers: [],
+      });
+      const restart = createDeferred<void>();
+      const reconnected = createDeferred<void>();
+      const idleEvents = createIdleEvents();
+      const events = vi.fn(async function* reconnectEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        if (events.mock.calls.length === 1) {
+          await restart.promise;
+          return;
+        }
+        reconnected.resolve();
+        yield* idleEvents(opts);
+      });
+      const session = createMockSession({ events });
+      vi.mocked(session.context).mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        workspaceCwd: session.workspaceCwd,
+        state: {
+          modes: {
+            currentModeId: 'plan',
+            _meta: { planExecutionMode: 'yolo' },
+          },
+        },
+      });
+      if (contextResult === 'rejected') {
+        vi.mocked(session.context).mockRejectedValue(
+          new Error('context failed'),
+        );
+      }
+      sdkMocks.sessions.push(session);
+      let connection: DaemonConnectionState | undefined;
+
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      expect(connection).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await act(async () => {
+        restart.resolve();
+        await reconnected.promise;
+      });
+      expect(session.context).toHaveBeenCalledTimes(2);
+      expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(2);
+      expect(connection).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+    },
+  );
 
   it('restarts the event stream when aborting the subscription throws', async () => {
     const turnComplete = createDeferred<void>();

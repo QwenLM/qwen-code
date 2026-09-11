@@ -36,6 +36,7 @@ export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
   applySkillSideEffects,
+  ReviewWorkflowActivationError,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -497,8 +498,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * live) suspends the already-applied hooks and allow rules without a
    * restart, and a trust granted again restores them.
    */
-  private applySideEffects(skill: SkillConfig): void {
-    applySkillSideEffects(this.config, skill);
+  private async applySideEffects(skill: SkillConfig): Promise<void> {
+    await applySkillSideEffects(this.config, skill);
   }
 
   private async recordAutoSkillUsageBestEffort(
@@ -714,6 +715,24 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
 
+      // Re-evaluated on every invocation, not just the first load: folder
+      // trust can be granted mid-session (IDE trust notifications flip it
+      // live), and a project skill first invoked while untrusted must not
+      // stay side-effect-less for the rest of the session. Both grants
+      // dedup, so re-applying is idempotent.
+      let activationWarning = '';
+      try {
+        await this.applySideEffects(skill);
+      } catch (error) {
+        if (
+          !(error instanceof ReviewWorkflowActivationError) ||
+          !this.isSkillLoaded(this.params.skill)
+        ) {
+          throw error;
+        }
+        activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
+      }
+
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
       // returns the full skill body; subsequent invocations return a
@@ -722,14 +741,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
-        // Re-evaluated on every invocation, not just the first load: folder
-        // trust can be granted mid-session (IDE trust notifications flip it
-        // live), and a project skill first invoked while untrusted must not
-        // stay side-effect-less for the rest of the session. Both grants
-        // dedup, so re-applying is idempotent.
-        this.applySideEffects(skill);
         void this.recordAutoSkillUsageBestEffort(skill);
-        const msg = `Skill "${this.params.skill}" is already loaded in context.`;
+        const msg = `Skill "${this.params.skill}" is already loaded in context.${activationWarning}`;
         return {
           llmContent: msg,
           returnDisplay: msg,
@@ -739,7 +752,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent);
-      this.applySideEffects(skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

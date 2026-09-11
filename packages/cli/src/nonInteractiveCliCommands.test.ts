@@ -10,7 +10,6 @@ import {
   handleSlashCommand,
 } from './nonInteractiveCliCommands.js';
 import {
-  __resetActiveGoalStoreForTests,
   createGoalRuntime,
   type ChatRecord,
   type Config,
@@ -81,7 +80,6 @@ describe('handleSlashCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
     const goalRuntime = createGoalRuntime({ journal: createJournal() });
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -135,7 +133,6 @@ describe('handleSlashCommand', () => {
 
   afterEach(() => {
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
   });
 
   it('should return no_command for non-slash input', async () => {
