@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
 import { getPty } from '../utils/getPty.js';
 import {
   disposeConoutWorker,
@@ -234,6 +235,7 @@ export class WebTerminalRegistry {
     delete env['NO_COLOR'];
     delete env['FORCE_COLOR'];
     delete env['npm_config_prefix'];
+    const useBundledConpty = os.platform() === 'win32';
     let spawned: SpawnedWebTerminalPty;
     let proc: WebTerminalPty;
     const sessionRef: { current?: PtySession } = {};
@@ -280,8 +282,11 @@ export class WebTerminalRegistry {
       // Nothing needs the PTY once the shell is gone: write() and resize()
       // already short-circuit on `exited`, and readSnapshot() replays the
       // JS-side `buffer`, not the console. Waiting for release() instead left
-      // every exited web terminal holding node-pty's conout worker — and,
-      // upstream, its conhost.exe — for up to IDLE_RECLAIM_MS, because the
+      // every exited web terminal holding node-pty's conout worker — and, on
+      // the inbox ConPTY backend, its conhost.exe (microsoft/node-pty#965);
+      // the bundled backend this registry now spawns with releases its host
+      // reference at spawn, so the conhost half survives only on the inbox
+      // retry fallback — for up to IDLE_RECLAIM_MS, because the
       // route keeps the session alive for scrollback and the client treats the
       // 4000 close as non-retryable, so only a tab close releases it. Exited
       // sessions also do not count against the admission cap, so accumulation
@@ -297,8 +302,8 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
-    try {
-      spawned = ptyImpl.module.spawn(file, args, {
+    const spawnPty = (useBundled: boolean) =>
+      ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,
@@ -310,7 +315,26 @@ export class WebTerminalRegistry {
           CLICOLOR: '1',
           PROMPT_EOL_MARK: '',
         },
-      }) as SpawnedWebTerminalPty;
+        // Windows: with the inbox ConPTY backend a natural shell exit orphans
+        // the `conhost.exe --headless` it spawned (microsoft/node-pty#965);
+        // the bundled backend releases its host reference right after spawn.
+        // Mirrors the #11497 shell path. Off Windows the option is inert:
+        // `useConptyDll` appears nowhere in the POSIX prebuilds.
+        useConptyDll: useBundled,
+      });
+    try {
+      try {
+        spawned = spawnPty(useBundledConpty) as SpawnedWebTerminalPty;
+      } catch (firstError) {
+        // The bundled backend adds a synchronous throw point: its conpty.dll
+        // missing or unloadable. A web terminal has no child_process
+        // fallback, so retry once on the inbox backend — the pre-fix leaking
+        // behavior beats a terminal that cannot start at all. A failed spawn
+        // produced no child process, so the retry cannot double-spawn (the
+        // `ptySpawned` argument from #11497).
+        if (!useBundledConpty) throw firstError;
+        spawned = spawnPty(false) as SpawnedWebTerminalPty;
+      }
       dataDisposable = spawned.onData(handleData);
       exitDisposable = spawned.onExit(handleExit);
       proc = {

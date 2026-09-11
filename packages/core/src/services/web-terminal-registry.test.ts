@@ -15,8 +15,9 @@ const { spawn, getPty, spawnSync, osPlatform } = vi.hoisted(() => ({
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
-// Only conpty-host reads os.platform(); killPtyTree branches on
-// process.platform, so this steers the ConPTY release without touching it.
+// conpty-host reads os.platform() for its win32 release gate, and the
+// registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
+// branches on process.platform, so this steers both without touching it.
 // Windows CI is skipped on PRs, so the win32 path has to be reachable here.
 // Everything else passes through -- Storage (via debugLogger) needs the real
 // os.homedir()/os.tmpdir().
@@ -43,6 +44,31 @@ describe('WebTerminalRegistry', () => {
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
 
+  const createSpawnedPty = () => ({
+    pid: 1,
+    write,
+    resize,
+    kill,
+    // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
+    // directly instead of going through kill(). See #11303.
+    _agent: {
+      _pty: 42,
+      _useConptyDll: false,
+      _ptyNative: { kill: nativeKill },
+      _conoutSocketWorker: { dispose: conoutDispose },
+    },
+    onData: vi.fn((listener: (data: string) => void) => {
+      onData = listener;
+      return { dispose: disposeData };
+    }),
+    onExit: vi.fn(
+      (listener: (e: { exitCode: number; signal?: number }) => void) => {
+        onExit = listener;
+        return { dispose: disposeExit };
+      },
+    ),
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     write = vi.fn();
@@ -54,28 +80,7 @@ describe('WebTerminalRegistry', () => {
     disposeExit = vi.fn();
     spawnSync.mockReturnValue({ stdout: '' });
     osPlatform.mockReturnValue(process.platform);
-    spawn.mockReturnValue({
-      pid: 1,
-      write,
-      resize,
-      kill,
-      // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
-      // directly instead of going through kill(). See #11303.
-      _agent: {
-        _pty: 42,
-        _useConptyDll: false,
-        _ptyNative: { kill: nativeKill },
-        _conoutSocketWorker: { dispose: conoutDispose },
-      },
-      onData: vi.fn((listener) => {
-        onData = listener;
-        return { dispose: disposeData };
-      }),
-      onExit: vi.fn((listener) => {
-        onExit = listener;
-        return { dispose: disposeExit };
-      }),
-    });
+    spawn.mockImplementation(() => createSpawnedPty());
     getPty.mockResolvedValue({ module: { spawn }, name: 'node-pty' });
   });
 
@@ -200,6 +205,9 @@ describe('WebTerminalRegistry', () => {
   });
 
   it('returns stable errors when PTY loading or spawning fails', async () => {
+    // Pin off Windows: on win32 a failed bundled spawn retries once on the
+    // inbox backend — covered by the bundled-backend cases below.
+    osPlatform.mockReturnValue('linux');
     const registry = new WebTerminalRegistry();
     getPty.mockResolvedValueOnce(null);
     await expect(
@@ -212,6 +220,122 @@ describe('WebTerminalRegistry', () => {
     await expect(
       registry.create({ workspaceCwd: '/workspace' }),
     ).resolves.toEqual({ error: 'Failed to spawn shell' });
+  });
+
+  it('spawns Windows terminals with the bundled ConPTY backend', async () => {
+    // Mirrors the shellExecutionService bundled-backend case: the inbox
+    // backend orphans a `conhost.exe --headless` per natural shell exit
+    // (microsoft/node-pty#965), so Windows terminals must spawn with the
+    // bundled backend. Hardcoding `useConptyDll: false` turns this red.
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+
+    await registry.create({
+      terminalId: 'terminal:bundled',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: true });
+  });
+
+  it('spawns non-Windows terminals without the bundled backend', async () => {
+    osPlatform.mockReturnValue('linux');
+    const registry = new WebTerminalRegistry();
+
+    await registry.create({
+      terminalId: 'terminal:posix-backend',
+      workspaceCwd: '/workspace',
+    });
+
+    // Inert on the POSIX prebuilds, but pinned so the option stays a
+    // deliberate platform branch rather than an unconditional `true`.
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: false });
+  });
+
+  it('retries a failed bundled spawn once on the inbox backend', async () => {
+    // The bundled backend throws synchronously when its conpty.dll is missing
+    // or unloadable; a web terminal has no child_process fallback, so the
+    // registry drops to the pre-fix inbox behavior rather than fail the
+    // terminal outright. Deleting the retry branch in create() turns this
+    // red.
+    osPlatform.mockReturnValue('win32');
+    spawn.mockImplementationOnce(() => {
+      throw new Error('Failed to load conpty.dll, error code: 126');
+    });
+    const registry = new WebTerminalRegistry();
+
+    const created = await registry.create({
+      terminalId: 'terminal:bundled-retry',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(created).toEqual({ terminalId: 'terminal:bundled-retry' });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ useConptyDll: true });
+    expect(spawn.mock.calls[1]?.[2]).toMatchObject({ useConptyDll: false });
+    // The retried PTY is fully wired: output reaches the session buffer.
+    onData('ready');
+    expect(registry.readSnapshot('terminal:bundled-retry')?.output).toBe(
+      'ready',
+    );
+  });
+
+  it('reports a spawn failure and frees the id when both backends fail', async () => {
+    osPlatform.mockReturnValue('win32');
+    spawn.mockImplementation(() => {
+      throw new Error('spawn failed');
+    });
+    const registry = new WebTerminalRegistry();
+
+    await expect(
+      registry.create({
+        terminalId: 'terminal:bundled-double-fail',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toEqual({ error: 'Failed to spawn shell' });
+    expect(spawn).toHaveBeenCalledTimes(2);
+
+    // finishCreating ran on the failure path: the same id is creatable again
+    // instead of being stuck on "is being created".
+    spawn.mockImplementation(() => createSpawnedPty());
+    await expect(
+      registry.create({
+        terminalId: 'terminal:bundled-double-fail',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toEqual({ terminalId: 'terminal:bundled-double-fail' });
+  });
+
+  it('frees a bundled-shape session once across kill and exit-time release', async () => {
+    osPlatform.mockReturnValue('win32');
+    // Bundled ConPTY shape: the host reference was released at spawn, so the
+    // native close is only reachable through kill(); the noted release must
+    // skip a second close yet still dispose the conout worker, which node-pty
+    // otherwise defers until more output that never comes. Mirrors the shell
+    // path's bundled cancel case in shellExecutionService.test.ts.
+    spawn.mockImplementationOnce(() => {
+      const pty = createSpawnedPty();
+      pty._agent._useConptyDll = true;
+      return pty;
+    });
+    kill.mockImplementation(() => {
+      nativeKill(42, true);
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:bundled-exit-release',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(registry.release('terminal:bundled-exit-release')).toBe(true);
+    onExit({ exitCode: 0 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(kill).toHaveBeenCalledOnce();
+    // kill()'s own close is the only native close: the noted bundled release
+    // adds none, and the exit-time release is a no-op after it.
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
   });
 
   it('caps replay output and records exit state', async () => {
