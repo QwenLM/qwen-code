@@ -24,6 +24,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { SkillToggleBlock } from '../../config/skill-settings.js';
 import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import type {
   PermissionRuleType,
@@ -368,6 +369,12 @@ export interface WorkspaceSkillToggleResult {
   skillName: string;
   enabled: boolean;
   changed: boolean;
+  /**
+   * The settings entry that forbids the toggle from taking effect, when the
+   * write was refused for one. A client that flips its row optimistically
+   * must read this or it shows an enable the config still denies.
+   */
+  block?: SkillToggleBlock;
   activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
@@ -399,6 +406,8 @@ export interface WorkspaceSkillBatchToggleResult {
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
+  /** Set with `changed: false` when a standing entry refused the write. */
+  block?: SkillToggleBlock;
   settingsChanges?: Array<{
     key: 'skills.disabled' | 'skills.enabled';
     value: string[] | undefined;

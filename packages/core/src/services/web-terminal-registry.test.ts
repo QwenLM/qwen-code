@@ -69,7 +69,20 @@ describe('WebTerminalRegistry', () => {
       },
       onData: vi.fn((listener) => {
         onData = listener;
-        return { dispose: disposeData };
+        // Capture this session's spy by value: the describe-scope `disposeData`
+        // variable is reassigned every test, and a deferred exit-time release
+        // from a previous session may fire during a later test — it must hit
+        // its own spy, not the current one. Same reason the detach guard
+        // checks listener identity before clearing the shared `onData`.
+        const disposeDataSpy = disposeData;
+        return {
+          // Model node-pty's disposable detaching the listener, so a test can
+          // tell a synchronous dispose apart from the deferred one.
+          dispose: () => {
+            if (onData === listener) onData = () => {};
+            disposeDataSpy();
+          },
+        };
       }),
       onExit: vi.fn((listener) => {
         onExit = listener;
@@ -481,6 +494,32 @@ describe('WebTerminalRegistry', () => {
     expect(disposeExit).toHaveBeenCalledOnce();
     expect(kill).not.toHaveBeenCalled();
     expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it('lets output queued behind onExit reach the scrollback before the release', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-trailing',
+      workspaceCwd: '/workspace',
+    });
+
+    // The release is deferred one tick after onExit so a trailing onData
+    // queued in the same turn still lands in the scrollback first. The
+    // assertion between the two calls is what pins the defer: a synchronous
+    // release has already disposed the data listener before the tail arrives.
+    // The fake's detach on dispose models node-pty and loses that tail too,
+    // but no signal in this test depends on it any more.
+    onExit({ exitCode: 0 });
+    expect(disposeData).not.toHaveBeenCalled();
+    onData('trailing');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(registry.readSnapshot('terminal:exit-trailing')).toMatchObject({
+      output: 'trailing',
+      exited: true,
+    });
   });
 
   it('forwards live output and bounds unacknowledged PTY input', async () => {
