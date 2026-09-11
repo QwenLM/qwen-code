@@ -164,6 +164,7 @@ import {
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
+import { ToolDetailsExpandedProvider } from './contexts/ToolDetailsExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -188,10 +189,7 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import {
-  detectWorkflowKeyword,
-  buildWorkflowSteeringNotice,
-} from './utils/workflow-keyword.js';
+import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
@@ -965,6 +963,18 @@ export const AppContainer = (props: AppContainerProps) => {
       } else {
         next.add(headId);
       }
+      return next;
+    });
+  }, []);
+
+  const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set<string>());
+  const expandToolBatch = useCallback((batchId: string) => {
+    setExpandedToolBatchIds((prev) => {
+      if (prev.has(batchId)) return prev;
+      const next = new Set(prev);
+      next.add(batchId);
       return next;
     });
   }, []);
@@ -3162,14 +3172,19 @@ export const AppContainer = (props: AppContainerProps) => {
         // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
         // break the BTW routing check below (which tests `submittedValue`),
         // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText) &&
-        detectWorkflowKeyword(userPromptText)
+        !isBtwCommand(userPromptText)
       ) {
-        setWorkflowKeywordActive(true);
-        logWorkflowKeyword(config, new WorkflowKeywordEvent());
-        submittedValue =
-          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
-          submittedValue;
+        // A `null` result means no reminder for this submission: the keyword
+        // is absent, the Workflow tool is not in this session, or this is a
+        // shell-mode command, which goes to bash rather than to the model.
+        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
+          shellMode: shellModeActive,
+        });
+        if (prefix) {
+          setWorkflowKeywordActive(true);
+          logWorkflowKeyword(config, new WorkflowKeywordEvent());
+          submittedValue = prefix + submittedValue;
+        }
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
@@ -5496,6 +5511,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
+  const toolDetailsExpandedValue = useMemo(
+    () => ({
+      expandedBatchIds: expandedToolBatchIds,
+      expandBatch: expandToolBatch,
+    }),
+    [expandedToolBatchIds, expandToolBatch],
+  );
+
   return (
     <VirtualViewportContext.Provider value={useTerminalBuffer}>
       <UIStateContext.Provider value={uiState}>
@@ -5508,17 +5531,19 @@ export const AppContainer = (props: AppContainerProps) => {
               }}
             >
               <ThoughtExpandedProvider value={thoughtExpandedValue}>
-                <RenderModeProvider value={renderModeValue}>
-                  <TerminalOutputProvider value={writeRaw}>
-                    <ShellFocusContext.Provider value={isFocused}>
-                      <ContextMenuProvider
-                        onMenuChange={handleContextMenuChange}
-                      >
-                        <App />
-                      </ContextMenuProvider>
-                    </ShellFocusContext.Provider>
-                  </TerminalOutputProvider>
-                </RenderModeProvider>
+                <ToolDetailsExpandedProvider value={toolDetailsExpandedValue}>
+                  <RenderModeProvider value={renderModeValue}>
+                    <TerminalOutputProvider value={writeRaw}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        <ContextMenuProvider
+                          onMenuChange={handleContextMenuChange}
+                        >
+                          <App />
+                        </ContextMenuProvider>
+                      </ShellFocusContext.Provider>
+                    </TerminalOutputProvider>
+                  </RenderModeProvider>
+                </ToolDetailsExpandedProvider>
               </ThoughtExpandedProvider>
             </AppContext.Provider>
           </ConfigContext.Provider>

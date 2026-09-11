@@ -31,6 +31,11 @@ const mocks = vi.hoisted(() => {
     sidecarRejects: false,
     cleanups: [] as Array<() => void | Promise<void>>,
     stderrLines: [] as string[],
+    /** Records the warm-up/renderer order — the warm-up only fixes the
+     * web-tree-sitter UMD probe if it wins the race against the renderer
+     * constructor installing `globalThis.window`. */
+    bootOrder: [] as string[],
+    warmupRejects: false,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -60,7 +65,10 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('@opentui/core', () => ({
-  createCliRenderer: vi.fn(async () => mocks.state.renderer),
+  createCliRenderer: vi.fn(async () => {
+    mocks.state.bootOrder.push('renderer');
+    return mocks.state.renderer;
+  }),
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
 }));
@@ -72,6 +80,17 @@ vi.mock('@opentui/react', () => ({
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
+// Only the warm-up entry point is replaced: the real one pulls in the
+// tree-sitter WASM runtime, which this contract test has no use for.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  initShellAstParser: () => {
+    mocks.state.bootOrder.push('warmup');
+    return mocks.state.warmupRejects
+      ? Promise.reject(new Error('wasm unavailable'))
+      : Promise.resolve();
+  },
+}));
 vi.mock('./opentui-runtime.js', () => ({
   OpenTuiRuntime: {
     create: vi.fn(() => mocks.state.runtime),
@@ -85,6 +104,8 @@ vi.mock('./live-turn.js', () => ({
   useOpenTuiLiveTurn: () => ({
     items: [],
     streaming: false,
+    streamingCharsRef: { current: 0 },
+    isReceivingContent: false,
     waitingCalls: [],
     queueLength: 0,
     popQueue: () => null,
@@ -163,6 +184,8 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.sidecarRejects = false;
     mocks.state.cleanups = [];
     mocks.state.stderrLines = [];
+    mocks.state.bootOrder = [];
+    mocks.state.warmupRejects = false;
     mocks.state.renderer.destroy.mockClear();
     mocks.state.root.unmount.mockClear();
     mocks.state.root.render.mockClear();
@@ -273,5 +296,33 @@ describe('startOpenTuiUI fallback contract', () => {
     ).toBe(true);
     expect(mocks.state.stderrLines).toEqual([]);
     expect(renderedInitialDialog()).toBeNull();
+  });
+
+  it('warms the shell AST parser before the renderer is created', async () => {
+    expect(
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(mocks.state.bootOrder).toEqual(['warmup', 'renderer']);
+  });
+
+  it('still boots when the shell AST warm-up fails', async () => {
+    mocks.state.warmupRejects = true;
+    expect(
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(mocks.state.bootOrder).toEqual(['warmup', 'renderer']);
+    expect(mocks.state.stderrLines).toHaveLength(0);
   });
 });

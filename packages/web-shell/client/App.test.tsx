@@ -8,6 +8,9 @@ import {
   type ReactNode,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
+import * as browserNotifications from './browser-turn-notifications';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -32,6 +35,7 @@ import {
 import type { WebShellApi } from './App';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
+import type { TurnOutputOpenRequest } from './components/artifacts/TurnOutputs';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -354,6 +358,9 @@ const {
       generatedAt: '2026-08-26T00:00:00.000Z',
       limits: { maxArtifacts: 100 },
     }),
+    readSessionArtifactContent: vi
+      .fn()
+      .mockResolvedValue('<h1>Saved version</h1>'),
     sessionStats: vi.fn().mockResolvedValue({}),
     sessionContextUsage: vi.fn().mockResolvedValue({}),
     sessionTaskCancel: vi.fn().mockResolvedValue({ cancelled: true }),
@@ -583,6 +590,7 @@ const {
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
       latestMessageListProps: null as {
+        onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -1124,7 +1132,9 @@ vi.mock('./components/TranscriptViewport', async () => {
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       testState.latestMessageListProps = props;
-      React.useImperativeHandle(ref, () => ({ scrollToBottom: vi.fn() }));
+      React.useImperativeHandle(ref, () => ({
+        scrollToBottom: notificationScrollToBottom,
+      }));
       return React.createElement(
         'div',
         { 'data-testid': 'messages' },
@@ -3631,6 +3641,295 @@ describe('task activity key', () => {
     expect(
       mockWorkspace.client.getSessionTranscriptPage,
     ).not.toHaveBeenCalled();
+  });
+
+  it.each(['workspace', 'standalone', 'live'] as const)(
+    'uses a restorable panel kind for published webpages in %s sessions',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockConnection.workspaceCwd = kind === 'workspace' ? '/tmp/project' : '';
+      mockConnection.capabilities.features = ['session_artifacts'];
+      const artifact: DaemonSessionArtifact = {
+        id: 'published-page',
+        kind: 'html',
+        storage: 'published',
+        source: 'tool',
+        toolName: 'Artifact',
+        status: 'available',
+        title: 'Published webpage',
+        url: 'https://preview.example/report.html',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+      };
+      mockSessionActions.loadArtifacts.mockResolvedValue({
+        artifacts: [artifact],
+      });
+      const props = { rightPanel: { items: ['webPreview'] as const } };
+      const first = renderApp(props);
+      await flush();
+      expect(testState.latestMessageListProps?.onTurnOutputOpen).toBeTypeOf(
+        'function',
+      );
+      await act(async () => {
+        testState.latestMessageListProps!.onTurnOutputOpen!({
+          kind: 'artifact',
+          id: 'artifact:published-page',
+          artifactId: artifact.id,
+          title: artifact.title,
+          artifact,
+          sourceSessionId: 'session-1',
+          turnId: 'turn-1',
+        });
+      });
+      await flush();
+      expect(
+        first.container.querySelector('[data-web-shell-web-preview]') !== null,
+      ).toBe(kind === 'workspace');
+      expect(
+        first.container.querySelector('[role="tab"]')?.textContent,
+      ).toContain(artifact.title);
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+      ).toContain(
+        `"kind":"${kind === 'workspace' ? 'web_preview' : 'artifact'}"`,
+      );
+      act(() => first.unmount());
+      const restored = renderApp(props);
+      await flush();
+      await flush();
+      expect(
+        restored.container.querySelector('[data-web-shell-web-preview]') !==
+          null,
+      ).toBe(kind === 'workspace');
+      expect(
+        restored.container.querySelector('[role="tab"]')?.textContent,
+      ).toContain(artifact.title);
+      if (kind !== 'workspace') {
+        expect(restored.container.textContent).toContain(
+          'This workspace may have been removed or the link is no longer valid.',
+        );
+        expect(
+          window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+        ).not.toContain('"kind":"web_preview"');
+      }
+    },
+  );
+
+  it.each(['workspace', 'standalone', 'live'] as const)(
+    'opens a saved webpage version from its card in %s sessions',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockConnection.workspaceCwd = kind === 'workspace' ? '/tmp/project' : '';
+      mockConnection.capabilities.features = ['session_artifacts'];
+      const artifact: DaemonSessionArtifact = {
+        id: 'saved-page-v1',
+        kind: 'html',
+        storage: 'published',
+        source: 'tool',
+        toolName: 'Artifact',
+        status: 'available',
+        title: 'Saved page v1',
+        url: 'file:///runtime/artifacts/snapshots/8c5e8dc7-4d9c-4a52-a703-7391e9b42dad/index.html',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          publishedUrl: 'https://preview.example/report.html',
+        },
+      };
+      mockSessionActions.loadArtifacts.mockResolvedValue({
+        artifacts: [artifact],
+      });
+      const props = { rightPanel: { items: ['webPreview'] as const } };
+      const first = renderApp(props);
+      await flush();
+      expect(testState.latestMessageListProps?.onTurnOutputOpen).toBeTypeOf(
+        'function',
+      );
+      await act(async () => {
+        testState.latestMessageListProps!.onTurnOutputOpen!({
+          kind: 'artifact',
+          id: `artifact:${artifact.id}`,
+          artifactId: artifact.id,
+          title: artifact.title,
+          artifact,
+          sourceSessionId: 'session-1',
+          turnId: 'turn-1',
+        });
+      });
+      await flush();
+      expect(
+        first.container.querySelector('[data-web-shell-saved-preview]'),
+      ).not.toBeNull();
+      expect(first.container.textContent).not.toContain(
+        'This workspace may have been removed',
+      );
+      expect(
+        first.container.querySelector('iframe[title="Saved webpage version"]'),
+      ).not.toBeNull();
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state'),
+      ).toContain('"kind":"artifact"');
+      act(() => first.unmount());
+    },
+  );
+
+  it('restores preview settings under their owning session', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        '/tmp/project\0session-2': {
+          open: true,
+          activeTabId: 'web-preview:second',
+          tabs: [
+            {
+              id: 'web-preview:second',
+              kind: 'web_preview',
+              title: 'Second page',
+              url: 'http://localhost:6544/second',
+              viewport: 'desktop',
+            },
+          ],
+        },
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:stored',
+          tabs: [
+            {
+              id: 'web-preview:stored',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543/settings',
+              viewport: 'mobile',
+              html: 'do not persist page content',
+            },
+          ],
+        },
+      }),
+    );
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['webPreview'] },
+    });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+    expect(
+      container.querySelector<HTMLIFrameElement>(
+        'iframe[title="Web preview frame"]',
+      )?.style.width,
+    ).toBe('390px');
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Desktop width"]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'].tabs,
+    ).toEqual([
+      {
+        id: 'web-preview:stored',
+        kind: 'web_preview',
+        title: 'Web preview',
+        url: 'http://localhost:6543/settings',
+        viewport: 'desktop',
+      },
+    ]);
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6544/second');
+    expect(container.innerHTML).not.toContain('http://localhost:6543/settings');
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+  });
+
+  it('defers persisted previews until the embedded host opts in', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:stored',
+          tabs: [
+            {
+              id: 'web-preview:stored',
+              kind: 'web_preview',
+              title: 'Stored page',
+              url: 'http://localhost:6543/settings',
+              viewport: 'desktop',
+            },
+          ],
+        },
+      }),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+    expect(container.querySelector('[data-web-shell-web-preview]')).toBeNull();
+    rerender({ rightPanel: { items: ['webPreview'] } });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+  });
+
+  it('rejects a persisted preview URL targeting the shell', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:unsafe',
+          tabs: [
+            {
+              id: 'web-preview:unsafe',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: window.location.href,
+              viewport: 'desktop',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp({ rightPanel: { items: ['webPreview'] } });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('iframe[title="Web preview frame"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'development address',
+    );
   });
 
   it('restores terminal tabs without persisting terminal output', async () => {
@@ -9735,7 +10034,10 @@ async function renderOpenSource(overrides: Partial<SessionSource> = {}) {
   return { ...view, source };
 }
 
-function renderApp(props: React.ComponentProps<typeof App> = {}): {
+function renderApp(
+  props: React.ComponentProps<typeof App> = {},
+  notificationTarget?: EventTarget,
+): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
   unmount: () => void;
@@ -9746,7 +10048,9 @@ function renderApp(props: React.ComponentProps<typeof App> = {}): {
   const doRender = (nextProps: React.ComponentProps<typeof App> = props) => {
     act(() => {
       root.render(
-        <App sidebar={{ enabled: true }} header={{}} {...nextProps} />,
+        <TurnNotificationNavigationContext.Provider value={notificationTarget}>
+          <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+        </TurnNotificationNavigationContext.Provider>,
       );
     });
   };
@@ -10094,6 +10398,10 @@ beforeEach(() => {
     generatedAt: '2026-08-26T00:00:00.000Z',
     limits: { maxArtifacts: 100 },
   });
+  mockWorkspace.client.readSessionArtifactContent.mockReset();
+  mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+    '<h1>Saved version</h1>',
+  );
   mockWorkspace.client.sessionStats.mockReset();
   mockWorkspace.client.sessionStats.mockResolvedValue({});
   mockWorkspace.client.sessionContextUsage.mockReset();
@@ -14564,6 +14872,51 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
       detail: false,
     });
+  });
+
+  it('suppresses stale composer context usage on error and restores it on reconnect', async () => {
+    const usageConnection = mockConnection as typeof mockConnection & {
+      tokenCount?: number;
+      contextWindow?: number;
+    };
+    const previous = {
+      tokenCount: usageConnection.tokenCount,
+      contextWindow: usageConnection.contextWindow,
+    };
+    Object.assign(usageConnection, {
+      tokenCount: 23_000,
+      contextWindow: 131_072,
+    });
+    try {
+      const { rerender } = renderApp();
+      await flush();
+      expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
+      expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
+      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+        'function',
+      );
+
+      mockConnection.status = 'error';
+      rerender();
+      await flush();
+      expect(mockConnection.sessionId).toBe('session-1');
+      expect(testState.latestChatEditorProps?.tokenCount).toBe(0);
+      expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
+      expect(
+        testState.latestChatEditorProps?.onShowContextUsage,
+      ).toBeUndefined();
+
+      mockConnection.status = 'connected';
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
+      expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
+      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+        'function',
+      );
+    } finally {
+      Object.assign(usageConnection, previous);
+    }
   });
 
   it('defaults the composer ring props to 0 before any usage arrives', async () => {
@@ -19868,6 +20221,278 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { kind: 'workspace' as const, cwd: '/notification/workspace' },
+    { kind: 'standalone' as const },
+    { kind: 'live' as const },
+  ])(
+    'opens a notification using its captured $kind context',
+    async (sessionContext) => {
+      mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )
+          ?.click();
+      });
+      expect(
+        container.querySelector('[data-testid="settings-message"]'),
+      ).not.toBeNull();
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: { sessionId: 'session-1', sessionContext },
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        {
+          workspaceCwd:
+            sessionContext.kind === 'workspace'
+              ? sessionContext.cwd
+              : undefined,
+          sessionContext,
+        },
+      );
+      expect(
+        container.querySelector('[data-testid="settings-message"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('synchronizes the resolved UI language with browser notifications', async () => {
+    const syncLanguage = vi.fn();
+    vi.spyOn(navigator, 'language', 'get').mockReturnValue('zh-CN');
+    vi.spyOn(
+      browserNotifications,
+      'useBrowserNotificationSettings',
+    ).mockReturnValue({
+      enabled: false,
+      permission: 'default',
+      pending: false,
+      persistent: true,
+      error: false,
+      setEnabled: vi.fn(),
+      refreshPermission: vi.fn(),
+      syncLanguage,
+    });
+    const { rerender } = renderApp();
+    await flush();
+    expect(syncLanguage).toHaveBeenCalledWith('zh-CN');
+    rerender({ language: 'en' });
+    await flush();
+    expect(syncLanguage).toHaveBeenLastCalledWith('en');
+  });
+
+  it('routes notification clicks only to their owning shell and stops after unmount', async () => {
+    const firstTarget = new EventTarget();
+    const secondTarget = new EventTarget();
+    const first = renderApp({}, firstTarget);
+    renderApp({}, secondTarget);
+    await flush();
+    const click = () =>
+      firstTarget.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'target-session',
+            sessionContext: { kind: 'workspace', cwd: '/target' },
+          },
+        }),
+      );
+    await act(async () => {
+      click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'target-session',
+      {
+        workspaceCwd: '/target',
+        sessionContext: { kind: 'workspace', cwd: '/target' },
+      },
+    );
+    first.unmount();
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      click();
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects an old notification after the host changes its locked workspace', async () => {
+    const target = new EventTarget();
+    const { rerender } = renderApp({ lockedWorkspaceCwd: '/old' }, target);
+    await flush();
+    rerender({ lockedWorkspaceCwd: '/new' });
+    await flush();
+    for (const sessionContext of [
+      { kind: 'workspace', cwd: '/old' },
+      { kind: 'standalone' },
+      { kind: 'live' },
+    ]) {
+      await act(async () => {
+        target.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: { sessionId: 'old-session', sessionContext },
+          }),
+        );
+      });
+    }
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      target.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'new-session',
+            sessionContext: { kind: 'workspace', cwd: '/new' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'new-session',
+      {
+        workspaceCwd: '/new',
+        sessionContext: { kind: 'workspace', cwd: '/new' },
+      },
+    );
+  });
+
+  it('keeps legacy window session links available with a workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'linked',
+            sessionContext: { kind: 'workspace', cwd: '/other' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('linked', {
+      workspaceCwd: '/other',
+      sessionContext: { kind: 'workspace', cwd: '/other' },
+    });
+  });
+
+  it.each(['loadingTranscript', 'missingSession'] as const)(
+    'reloads the current notification target when %s',
+    async (field) => {
+      mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.status = 'connected';
+      mockConnection[field] = true;
+      renderApp();
+      await flush();
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: {
+              sessionId: 'session-1',
+              sessionContext: { kind: 'workspace', cwd: '/workspace' },
+            },
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenCalled();
+    },
+  );
+
+  it('loads a different notification session with matching kind and workspace', async () => {
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.status = 'connected';
+    renderApp();
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            sessionContext: { kind: 'workspace', cwd: '/workspace' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'other-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    );
+  });
+
+  it('reveals the current notification target without reloading an active session', async () => {
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.status = 'connected';
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sidebar-settings"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('[data-testid="settings-message"]'),
+    ).not.toBeNull();
+    notificationScrollToBottom.mockClear();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'session-1',
+            sessionContext: { kind: 'workspace', cwd: '/workspace' },
+          },
+        }),
+      );
+    });
+    await vi.waitFor(() =>
+      expect(notificationScrollToBottom).toHaveBeenCalledWith('auto'),
+    );
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="settings-message"]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    { sessionContext: { kind: 'unknown' } },
+    { sessionContext: { kind: 'workspace', cwd: ' ' } },
+    {
+      sessionContext: { kind: 'workspace', cwd: '/target' },
+      workspaceCwd: '/other',
+    },
+    { sessionContext: { kind: 'standalone' }, workspaceCwd: '/other' },
+  ])(
+    'rejects invalid or conflicting notification contexts: %j',
+    async (detail) => {
+      renderApp();
+      await flush();
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: { sessionId: 'notification-session', ...detail },
+          }),
+        );
+      });
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    },
+  );
+
   it('opens a Live session through its explicit product context', async () => {
     mockWorkspace.capabilities = {
       features: ['multi_workspace_sessions'],
@@ -20534,7 +21159,7 @@ describe('App session callbacks', () => {
     });
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
       'resolved',
-      expect.objectContaining({ inputAnnotations }),
+      expect.objectContaining({ inputAnnotations, submittedPrompt: 'hello' }),
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -20967,6 +21592,8 @@ describe('App session callbacks', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
+      '',
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -24674,6 +25301,8 @@ describe('App session callbacks', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
+      'queued',
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -24726,6 +25355,8 @@ describe('App session callbacks', () => {
       undefined,
       undefined,
       inputAnnotations,
+      undefined,
+      'queued',
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -26296,20 +26927,36 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('converts /skills arguments to a direct skill command', async () => {
-    const { container } = renderApp();
-    await flush();
-
-    testState.prompt = '/skills bugfix';
-    await clickSubmit(container);
-    await flush();
-
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
-      '/bugfix',
-      expect.any(Object),
-    );
-    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
-  });
+  it.each(['idle', 'responding'] as const)(
+    'preserves the original /skills submission when %s',
+    async (streamingState) => {
+      testState.streamingState = streamingState;
+      const { container } = renderApp();
+      await flush();
+      testState.prompt = '/skills bugfix';
+      await clickSubmit(container);
+      await flush();
+      if (streamingState === 'idle') {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+          '/bugfix',
+          expect.objectContaining({ submittedPrompt: '/skills bugfix' }),
+        );
+      } else {
+        expect(rawEnqueuePrompt).toHaveBeenCalledWith(
+          '/bugfix',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          '/skills bugfix',
+        );
+      }
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+    },
+  );
 
   it('opens plugin management tabs from the sidebar', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
@@ -29921,6 +30568,103 @@ describe('App session callbacks', () => {
       ).not.toBeNull();
       // The one-shot param is stripped so a reload/exit doesn't force it back.
       expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('notifies a controlled host when a notification closes split view', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const target = new EventTarget();
+    const { container } = renderApp(
+      { splitSessionIds: ['s1', 's2'], onSplitSessionIdsChange },
+      target,
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    onSplitSessionIdsChange.mockClear();
+    await act(async () => {
+      target.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 's2',
+            sessionContext: { kind: 'workspace', cwd: '/target' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('restores composer focus when revealing the current session from split view', async () => {
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.status = 'connected';
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const target = new EventTarget();
+      const { container } = renderApp({}, target);
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      editorFocus.mockClear();
+      await act(async () => {
+        target.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: {
+              sessionId: 'session-1',
+              sessionContext: { kind: 'workspace', cwd: '/workspace' },
+            },
+          }),
+        );
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+      expect(editorFocus).toHaveBeenCalled();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('opens a notification target in the main chat from split view', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('qwen:open-session', {
+            detail: {
+              sessionId: 's2',
+              sessionContext: { kind: 'workspace', cwd: '/target' },
+            },
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(loadSplitSessions()).toEqual([]);
+      expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+        's2',
+        {
+          workspaceCwd: '/target',
+          sessionContext: { kind: 'workspace', cwd: '/target' },
+        },
+      );
     } finally {
       window.history.pushState({}, '', '/');
     }
@@ -35867,6 +36611,10 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await act(async () => {
       await expect(run('do the thing', null)).resolves.toBeUndefined();
     });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'do the thing',
+      expect.not.objectContaining({ submittedPrompt: expect.anything() }),
+    );
   });
 
   it('rejects an unbound run that settles without admitting (cancel path)', async () => {

@@ -90,6 +90,8 @@ type LastGoalSummary = Pick<
   | 'activeTimeMs'
   | 'tokensUsed'
   | 'tokenBudget'
+  | 'turnBudget'
+  | 'activeTimeBudgetMs'
   | 'lastReason'
 >;
 
@@ -158,7 +160,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
@@ -219,6 +221,10 @@ export class GetGoalTool extends BaseDeclarativeTool<
       ...(goal.tokenBudget === undefined
         ? {}
         : { tokenBudget: goal.tokenBudget }),
+      ...(goal.turnBudget === undefined ? {} : { turnBudget: goal.turnBudget }),
+      ...(goal.activeTimeBudgetMs === undefined
+        ? {}
+        : { activeTimeBudgetMs: goal.activeTimeBudgetMs }),
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
@@ -624,6 +630,12 @@ function summarizeCatalog(
  */
 export const PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS = 1500;
 
+export const formatProposeGoalRecoveryNotStarted = (objective: string) =>
+  `The approved Goal was not started because the turn did not finish normally. To start it, run:\n/goal set ${objective}`;
+
+export const formatProposeGoalRecoveryFailed = (objective: string) =>
+  `The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ${objective}`;
+
 export interface ProposeGoalToolParams {
   objective: string;
 }
@@ -637,6 +649,9 @@ export interface ProposeGoalToolParams {
  */
 export interface PendingGoalProposal {
   objective: string;
+  reviewedGoal: Pick<GoalRecord, 'goalId' | 'revision'> | null;
+  /** Plan mode revokes approval even after the host takes the proposal. */
+  approvalSignal?: AbortSignal;
   /**
    * The `prompt_id` of the turn whose dialog approved it. Only that turn's
    * terminal boundary may set or discard the Goal; unrelated frames leave it
@@ -657,27 +672,42 @@ type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
 
 export type ApplyPendingGoalProposalResult =
   | { applied: true; goal: GoalRecord }
-  | { applied: false; reason: string };
+  | { applied: false; reason: string; kind: 'changed' | 'unavailable' };
 
 /**
  * Sets an approved proposal as the session Goal. Called by the client once
  * the proposing turn has ended; never from inside a turn.
  *
  * Re-reads the snapshot because `/goal` may have changed the session since
- * the dialog: an active Goal is never replaced (someone is already running
- * it), a stopped one is replaced through its expected version, and no Goal
- * creates.
+ * the dialog: only the reviewed Goal can be replaced, through its expected
+ * version, and a reviewed empty session can only create a new Goal.
  */
 export async function applyPendingGoalProposal(
   runtime: ProposeGoalRuntime,
   proposal: PendingGoalProposal,
 ): Promise<ApplyPendingGoalProposalResult> {
+  if (proposal.approvalSignal?.aborted) {
+    return {
+      applied: false,
+      kind: 'changed',
+      reason:
+        'The approved Goal was not started because its approval was revoked. Ask for a new draft when you are ready to start.',
+    };
+  }
   const objective = proposal.objective.trim();
   const current = runtime.getSnapshot().goal;
   if (current?.status === 'active') {
     return {
       applied: false,
+      kind: 'changed',
       reason: `A Goal became active (revision ${current.revision}) before the approved proposal could be set.`,
+    };
+  }
+  if (!matchesReviewedGoal(current, proposal.reviewedGoal)) {
+    return {
+      applied: false,
+      kind: 'changed',
+      reason: PROPOSE_GOAL_CHANGED_MESSAGE,
     };
   }
   const request: GoalControlRequest = current
@@ -697,6 +727,7 @@ export async function applyPendingGoalProposal(
     if (!goal) {
       return {
         applied: false,
+        kind: 'unavailable',
         reason: 'The Goal runtime accepted the request but reported no Goal.',
       };
     }
@@ -707,10 +738,12 @@ export async function applyPendingGoalProposal(
   } catch (error) {
     if (
       error instanceof GoalConflictError ||
-      error instanceof GoalInvalidTransitionError ||
-      error instanceof GoalPersistenceUnavailableError
+      error instanceof GoalInvalidTransitionError
     ) {
-      return { applied: false, reason: error.message };
+      return { applied: false, kind: 'changed', reason: error.message };
+    }
+    if (error instanceof GoalPersistenceUnavailableError) {
+      return { applied: false, kind: 'unavailable', reason: error.message };
     }
     throw error;
   }
@@ -740,6 +773,19 @@ export const PROPOSE_GOAL_NO_TURN_MESSAGE =
   'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';
 export const PROPOSE_GOAL_PENDING_MESSAGE =
   'Another approved Goal proposal is already waiting for this turn to end. Do not propose another one.';
+const PROPOSE_GOAL_CHANGED_MESSAGE =
+  'The Goal changed after the proposal was shown. The approved proposal was not applied; review the current Goal before proposing again.';
+
+function matchesReviewedGoal(
+  current: GoalRecord | null,
+  reviewed: PendingGoalProposal['reviewedGoal'] | undefined,
+): boolean {
+  if (reviewed === undefined) return false;
+  return reviewed === null
+    ? current === null
+    : current?.goalId === reviewed.goalId &&
+        current.revision === reviewed.revision;
+}
 
 function activeGoalMessage(revision: number): string {
   return `A Goal is already active (revision ${revision}); this tool does not replace a running Goal. Hand the user a \`/goal edit <objective>\` line to tighten it or a \`/goal set <objective>\` line to replace it, and stop.`;
@@ -757,6 +803,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
   GoalToolResult
 > {
   private approved = false;
+  private reviewedGoal: PendingGoalProposal['reviewedGoal'] | undefined;
 
   constructor(
     params: ProposeGoalToolParams,
@@ -766,9 +813,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
   }
 
   /**
-   * The description is the one piece of the confirmation every host shows
-   * (the Web Shell does not forward an `info` prompt), so the objective has
-   * to be in it.
+   * Include the objective for hosts that show only the tool description.
    */
   getDescription(): string {
     return `Propose Goal: ${this.params.objective.trim()}`;
@@ -842,11 +887,15 @@ class ProposeGoalInvocation extends BaseToolInvocation<
       throw new StructuredToolError(blocker.message, blocker.type);
     }
     const current = this.config.getGoalRuntime().getSnapshot().goal;
+    this.reviewedGoal = current
+      ? { goalId: current.goalId, revision: current.revision }
+      : null;
     return {
       type: 'info',
       title: 'Set this as the session Goal?',
       prompt: `${proposalPromptHeadline(current)}\n\n${this.params.objective.trim()}`,
       renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         this.approved = outcome !== ToolConfirmationOutcome.Cancel;
       },
@@ -865,6 +914,15 @@ class ProposeGoalInvocation extends BaseToolInvocation<
 
     const objective = this.params.objective.trim();
     const current = this.config.getGoalRuntime().getSnapshot().goal;
+    if (
+      this.reviewedGoal === undefined ||
+      !matchesReviewedGoal(current, this.reviewedGoal)
+    ) {
+      return this.errorResult(
+        PROPOSE_GOAL_CHANGED_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
     // Parked, not dispatched: the client sets it when this turn ends. Doing
     // it here would strip the rest of the turn of its Goal permit. The
     // approval is bound to this turn's prompt id so no other frame can
@@ -876,7 +934,13 @@ class ProposeGoalInvocation extends BaseToolInvocation<
         ToolErrorType.EXECUTION_DENIED,
       );
     }
-    if (!this.config.setPendingGoalProposal({ objective, turnKey })) {
+    if (
+      !this.config.setPendingGoalProposal({
+        objective,
+        turnKey,
+        reviewedGoal: this.reviewedGoal,
+      })
+    ) {
       return this.errorResult(
         PROPOSE_GOAL_PENDING_MESSAGE,
         ToolErrorType.EXECUTION_DENIED,
@@ -927,7 +991,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
-            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
           },
         },
         required: ['objective'],
@@ -944,6 +1008,9 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     }
     if (params.objective.length > PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS) {
       return `objective must be at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters.`;
+    }
+    if (/[\r\n]/.test(params.objective)) {
+      return 'objective must be written on one line.';
     }
     return null;
   }
