@@ -92,11 +92,10 @@ interface DingTalkRichTextPart {
   text?: string;
   downloadCode?: string;
   atName?: string;
-  atUserId?: string;
 }
 
 function renderRichTextAt(part: DingTalkRichTextPart): string {
-  const value = [part.text, part.atName, part.atUserId].find(
+  const value = [part.text, part.atName].find(
     (candidate): candidate is string =>
       typeof candidate === 'string' && candidate.length > 0,
   );
@@ -2974,9 +2973,8 @@ export class DingtalkChannel extends ChannelBase {
           parts.push(part.text);
         } else if (partType === 'picture') {
           parts.push('[image]');
-        } else if (partType === 'at') {
-          const label = renderRichTextAt(part);
-          if (label) parts.push(label);
+        } else if (partType === 'at' && part.atName) {
+          parts.push(`@${part.atName}`);
         }
       }
       const summary = parts.join('').trim();
@@ -3029,6 +3027,7 @@ export class DingtalkChannel extends ChannelBase {
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
     placeholder?: string;
+    imageCount?: number;
     syntheticText: boolean;
   } {
     const msgtype = data.msgtype || 'text';
@@ -3039,24 +3038,29 @@ export class DingtalkChannel extends ChannelBase {
         return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
-      let userText = '';
+      let hasUserText = false;
+      let imageCount = 0;
       const codes: string[] = [];
       for (const part of richText) {
         const partType = part.type || 'text';
         if (partType === 'text' && part.text) {
           text += part.text;
-          userText += part.text;
+          hasUserText ||= part.text.trim().length > 0;
         } else if (partType === 'at') {
           text += renderRichTextAt(part);
-        } else if (partType === 'picture' && part.downloadCode) {
-          codes.push(part.downloadCode);
+        } else if (partType === 'picture') {
+          imageCount += 1;
+          if (part.downloadCode) codes.push(part.downloadCode);
         }
       }
+      const renderedText = text.trim();
       return {
-        text: text.trim() || (codes.length > 0 ? '(image)' : ''),
+        text: renderedText || (imageCount > 0 ? '(image)' : ''),
         downloadCodes: codes,
-        mediaType: codes.length > 0 ? 'image' : undefined,
-        syntheticText: richText.length > 0 && userText.trim().length === 0,
+        mediaType: imageCount > 0 ? 'image' : undefined,
+        imageCount,
+        syntheticText:
+          !hasUserText && (renderedText.length > 0 || codes.length > 0),
       };
     }
 
@@ -3374,10 +3378,38 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const processMessage =
-        content.downloadCodes.length > 0 || quoted.media
+        content.downloadCodes.length > 0 || content.imageCount || quoted.media
           ? this.prepareThenHandleInbound(envelope, async () => {
               // Download media in callback order.
-              if (content.downloadCodes.length > 0 && content.mediaType) {
+              if (content.mediaType === 'image') {
+                const imagesBefore =
+                  envelope.attachments?.filter(
+                    (attachment) => attachment.type === 'image',
+                  ).length ?? 0;
+                for (const downloadCode of content.downloadCodes) {
+                  await this.attachMedia(
+                    envelope,
+                    downloadCode,
+                    content.mediaType,
+                    content.fileName,
+                    content.placeholder,
+                  );
+                }
+                const imagesAfter =
+                  envelope.attachments?.filter(
+                    (attachment) => attachment.type === 'image',
+                  ).length ?? 0;
+                if (
+                  imagesAfter - imagesBefore <
+                    (content.imageCount ?? content.downloadCodes.length) &&
+                  !envelope.text.trimEnd().endsWith('(image)')
+                ) {
+                  envelope.text = `${envelope.text}\n(image)`.trim();
+                }
+              } else if (
+                content.downloadCodes.length > 0 &&
+                content.mediaType
+              ) {
                 for (const downloadCode of content.downloadCodes) {
                   await this.attachMedia(
                     envelope,

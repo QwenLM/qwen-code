@@ -5923,6 +5923,11 @@ describe('DingtalkChannel quoted media', () => {
 
   it.each([
     ['an empty rich-text message', 'richText', { richText: [] }],
+    [
+      'a rich-text picture without a download code',
+      'richText',
+      { richText: [{ type: 'picture' }] },
+    ],
     ['a picture without a download code', 'picture', {}],
   ])('does not mark %s as synthetic', async (_label, msgtype, content) => {
     const channel = createChannel();
@@ -5933,8 +5938,83 @@ describe('DingtalkChannel quoted media', () => {
       expect(channel.handleInbound).toHaveBeenCalledOnce();
     });
     const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    if (msgtype === 'richText' && 'richText' in content) {
+      expect(envelope.text).toBe(content.richText.length > 0 ? '(image)' : '');
+    }
     expect(envelope.syntheticText).toBeUndefined();
   });
+
+  it.each([
+    {
+      label: 'keeps the image marker after a structured mention',
+      richText: [
+        { type: 'at', atName: 'qwen-code' },
+        { type: 'picture', downloadCode: 'picture-1' },
+      ],
+      atUsers: [{ dingtalkId: 'bot-1' }],
+      expectedText: '@qwen-code\n(image)',
+      syntheticText: true,
+    },
+    {
+      label: 'keeps the image placeholder for mention-only rich text',
+      richText: [
+        { text: '@qwen-code ' },
+        { text: '@qwen-code ' },
+        { text: '@Alice ' },
+        { type: 'picture', downloadCode: 'picture-1' },
+      ],
+      atUsers: [{ dingtalkId: 'bot-1' }, { dingtalkId: 'alice-1' }],
+      expectedText: '@qwen-code @qwen-code @Alice\n(image)',
+      syntheticText: undefined,
+    },
+    {
+      label: 'keeps text glued to a mention as user-authored content',
+      richText: [
+        { text: '@qwen-code输出1 ' },
+        { type: 'picture', downloadCode: 'picture-1' },
+      ],
+      atUsers: [{ dingtalkId: 'bot-1' }],
+      expectedText: '@qwen-code输出1\n(image)',
+      syntheticText: undefined,
+    },
+  ])(
+    '$label when image download fails',
+    async ({ richText, atUsers, expectedText, syntheticText }) => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const channel = createChannel();
+
+      const downstream = {
+        data: JSON.stringify({
+          msgId: 'mention-only-picture',
+          msgtype: 'richText',
+          conversationType: '2',
+          conversationId: 'cid123',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderNick: 'Alice',
+          senderStaffId: 'staff-1',
+          senderId: 'sender-1',
+          isInAtList: true,
+          atUsers,
+          content: { richText },
+        }),
+        headers: { messageId: 'mention-only-picture' },
+      } as unknown as DWClientDownStream;
+
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.text).toBe(expectedText);
+      expect(envelope.syntheticText).toBe(syntheticText);
+      expect(envelope.attachments).toBeUndefined();
+    },
+  );
 
   it.each([
     {
@@ -6038,6 +6118,85 @@ describe('DingtalkChannel quoted media', () => {
       },
     ]);
   });
+
+  it.each([
+    {
+      label: 'a download returns no URL',
+      richText: [
+        { text: 'compare these' },
+        { type: 'picture', downloadCode: 'picture-1' },
+        { type: 'picture', downloadCode: 'picture-2' },
+      ],
+      expectedText: 'compare these\n(image)',
+      expectedAttachments: 1,
+    },
+    {
+      label: 'one picture has no download code',
+      richText: [
+        { text: 'compare these' },
+        { type: 'picture', downloadCode: 'picture-1' },
+        { type: 'picture' },
+      ],
+      expectedText: 'compare these\n(image)',
+      expectedAttachments: 1,
+    },
+    {
+      label: 'a mention accompanies a picture without a download code',
+      richText: [{ type: 'at', atName: 'qwen-code' }, { type: 'picture' }],
+      expectedText: '@qwen-code\n(image)',
+      expectedAttachments: 0,
+    },
+  ])(
+    'marks missing rich-text media when $label',
+    async ({ richText, expectedText, expectedAttachments }) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+                { status: 200 },
+              ),
+            );
+          }
+          if (
+            url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+          ) {
+            const request = JSON.parse(String(init?.body)) as {
+              downloadCode: string;
+            };
+            return Promise.resolve(
+              new Response(
+                JSON.stringify(
+                  request.downloadCode === 'picture-1'
+                    ? { downloadUrl: 'https://example.com/picture-1' }
+                    : {},
+                ),
+                { status: 200 },
+              ),
+            );
+          }
+          return Promise.resolve(
+            new Response(new Uint8Array([1]), {
+              status: 200,
+              headers: { 'content-type': 'image/png' },
+            }),
+          );
+        },
+      );
+      const channel = createChannel();
+
+      sendDirectMedia(channel, 'richText', { richText });
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.text).toBe(expectedText);
+      expect(envelope.attachments ?? []).toHaveLength(expectedAttachments);
+    },
+  );
 
   it('downloads a replied picture and attaches it to the prompt', async () => {
     const downloadCodes = mockMediaDownload(
@@ -6988,7 +7147,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('preserves rich-text mention text in the delivered order', () => {
+  it('preserves rich-text mention text in the delivered order', async () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7005,6 +7164,7 @@ describe('DingtalkChannel sender attribution', () => {
         content: {
           richText: [
             { text: '@qwen-code ' },
+            { type: 'at', atName: 'Alice' },
             { text: '输出1' },
             { type: 'picture' },
             { text: '\n输出2' },
@@ -7018,9 +7178,12 @@ describe('DingtalkChannel sender attribution', () => {
       channel as unknown as { onMessage(d: DWClientDownStream): void }
     ).onMessage(downstream);
 
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '@qwen-code 输出1\n输出2',
+        text: '@qwen-code @Alice 输出1\n输出2\n(image)',
         isMentioned: true,
       }),
     );
