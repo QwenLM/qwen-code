@@ -7889,8 +7889,10 @@ function composeReviewBody(
             `earlier round was not dry, or no audit history keeps a chunk ` +
             `in the wave; a dry receipt that shows no evidence of having ` +
             `seen an earlier yield or uncertified receipt — same list, same ` +
-            `entries modulo verification tags, or no entry for the filed ` +
-            `finding — returns it to the ordinary retirement rules). ` +
+            `entries modulo verification tags, no entry for the filed ` +
+            `finding, or a filing whose file line this reader cannot turn ` +
+            `into a comparable token — returns it to the ordinary ` +
+            `retirement rules). ` +
             `${fixAuditFloorEn}${planLicenceEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
@@ -7903,7 +7905,8 @@ function composeReviewBody(
             `chunk（出过发现、收据未认证、同轮存在未认证的兄弟、在此前某轮非干燥时` +
             `发现清单不可读、或无审计历史，都会让 chunk 留在波内；干燥收据若` +
             `没有证据表明见过此前的发现或未认证收据——同一份清单、仅验证标记不同的` +
-            `同批条目、或清单中找不到该发现的条目——则让它回到普通退役规则）。` +
+            `同批条目、清单中找不到该发现的条目、或某次提交的 File 行无法被读成` +
+            `可比较的记号——则让它回到普通退役规则）。` +
             `${fixAuditFloorZh}${planLicenceZh}`,
         },
       ]

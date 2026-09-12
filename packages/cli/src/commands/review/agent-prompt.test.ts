@@ -5816,7 +5816,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     );
     expect(out).toContain('uncertified (unknown)');
     expect(out).toContain(
-      'stale against a same-digest yield or uncertified receipt',
+      'stale against a same-digest yield, an uncertified receipt, or a filing whose file line cannot be read as a comparable token',
     );
     expect(out).toContain('under the ordinary retirement rules');
     expect(out).toContain('returns to the ordinary retirement rules');

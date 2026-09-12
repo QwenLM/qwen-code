@@ -1209,8 +1209,9 @@ export function scheduleReverseAuditRound(
         // lists legitimately differ by `— [unverified]` tag state alone
         // (SKILL.md:771 — the merge clears tags between the pair's
         // rounds), so a receipt built against the same entries under a
-        // different digest never saw the round's findings. Three arms,
-        // each its own evidence:
+        // different digest never saw the round's findings. Four arms, each
+        // its own evidence — and each reached only for a round the record
+        // does NOT certify dry, so a dry round's own text never rules:
         const staleAgainstYield = audits.some((a) => {
           if (a.outcome === 'dry') return false;
           // Same digest: built against the same list bytes.

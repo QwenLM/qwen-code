@@ -3405,7 +3405,8 @@ function runAllChunks(
             `certify dry — one that yielded, one whose latest receipt is ` +
             `uncertified (unknown), or one with no audit history stays in ` +
             `the wave, and one whose dry receipt is stale against a ` +
-            `same-digest yield or uncertified receipt returns to the ` +
+            `same-digest yield, an uncertified receipt, or a filing whose ` +
+            `file line cannot be read as a comparable token returns to the ` +
             `ordinary retirement rules; a chunk holding no delta file ` +
             `leaves the schedule after one substantive dry audit — a round the ` +
             `record certifies dry in every member, and whose findings list ` +

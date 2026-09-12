@@ -3160,7 +3160,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
     );
     expect(r.body).toContain(
-      'a yield, an uncertified receipt, an uncertified SIBLING in the same round, a findings list that cannot be read where an earlier round was not dry, or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, or no entry for the filed finding — returns it to the ordinary retirement rules',
+      'a yield, an uncertified receipt, an uncertified SIBLING in the same round, a findings list that cannot be read where an earlier round was not dry, or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, no entry for the filed finding, or a filing whose file line this reader cannot turn into a comparable token — returns it to the ordinary retirement rules',
     );
     expect(r.body).not.toContain('chunks whose previous wave yielded');
   });
