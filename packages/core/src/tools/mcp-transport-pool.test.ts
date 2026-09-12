@@ -7,6 +7,13 @@
 import * as ClientLib from '@modelcontextprotocol/client';
 import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import * as GenAiLib from '@google/genai';
+import type { PoolEvent } from './mcp-pool-events.js';
+import {
+  MCP_TEARDOWN_TIMEOUT_MS,
+  McpClient,
+  MCPServerStatus,
+} from './mcp-client.js';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PoolEntry } from './mcp-pool-entry.js';
@@ -19,6 +26,7 @@ import {
   type McpTransportPoolOptions,
 } from './mcp-transport-pool.js';
 import { SessionMcpView } from './session-mcp-view.js';
+import { BudgetExhaustedError } from './mcp-client-manager.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
@@ -93,7 +101,7 @@ function mkSessionRegistries() {
 
 /**
  * Set up the MCP SDK mocks to simulate a successfully-connecting
- * stdio server that returns the given tool names + prompt names.
+ * server that returns the given tool names + prompt names.
  * Returns the mock objects so tests can introspect connect-call counts.
  */
 function mockMcpSuccess(
@@ -140,6 +148,13 @@ function mockMcpSuccess(
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as SdkClientStdioLib.StdioClientTransport,
   );
+  vi.spyOn(ClientLib, 'StreamableHTTPClientTransport').mockReturnValue({
+    close: vi.fn().mockResolvedValue(undefined),
+    terminateSession: vi.fn().mockResolvedValue(undefined),
+  } as unknown as ClientLib.StreamableHTTPClientTransport);
+  vi.spyOn(ClientLib, 'SSEClientTransport').mockReturnValue({
+    close: vi.fn().mockResolvedValue(undefined),
+  } as unknown as ClientLib.SSEClientTransport);
   vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
     tool: () =>
       Promise.resolve({
@@ -163,6 +178,666 @@ describe('McpTransportPool', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  describe('demand recovery', () => {
+    it('keeps budget refusals observable and retries as soon as capacity is free', async () => {
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      budget.tryReserve('occupied');
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const acquire = () =>
+        pool.acquire('srv', cfg, 'session', r.tools, r.prompts, r.resources);
+      await expect(acquire()).rejects.toBeInstanceOf(BudgetExhaustedError);
+      await expect(acquire()).rejects.toBeInstanceOf(BudgetExhaustedError);
+      expect(mocked.connect).not.toHaveBeenCalled();
+      budget.release('occupied');
+      const handle = await acquire();
+      expect(handle.client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(mocked.connect).toHaveBeenCalledOnce();
+      await pool.drainAll();
+    });
+
+    const cleanupTransports: Array<{
+      transport: string;
+      cfg: MCPServerConfig;
+    }> = [
+      { transport: 'stdio', cfg: new MCPServerConfig('node') },
+      { transport: 'http', cfg: { httpUrl: 'https://example.test/mcp' } },
+      { transport: 'sse', cfg: { url: 'https://example.test/sse' } },
+    ];
+
+    it('releasing an older handle preserves the current session attachment', async () => {
+      mockMcpSuccess({
+        toolNames: ['ping'],
+        resourceNames: ['test://resource'],
+      });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const current = mkSessionRegistries();
+      const cfg = new MCPServerConfig('node');
+      const oldHandle = await pool.acquire(
+        'srv',
+        cfg,
+        'session',
+        current.tools,
+        current.prompts,
+        current.resources,
+      );
+      const staleListener = vi.fn();
+      oldHandle.on('event', staleListener);
+      const handle = await pool.acquire(
+        'srv',
+        cfg,
+        'session',
+        current.tools,
+        current.prompts,
+        current.resources,
+      );
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const entry = entries.get(handle.id)!;
+      entry.emit({
+        kind: 'toolsChanged',
+        serverName: 'srv',
+        snapshot: [],
+        generation: 0,
+      });
+      expect(staleListener).not.toHaveBeenCalled();
+      expect(() =>
+        oldHandle.updateConfig({ command: 'node', trust: true }),
+      ).toThrow('released');
+      vi.mocked(current.tools.removeMcpToolsByServer).mockClear();
+      vi.mocked(current.resources.removeResourcesByServer).mockClear();
+      oldHandle.release();
+      expect(entry.refs.size).toBe(1);
+      expect(entry.currentState).toBe('active');
+      expect(current.tools.removeMcpToolsByServer).not.toHaveBeenCalled();
+      expect(current.resources.removeResourcesByServer).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(entry.currentState).toBe('active');
+      // Session shutdown still releases the current seat without a handle.
+      pool.releaseSession('session');
+      expect(entry.refs.size).toBe(0);
+      expect(current.tools.removeMcpToolsByServer).toHaveBeenCalledOnce();
+      await pool.drainAll();
+    });
+
+    it('keeps parent and child registry subscriptions on the same logical session', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const parent = mkSessionRegistries();
+      const child = mkSessionRegistries();
+      const parentHandle = await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        parent.tools,
+        parent.prompts,
+        parent.resources,
+      );
+      const parentFailed = vi.fn();
+      parentHandle.on('event', parentFailed);
+      const childHandle = await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        child.tools,
+        child.prompts,
+        child.resources,
+      );
+      const childFailed = vi.fn();
+      childHandle.on('event', childFailed);
+      (mocked as unknown as { onclose: () => void }).onclose();
+
+      expect(parentFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'failed' }),
+      );
+      expect(childFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'failed' }),
+      );
+      const [nextParent, nextChild] = await Promise.all([
+        pool.acquire(
+          'srv',
+          cfg,
+          'logical',
+          parent.tools,
+          parent.prompts,
+          parent.resources,
+        ),
+        pool.acquire(
+          'srv',
+          cfg,
+          'logical',
+          child.tools,
+          child.prompts,
+          child.resources,
+        ),
+      ]);
+      expect(nextParent.client).toBe(nextChild.client);
+      expect(mocked.connect).toHaveBeenCalledTimes(2);
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(1);
+      await pool.drainAll();
+    });
+
+    it('updates and releases only the registry that owns the handle', async () => {
+      const mocked = mockMcpSuccess({ toolNames: ['first', 'second'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const parent = mkSessionRegistries();
+      const child = mkSessionRegistries();
+      const parentHandle = await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        parent.tools,
+        parent.prompts,
+        parent.resources,
+      );
+      const childHandle = await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        child.tools,
+        child.prompts,
+        child.resources,
+      );
+      vi.mocked(parent.tools.registerTool).mockClear();
+      vi.mocked(parent.tools.removeMcpToolsByServer).mockClear();
+      vi.mocked(parent.prompts.removePromptsByServer).mockClear();
+      vi.mocked(parent.resources.removeResourcesByServer).mockClear();
+      vi.mocked(child.tools.registerTool).mockClear();
+      childHandle.updateConfig({
+        ...cfg,
+        includeTools: ['second'],
+        trust: true,
+      });
+      const childNames = vi
+        .mocked(child.tools.registerTool)
+        .mock.calls.map(([tool]) => tool.name);
+      expect(childNames).toEqual(['mcp__srv__second']);
+      expect(parent.tools.registerTool).not.toHaveBeenCalled();
+      expect(parent.tools.removeMcpToolsByServer).not.toHaveBeenCalled();
+      childHandle.release();
+      expect(parent.tools.removeMcpToolsByServer).not.toHaveBeenCalled();
+      expect(parent.prompts.removePromptsByServer).not.toHaveBeenCalled();
+      expect(parent.resources.removeResourcesByServer).not.toHaveBeenCalled();
+      expect(() =>
+        parentHandle.updateConfig({ ...cfg, trust: true }),
+      ).not.toThrow();
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(1);
+      expect(mocked.connect).toHaveBeenCalledTimes(1);
+      await pool.drainAll();
+    });
+
+    it('accepts the logical session ID when releasing a connection without a handle', async () => {
+      mockMcpSuccess();
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const parent = mkSessionRegistries();
+      const child = mkSessionRegistries();
+      const handle = await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        parent.tools,
+        parent.prompts,
+        parent.resources,
+      );
+      await pool.acquire(
+        'srv',
+        cfg,
+        'logical',
+        child.tools,
+        child.prompts,
+        child.resources,
+      );
+      vi.mocked(parent.tools.removeMcpToolsByServer).mockClear();
+      vi.mocked(child.tools.removeMcpToolsByServer).mockClear();
+
+      pool.release(handle.id, 'logical');
+
+      expect(parent.tools.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
+      expect(child.tools.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(0);
+      await pool.drainAll();
+    });
+
+    it.each(cleanupTransports)(
+      'releases all $transport registry seats under the logical session only',
+      async ({ cfg }) => {
+        mockMcpSuccess();
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const parent = mkSessionRegistries();
+        const child = mkSessionRegistries();
+        const other = mkSessionRegistries();
+        await pool.acquire(
+          'srv',
+          cfg,
+          'logical',
+          parent.tools,
+          parent.prompts,
+          parent.resources,
+        );
+        await pool.acquire(
+          'srv',
+          cfg,
+          'logical',
+          child.tools,
+          child.prompts,
+          child.resources,
+        );
+        await pool.acquire(
+          'child-only',
+          cfg,
+          'logical',
+          child.tools,
+          child.prompts,
+          child.resources,
+        );
+        const otherHandle = await pool.acquire(
+          'srv',
+          cfg,
+          'other-session',
+          other.tools,
+          other.prompts,
+          other.resources,
+        );
+        for (const r of [parent, child, other]) {
+          vi.mocked(r.tools.removeMcpToolsByServer).mockClear();
+        }
+        pool.releaseSession('logical');
+        expect(parent.tools.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
+        expect(child.tools.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
+        expect(child.tools.removeMcpToolsByServer).toHaveBeenCalledWith(
+          'child-only',
+        );
+        expect(other.tools.removeMcpToolsByServer).not.toHaveBeenCalled();
+        expect(() =>
+          otherHandle.updateConfig({ ...cfg, trust: true }),
+        ).not.toThrow();
+        await vi.advanceTimersByTimeAsync(1_001);
+        expect(pool.getSnapshot().byName['srv'].entrySummary).toEqual([
+          expect.objectContaining({
+            refs: 1,
+            status: MCPServerStatus.CONNECTED,
+          }),
+        ]);
+        expect(pool.getSnapshot().byName['child-only']).toBeUndefined();
+        await pool.drainAll();
+      },
+    );
+
+    it.each(cleanupTransports)(
+      'waits for evicted $transport cleanup before replacing the connection',
+      async ({ transport, cfg }) => {
+        const mocked = mockMcpSuccess();
+        const connect = vi.spyOn(McpClient.prototype, 'connect');
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+          new Error('EPIPE'),
+        );
+        expect(
+          (pool as unknown as { entries: Map<string, PoolEntry> }).entries.has(
+            first.id,
+          ),
+        ).toBe(false);
+        const next = pool.acquire(
+          'srv',
+          cfg,
+          transport === 'stdio' ? 'b' : 'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const connectsBeforeCleanup = connect.mock.calls.length;
+        finish();
+        await next;
+        expect(mocked.connect).toHaveBeenCalledTimes(2);
+        await pool.drainAll();
+        expect(connectsBeforeCleanup).toBe(1);
+      },
+    );
+
+    it.each(cleanupTransports)(
+      'rejects a waiting $transport replacement when draining starts',
+      async ({ transport, cfg }) => {
+        const mocked = mockMcpSuccess();
+        const connect = vi.spyOn(McpClient.prototype, 'connect');
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+          new Error('EPIPE'),
+        );
+        const nextOutcome = pool
+          .acquire(
+            'srv',
+            cfg,
+            transport === 'stdio' ? 'b' : 'a',
+            r.tools,
+            r.prompts,
+            r.resources,
+          )
+          .then(
+            () => 'connected',
+            (error: Error) => error.message,
+          );
+        await vi.advanceTimersByTimeAsync(0);
+        const draining = pool.drainAll({ timeoutMs: 100 });
+        finish();
+        await draining;
+        expect(await nextOutcome).toContain('is draining');
+        expect(connect).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(cleanupTransports.filter(({ transport }) => transport !== 'stdio'))(
+      'limits unpooled $transport cleanup waits to the session and transport config',
+      async ({ cfg }) => {
+        const mocked = mockMcpSuccess();
+        const connect = vi.spyOn(McpClient.prototype, 'connect');
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        // Handle release clears refs and the session index before cleanup ends.
+        first.release();
+        const replacement = pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        const anotherSession = mkSessionRegistries();
+        await pool.acquire(
+          'srv',
+          cfg,
+          'b',
+          anotherSession.tools,
+          anotherSession.prompts,
+          anotherSession.resources,
+        );
+        await pool.acquire(
+          'srv',
+          { ...cfg, headers: { Authorization: 'other-account' } },
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const connectsBeforeCleanup = connect.mock.calls.length;
+        finish();
+        await replacement;
+        await pool.drainAll();
+        expect(connectsBeforeCleanup).toBe(3);
+        expect(mocked.connect).toHaveBeenCalledTimes(4);
+      },
+    );
+
+    it('publishes force-close cleanup to all replacement acquires', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        cfg,
+        'a',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
+      const entry = (
+        pool as unknown as { entries: Map<string, PoolEntry> }
+      ).entries.get(first.id)!;
+      let finish!: () => void;
+      vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const closing = entry.forceShutdown('manual');
+      expect(entry.waitForCleanup()).toBeDefined();
+      const next = pool.acquire(
+        'srv',
+        cfg,
+        'b',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocked.connect).toHaveBeenCalledTimes(1);
+      finish();
+      await closing;
+      await next;
+      expect(mocked.connect).toHaveBeenCalledTimes(2);
+      await pool.drainAll();
+    });
+
+    it.each(['manual', 'silent drop'] as const)(
+      'bounds acquire waiting for %s cleanup without spawning over the old transport',
+      async (reason) => {
+        const mocked = mockMcpSuccess();
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const cfg = new MCPServerConfig('node');
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        const entry = (
+          pool as unknown as { entries: Map<string, PoolEntry> }
+        ).entries.get(first.id)!;
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        if (reason === 'manual') void entry.forceShutdown('manual');
+        else
+          (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+            new Error('EPIPE'),
+          );
+        let error: Error | undefined;
+        const pending = pool
+          .acquire('srv', cfg, 'b', r.tools, r.prompts, r.resources)
+          .catch((cause: Error) => {
+            error = cause;
+          });
+        // Past the cleanup barrier deadline (teardown budget + slack).
+        await vi.advanceTimersByTimeAsync(MCP_TEARDOWN_TIMEOUT_MS + 2_000);
+        const timeout = error?.message;
+        const connectsBeforeCleanup = mocked.connect.mock.calls.length;
+        const barrier = entry.waitForCleanup();
+        finish();
+        await barrier;
+        await pending;
+        await pool.acquire('srv', cfg, 'b', r.tools, r.prompts, r.resources);
+        await pool.drainAll();
+        expect(timeout ?? '').toMatch(/timed out.*cleanup/i);
+        expect(connectsBeforeCleanup).toBe(1);
+        expect(mocked.connect).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each(
+      cleanupTransports.flatMap((testCase) =>
+        [false, true].map((timeout) => ({ ...testCase, timeout })),
+      ),
+    )(
+      'accounts for evicted $transport cleanup during drain (timeout=$timeout)',
+      async ({ cfg, timeout }) => {
+        const mocked = mockMcpSuccess();
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+          new Error('EPIPE'),
+        );
+        let settled = false;
+        const draining = pool.drainAll({ timeoutMs: 100 }).then((result) => {
+          settled = true;
+          return result;
+        });
+        await vi.advanceTimersByTimeAsync(99);
+        expect(settled).toBe(false);
+        if (timeout) {
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await draining).toMatchObject({ drained: 0, forced: 1 });
+          finish();
+        } else {
+          finish();
+          expect(await draining).toMatchObject({ drained: 1, forced: 0 });
+        }
+        expect(
+          (pool as unknown as { retiringEntries: Map<string, unknown> })
+            .retiringEntries.size,
+        ).toBe(0);
+      },
+    );
+
+    it('observes EOF and shares one replacement across sessions', async () => {
+      const mocked = mockMcpSuccess({ toolNames: ['count'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const a = mkSessionRegistries();
+      const b = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        cfg,
+        'a',
+        a.tools,
+        a.prompts,
+        a.resources,
+      );
+      await pool.acquire('srv', cfg, 'b', b.tools, b.prompts, b.resources);
+      const events: PoolEvent[] = [];
+      first.on('event', (event) => events.push(event));
+      (mocked as unknown as { onclose: () => void }).onclose();
+      expect(events.some((event) => event.kind === 'failed')).toBe(true);
+      expect(first.client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      const [nextA, nextB] = await Promise.all([
+        pool.acquire('srv', cfg, 'a', a.tools, a.prompts, a.resources),
+        pool.acquire('srv', cfg, 'b', b.tools, b.prompts, b.resources),
+      ]);
+      expect(nextA.client).toBe(nextB.client);
+      expect(nextA.client).not.toBe(first.client);
+      expect(mocked.connect).toHaveBeenCalledTimes(2);
+      await pool.drainAll();
+    });
+
+    it('waits for old cleanup before a replacement acquire starts', async () => {
+      const mocked = mockMcpSuccess({ toolNames: ['count'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const a = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        cfg,
+        'a',
+        a.tools,
+        a.prompts,
+        a.resources,
+      );
+      let finishCleanup!: () => void;
+      vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishCleanup = resolve;
+          }),
+      );
+      let next!: ReturnType<typeof pool.acquire>;
+      first.on('event', (event) => {
+        if (event.kind === 'failed') {
+          next = pool.acquire('srv', cfg, 'a', a.tools, a.prompts, a.resources);
+        }
+      });
+      (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+        new Error('EPIPE'),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocked.connect).toHaveBeenCalledTimes(1);
+      finishCleanup();
+      await next;
+      expect(mocked.connect).toHaveBeenCalledTimes(2);
+      await pool.drainAll();
+    });
   });
 
   describe('acquire / release lifecycle', () => {
@@ -682,9 +1357,7 @@ describe('McpTransportPool', () => {
 
       pool.releaseSession('s1');
       expect(pool.getSnapshot().total).toBe(0);
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(mocked.close).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mocked.close).toHaveBeenCalledTimes(1));
     });
 
     it('applies session-level includeTools/excludeTools to unpooled tools (W81/W87)', async () => {
@@ -947,74 +1620,67 @@ describe('McpTransportPool', () => {
       expect(entry.currentState).toBe('failed');
     });
 
-    it('W125 else-if path: stale terminal entry evicted with budget released (R22 W125-followup A)', async () => {
-      // Reproduces the race where `forceShutdown` has run its sync
-      // portion (state='closed' + listener detach + emit + subscriber
-      // detach) but the async tail (`await sweepAndDisconnect` →
-      // `updateGlobalStatus` → `onClosed`) is still pending. During
-      // that window pool.entries still holds the terminal entry, and
-      // a concurrent `pool.acquire` for the same id hits W125's
-      // else-if path. Pre-R22 the bare `entries.delete(id)` here
-      // permanently leaked the budget slot — the entry's own onClosed
-      // (firing later when sweep finished) saw `entries.get(id) ===
-      // undefined` and skipped budget release. Post-R22 the eviction
-      // routes through `evictEntry` which inline-releases the slot,
-      // and `onClosed`'s identity check makes its later eviction a
-      // safe no-op.
+    it('waits for retirement before replacing a closed entry without leaking budget', async () => {
       const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
       const budget = new WorkspaceMcpBudget({
         clientBudget: 1,
         mode: 'enforce',
       });
-      mockMcpSuccess({ toolNames: ['t1'] });
+      const release = vi.spyOn(budget, 'release');
+      const client = mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
       const cfg = new MCPServerConfig('node');
-      const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
-      expect(budget.getReservedSlots()).toEqual(['srv']);
-      const targetId = connectionIdOf('srv', cfg);
+      const first = mkSessionRegistries();
+      await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        first.tools,
+        first.prompts,
+        first.resources,
+      );
+      const id = connectionIdOf('srv', cfg);
       const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
         .entries;
-      const oldEntry = entries.get(targetId)!;
-      // Fire-and-forget forceShutdown — sync portion runs (state='closed',
-      // listener detached, subscribers torn down) but the
-      // `await sweepAndDisconnect` and subsequent `onClosed` are
-      // pending in the microtask queue.
-      void oldEntry.forceShutdown('manual');
+      const oldEntry = entries.get(id)!;
+      let finishClose!: () => void;
+      client.close.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+      );
+      const closing = oldEntry.forceShutdown('manual');
       expect(oldEntry.currentState).toBe('closed');
-      // Critical precondition: pool.entries STILL has the terminal
-      // entry (onClosed hasn't run yet). Without this, the else-if
-      // path is unreachable.
-      expect(entries.get(targetId)).toBe(oldEntry);
+      expect(entries.get(id)).toBe(oldEntry);
 
-      // Concurrent acquire for the same fingerprint. Hits the W125
-      // else-if path: existing && existing.isTerminated() → evictEntry
-      // → fall through to spawn → fresh entry.
-      const r2 = mkSessionRegistries();
-      const conn2 = await pool.acquire(
+      // Acquire waits for the retiring entry's cleanup. This no longer
+      // exercises the stale-cache eviction branch: retirement owns removal.
+      const next = mkSessionRegistries();
+      const acquiring = pool.acquire(
         'srv',
         cfg,
         's2',
-        r2.tools,
-        r2.prompts,
-        r2.resources,
+        next.tools,
+        next.prompts,
+        next.resources,
       );
-      // Fresh entry: different object, different entryIndex.
-      const newEntry = entries.get(targetId)!;
-      expect(newEntry).not.toBe(oldEntry);
-      expect(conn2.entryIndex).toBe(1);
-      // Budget slot is held by the fresh spawn (was released by
-      // evictEntry, then re-reserved by the spawn path) — net 1 slot
-      // reserved, not the 0 (leak) of pre-R22 nor the 2 of double-
-      // reserve regression.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.close).toHaveBeenCalledOnce();
+      expect(ClientLib.Client).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
       expect(budget.getReservedSlots()).toEqual(['srv']);
 
-      // Drain the pending forceShutdown microtasks. The OLD entry's
-      // onClosed will fire and hit `evictEntry`'s identity check
-      // (`current === newEntry !== oldEntry` → no-op). New entry must
-      // survive intact.
+      finishClose();
+      await closing;
+      const connection = await acquiring;
+      const newEntry = entries.get(id)!;
+      expect(newEntry).not.toBe(oldEntry);
+      expect(connection.entryIndex).toBe(1);
+      expect(ClientLib.Client).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledExactlyOnceWith('srv');
+      expect(budget.getReservedSlots()).toEqual(['srv']);
       await vi.runAllTimersAsync();
-      expect(entries.get(targetId)).toBe(newEntry);
+      expect(entries.get(id)).toBe(newEntry);
       expect(budget.getReservedSlots()).toEqual(['srv']);
     });
 
