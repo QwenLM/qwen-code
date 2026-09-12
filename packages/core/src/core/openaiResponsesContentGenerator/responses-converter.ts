@@ -35,6 +35,7 @@ import {
   type ResponsesMessageMetadata,
   type ResponsesTextPart,
 } from '../../utils/responses-message.js';
+import { followingFunctionCallIds } from './responses-reasoning-rejection.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -796,6 +797,14 @@ export function convertGeminiContentsToResponsesInput(
  * the call while dropping the output, or vice versa. This safety net ensures
  * the wire request is always structurally valid regardless of upstream
  * trimming bugs.
+ *
+ * A reasoning item heads the function_call group that follows it, so the
+ * reasoning and that group are one unit (#11665): the reasoning stays iff at
+ * least one call in its group survives the pair cleanup, and goes with the
+ * group when none do. Dropping every orphaned call while keeping the group's
+ * reasoning would send reasoning without its required following item;
+ * keeping the reasoning while only some of its calls survive is what the
+ * surviving calls still need.
  */
 export function cleanOrphanedFunctionCalls(
   items: ResponsesApiInputItem[],
@@ -812,18 +821,39 @@ export function cleanOrphanedFunctionCalls(
       outputCallIds.add((item as ResponsesApiFunctionCallOutputItem).call_id);
     }
   }
-  return items.filter((item) => {
+  const kept: ResponsesApiInputItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (typeof item !== 'object' || item === null || !('type' in item)) {
-      return true;
+      kept.push(item);
+      continue;
     }
     if (item.type === 'function_call' && 'call_id' in item) {
-      return outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id);
+      if (outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id)) {
+        kept.push(item);
+      }
+      continue;
     }
     if (item.type === 'function_call_output' && 'call_id' in item) {
-      return callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id);
+      if (callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)) {
+        kept.push(item);
+      }
+      continue;
     }
-    return true;
-  });
+    if (item.type === 'reasoning') {
+      const unitCallIds = followingFunctionCallIds(items, i);
+      if (
+        unitCallIds.length > 0 &&
+        !unitCallIds.some((callId) => outputCallIds.has(callId))
+      ) {
+        continue;
+      }
+      kept.push(item);
+      continue;
+    }
+    kept.push(item);
+  }
+  return kept;
 }
 
 export function convertGeminiToolsToResponsesTools(
