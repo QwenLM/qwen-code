@@ -7612,7 +7612,6 @@ describe('runQwenServe runtime startup failures', () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
       'http://localhost:5173',
-      '/opt/qwen-cdp-mcp-adapter',
     );
 
     expect(features).not.toContain('browser_automation_mcp');
@@ -11740,7 +11739,7 @@ describe('runQwenServe runtime startup failures', () => {
           logDroppedRecords: 0,
           logDroppedBytes: 0,
         },
-        security: { allowOriginMode: 'none' },
+        security: { allowOriginMode: 'specific' },
         limits: {
           maxSessions: 1,
           maxPendingPromptsPerSession: 5,
