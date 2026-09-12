@@ -3006,6 +3006,10 @@ describe('AppContainer State Management', () => {
       (_case, shellMode, expectReminder) => {
         const mockQueueMessage = vi.fn();
         vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+        // Skip the real config.initialize(): the mount effect runs it
+        // un-awaited, and against the partial registry spy below (no warmAll)
+        // it rejects unhandled, failing the whole file on Linux.
+        vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
         vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
           getAllToolNames: () => ['workflow'],
           getTool: () => undefined,
@@ -5973,6 +5977,10 @@ describe('AppContainer State Management', () => {
       // The workflow-steering injector is un-latched and re-fires on the
       // resubmit, so the re-armed copy must be dropped, not stacked on top.
       vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+      // Skip the real config.initialize(): the mount effect runs it
+      // un-awaited, and against the partial registry spy below (no warmAll)
+      // it rejects unhandled, failing the whole file on Linux.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
         getAllToolNames: () => ['workflow'],
         getTool: () => undefined,
