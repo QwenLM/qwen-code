@@ -37111,6 +37111,75 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('never promotes a queued mid-turn message once the session is closing', async () => {
+    const releases: Array<() => void> = [];
+    const closeStarted = deferred<void>();
+    const closeGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          releases.push(r);
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: async (method) => {
+        if (method !== 'qwen/control/session/close') return {};
+        closeStarted.resolve();
+        return closeGate.promise;
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const send = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'occupy the turn' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'queued behind the turn',
+      { clientId: session.clientId },
+      'closing-queued',
+      { rejectIfIdle: true },
+    );
+    expect(admission).toEqual({ accepted: true, messageId: 'closing-queued' });
+
+    const close = bridge.closeSession(session.sessionId);
+    await closeStarted.promise;
+    // The turn settles while the session is closing: nothing the queue still
+    // holds may be promoted into the FIFO.
+    releases[0]!();
+    await send;
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(releases).toHaveLength(1);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    // The message stays queued (the teardown will discard it): a promotion
+    // attempt would splice it and the closing sendPrompt gate would drop it,
+    // vanishing it from every ring.
+    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+      messages: [
+        expect.objectContaining({
+          messageId: 'closing-queued',
+          text: 'queued behind the turn',
+        }),
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+
+    closeGate.resolve({});
+    await close;
+    await bridge.shutdown();
+  });
+
   it('promotes a stable-id request that reaches an idle session', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
@@ -37370,7 +37439,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('acks a same-id retry after the queued media is removed', async () => {
+  it('acks a same-id retry whose attachment reference is dead', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -37406,9 +37475,21 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         clientId: session.clientId,
       }),
     ).toEqual({ removed: true });
+    // Deleting the queued message keeps the upload, so remove it too: the
+    // retried reference must be genuinely dead for the ordering below to be
+    // at stake.
+    expect(
+      await bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        { clientId: session.clientId },
+      ),
+    ).toBe(true);
 
     // The removal settled the id; a same-id retry must hit the settled ring
-    // and ack, not throw session_attachments_gone (410).
+    // and ack, not throw session_attachment_gone (410). Hoisting the
+    // reference validation above the rings — validating inputs first — turns
+    // this into a 410 for a message the daemon already owns and settled.
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
@@ -37421,6 +37502,43 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     release();
     await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('declines a dead attachment reference before the idle verdict', async () => {
+    const { factory } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const reference = await bridge.storeSessionAttachment(
+      session.sessionId,
+      Uint8Array.of(1, 2, 3),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    expect(
+      await bridge.removeSessionAttachment(
+        session.sessionId,
+        reference.attachmentId,
+        { clientId: session.clientId },
+      ),
+    ).toBe(true);
+
+    // Nothing is running, so the cheap verdict would answer
+    // `{ accepted: false, reason: 'session_idle' }` and send the client to the
+    // ordinary prompt route — which validates references too, so the message
+    // would dead-end two hops later behind a verdict that was never the real
+    // cause. The decline runs first.
+    expect(() =>
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'look at this',
+        { clientId: session.clientId },
+        'dead-reference-idle',
+        { rejectIfIdle: true, content: [reference] },
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: 'session_attachment_gone' }),
+    );
     await bridge.shutdown();
   });
 
@@ -39634,7 +39752,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         'steer-idle',
         { queueOnly: true },
       ),
-    ).toEqual({ accepted: false });
+    ).toEqual({ accepted: false, reason: 'session_idle' });
     expect(promptCalls).toBe(0);
     expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     expect(
@@ -39673,7 +39791,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         'public-idle',
         { rejectIfIdle: true },
       ),
-    ).toEqual({ accepted: false });
+    ).toEqual({ accepted: false, reason: 'session_idle' });
     expect(promptCalls).toBe(0);
     expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();

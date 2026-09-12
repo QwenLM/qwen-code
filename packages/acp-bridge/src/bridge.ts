@@ -13854,7 +13854,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           writeStderrLine(
             `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,
           );
-          return { accepted: false };
+          return { accepted: false, reason: 'session_idle' };
         }
         promoteMidTurnMessage(
           entry,

@@ -3934,11 +3934,30 @@ export interface DaemonSessionBtwResult {
 /**
  * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
  * when the message is owned by the daemon, either in the running turn's queue
- * or promoted into the normal prompt FIFO.
+ * or promoted into the normal prompt FIFO. On a rejection, `reason` is
+ * `'session_idle'` when an open session has no prompt admitted to its prompt
+ * FIFO and no active Goal turn, so the caller can resubmit the message as an
+ * ordinary prompt; the verdict describes only what can drain a mid-turn
+ * message, not everything the session may hold (a session snapshot can still
+ * report `hasActivePrompt: true`). It is absent on older daemons and on every
+ * other rejection cause (queue full, closing session, attachment budget,
+ * mismatched `messageId` — the payload the daemon already admitted is kept,
+ * though that is not a delivery promise: a removed promoted message
+ * disappears from pending-prompt snapshots at once — one that had not
+ * started is dropped where it stands, one already running is hidden until
+ * its aborted turn settles — so the removal response is the only
+ * `removed = true` a client observes), so callers must
+ * keep their own idle detection alongside it. For a new admission, a
+ * `content` reference the session no longer holds (or an invalid one) does
+ * not produce this body: the request is declined before the idle verdict
+ * with a 410/400 `{ error, code }` response. A matching same-`messageId`
+ * retry is answered `{ accepted: true }` and a closing session
+ * `{ accepted: false }` first.
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
   messageId?: string;
+  reason?: 'session_idle';
 }
 
 export interface DaemonRemoveMidTurnMessageResult {

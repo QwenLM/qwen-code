@@ -6025,6 +6025,15 @@ describe('DaemonClient', () => {
       expect(result.accepted).toBe(false);
     });
 
+    it('returns the idle rejection reason verbatim', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { accepted: false, reason: 'session_idle' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage('s-1', 'late');
+      expect(result).toEqual({ accepted: false, reason: 'session_idle' });
+    });
+
     it('includes media content blocks in the POST body when provided', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { accepted: true, messageId: 'mid-1' }),

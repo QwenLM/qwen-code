@@ -8842,9 +8842,26 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
-  // daemon; rejected requests were not admitted. Synchronous — the bridge only
-  // mutates its in-memory session queues.
+  // Returns `{ accepted, messageId?, reason? }`; `reason` is `'session_idle'`
+  // when an open session has no prompt admitted to its prompt FIFO and no
+  // active Goal turn, which lets a client resubmit as an ordinary prompt
+  // instead of reporting a failure. The verdict describes only what can drain
+  // a mid-turn message, not everything the session may hold (a session
+  // snapshot can still report `hasActivePrompt: true`). Every other rejection
+  // cause — closing, attachment budget, mismatched `messageId`, full queue —
+  // omits it, and a kept mismatched payload is not a delivery promise: a
+  // removed promoted message disappears from snapshots at once — one that had
+  // not started is dropped where it stands, one already running is hidden
+  // until its aborted turn settles — so the removal response is the only
+  // `removed = true` a client ever observes.
+  // For a new admission, a `content` reference the session no longer holds
+  // (or an invalid one) is declined before the idle/queue verdicts: the
+  // bridge throws and the error mapping answers 410/400 with an
+  // `{ error, code }` body — no `accepted`, no `reason`. A same-`messageId`
+  // retry whose payload matches acks idempotently first, and a closing
+  // session is refused reasonless first. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge
+  // only mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. It bounds how much a single
