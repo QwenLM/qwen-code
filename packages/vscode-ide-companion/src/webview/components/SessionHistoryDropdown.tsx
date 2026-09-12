@@ -578,7 +578,7 @@ export function SessionHistoryDropdown({
             </div>
           ))}
 
-          {!loading && filtered.length === 0 && (
+          {!loading && !hasMore && filtered.length === 0 && (
             <div
               style={{
                 padding: 20,
@@ -610,6 +610,24 @@ export function SessionHistoryDropdown({
             </div>
           )}
         </div>
+        {hasMore && !loading && (
+          <button
+            type="button"
+            className="qwen-session-icon-button"
+            onClick={onLoadMore}
+            style={{
+              padding: 8,
+              border: 0,
+              borderRadius: 3,
+              background: 'transparent',
+              color: 'inherit',
+              font: 'inherit',
+              cursor: 'pointer',
+            }}
+          >
+            {t('session.loadMore')}
+          </button>
+        )}
       </div>
     </>
   );
