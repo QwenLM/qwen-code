@@ -168,6 +168,10 @@ describe('package scripts', () => {
     expect(result.stdout).toContain(
       'pnpm build approvals cover every install script.',
     );
+    // Pins the Playwright parity block's existence and happy path: deleting it,
+    // or returning before it, goes red here. Its drift arms live in
+    // check-lockfile.test.js, which runs the script against perturbed fixtures.
+    expect(result.stdout).toContain('Playwright parity check passed.');
   });
 
   describe('check-lockfile failure branches', () => {
@@ -177,12 +181,20 @@ describe('package scripts', () => {
     function runCheckLockfile(mutate) {
       const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'check-lockfile-'));
       try {
+        // The Playwright parity section reads the pinned manifests as
+        // well as the lockfiles, so the fixture carries them too: without
+        // them the run dies on a missing package.json before reaching the
+        // branch under test.
         for (const file of [
           'package-lock.json',
           'pnpm-lock.yaml',
           'pnpm-workspace.yaml',
+          'package.json',
+          'packages/web-shell/package.json',
         ]) {
-          copyFileSync(path.join(root, file), path.join(fixtureRoot, file));
+          const to = path.join(fixtureRoot, file);
+          mkdirSync(path.dirname(to), { recursive: true });
+          copyFileSync(path.join(root, file), to);
         }
         mutate(fixtureRoot);
         return spawnSync(
