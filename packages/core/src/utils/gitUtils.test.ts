@@ -37,13 +37,29 @@ describe('getCachedGitBranch', () => {
     expect(execFileSyncSpy).toHaveBeenNthCalledWith(
       1,
       'git',
-      ['-c', 'core.fsmonitor=', 'rev-parse', '--abbrev-ref', 'HEAD'],
+      [
+        '-c',
+        'core.fsmonitor=',
+        '-c',
+        'log.showSignature=false',
+        'rev-parse',
+        '--abbrev-ref',
+        'HEAD',
+      ],
       expect.objectContaining({ cwd: '/repo/cache-a' }),
     );
     expect(execFileSyncSpy).toHaveBeenNthCalledWith(
       2,
       'git',
-      ['-c', 'core.fsmonitor=', 'rev-parse', '--abbrev-ref', 'HEAD'],
+      [
+        '-c',
+        'core.fsmonitor=',
+        '-c',
+        'log.showSignature=false',
+        'rev-parse',
+        '--abbrev-ref',
+        'HEAD',
+      ],
       expect.objectContaining({ cwd: '/repo/cache-b' }),
     );
 
@@ -93,6 +109,8 @@ describe('getRecentGitStatus', () => {
       [
         '-c',
         'core.fsmonitor=',
+        '-c',
+        'log.showSignature=false',
         '--no-optional-locks',
         'status',
         '--short',

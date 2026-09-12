@@ -27,7 +27,7 @@ describe('loadSimpleGit', () => {
 
     loaded.simpleGit('/repo');
     expect(simpleGit).toHaveBeenCalledWith('/repo', {
-      config: ['core.fsmonitor='],
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
     });
   });
@@ -49,7 +49,11 @@ describe('loadSimpleGit', () => {
     // Git honours the last `-c` for a key, so ours has to come after any the
     // caller supplied.
     expect(simpleGit).toHaveBeenCalledWith('/repo', {
-      config: ['core.quotepath=false', 'core.fsmonitor='],
+      config: [
+        'core.quotepath=false',
+        'core.fsmonitor=',
+        'log.showSignature=false',
+      ],
       unsafe: { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true },
     });
   });
@@ -66,13 +70,13 @@ describe('loadSimpleGit', () => {
     guarded({ baseDir: '/repo' });
     expect(simpleGit).toHaveBeenLastCalledWith({
       baseDir: '/repo',
-      config: ['core.fsmonitor='],
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
     });
 
     guarded();
     expect(simpleGit).toHaveBeenLastCalledWith({
-      config: ['core.fsmonitor='],
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
     });
   });
@@ -93,7 +97,7 @@ describe('loadSimpleGit', () => {
     expect(loaded.CheckRepoActions).toBe(simpleGit.CheckRepoActions);
     loaded.simpleGit('/repo');
     expect(simpleGit).toHaveBeenCalledWith('/repo', {
-      config: ['core.fsmonitor='],
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
     });
   });

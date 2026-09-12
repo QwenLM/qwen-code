@@ -289,6 +289,33 @@ describe('a planted git program reaches no automatic git call', () => {
   );
 
   itWherePlantRuns(
+    'the exit-tool probes pin --untracked-files=all so a hidden untracked mode cannot read a worktree clean',
+    async () => {
+      const { repo, fired } = planted('post-index-change');
+      // Clean the tracked file and leave a single untracked file. An ambient
+      // `status.showUntrackedFiles=no` (a user's `~/.gitconfig`, or a
+      // tree-shipped `.git/config` a linked worktree inherits) would make a
+      // bare `status --porcelain` read the worktree clean and destroy the
+      // untracked output — unless the probe pins `--untracked-files=all`.
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+      execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+        cwd: repo,
+        encoding: 'utf8',
+      });
+      writeFileSync(join(repo, 'agent-output.ts'), 'untracked agent output\n');
+
+      const service = new GitWorktreeService(repo);
+      expect(await service.hasWorktreeChanges(repo)).toBe(true);
+      expect(await service.countWorktreeChanges(repo)).toEqual({
+        tracked: 0,
+        untracked: 1,
+      });
+      expect(fired()).toBe(false);
+    },
+    PLANT_TIMEOUT_MS,
+  );
+
+  itWherePlantRuns(
     'the post-index-change fixture is a live attack: an ungated status runs it',
     () => {
       const { repo, fired } = planted('post-index-change');

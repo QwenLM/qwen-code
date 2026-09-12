@@ -39,13 +39,32 @@ const DETACHED_HEAD_LABEL = '(detached HEAD)';
 export const NO_EXEC_CONFIG_SETTING = 'core.fsmonitor=';
 
 /**
- * {@link NO_EXEC_CONFIG_SETTING} as `git` argv, to spread into a command's
+ * The program-valued config keys a repository can point a git command at, each
+ * expressed as the bare `key=value` form simple-git's `config` option and the
+ * `-c` argv both read.
+ *
+ * `core.fsmonitor` names the helper git runs on every index refresh.
+ * `log.showSignature=false` closes the `log.showSignature` → `gpg.program`
+ * vector: a repo-local `gpg.program` is reached whenever `log.showSignature`
+ * is true and a `gpgsig`-bearing commit is walked, and git verifies the
+ * signature regardless of whether `--format` prints `%G*`.
+ */
+export const NO_EXEC_CONFIG_SETTINGS = [
+  NO_EXEC_CONFIG_SETTING,
+  'log.showSignature=false',
+] as const;
+
+/**
+ * {@link NO_EXEC_CONFIG_SETTINGS} as `git` argv, to spread into a command's
  * arguments.
  *
  * Passed to every git call rather than only the ones measured to refresh, so
  * the guard does not rest on which subcommand a given git version refreshes on.
  */
-export const NO_EXEC_CONFIG = ['-c', NO_EXEC_CONFIG_SETTING] as const;
+export const NO_EXEC_CONFIG = NO_EXEC_CONFIG_SETTINGS.flatMap((setting) => [
+  '-c',
+  setting,
+]) as readonly string[];
 
 // Bound the read: these files are one short line, never megabytes.
 const MAX_GIT_METADATA_BYTES = 4096;
@@ -311,16 +330,7 @@ export function getRecentGitStatus(cwd: string): string | null {
 
     const log = execFileSync(
       'git',
-      [
-        ...NO_EXEC_CONFIG,
-        '-c',
-        'log.showSignature=false',
-        '--no-optional-locks',
-        'log',
-        '--oneline',
-        '-n',
-        '5',
-      ],
+      [...NO_EXEC_CONFIG, '--no-optional-locks', 'log', '--oneline', '-n', '5'],
       {
         cwd,
         encoding: 'utf8',

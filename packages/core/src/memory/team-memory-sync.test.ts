@@ -337,4 +337,35 @@ describe('syncTeamMemory', () => {
     expect(second.skippedReason).not.toBe('local-ahead');
     expect(second.pushed).toBe(false);
   }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'does not rewind over a concurrent commit when the push is rejected',
+    async () => {
+      const { repo } = freshRemoteAndClone('alice');
+      // A client-side pre-push hook plays the "second writer": it commits and
+      // publishes its own file with `--no-verify`, then exits 1 so THIS sync's
+      // push fails. A blind `HEAD~1` rollback would rewind over the hook's
+      // commit and sweep its file into the shared index; the SHA guard must
+      // leave it alone.
+      const hook = path.join(repo, '.git', 'hooks', 'pre-push');
+      fs.writeFileSync(
+        hook,
+        "#!/bin/sh\necho precious > user-precious.txt\ngit add user-precious.txt\ngit commit -m 'USER PRECIOUS'\ngit push --no-verify origin HEAD:main\nexit 1\n",
+      );
+      fs.chmodSync(hook, 0o755);
+
+      writeTeamMemory(repo, 'feedback/x.md', 'note');
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.pushed).toBe(false);
+      // The hook's commit is still HEAD — the rewind must not have stripped it.
+      expect(git(repo, 'log', '-1', '--format=%s').trim()).toBe(
+        'USER PRECIOUS',
+      );
+      // Its file is committed, not stranded in the shared index.
+      expect(git(repo, 'diff', '--cached', '--name-only').trim()).toBe('');
+      expect(fs.existsSync(path.join(repo, 'user-precious.txt'))).toBe(true);
+    },
+    30_000,
+  );
 });

@@ -2762,8 +2762,18 @@ export class GitWorktreeService {
       // global `core.excludesFile` / `safe.directory`).
       const { stdout } = await execFileAsync(
         'git',
-        [...NO_EXEC_CONFIG, '--no-optional-locks', 'status', '--porcelain'],
-        { cwd: worktreePath, encoding: 'utf8' },
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
       );
       // Porcelain v1 emits one line per change (`XY path`); any line — tracked
       // (` M`), untracked (`??`), or conflicted (`UU`) — means the worktree is
@@ -2784,16 +2794,26 @@ export class GitWorktreeService {
     try {
       const { stdout } = await execFileAsync(
         'git',
-        [...NO_EXEC_CONFIG, '--no-optional-locks', 'status', '--porcelain'],
-        { cwd: worktreePath, encoding: 'utf8' },
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ],
+        {
+          cwd: worktreePath,
+          encoding: 'utf8',
+          maxBuffer: 10 * 1024 * 1024,
+        },
       );
       let tracked = 0;
       let untracked = 0;
       // Porcelain v1: each change line begins with a two-char status code.
       // `??` is untracked; every other code is a tracked change — staged,
-      // unstaged, renamed, or conflicted (`UU` and friends, which the old
-      // `status.conflicted` enumeration could miss and thus read a mid-merge
-      // worktree as clean).
+      // unstaged, renamed, or conflicted (`UU` and friends, which porcelain v1
+      // emits as ordinary lines, so the mid-merge case the previous simple-git
+      // enumeration already covered stays covered).
       for (const line of stdout.split('\n')) {
         if (line.length === 0) continue;
         if (line.startsWith('??')) {

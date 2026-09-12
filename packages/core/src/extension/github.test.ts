@@ -211,7 +211,7 @@ describe('git extension helpers', () => {
 
       expect(simpleGit).toHaveBeenCalledWith(destination, {
         abort: controller.signal,
-        config: ['core.fsmonitor='],
+        config: ['core.fsmonitor=', 'log.showSignature=false'],
         unsafe: { allowUnsafeFsMonitor: true },
       });
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
@@ -324,6 +324,7 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
           'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
@@ -387,6 +388,7 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
           'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
@@ -1869,6 +1871,7 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
           'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,

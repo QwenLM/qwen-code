@@ -144,6 +144,11 @@ export async function syncTeamMemory(
     pushed: false,
   };
 
+  // The commit THIS sync created, captured so a rejected push can rewind to it
+  // by SHA instead of assuming `HEAD~1` is ours (a concurrent writer may have
+  // committed on top during the push window).
+  let ourSha: string | null = null;
+
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   const gitRoot = findGitRoot(teamRoot);
   if (!gitRoot || !isGitRepository(gitRoot)) {
@@ -224,6 +229,11 @@ export async function syncTeamMemory(
     }
     commitArgs.push('--', relPath);
     result.committed = (await tryGit(gitRoot, commitArgs)) !== null;
+    if (result.committed) {
+      ourSha =
+        (await tryGit(gitRoot, ['rev-parse', 'HEAD'], 'SIGKILL'))?.trim() ??
+        null;
+    }
     if (!result.committed && staged) {
       // Commit failed (hook/GPG/missing user.email — tryGit swallowed it).
       // Unstage the team paths so a user's next manual `git commit` does not
@@ -264,13 +274,47 @@ export async function syncTeamMemory(
     // branch. That stranded commit trips the `wasAheadBeforeSync` gate next
     // cycle and disables pushing permanently, and it also blocks the user's own
     // next signed push. Undo our own commit so the branch returns to its
-    // pre-sync HEAD and cannot stay ahead. `--soft` keeps the index and working
-    // tree intact (unlike a whole-tree mixed reset, which would unstage
-    // unrelated work this sync never touches); the pathspec-limited reset then
-    // unstages only the team path, mirroring the unstage-on-commit-failure
-    // pattern above.
-    await tryGit(gitRoot, ['reset', '--soft', 'HEAD~1']);
-    await tryGit(gitRoot, ['reset', '--quiet', '--', relPath]);
+    // pre-sync HEAD and cannot stay ahead.
+    //
+    // The rewind is by SHA, never a blind `HEAD~1`: a second writer (the
+    // user's own terminal, or another daemon session) may have committed on top
+    // during the push window, and a blind `HEAD~1` would drop THAT commit and
+    // sweep its files into the shared index. `headNow !== ourSha` means someone
+    // else advanced HEAD — leave their commit alone. `remoteHasIt` covers the
+    // false-negative push: `tryGit` collapses a push that was SIGKILLed (or
+    // dropped by a proxy) after the remote applied the ref into the same `null`
+    // as a rejection, and rewinding a commit the remote already has would
+    // demote the published note to untracked and wedge the next `pull --ff-only`.
+    const headNow =
+      (await tryGit(gitRoot, ['rev-parse', 'HEAD'], 'SIGKILL'))?.trim() ?? null;
+    const remoteTip = await tryGit(
+      gitRoot,
+      ['ls-remote', pushTarget.remote, pushTarget.mergeRef],
+      'SIGKILL',
+    );
+    const remoteHasIt = ourSha !== null && (remoteTip ?? '').includes(ourSha);
+    if (headNow === ourSha && !remoteHasIt) {
+      // `--soft` keeps the index and working tree intact (unlike a whole-tree
+      // mixed reset, which would unstage unrelated work this sync never
+      // touches); the pathspec-limited reset then unstages only the team path,
+      // mirroring the unstage-on-commit-failure pattern above.
+      const rewound =
+        (await tryGit(
+          gitRoot,
+          ['reset', '--soft', `${ourSha}^`],
+          'SIGTERM',
+        )) !== null;
+      const unstaged =
+        (await tryGit(gitRoot, ['reset', '--quiet', '--', relPath])) !== null;
+      if (!rewound || !unstaged) {
+        // A partial rollback (e.g. the second reset died on a held index.lock)
+        // would leave HEAD rewound while the team path stays staged — surface
+        // it rather than dropping both results.
+        debugLogger.warn(
+          `team memory push-failed rollback incomplete (reset=${rewound}, unstage=${unstaged})`,
+        );
+      }
+    }
     result.skippedReason = 'push-failed';
   }
   return result;

@@ -9,7 +9,7 @@ import type {
   SimpleGitFactory,
   SimpleGitOptions,
 } from 'simple-git';
-import { NO_EXEC_CONFIG_SETTING } from './gitUtils.js';
+import { NO_EXEC_CONFIG_SETTINGS } from './gitUtils.js';
 
 export type SimpleGitModule = {
   CheckRepoActions: typeof CheckRepoActions;
@@ -56,7 +56,7 @@ function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
     const options = typeof first === 'string' ? second : first;
     const merged: Partial<SimpleGitOptions> = {
       ...options,
-      config: [...(options?.config ?? []), NO_EXEC_CONFIG_SETTING],
+      config: [...(options?.config ?? []), ...NO_EXEC_CONFIG_SETTINGS],
       unsafe: { ...options?.unsafe, allowUnsafeFsMonitor: true },
     };
     return baseDir === undefined ? factory(merged) : factory(baseDir, merged);
