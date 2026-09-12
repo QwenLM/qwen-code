@@ -1246,6 +1246,126 @@ describe('EmbeddedApp host wiring', () => {
     );
   });
 
+  it('keeps the truncation notice when a later load-more page is clean', async () => {
+    const presentable = Array.from({ length: 20 }, (_, index) => ({
+      sessionId: `sess-${index}`,
+      workspaceCwd: '/workspace',
+      displayName: `Session ${index}`,
+      updatedAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+    }));
+    // Page 1 mints a cursor that drops a tie group (truncated). A load-more
+    // returns a clean page, but the dropped rows are unreachable forever, so
+    // the notice must survive the clean page.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(async ({ cursor }) =>
+      cursor === undefined
+        ? { sessions: presentable, nextCursor: 'c1', truncated: true }
+        : {
+            sessions: [
+              {
+                sessionId: 'sess-extra',
+                workspaceCwd: '/workspace',
+                displayName: 'Extra',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain(
+        'Some conversations may not be shown.',
+      );
+    });
+
+    const loadMore = document.querySelector(
+      'button[data-load-more]',
+    ) as HTMLButtonElement;
+    expect(loadMore).not.toBeNull();
+    await act(async () => {
+      loadMore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    });
+    // The clean page must not retract the notice.
+    expect(container.textContent).toContain(
+      'Some conversations may not be shown.',
+    );
+  });
+
+  it('hides permanent delete for a session another surface is using', async () => {
+    // The panel lists every workspace session, including a live browser Web
+    // Shell conversation (clientCount > 0). It must still render, but must
+    // not offer the panel's irreversible delete.
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'web-live',
+          workspaceCwd: '/workspace',
+          displayName: 'Browser chat in another window',
+          sourceType: 'default',
+          clientCount: 1,
+          updatedAt: '2026-09-09T12:00:00.000Z',
+        },
+        {
+          sessionId: 'dead-cli',
+          workspaceCwd: '/workspace',
+          displayName: 'Terminal chat',
+          updatedAt: '2026-09-08T12:00:00.000Z',
+        },
+      ],
+      nextCursor: undefined,
+    });
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="web-live"]'),
+      ).not.toBeNull();
+    });
+
+    const liveRow = document.querySelector(
+      '[data-session-id="web-live"]',
+    ) as HTMLElement;
+    const deadRow = document.querySelector(
+      '[data-session-id="dead-cli"]',
+    ) as HTMLElement;
+    expect(liveRow).not.toBeNull();
+    expect(deadRow).not.toBeNull();
+
+    // The live row drops the delete control (but keeps rename).
+    expect(
+      liveRow.querySelector('button[aria-label="Delete conversation"]'),
+    ).toBeNull();
+    expect(
+      liveRow.querySelector('button[aria-label="Rename conversation"]'),
+    ).not.toBeNull();
+    // A dead transcript still offers delete.
+    expect(
+      deadRow.querySelector('button[aria-label="Delete conversation"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps rows fetched before a later page rejects', async () => {
     let calls = 0;
     sdkMocks.listWorkspaceSessionsPage.mockImplementation(async () => {

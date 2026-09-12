@@ -369,6 +369,15 @@ export function SessionHistoryDropdown({
               </div>
               {group.sessions.map((session) => {
                 const active = session.sessionId === currentSessionId;
+                // A row another surface is actively using (a browser Web Shell
+                // window, a Live voice thread) must not offer permanent delete:
+                // the daemon's delete route has no liveness bail for a
+                // non-Live session, so it would force-close a live
+                // conversation and unlink its transcript with no undo.
+                const liveElsewhere =
+                  !active &&
+                  ((session.clientCount ?? 0) > 0 ||
+                    session.hasActivePrompt === true);
                 const hovered = session.sessionId === hoveredId;
                 const renaming = session.sessionId === renamingId;
                 return (
@@ -526,7 +535,7 @@ export function SessionHistoryDropdown({
                         >
                           <Pencil size={13} aria-hidden="true" />
                         </button>
-                        {!active &&
+                        {!active && !liveElsewhere &&
                           (confirmDeleteId === session.sessionId ? (
                             <button
                               type="button"
@@ -614,6 +623,7 @@ export function SessionHistoryDropdown({
         </div>
         {truncated && !loading && (
           <div
+            role="status"
             style={{
               padding: '6px 10px',
               borderTop: '1px solid var(--vscode-panel-border)',

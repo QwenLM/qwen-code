@@ -295,11 +295,12 @@ export interface ListSessionsResult {
   /** Whether there are more items after this page */
   hasMore: boolean;
   /**
-   * True when the strict `mtime < cursor` boundary dropped files at
-   * `mtime >= cursor` (a tie group at a page boundary). Those rows are
-   * unreachable through this cursor, so the page is not a complete tail even
-   * though `items` may be empty and `nextCursor` undefined. Absent for a
-   * first page or when no file was dropped.
+   * True when this page's cursor (the mtime of its last processed file)
+   * equals the mtime of the next unprocessed file — a tie group at a page
+   * boundary. Those siblings are unreachable through the strict
+   * `mtime < cursor` keyset, so the list this page produces is not a complete
+   * tail. Reported on the page that mints the cursor, not the page that
+   * consumes it. Absent for a first page or when no tie group was dropped.
    */
   truncated?: boolean;
 }
@@ -2572,15 +2573,13 @@ export class SessionService {
     files.sort((a, b) => b.mtime - a.mtime);
     signal?.throwIfAborted();
 
-    // Apply cursor filter (items with mtime < cursor). The strict boundary
-    // drops files at `mtime >= cursor`; those rows are unreachable through
-    // this cursor (a tie group at a page boundary), so a non-empty drop is
-    // the one case where this page cannot certify a complete tail.
-    let truncated = false;
+    // Apply cursor filter (items with mtime < cursor). Files with
+    // `mtime > cursor` were served by an earlier page and are never a drop; a
+    // tie-group sibling (`mtime === cursor`) is unreachable through this
+    // strict boundary, and its loss is detected at the cursor-mint site below
+    // rather than here.
     if (cursor !== undefined) {
-      const filesBeforeCursorFilter = files.length;
       files = files.filter((f) => f.mtime < cursor);
-      truncated = files.length < filesBeforeCursorFilter;
     }
 
     // Iterate through files until we have enough matching ones.
@@ -2590,6 +2589,7 @@ export class SessionService {
     let filesProcessed = 0;
     let lastProcessedMtime: number | undefined;
     let hasMoreFiles = false;
+    let truncated = false;
 
     // Pre-allocate the tail-read buffer once and pass it to every
     // per-file metadata read. Without pooling, each session in the
@@ -2609,6 +2609,13 @@ export class SessionService {
       // Stop if we have enough items
       if (items.length >= size) {
         hasMoreFiles = true;
+        // The cursor this page mints is `lastProcessedMtime`. When the next
+        // unprocessed file shares that mtime, it is a tie-group sibling the
+        // strict `mtime < cursor` boundary will drop and never re-reach —
+        // flag the page so callers do not present a short list as complete.
+        if (file.mtime === lastProcessedMtime) {
+          truncated = true;
+        }
         break;
       }
 

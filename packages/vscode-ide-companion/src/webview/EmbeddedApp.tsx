@@ -542,7 +542,13 @@ export function EmbeddedApp() {
           return Array.from(merged.values());
         });
         setSessionCursor(nextCursor);
-        setSessionListTruncated(truncated);
+        // The rows shown are merged cumulatively across calls, so a later
+        // clean page must not retract a truncation notice that is still true
+        // of the list on screen. A fresh page-1 load (no cursor) resets the
+        // notice; a cursor-bearing page only ever ORs it on.
+        setSessionListTruncated((current) =>
+          cursor === undefined ? truncated : current || truncated,
+        );
       } catch (error) {
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),

@@ -233,5 +233,13 @@ describe('SessionHistoryDropdown load-more control', () => {
       'Some conversations may not be shown.',
     );
     expect(container.querySelector('button[data-load-more]')).toBeNull();
+    // The notice is the only disclosure that the list is incomplete, so it
+    // must be announced to screen readers like the sibling error/loading rows.
+    const statusEl = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="status"]'),
+    ).find((element) =>
+      element.textContent?.includes('Some conversations may not be shown.'),
+    );
+    expect(statusEl).toBeDefined();
   });
 });
