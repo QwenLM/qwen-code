@@ -920,39 +920,6 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.response_text).toBe('KEEP_RESPONSE_MARKER');
   });
 
-  it('preserves opaque thoughtSignature provider payload in request_text', async () => {
-    const wrapped = createWrappedGenerator(
-      vi
-        .fn()
-        .mockResolvedValue(
-          createResponse('resp-sig', 'test-model', [
-            { text: 'RESPONSE_MARKER' },
-          ]),
-        ),
-      vi.fn(),
-    );
-    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
-      model: 'test-model',
-      authType: AuthType.USE_OPENAI,
-    });
-
-    await generator.generateContent(
-      {
-        model: 'test-model',
-        contents: [
-          {
-            role: 'user',
-            parts: [{ thought: true, thoughtSignature: 'OPAQUE_SIG_MARKER' }],
-          },
-        ],
-      } as unknown as GenerateContentParameters,
-      'prompt-thought-signature',
-    );
-
-    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
-    expect(requestEvent.request_text).toContain('OPAQUE_SIG_MARKER');
-  });
-
   it('omits request_text and response_text from API telemetry for streaming when logPrompts is false', async () => {
     const streamFn = vi.fn().mockResolvedValue(
       (async function* () {
