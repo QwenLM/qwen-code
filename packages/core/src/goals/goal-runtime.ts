@@ -1417,15 +1417,21 @@ export function createGoalRuntime(
         await finishCheckpointCheck(attempt, 'room');
         return;
       }
-      // The first check sends the whole window; a check after a stall sends
-      // it in batches, smaller after each further stall (see
-      // `checkpointBatchRecordLimit`). Each batch is folded into claims that
-      // the next batch carries forward, and only the last batch's checkpoint
-      // is kept: the cursor cannot move past records a later batch failed to
-      // fold. A replay batches by the streak it restored, like a live check.
+      // The first check sends the whole window; a check after a stall on an
+      // overflowing window sends it in batches, smaller after each further
+      // stall (see `checkpointBatchRecordLimit`). Each batch is folded into
+      // claims that the next batch carries forward, and only the last batch's
+      // checkpoint is kept: the cursor cannot move past records a later batch
+      // failed to fold. Only the overflowing live check is split, because only
+      // it can spend a stall: a window with room settles a failure as
+      // inconclusive and a restore replay is exempt, so splitting either would
+      // cost calls -- and, for the replay, hold up session activation -- without
+      // changing an attempt the breaker counts.
       const batches = splitCheckpointEvidence(
         window.evidence,
-        checkpointBatchRecordLimit(attempt.goal.checkpointStalls ?? 0),
+        window.truncated && !replay
+          ? checkpointBatchRecordLimit(attempt.goal.checkpointStalls ?? 0)
+          : undefined,
       );
       let checkpoint: GoalEvidenceCheckpoint | undefined;
       let batchIndex = 0;

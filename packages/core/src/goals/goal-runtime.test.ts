@@ -2134,10 +2134,9 @@ describe('goal runtime', () => {
       60,
       'c',
     );
-    // The third check ran after two stalls, so in batches of 12.
-    expect(batchSizes(checkpointVerifier)).toEqual([
-      100, 24, 24, 20, 12, 12, 12, 12, 12,
-    ]);
+    // The third check ran after two stalls, but on a window with room, which
+    // cannot spend a stall, so it went out whole.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 60]);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     // A check that succeeded is the only thing that retires the diagnostic.
@@ -2720,24 +2719,14 @@ describe('goal runtime', () => {
     expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
   });
 
-  it('batches a checkpoint replay by the streak it restored, still without spending a stall', async () => {
+  it('sends a checkpoint replay whole, whatever streak it restored', async () => {
+    // Session activation waits for the replay, and a replay cannot spend a
+    // stall, so splitting it would only hold the session up for more calls.
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
-    // Answers a full batch, fails a short one: the replay's second batch.
     const checkpointVerifier = vi.fn(
-      async (input: GoalCheckpointVerifierInput) => {
-        if (input.evidence.length < GOAL_CHECKPOINT_BATCH_RECORD_LIMIT) {
-          throw new Error('provider failed');
-        }
-        return {
-          claims: [
-            {
-              proofKind: 'delivered_output' as const,
-              claim: 'Folded.',
-              sourceRefs: [input.evidence[0]!.uuid],
-            },
-          ],
-        };
+      async (_input: GoalCheckpointVerifierInput): Promise<never> => {
+        throw new Error('provider failed');
       },
     );
     const runtime = createGoalRuntime({
@@ -2788,19 +2777,20 @@ describe('goal runtime', () => {
     await runtime.prepareRestore([record], preparedWindow);
     await runtime.activateRestoredWork();
 
-    expect(batchSizes(checkpointVerifier)).toEqual([24, 6]);
+    expect(batchSizes(checkpointVerifier)).toEqual([30]);
+    // Still exempt: the failed replay keeps the streak it restored.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
       goal: {
         status: 'active',
         checkpointStalls: 1,
-        lastCheckpointFailure: 'batch 2/2: Error: provider failed',
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     expect(failedCheckpointChecks()).toHaveLength(1);
     expect(failedCheckpointChecks()[0]!.slice(3)).toEqual([
       'replay=true',
-      'batch=2/2',
+      'batch=1/1',
     ]);
   });
 
@@ -2856,14 +2846,15 @@ describe('goal runtime', () => {
 
     // The failure spends no stall, but it is still a failure the surfaces
     // should show: the record carries it beside the unchanged streak. The
-    // check followed a stall, so it split the 60 records and failed on the
-    // first of three batches.
+    // check followed a stall, but a window with room cannot spend one, so it
+    // went out whole rather than in batches.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 60]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
       goal: {
         status: 'active',
         checkpointStalls: 1,
-        lastCheckpointFailure: 'batch 1/3: Error: provider failed',
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     // The room arm leaves the same trace the truncated arm does: the
