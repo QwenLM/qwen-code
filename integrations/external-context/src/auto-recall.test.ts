@@ -244,6 +244,37 @@ describe('runAutoRecall', () => {
     });
   });
 
+  it('redacts a versioned Mem0 credential before search', async () => {
+    const fixture = await createRepositoryFixture();
+    loadConfig.mockResolvedValue({
+      version: 2,
+      timeoutMs: 5000,
+      autoRecall: { repositoryRoot: fixture.root, timeoutMs: 1500 },
+      provider: {
+        type: 'mem0',
+        preset: 'mem0-oss-rest-2026-08',
+        endpoint: { origin: 'https://mem0.example.com', basePath: '' },
+        credentialEnv: 'MEM0_API_KEY',
+        credential: 'provider-secret-value',
+        scope: { userId: 'fixed-user' },
+      },
+    } satisfies ExternalContextConfigV2);
+    search.mockResolvedValue([]);
+    const { runAutoRecall } = await import('./auto-recall.js');
+
+    await runAutoRecall({
+      hook_event_name: 'UserPromptSubmit',
+      submitted_prompt: 'compare provider-secret-value with deployment policy',
+      cwd: fixture.root,
+    });
+
+    expect(search).toHaveBeenCalledWith({
+      query: 'compare with deployment policy',
+      limit: 5,
+      signal: expect.any(AbortSignal),
+    });
+  });
+
   it('does not inspect the legacy prompt field', async () => {
     const fixture = await createRepositoryFixture();
     loadConfig.mockResolvedValue(config(fixture.root));
