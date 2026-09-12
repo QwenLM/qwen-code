@@ -704,6 +704,84 @@ describe('createWorkflowSandbox security', () => {
     expect(sandbox.getPhases()).toEqual(['Search']);
   });
 
+  // effort is validated and normalized on the revived copy, so the host (and
+  // the resume key) sees one canonical tier for every alias /effort accepts.
+  it('agent({effort}) hands the host the canonical tier', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.effort);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { effort: "high" });
+      await agent("b", { effort: "X-High" });
+      await agent("c", { effort: "med" });
+      await agent("d", {});
+      return "done";
+    `);
+    expect(seen).toEqual(['high', 'xhigh', 'medium', undefined]);
+  });
+
+  it.each([['"turbo"'], ['3'], ['{}']])(
+    'agent({effort: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { effort: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{effort\}\): unknown effort tier .*Known tiers are: low, medium, high, xhigh, max\./,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // Order and duplicates are not part of what the list means, so they must
+  // not reach the resume key; an empty list denies nothing and is dropped.
+  it('agent({disallowedTools}) hands the host a sorted, de-duplicated list', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { disallowedTools: ["write_file", "run_shell_command", "write_file"] });
+      await agent("b", { disallowedTools: [] });
+      return "done";
+    `);
+    expect(seen).toEqual([['run_shell_command', 'write_file'], undefined]);
+  });
+
+  it.each([['"run_shell_command"'], ['[""]'], ['[" edit"]'], ['[42]']])(
+    'agent({disallowedTools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { disallowedTools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{disallowedTools\}\): must be an array of non-empty tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names effort and disallowedTools among the known options', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { efort: "low" });`),
+    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools/);
+  });
+
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
     const emitted: string[] = [];

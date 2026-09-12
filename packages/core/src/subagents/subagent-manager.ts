@@ -43,6 +43,7 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import {
   createRuntimeContentGeneratorView,
   type AuthOverrides,
@@ -1074,15 +1075,17 @@ export class SubagentManager {
         ),
       };
 
-      // When the model selector specifies a different provider, build a
-      // dedicated ContentGenerator + view so the subagent talks to the
-      // right API without affecting the parent process. The view is
+      // When the model selector specifies a different provider, or the
+      // caller asked for a per-agent reasoning effort, build a dedicated
+      // ContentGenerator + view so the subagent talks to the right API with
+      // its own settings without affecting the parent process. The view is
       // applied via AsyncLocalStorage when the agent runs.
       const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
         modelConfig.model,
         options?.runtimeAuthOverrides,
+        modelConfig.reasoningEffort,
       );
 
       const { context: subagentContext, cleanup } =
@@ -1308,6 +1311,10 @@ export class SubagentManager {
    * override is needed — including `inherit`, an unset `fast` selector, or
    * any selector that fails to resolve to a configured model.
    *
+   * A `reasoningEffort` always needs its own view, even on the parent's model:
+   * the tier is written onto the agent's copy of the config, and the session
+   * config the agent would otherwise share must never receive it.
+   *
    * FileReadCache isolation and tool-registry rebuilding are handled
    * separately in {@link buildSubagentContextOverride} — every subagent
    * (inherit or explicit) gets that, regardless of whether a runtime
@@ -1318,6 +1325,7 @@ export class SubagentManager {
     base: Config,
     fallbackModelId?: string,
     runtimeAuthOverrides?: AuthOverrides,
+    reasoningEffort?: ReasoningEffort,
   ): Promise<RuntimeContentGeneratorView | undefined> {
     const route = this.resolveModelRoute(
       config,
@@ -1325,7 +1333,7 @@ export class SubagentManager {
       runtimeAuthOverrides?.authType,
     );
     const modelId = route?.modelId ?? fallbackModelId;
-    if (!modelId) {
+    if (!modelId && reasoningEffort === undefined) {
       return undefined;
     }
 
@@ -1345,10 +1353,14 @@ export class SubagentManager {
       base,
       modelId,
       authOverrides,
+      { reasoningEffort },
     );
 
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}` +
+        (reasoningEffort !== undefined
+          ? `, reasoningEffort=${reasoningEffort}`
+          : ''),
     );
 
     return view;
@@ -1496,6 +1508,16 @@ export class SubagentManager {
       runConfig,
       toolConfig,
     };
+  }
+
+  /**
+   * Resolve tool names or display names to tool names with the rules a spawn
+   * applies to `tools` / `disallowedTools`. A name that matches no registered
+   * tool is kept as given. Lets a caller reason about a deny list before the
+   * spawn without keeping a second copy of the matching rules.
+   */
+  async resolveToolNames(tools: string[]): Promise<string[]> {
+    return this.transformToToolNames(tools);
   }
 
   /**

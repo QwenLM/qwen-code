@@ -24,11 +24,30 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ResolvedModelConfig } from './types.js';
+import {
+  clampReasoningEffort,
+  parseModelReasoningCapabilities,
+  reasoningEffortsForCapability,
+  setGeneratorReasoningEffort,
+  type ReasoningEffort,
+} from '../core/reasoning-effort.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
 export interface AuthOverrides {
   authType: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+export interface AgentContentGeneratorOptions {
+  /**
+   * Reasoning effort for this agent alone, written onto the agent's own copy of
+   * the config and never onto the session's. Limited to the tiers `/effort`
+   * offers for the agent's model; see {@link applyAgentReasoningEffort}.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 /**
@@ -42,6 +61,67 @@ export interface AuthOverrides {
  * what a PTY subprocess does during its own initialization.
  */
 export function buildAgentContentGeneratorConfig(
+  base: Config,
+  modelId: string | undefined,
+  authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
+): ContentGeneratorConfig {
+  const nextConfig = buildInheritedAgentContentGeneratorConfig(
+    base,
+    modelId,
+    authOverrides,
+  );
+  if (options.reasoningEffort !== undefined) {
+    applyAgentReasoningEffort(base, nextConfig, options.reasoningEffort);
+  }
+  return nextConfig;
+}
+
+/**
+ * Put a per-agent tier on `target`, limited to the tiers `/effort` offers for
+ * the agent's model. `/effort` refuses a tier outside that set; an agent gets
+ * the closest tier the model does offer instead (the next stronger one, else
+ * the strongest), so a script written for one model still runs on another. A
+ * model that offers no tiers, or has thinking turned off, keeps the tier the
+ * agent inherited. The tier is then written with the rule the session setter
+ * uses, and each provider clamps it per request as it does the session tier.
+ */
+function applyAgentReasoningEffort(
+  base: Config,
+  target: ContentGeneratorConfig,
+  requested: ReasoningEffort,
+): void {
+  const capability =
+    target.authType && target.model
+      ? base
+          .getModelsConfig()
+          .getResolvedModel(target.authType, target.model, target.baseUrl)
+          ?.capabilities?.reasoning
+      : undefined;
+  const offered = reasoningEffortsForCapability(
+    parseModelReasoningCapabilities(capability),
+  );
+  if (offered.length === 0) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: model '${target.model}' offers no reasoning effort tiers.`,
+    );
+    return;
+  }
+  const tier = clampReasoningEffort(requested, offered);
+  if (!setGeneratorReasoningEffort(target, tier)) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: thinking is disabled for model '${target.model}'.`,
+    );
+    return;
+  }
+  if (tier !== requested) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' is not offered by model '${target.model}'; using '${tier}'.`,
+    );
+  }
+}
+
+function buildInheritedAgentContentGeneratorConfig(
   base: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
@@ -127,11 +207,13 @@ export async function createRuntimeContentGeneratorView(
   contentGeneratorOwner: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
 ): Promise<RuntimeContentGeneratorView> {
   const contentGeneratorConfig = buildAgentContentGeneratorConfig(
     base,
     modelId,
     authOverrides,
+    options,
   );
   const contentGenerator = await createContentGenerator(
     contentGeneratorConfig,

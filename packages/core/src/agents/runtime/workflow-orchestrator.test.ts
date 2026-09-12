@@ -1579,6 +1579,39 @@ describe('WorkflowOrchestrator', () => {
     return { journal, entries };
   }
 
+  // The sandbox normalizes effort and disallowedTools before the resume key is
+  // derived: spelling the same request differently must replay, and a
+  // genuinely different request must not.
+  it('derives one resume key for equivalent effort and disallowedTools spellings', async () => {
+    const keyFor = async (opts: string): Promise<string> => {
+      const { journal, entries } = memoryJournal();
+      await new WorkflowOrchestrator(async () => 'ok').run({
+        script: `return await agent('scan', ${opts});`,
+        args: undefined,
+        journal,
+      });
+      const started = entries.find((e) => e.type === 'started');
+      return (started as { key: string }).key;
+    };
+
+    const medium = await keyFor(
+      `{ effort: 'medium', disallowedTools: ['write_file', 'edit'] }`,
+    );
+    expect(
+      await keyFor(
+        `{ effort: 'MED', disallowedTools: ['edit', 'write_file', 'edit'] }`,
+      ),
+    ).toBe(medium);
+    expect(
+      await keyFor(
+        `{ effort: 'high', disallowedTools: ['edit', 'write_file'] }`,
+      ),
+    ).not.toBe(medium);
+    expect(
+      await keyFor(`{ effort: 'medium', disallowedTools: ['edit'] }`),
+    ).not.toBe(medium);
+  });
+
   it('settles a sequential agent() to null when the agent itself failed', async () => {
     const { journal, entries } = memoryJournal();
     const orchestrator = new WorkflowOrchestrator(async () => {
@@ -3427,6 +3460,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeIgnoreFiles?: string;
     options?: {
       runConfigOverrides?: unknown;
+      modelConfigOverrides?: unknown;
       taskName?: string;
       subagentId?: string;
     };
@@ -3521,6 +3555,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        // The real manager resolves display names against the tool registry;
+        // the stub knows the one display name the schema-deny refusal needs.
+        resolveToolNames: async (names: string[]) =>
+          names.map((name) =>
+            name === 'StructuredOutput' ? 'structured_output' : name,
+          ),
         createAgentHeadless: async (
           subagentConfig: {
             name?: string;
@@ -3531,6 +3571,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           options?: {
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
+            modelConfigOverrides?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3545,6 +3586,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               .getQwenIgnoreFileNamesDisplay(),
             options: {
               runConfigOverrides: options?.runConfigOverrides,
+              modelConfigOverrides: options?.modelConfigOverrides,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -4204,6 +4246,125 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       ]),
     );
   });
+
+  // effort needs the agent's own content-generator config, which only the
+  // override path builds: it has to leave the fast path and reach the manager
+  // as a per-agent model-config override, never as a session change.
+  it('routes effort through the override path as a per-agent model override', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    const result = await createProductionDispatch(config)('hi', {
+      effort: 'low',
+    });
+
+    expect(result).toBe('done');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'low',
+    });
+    expect(calls[0]!.config.model).toBeUndefined();
+  });
+
+  it('sends no model-config override when effort is omitted', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('hi', { model: 'qwen3-max' });
+
+    expect(calls[0]!.options?.modelConfigOverrides).toBeUndefined();
+  });
+
+  // The sandbox normalizes effort before it crosses; a host caller that
+  // dispatches directly gets the same normalization and the same refusal.
+  it('normalizes a host-supplied effort alias and refuses an unknown tier', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await dispatch('hi', { effort: 'X-High' as unknown as 'xhigh' });
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'xhigh',
+    });
+
+    await expect(
+      dispatch('hi', { effort: 'turbo' as unknown as 'low' }),
+    ).rejects.toThrow(/agent\(\{effort\}\): unknown effort tier "turbo"/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('unions per-call disallowedTools with the agentType denies and the floor', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'read-only scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      agentType: 'Scanner',
+      disallowedTools: ['Shell', 'write_file'],
+    });
+
+    const disallowed = calls[0]!.config.disallowedTools ?? [];
+    expect(disallowed).toEqual(
+      expect.arrayContaining([
+        'Foo',
+        'Shell',
+        'write_file',
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+    expect(new Set(disallowed).size).toBe(disallowed.length);
+  });
+
+  it('routes disallowedTools alone through the override path', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      disallowedTools: ['edit'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.disallowedTools).toEqual(
+      expect.arrayContaining(['edit', 'agent', 'ask_user_question']),
+    );
+  });
+
+  // A schema agent answers only through structured_output. Denying it must be
+  // refused before anything spawns, by display name as well as by tool name.
+  it.each([['structured_output'], ['StructuredOutput']])(
+    'refuses a schema agent that denies %s before spawning',
+    async (name) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('extract', {
+          schema: { type: 'object' },
+          disallowedTools: [name],
+        }),
+      ).rejects.toThrow(
+        /schema mode needs the structured_output tool, but disallowedTools deny it/,
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
 
   it('schema-mode: subagent calls structured_output successfully → returns validated args', async () => {
     const { config } = fakeConfigWithMgr({

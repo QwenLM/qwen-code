@@ -176,6 +176,18 @@ describe('bundled workflow-authoring skill', () => {
     // The phase option is ambient, not per call.
     ['every dispatch issued after it'],
     ['It is not scoped to the one call'],
+    // effort: the rule it shares with /effort, and what changes the key.
+    ['model?, effort?, agentType?'],
+    ["limited to the tiers `/effort` offers for the agent's model"],
+    ['becomes the next stronger tier it does offer'],
+    ['keeps the effort it inherited'],
+    ["The session's own effort is never changed"],
+    ['A different effort is a different resume cache key'],
+    // disallowedTools only narrows, and a schema agent cannot deny its answer.
+    ['stallMs?, disallowedTools? })'],
+    ['never re-enable one'],
+    ['denies `structured_output` resolves to null'],
+    ['not on their order or duplicates'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],

@@ -3212,6 +3212,53 @@ bad`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
+      // A per-agent reasoning effort needs its own content generator even on
+      // the parent's model: the tier goes onto the agent's copy of the
+      // config, and the session config the agent would otherwise share must
+      // never receive it.
+      it('should create a ContentGenerator on the parent model for a reasoning effort alone', async () => {
+        const parent = mockConfig.getContentGeneratorConfig();
+
+        await manager.createAgentHeadless(agentConfig, mockConfig, {
+          modelConfigOverrides: { reasoningEffort: 'low' },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'parent-model',
+            reasoning: { effort: 'low' },
+          }),
+          mockConfig,
+        );
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeDefined();
+        expect(parent.reasoning).toBeUndefined();
+      });
+
+      it('should carry a reasoning effort alongside a model override', async () => {
+        await manager.createAgentHeadless(
+          { ...agentConfig, model: 'custom-model' },
+          mockConfig,
+          { modelConfigOverrides: { reasoningEffort: 'max' } },
+        );
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'custom-model',
+            reasoning: { effort: 'max' },
+          }),
+          mockConfig,
+        );
+      });
+
+      it('resolves display names to tool names and keeps unknown names as given', async () => {
+        await expect(
+          manager.resolveToolNames(['Write File', 'grep', 'not_a_tool']),
+        ).resolves.toEqual(['write_file', 'grep', 'not_a_tool']);
+      });
+
       it('should pass the agent runtimeView to AgentHeadless.create', async () => {
         const config = { ...agentConfig, model: 'custom-model' };
         const fakeGenerator = { generateContentStream: vi.fn() };

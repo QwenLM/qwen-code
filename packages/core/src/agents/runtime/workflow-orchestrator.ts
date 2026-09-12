@@ -52,6 +52,11 @@ import type {
   AgentToolResultEvent,
 } from './agent-events.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import {
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../../core/reasoning-effort.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -271,6 +276,9 @@ export function resolveSubagentMaxTimeMinutes(
  * and MonitorTool depends on AgentTool-owned notification callbacks that
  * workflow subagents do not register. Defense-in-depth alongside the workflow
  * system prompt's return-value contract.
+ *
+ * A per-call `agent({ disallowedTools })` is unioned on top of this floor and
+ * can only narrow the set further; nothing a script passes removes an entry.
  */
 export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.ASK_USER_QUESTION,
@@ -745,13 +753,17 @@ async function runSingleDispatch(
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
-  // the parent working tree.
+  // the parent working tree. The same holds for `effort`, which needs the
+  // agent's own content-generator config, and for `disallowedTools`, whose
+  // display names are resolved only on the override path.
   if (
     opts.agentType === undefined &&
     opts.model === undefined &&
     opts.isolation === undefined &&
     opts.schema === undefined &&
-    opts.workingDir === undefined
+    opts.workingDir === undefined &&
+    opts.effort === undefined &&
+    opts.disallowedTools === undefined
   ) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
@@ -852,7 +864,47 @@ function reportTokens(
 }
 
 /**
- * Override path for `agent({ agentType, model, isolation })`. Resolves the
+ * `opts.effort` as its canonical tier, or `undefined` when omitted. The sandbox
+ * already normalizes it; this re-check covers a host caller that dispatches
+ * without going through the sandbox.
+ */
+function resolveDispatchEffort(raw: unknown): ReasoningEffort | undefined {
+  if (raw === undefined) return undefined;
+  const tier =
+    typeof raw === 'string' ? normalizeReasoningEffort(raw) : undefined;
+  if (tier === undefined) {
+    throw new Error(
+      `agent({effort}): unknown effort tier ${sanitizeForErrorMessage(
+        JSON.stringify(raw) ?? String(raw),
+      )}. Known tiers are: ${REASONING_EFFORT_TIERS.join(', ')}.`,
+    );
+  }
+  return tier;
+}
+
+/**
+ * `opts.disallowedTools` as a list (`[]` when omitted). Same host-side
+ * re-check as {@link resolveDispatchEffort}.
+ */
+function resolveDispatchDenies(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (name) =>
+        typeof name !== 'string' || name.length === 0 || name !== name.trim(),
+    )
+  ) {
+    throw new Error(
+      "agent({disallowedTools}): must be an array of non-empty tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'write_file'].",
+    );
+  }
+  return raw as string[];
+}
+
+/**
+ * Override path for `agent({ agentType, model, effort, isolation,
+ * disallowedTools })`. Resolves the
  * requested agentType against `SubagentManager`, applies the workflow
  * disallowed-tool floor, threads `opts.model` into `SubagentConfig.model`
  * so provider routing in `buildRuntimeContentGeneratorView` sees the
@@ -872,7 +924,13 @@ function reportTokens(
  * (not via `toolConfigOverride`): augmenting before `convertToRuntimeConfig`
  * lets the manager's `transformToToolNames` normalize all entries together
  * (display name → tool name + MCP pattern preservation). A toolConfigOverride
- * would bypass that normalization and require us to duplicate it here.
+ * would bypass that normalization and require us to duplicate it here. A
+ * per-call `disallowedTools` joins the same union for the same reason.
+ *
+ * Why `effort` goes into `modelConfigOverrides.reasoningEffort`: the manager
+ * builds this agent its own content generator from a copy of the session
+ * config and writes the tier onto that copy, limited to the tiers `/effort`
+ * offers for the agent's model, so the session's own tier is never touched.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
  * `toolConfigOverride`): `SubagentManager` derives its subagent context from
@@ -916,6 +974,9 @@ async function runOverridePath(
       "agent({isolation:'remote'}) is not available in this build.",
     );
   }
+
+  const effort = resolveDispatchEffort(opts.effort);
+  const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
 
   const subagentMgr = config.getSubagentManager();
   let baseConfig: SubagentConfig;
@@ -1006,9 +1067,24 @@ async function runOverridePath(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
         ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+        ...requestedDenies,
       ]),
     ),
   };
+
+  // A schema agent answers only through structured_output. Denying that tool
+  // leaves it no way to deliver the one result the script accepts, and the
+  // run would spend the agent's turns before failing as if it had ignored the
+  // contract. Refuse before anything is provisioned. Names are resolved by the
+  // normalizer the spawn itself applies, so the display name is caught too.
+  if (opts.schema !== undefined && requestedDenies.length > 0) {
+    const resolvedDenies = await subagentMgr.resolveToolNames(requestedDenies);
+    if (resolvedDenies.includes(ToolNames.STRUCTURED_OUTPUT)) {
+      throw new Error(
+        'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it.',
+      );
+    }
+  }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
@@ -1160,6 +1236,9 @@ async function runOverridePath(
           max_turns: resolveSubagentMaxTurns(),
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
+        ...(effort !== undefined
+          ? { modelConfigOverrides: { reasoningEffort: effort } }
+          : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),
         subagentId: workflowAgentId,

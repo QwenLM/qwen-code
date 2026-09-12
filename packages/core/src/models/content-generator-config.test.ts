@@ -297,6 +297,146 @@ describe('buildAgentContentGeneratorConfig', () => {
     });
   });
 
+  // A workflow `agent({ effort })` gets its tier through this builder. It has
+  // to land on the agent's copy by the rule `/effort` uses, and never on the
+  // session config that copy was spread from.
+  describe('per-agent reasoning effort', () => {
+    it('writes the tier onto an inherited copy without touching the parent', () => {
+      const parent: ContentGeneratorConfig = {
+        ...parentConfig,
+        reasoning: { effort: 'high', budget_tokens: 4096 },
+      };
+      const config = createMockConfig(parent);
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'low' },
+      );
+
+      expect(result.model).toBe('parent-model');
+      expect(result.apiKey).toBe('parent-key');
+      expect(result.reasoning).toEqual({ effort: 'low', budget_tokens: 4096 });
+      expect(parent.reasoning).toEqual({ effort: 'high', budget_tokens: 4096 });
+    });
+
+    it('leaves thinking off when the parent turned it off', () => {
+      const config = createMockConfig({ ...parentConfig, reasoning: false });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'max' },
+      );
+
+      expect(result.reasoning).toBe(false);
+    });
+
+    it('applies after a cross-provider switch cleared the generation config', () => {
+      const config = createMockConfig(parentConfig);
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'claude-sonnet',
+        { authType: 'anthropic' },
+        { reasoningEffort: 'xhigh' },
+      );
+
+      expect(result.samplingParams).toBeUndefined();
+      expect(result.reasoning).toEqual({ effort: 'xhigh' });
+    });
+
+    it('changes nothing when no effort is requested', () => {
+      const config = createMockConfig(parentConfig);
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        {},
+      );
+
+      expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    // Limited to what `/effort` offers the agent's model: an unoffered tier
+    // becomes the next stronger offered one (else the strongest), and a model
+    // that offers none keeps the tier the agent inherited.
+    it('clamps to the tiers the model declares', () => {
+      const config = createMockConfig(parentConfig, {
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            disableField: 'reasoning_effort',
+            efforts: ['low', 'medium', 'high'],
+          },
+        },
+      } as unknown as ResolvedModelConfig);
+
+      const above = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'max' },
+      );
+      const offered = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'low' },
+      );
+
+      expect(above.reasoning).toEqual({ effort: 'high' });
+      expect(offered.reasoning).toEqual({ effort: 'low' });
+    });
+
+    it('keeps the inherited tier for a model that offers none', () => {
+      const config = createMockConfig(parentConfig, {
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            toggleOnly: true,
+          },
+        },
+      } as unknown as ResolvedModelConfig);
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'low' },
+      );
+
+      expect(result.reasoning).toEqual({ effort: 'high' });
+    });
+
+    it('carries the effort through createRuntimeContentGeneratorView', async () => {
+      const config = createMockConfig(parentConfig);
+      vi.mocked(createContentGenerator).mockResolvedValue(
+        {} as Awaited<ReturnType<typeof createContentGenerator>>,
+      );
+
+      const view = await createRuntimeContentGeneratorView(
+        config,
+        config,
+        undefined,
+        { authType: 'openai' },
+        { reasoningEffort: 'medium' },
+      );
+
+      expect(view.contentGeneratorConfig.reasoning).toEqual({
+        effort: 'medium',
+      });
+      expect(createContentGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({ reasoning: { effort: 'medium' } }),
+        config,
+      );
+    });
+  });
+
   describe('edge cases', () => {
     it('should fall back to parent model when modelId is undefined', () => {
       const config = createMockConfig(parentConfig);

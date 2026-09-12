@@ -83,7 +83,7 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
+`agent(prompt, { label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
 
 - `label` (string) — the name shown in the run views and the failures list.
   Make it unique per dispatch: a failure line carries only the label and the
@@ -104,6 +104,16 @@ say explicitly what each one should read and whether it may edit files.
   agent type 'X' not found"; check for null.
 - `model` (string) — per-call model override; routes provider correctly via the
   subagent runtime view.
+- `effort` (`'low'` | `'medium'` | `'high'` | `'xhigh'` | `'max'`) — the
+  reasoning effort for this one agent; omit it to inherit the session's effort.
+  It is limited to the tiers `/effort` offers for the agent's model: a tier the
+  model does not offer becomes the next stronger tier it does offer, or its
+  strongest tier when none is stronger, and a model that offers no tiers, or has
+  thinking turned off, keeps the effort it inherited. The session's own effort
+  is never changed. Aliases such as `'med'` and `'x-high'` are accepted; any
+  other value rejects the call. Use `'low'` for cheap mechanical stages and the
+  higher tiers only for the hardest verify or judge stages. A different effort
+  is a different resume cache key.
 - `isolation` — `'worktree'` provisions a fresh git worktree under
   `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
@@ -131,6 +141,15 @@ say explicitly what each one should read and whether it may edit files.
   a legitimately slow tool is not a stall. Default 180000 (override via
   `QWEN_CODE_WORKFLOW_STALL_SECONDS`, whole seconds); `0` disables the
   watchdog. Wall time per attempt is bounded separately.
+- `disallowedTools` (string[]) — tools this agent may not call, on top of the
+  floor below; it can only narrow the agent's tools, never re-enable one. Use
+  tool names (`run_shell_command`, `write_file`, `edit`) or display names
+  (`Shell`, `WriteFile`, `Edit`); a name that matches no tool denies nothing.
+  Entries must be non-empty strings without surrounding whitespace, or the call
+  is rejected. A `schema` agent that denies `structured_output` resolves to null
+  with the reason recorded, because it would have no way to return its result.
+  The resume cache key depends on which tools are denied, not on their order or
+  duplicates.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
 EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A

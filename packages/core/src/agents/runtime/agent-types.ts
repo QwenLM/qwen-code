@@ -12,6 +12,7 @@
  */
 
 import type { Content, FunctionDeclaration } from '@google/genai';
+import type { ReasoningEffort } from '../../core/reasoning-effort.js';
 
 // ─── Agent Configuration ─────────────────────────────────────
 
@@ -52,6 +53,13 @@ export interface ModelConfig {
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
   model?: string;
+
+  /**
+   * Reasoning effort for this agent alone. Written onto the agent's own
+   * content-generator config — never the session's — and limited to the tiers
+   * `/effort` offers for the agent's model.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 /**
