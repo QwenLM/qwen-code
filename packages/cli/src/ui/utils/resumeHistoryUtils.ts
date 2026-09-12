@@ -492,7 +492,7 @@ function convertToHistoryItems(
           // envelope.
           const modelFromParts = extractTextFromParts(
             stripTrailingUserPromptSubmitContextPart(
-              record.message?.parts as Part[],
+              (record.message?.parts ?? []) as Part[],
             ),
           );
           const envelopePrefix =

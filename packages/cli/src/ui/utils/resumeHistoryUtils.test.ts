@@ -990,6 +990,47 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('restores media-reference user messages whose record has no message.parts', () => {
+    // validateTranscriptRecord drops a non-object message or a non-array
+    // message.parts, yielding a user record with no parts at all. The
+    // modelText recovery must tolerate that shape instead of throwing.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: { role: 'user' },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'image',
+                attachmentId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+        sentToModel: true,
+      },
+    ]);
+  });
+
   it('restores ordinary user messages from clean display text', () => {
     const conversation = {
       messages: [

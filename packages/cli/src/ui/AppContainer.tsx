@@ -279,6 +279,7 @@ import {
   isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  omitSystemReminderBlocks,
   prependMissingSystemReminders,
   realUserPromptTexts,
   splitLeadingSystemReminders,
@@ -395,6 +396,7 @@ export function useQueuedSubmissionDrain({
   submissionInFlightRef,
   submissionSettledRevision,
   peerMessaging,
+  rearmRestoredReminders,
 }: {
   config: Config;
   isConfigInitialized: boolean;
@@ -412,6 +414,11 @@ export function useQueuedSubmissionDrain({
   submissionInFlightRef: RefObject<boolean>;
   submissionSettledRevision: number;
   peerMessaging?: PeerMessaging | null;
+  /**
+   * Re-arms one-shot reminder envelopes a drained submission carried when
+   * its turn aborted before dispatch (see pendingRestoredRemindersRef).
+   */
+  rearmRestoredReminders?: (reminders: string) => void;
 }) {
   const goalRuntimeSessionId = config.getSessionId();
   const [goalQueueRevision, setGoalQueueRevision] = useState(0);
@@ -560,6 +567,7 @@ export function useQueuedSubmissionDrain({
         },
       );
     } else {
+      const submissionReminders = submission.reminders;
       request = submitQuery(
         submission.modelText,
         SendMessageType.UserQuery,
@@ -569,6 +577,19 @@ export function useQueuedSubmissionDrain({
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
+          // The producer's per-member envelope decomposition: the dispatch
+          // path's adoption gate needs it to recognize the projection when
+          // an injected envelope sits mid-string (a non-first member), and
+          // a pre-dispatch abort (a failed at-command read, a deferred
+          // goal-claim) re-arms it — the envelope was consumed into the
+          // model text but never reached the API.
+          ...(submissionReminders === undefined
+            ? {}
+            : {
+                reminders: submissionReminders,
+                onUndispatchedAbort: () =>
+                  rearmRestoredReminders?.(submissionReminders),
+              }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
             // path uses: admission failed because a turn is active,
@@ -607,6 +628,7 @@ export function useQueuedSubmissionDrain({
     peerMessaging,
     popNextSubmission,
     queueDrainNonce,
+    rearmRestoredReminders,
     restoreMessages,
     restorePeerMessage,
     addHistoryItem,
@@ -713,20 +735,6 @@ function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
   }
 
   return stableTodosRef.current.todos;
-}
-
-// Exported for tests. Given a newest-first list of messages, return a list
-// with duplicates removed, keeping the first (newest) occurrence of each.
-export function dedupeNewestFirst(messages: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const msg of messages) {
-    if (!seen.has(msg)) {
-      seen.add(msg);
-      result.push(msg);
-    }
-  }
-  return result;
 }
 
 export function mergeStartupWarnings(
@@ -2725,8 +2733,14 @@ export const AppContainer = (props: AppContainerProps) => {
         displayText = producerDisplay;
         reminders = submission.reminders ?? split.reminders;
       } else {
-        displayText = split.rest;
-        reminders = split.reminders;
+        // The producer's decomposition names exactly which blocks were
+        // injected, so omit those (a mid-string aggregate envelope
+        // included) from the expanded model text; a leading-only split
+        // would leave the raw envelope in the composer and drop its
+        // re-arm. Without a producer decomposition the leading split is
+        // all that is safe to remove.
+        reminders = submission.reminders ?? split.reminders;
+        displayText = omitSystemReminderBlocks(submission.modelText, reminders);
       }
       restoredSubmissionRef.current = { displayText };
       // Merge, don't overwrite: a restore carrying no envelope of its own
@@ -3643,6 +3657,11 @@ export const AppContainer = (props: AppContainerProps) => {
           stashRestoredSubmission({
             modelText: cancelledTurnUserItem.modelText,
             displayText: cancelledTurnUserItem.text,
+            // A mid-aggregate envelope is invisible to the restore's
+            // suffix arithmetic; the producer decomposition carries it.
+            ...(cancelledTurnUserItem.reminders === undefined
+              ? {}
+              : { reminders: cancelledTurnUserItem.reminders }),
           }),
         );
         if (!rearmReminders) {
@@ -5139,6 +5158,18 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
   ]);
 
+  // A drained submission whose turn aborts before dispatch consumed the
+  // armed one-shot envelopes into its model text without delivering them:
+  // re-arm so the next submit delivers the notice instead of losing it
+  // for the session. Merge, never overwrite, so an envelope armed after
+  // this submission was admitted survives too.
+  const rearmRestoredReminders = useCallback((reminders: string) => {
+    pendingRestoredRemindersRef.current = prependMissingSystemReminders(
+      reminders,
+      pendingRestoredRemindersRef.current ?? '',
+    );
+  }, []);
+
   useQueuedSubmissionDrain({
     config,
     isConfigInitialized,
@@ -5156,6 +5187,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submissionInFlightRef,
     submissionSettledRevision,
     peerMessaging,
+    rearmRestoredReminders,
   });
 
   const nightly = props.version.includes('nightly');

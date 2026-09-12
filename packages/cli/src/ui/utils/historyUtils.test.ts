@@ -13,6 +13,7 @@ import {
   isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  omitSystemReminderBlocks,
   prependMissingSystemReminders,
   realUserPromptTexts,
   splitLeadingSystemReminders,
@@ -407,5 +408,38 @@ describe('prependMissingSystemReminders', () => {
     expect(prependMissingSystemReminders('', 'review this')).toBe(
       'review this',
     );
+  });
+});
+
+describe('omitSystemReminderBlocks', () => {
+  it('removes a mid-string envelope block listed by the producer', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      omitSystemReminderBlocks(
+        `first\n\n${envelope}\n\nsecond`,
+        `${envelope}\n\n`,
+      ),
+    ).toBe('first\n\nsecond');
+  });
+
+  it('removes each listed block once and leaves user-authored twins in place', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `${envelope}\n\nfirst\n\n${envelope}\n\nsecond`;
+    // The producer lists only the leading (injected) block; the identical
+    // block the user pasted mid-message is content and stays.
+    expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe(
+      `first\n\n${envelope}\n\nsecond`,
+    );
+  });
+
+  it('returns the text unchanged for an empty reminder list', () => {
+    const text = '<system-reminder>\nnotice\n</system-reminder>\n\nkept';
+    expect(omitSystemReminderBlocks(text, '')).toBe(text);
+  });
+
+  it('matches the leading-only split when the listed block leads the text', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `${envelope}\n\nmy prompt`;
+    expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe('my prompt');
   });
 });

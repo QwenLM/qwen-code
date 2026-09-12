@@ -226,6 +226,40 @@ export function prependMissingSystemReminders(
 }
 
 /**
+ * Removes exactly the `<system-reminder>` envelope blocks listed in
+ * `reminders` (the producer's own decomposition — see
+ * `aggregateUserMessages`) from `text`, first occurrence each, leaving every
+ * other block — including a user-authored one — in place. Provenance-driven
+ * counterpart to the leading-only shape strip: a mid-string injected
+ * envelope is dropped without touching identical-looking user content
+ * elsewhere in the text. Each removed block takes the whitespace separator
+ * that followed it, mirroring how the envelopes were prepended.
+ */
+export function omitSystemReminderBlocks(
+  text: string,
+  reminders: string,
+): string {
+  let result = text;
+  let rest = reminders;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) break;
+    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+    const block = rest.slice(0, blockEnd);
+    rest = rest.slice(blockEnd).replace(/^\s+/, '');
+    const at = result.indexOf(block);
+    if (at === -1) continue;
+    const after = result.slice(at + block.length);
+    const separator = after.match(/^\s+/)?.[0] ?? '';
+    result = result.slice(0, at) + after.slice(separator.length);
+  }
+  return result;
+}
+
+/**
  * Whether `text` consists solely of whole leading `<system-reminder>`
  * envelopes (plus separating whitespace) — the shape of a prefix the submit
  * path's injectors prepend. Gates producer-provenance adoption: a recovered

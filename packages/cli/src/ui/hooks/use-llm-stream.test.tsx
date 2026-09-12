@@ -982,6 +982,185 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('adopts the queue projection when the producer decomposition places the envelope mid-string', async () => {
+    // A drained two-member aggregate whose SECOND member carried the
+    // injected envelope: the projection is no suffix of the model text, so
+    // only the producer-carried `reminders` decomposition can prove the
+    // adoption. The model request keeps the envelope; the transcript row
+    // and the ↑-recall log show the projection.
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const envelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+    const modelText = `first message\n\n${envelope}second message`;
+    const projection = 'first message\n\nsecond message';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection, reminders: envelope },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe(projection);
+    expect(userItems[0][0].modelText).toBe(modelText);
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      projection,
+    );
+  });
+
+  it('carries the producer envelope decomposition onto the cancel handoff for a mid-aggregate turn', async () => {
+    // The cancelled aggregate's envelope sits mid-string: the restore
+    // path's suffix arithmetic cannot recover it from modelText/text
+    // alone, so the adopted decomposition rides the cancel handoff.
+    const cancelSubmitSpy = vi.fn();
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })(),
+    );
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      cancelSubmitSpy,
+    );
+    const envelope =
+      '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+    const modelText = `first message\n\n${envelope}second message`;
+    const projection = 'first message\n\nsecond message';
+
+    await act(async () => {
+      result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: projection, reminders: envelope },
+      );
+    });
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+
+    expect(cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem).toEqual({
+      id: expect.any(Number),
+      text: projection,
+      modelText,
+      reminders: envelope,
+      submittedPrompt: projection,
+    });
+  });
+
+  it('fires onUndispatchedAbort only when the turn never reaches the model', async () => {
+    // A failed at-command read exits after the armed envelope was consumed
+    // into the submit text but before any request went out: the caller
+    // re-arms the notice from this callback. A dispatched-then-failed turn
+    // must NOT fire it — its API-side copy already delivered the envelope.
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: false,
+      processedQuery: null,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    const onUndispatchedAbort = vi.fn();
+    const onDeliveryFailed = vi.fn();
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'read @/tmp/missing.png',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          submittedPrompt: 'read @/tmp/missing.png',
+          onUndispatchedAbort,
+          onDeliveryFailed,
+        },
+      );
+    });
+
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    // A dispatched turn that then fails fires onDeliveryFailed alone.
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: [{ text: 'second turn' }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Error,
+          value: { error: { message: 'boom' } },
+        };
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })(),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'second @turn',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          submittedPrompt: 'second @turn',
+          onUndispatchedAbort,
+          onDeliveryFailed,
+        },
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(2);
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onUndispatchedAbort when the goal-claim check defers the turn', async () => {
+    // The goal-claim exit is the other post-admission pre-dispatch abort:
+    // the consumed envelope was never delivered, so the caller re-arms it.
+    const onUndispatchedAbort = vi.fn();
+    const onGoalClaimDeferred = vi.fn();
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'a goal-bound prompt',
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          claimGoalTurn: () => undefined,
+          onUndispatchedAbort,
+          onGoalClaimDeferred,
+        },
+      );
+    });
+
+    expect(onGoalClaimDeferred).toHaveBeenCalledTimes(1);
+    expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('shows the expanded paste text, not the collapsed placeholder, as the visible prompt', async () => {
     // InputPrompt hands the raw buffer capture as submittedPrompt: for a
     // large paste that is the collapsed placeholder, which is no suffix of

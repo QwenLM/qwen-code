@@ -102,6 +102,7 @@ import {
 import {
   findLastUserItemIndex,
   isOnlyLeadingSystemReminders,
+  omitSystemReminderBlocks,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
@@ -532,6 +533,13 @@ export interface CancelSubmitInfo {
      * AppContainer).
      */
     modelText: string;
+    /**
+     * The producer's envelope decomposition, carried when the adoption
+     * gate used it (a mid-aggregate envelope): the cancel restore's
+     * suffix arithmetic cannot recover a mid-string envelope from
+     * `modelText`/`text` alone.
+     */
+    reminders?: string;
     submittedPrompt?: string;
   } | null;
   /**
@@ -843,6 +851,7 @@ export const useLlmStream = (
     id: number;
     text: string;
     modelText: string;
+    reminders?: string;
     submittedPrompt?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
@@ -1608,6 +1617,7 @@ export const useLlmStream = (
       prompt_id: string,
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
+      producerReminders: string | undefined,
       preserveTurnOwnership: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
@@ -1647,6 +1657,19 @@ export const useLlmStream = (
         // prompt stays visible as-is.
         const trimmedSubmittedPrompt = submittedPrompt?.trim() || undefined;
         const strippedQuery = stripLeadingSystemReminders(trimmedQuery);
+        // A queue aggregate's injected envelope can sit mid-string (a
+        // non-first member), where suffix arithmetic fails: adopt the
+        // projection when removing exactly the producer-decomposed blocks
+        // from the model text yields it, and keep the decomposition so the
+        // cancel restore can re-arm what the display form hides.
+        const adoptedReminders =
+          trimmedSubmittedPrompt !== undefined &&
+          trimmedSubmittedPrompt !== trimmedQuery &&
+          producerReminders !== undefined &&
+          omitSystemReminderBlocks(trimmedQuery, producerReminders) ===
+            trimmedSubmittedPrompt
+            ? producerReminders
+            : undefined;
         const userVisibleQuery =
           trimmedSubmittedPrompt !== undefined &&
           (trimmedSubmittedPrompt === trimmedQuery ||
@@ -1656,7 +1679,8 @@ export const useLlmStream = (
                   0,
                   trimmedQuery.length - trimmedSubmittedPrompt.length,
                 ),
-              )))
+              )) ||
+            adoptedReminders !== undefined)
             ? trimmedSubmittedPrompt
             : strippedQuery;
 
@@ -1823,6 +1847,9 @@ export const useLlmStream = (
               id: insertedId,
               text: userVisibleQuery,
               modelText: trimmedQuery,
+              ...(adoptedReminders === undefined
+                ? {}
+                : { reminders: adoptedReminders }),
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             };
           }
@@ -3592,9 +3619,25 @@ export const useLlmStream = (
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
+        /**
+         * Fired when the turn aborts after admission but BEFORE its
+         * request reached the model (a failed at-command read, a deferred
+         * goal-claim): unlike `onDeliveryFailed`, it never fires for a
+         * dispatched turn, so a caller may safely re-arm a one-shot
+         * envelope the consumed submit text carried.
+         */
+        onUndispatchedAbort?: () => void;
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * The queue producer's per-member decomposition of the injected
+         * `<system-reminder>` envelopes inside `query` (see
+         * aggregateUserMessages). Lets the display-text adoption gate
+         * recognize a projection whose envelope sits mid-string (a
+         * non-first aggregate member), where suffix arithmetic cannot.
+         */
+        reminders?: string;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3634,6 +3677,10 @@ export const useLlmStream = (
       const submittedPrompt =
         submitType === SendMessageType.UserQuery
           ? metadata?.submittedPrompt
+          : undefined;
+      const producerReminders =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.reminders
           : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
@@ -3857,6 +3904,7 @@ export const useLlmStream = (
                     prompt_id!,
                     submitType,
                     submittedPrompt,
+                    producerReminders,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
                   );
@@ -3882,6 +3930,7 @@ export const useLlmStream = (
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
+          metadata?.onUndispatchedAbort?.();
           metadata?.onDeliveryFailed?.();
           return;
         }
@@ -3892,6 +3941,7 @@ export const useLlmStream = (
           queuedGoal = metadata.claimGoalTurn();
           if (!queuedGoal) {
             releaseSubmissionLease();
+            metadata?.onUndispatchedAbort?.();
             metadata.onGoalClaimDeferred?.();
             return;
           }
