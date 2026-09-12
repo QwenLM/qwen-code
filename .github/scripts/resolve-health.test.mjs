@@ -1,0 +1,4966 @@
+// Pins the /resolve health watch: how a result comment is classified, how a
+// streak and an unanswered request are counted, and exactly which writes the
+// watch makes against the open issue — none when nothing changed, one comment
+// when the picture moved, a recovery comment plus close once the lane works.
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, it } from 'node:test';
+import { parse } from 'yaml';
+import {
+  ANSWERABLE_ASSOCIATIONS,
+  DEFAULTS,
+  HEALTH_MARKER,
+  RESULT_MARKER,
+  apply,
+  assess,
+  classifyResult,
+  decide,
+  fetchPrs,
+  findOpenIssue,
+  isRequest,
+  JUDGMENT_CAP,
+  RESULT_RECORD_CAP,
+  main,
+  readState,
+} from './resolve-health.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const workflow = parse(
+  readFileSync(
+    join(here, '..', 'workflows', 'qwen-resolve-health.yml'),
+    'utf8',
+  ),
+);
+const ci = readFileSync(join(here, '..', 'workflows', 'ci.yml'), 'utf8');
+const producer = readFileSync(
+  join(here, '..', 'workflows', 'qwen-code-pr-review.yml'),
+  'utf8',
+);
+// One job of the producer workflow, from its name to the next job.
+function producerJob(name) {
+  const start = producer.indexOf(`\n  ${name}:`);
+  assert.ok(start > 0, `${name} job not found in the producer`);
+  const rest = producer.slice(start + 1);
+  const next = rest.search(/\n {2}[A-Za-z]/);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+const BOT = 'qwen-code-dev-bot';
+// What findOpenIssue reports as the tracking issue's creation time. Earlier
+// than every fixture's events, so the recovery gate is exercised on the
+// RECORDED barrier rather than on the creation-time floor.
+const FILED_AT = '2026-08-01T00:00:00Z';
+let nextId = 1000;
+function comment(
+  user,
+  created_at,
+  body,
+  pr = 1,
+  updated_at = created_at,
+  author_association = 'COLLABORATOR',
+  eyes = 1,
+) {
+  const id = (nextId += 1);
+  return {
+    id,
+    user,
+    author_association,
+    created_at,
+    updated_at,
+    body,
+    html_url: `https://github.com/QwenLM/qwen-code/pull/${pr}#issuecomment-${id}`,
+    eyes,
+  };
+}
+// Default COLLABORATOR: the association a maintainer's comment carries, and
+// the only kind the producer would have served — see ANSWERABLE_ASSOCIATIONS.
+// The default `eyes` is the same neutrality on the acknowledgement layer:
+// the producer's reaction is present exactly on the requests it accepted,
+// and a fixture that does not exercise the owed gate models a served request.
+const request = (
+  at,
+  pr,
+  user = 'maintainer',
+  updated_at = at,
+  author_association = 'COLLABORATOR',
+  eyes = 1,
+) =>
+  comment(
+    user,
+    at,
+    '@qwen-code /resolve',
+    pr,
+    updated_at,
+    author_association,
+    eyes,
+  );
+const result = (at, sentence, pr) =>
+  comment(BOT, at, `${RESULT_MARKER}\n${sentence}\n\nDetails.`, pr);
+
+const PUSHED =
+  'Qwen Code resolved the merge conflicts and pushed the branch update.';
+const AGENT_FAILED =
+  'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.';
+const INFRA_FAILED =
+  'Qwen Code could not run conflict resolution on this PR: the agent step ended with `outcome=cancelled` before producing a result.';
+const SKIPPED = 'Qwen Code did not run conflict resolution for this request.';
+const ARTIFACT_MISSING =
+  "Qwen Code's conflict-resolution agent finished successfully, but its run artifact never reached the publish job — the upload failed or the artifact expired — so the result could not be verified or published.";
+const MOVED =
+  'Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed.';
+const PERMISSION =
+  'Qwen Code resolved the merge conflicts, but could not push to `owner/repo`. For a fork PR this needs **Allow edits by maintainers** enabled.';
+const WORKFLOW_SCOPE =
+  'Qwen Code resolved the merge conflicts, but could not push to `owner/repo`: resolving merges the base branch in, which includes its `.github/workflows/**` changes.';
+const OTHER_PUSH =
+  'Qwen Code resolved the merge conflicts, but pushing to `owner/repo` failed.';
+const NOOP = 'Qwen Code checked this PR and did not push changes.';
+const DRY_RUN = 'Qwen Code resolved the merge conflicts in dry-run mode.';
+const UNKNOWN = 'Qwen Code did something this script has never heard of.';
+
+describe('resolve-health: classification', () => {
+  it('recognises every sentence the workflow emits', () => {
+    const kind = (s) => classifyResult(`${RESULT_MARKER}\n${s}`);
+    assert.equal(kind(PUSHED), 'pushed');
+    assert.equal(kind(AGENT_FAILED), 'agent_failed');
+    assert.equal(kind(INFRA_FAILED), 'infra_failed');
+    assert.equal(kind(ARTIFACT_MISSING), 'infra_failed');
+    assert.equal(kind(SKIPPED), 'skipped');
+    assert.equal(kind(NOOP), 'noop');
+    assert.equal(kind(DRY_RUN), 'dry_run');
+    // Of the four "resolved, but" sentences only the moved head is benign
+    // (a retry helps); the other three mean the push itself is broken and a
+    // retry repeats them, so they are failures.
+    assert.equal(kind(MOVED), 'resolved_moved');
+    assert.equal(kind(PERMISSION), 'push_failed');
+    assert.equal(kind(WORKFLOW_SCOPE), 'push_failed');
+    assert.equal(kind(OTHER_PUSH), 'push_failed');
+    // A comment without the marker is not a result, whatever it says.
+    assert.equal(classifyResult(PUSHED), null);
+    // Drift is loud, not silent: an unrecognised sentence is a failure.
+    assert.equal(kind(UNKNOWN), 'unknown');
+  });
+
+  it('classifies on the first line only, never on the agent-authored appendix', () => {
+    // `Report result` appends address-summary.md / no-action.md / failure.md
+    // after its fixed sentence. That text is written by the agent (and
+    // quotes conflicting-file content an attacker may have chosen), so a
+    // success whose appendix mentions an earlier failure must stay a success
+    // — classifying on the whole body would turn five such comments into a
+    // false alarm.
+    const appendix =
+      '\n\n### address-summary.md\n\nThe previous run did not complete successfully; this one could not run conflict resolution at first, then did.';
+    assert.equal(
+      classifyResult(`${RESULT_MARKER}\n${PUSHED}${appendix}`),
+      'pushed',
+    );
+    assert.equal(
+      classifyResult(`${RESULT_MARKER}\n${NOOP}${appendix}`),
+      'noop',
+    );
+    // The marker line itself is skipped; blank lines before the sentence are
+    // tolerated; the verdict comes from the first real line.
+    assert.equal(
+      classifyResult(`${RESULT_MARKER}\n\n${AGENT_FAILED}\n${PUSHED}`),
+      'agent_failed',
+    );
+  });
+
+  it('reads a crash-skip as infrastructure, not as a benign skip', () => {
+    // The producer posts ONE sentence for everything it did not run: a PR
+    // with nothing to do and a `prepare` step that died before deciding get
+    // the same first line, and only the reason on the next line tells them
+    // apart. Read as a benign skip, a crash counts on neither side of the
+    // streak while its comment marks the request answered — so a lane where
+    // every request crash-skips (an expired CI_BOT_PAT does exactly this)
+    // reads as healthy forever, the never-ran failure this watch exists for.
+    const skipWith = (reason) => `${RESULT_MARKER}\n${SKIPPED}\n\n${reason}`;
+    for (const reason of [
+      'Internal error while preparing PR #123 for /resolve (see workflow logs). Re-run /resolve.',
+      'Could not determine conflict status for PR #123 (git merge-tree failed unexpectedly). Re-run /resolve.',
+    ]) {
+      assert.equal(classifyResult(skipWith(reason)), 'infra_failed', reason);
+    }
+    // Benign refusals stay uncounted — they are a lane with nothing to do.
+    for (const reason of [
+      'PR #123 is CLOSED.',
+      'PR #123 does not currently have merge conflicts with main.',
+      "PR #123's head repository was deleted; cannot push a resolution back.",
+      'PR #123 comes from the fork `x/y` with **Allow edits by maintainers** off, so a resolution could not be pushed back to it.',
+      '', // no reason line at all
+    ]) {
+      assert.equal(classifyResult(skipWith(reason)), 'skipped', reason);
+    }
+  });
+
+  it('alarms on a lane where every request crash-skips', () => {
+    // End to end through assess(): the comments answer every request, so the
+    // unanswered signal is silent by design — the streak is the only thing
+    // that can see this outage, and it only does if a crash-skip counts.
+    const now = new Date('2026-08-27T12:00:00Z');
+    const crash = (at, pr) =>
+      comment(
+        BOT,
+        at,
+        `${RESULT_MARKER}\n${SKIPPED}\n\nInternal error while preparing PR #${pr} for /resolve (see workflow logs). Re-run /resolve.`,
+        pr,
+      );
+    const lane = [1, 2, 3, 4, 5].map((d) => ({
+      number: 50 + d,
+      state: 'open',
+      comments: [
+        request(`2026-08-2${d}T00:00:00Z`, 50 + d),
+        crash(`2026-08-2${d}T00:05:00Z`, 50 + d),
+      ],
+    }));
+    const a = assess(lane, { now });
+    assert.equal(a.unanswered.length, 0, 'every request was answered');
+    assert.equal(a.streak, 5);
+    assert.equal(a.infraInStreak, 5);
+    assert.equal(a.alarm, true);
+    // The same lane with benign skips is a lane with nothing to do: quiet.
+    const benign = lane.map((pr) => ({
+      ...pr,
+      comments: [
+        pr.comments[0],
+        comment(
+          BOT,
+          pr.comments[1].created_at,
+          `${RESULT_MARKER}\n${SKIPPED}\n\nPR #${pr.number} does not currently have merge conflicts with main.`,
+          pr.number,
+        ),
+      ],
+    }));
+    const b = assess(benign, { now });
+    assert.equal(b.streak, 0);
+    assert.equal(b.alarm, false);
+  });
+
+  it('matches the crash-skip reasons the producer actually writes', () => {
+    // Same parity discipline as the result sentences: the reasons are
+    // producer-owned strings in `Prepare pull request branch`, so a reword
+    // there must fail here rather than going quiet at runtime.
+    const prepare = producer.slice(
+      producer.indexOf("- name: 'Prepare pull request branch'"),
+      producer.indexOf("- name: 'Install Qwen CLI'"),
+    );
+    assert.ok(prepare.length > 0);
+    // Every `failed` decision the step can reach, in the producer's words.
+    const failedReasons = [
+      ...prepare.matchAll(/finish_without_agent failed "([^"\\]*)/g),
+    ].map((m) => m[1]);
+    const trapReason = prepare.match(
+      /printf "skip_reason=%s\\n" "([^"$\\]*)/,
+    )?.[1];
+    assert.ok(trapReason, 'the EXIT trap must still write a skip_reason');
+    assert.ok(failedReasons.length >= 1, failedReasons.join(' | '));
+    for (const reason of [...failedReasons, trapReason]) {
+      const kind = classifyResult(`${RESULT_MARKER}\n${SKIPPED}\n\n${reason}`);
+      // A `moved while preparing` reason is a race the caller retries, not a
+      // broken lane, so it stays a benign skip; the rest are infrastructure.
+      const expected = /moved while preparing/.test(reason)
+        ? 'skipped'
+        : 'infra_failed';
+      assert.equal(kind, expected, reason);
+    }
+  });
+
+  it('classifies every result sentence the producer workflow actually emits', () => {
+    // Read the sentences from `resolve-pr`'s report steps rather than from
+    // hand-copied constants, so a wording change in the workflow fails here
+    // instead of turning into `unknown` at runtime. The echoes escape
+    // backticks (\`) inside double quotes; unescape them so each sentence
+    // is seen whole, not cut at the first backslash (which would collapse
+    // the four "resolved, but" sentences into one prefix).
+    // The lane reports from two jobs: `resolve-pr` posts the skip report,
+    // `publish-resolution` every outcome of a run it publishes.
+    const lane = producerJob('resolve-pr') + producerJob('publish-resolution');
+    const sentences = [...lane.matchAll(/echo "((?:[^"\\]|\\.)*)"/g)]
+      .map((m) => m[1].replace(/\\(.)/g, '$1'))
+      .filter((s) => s.startsWith('Qwen Code'));
+    // Exact, not a floor: the producer emits twelve report sentences today,
+    // and a floor one below that let the dry-run sentence be dropped or
+    // reworded into a "resolved, but" shape without any test noticing.
+    assert.equal(
+      sentences.length,
+      12,
+      `expected exactly the twelve report sentences, found ${sentences.length}: ${sentences.join(' | ')}`,
+    );
+    const kinds = new Map();
+    for (const sentence of sentences) {
+      const kind = classifyResult(`${RESULT_MARKER}\n${sentence}`);
+      assert.ok(
+        kind && kind !== 'unknown',
+        `producer sentence is not classified: ${sentence}`,
+      );
+      kinds.set(sentence, kind);
+    }
+    // The four "resolved, but" producers land on the two sides they belong
+    // to; the replayed push is a success and the lost artifact an infra
+    // failure.
+    for (const [sentence, kind] of kinds) {
+      if (sentence.includes('head branch changed while resolving')) {
+        assert.equal(kind, 'resolved_moved', sentence);
+      } else if (
+        sentence.includes('could not push') ||
+        sentence.includes('but pushing to')
+      ) {
+        assert.equal(kind, 'push_failed', sentence);
+      } else if (sentence.includes('replayed on top of it')) {
+        assert.equal(kind, 'pushed', sentence);
+      } else if (
+        sentence.includes('run artifact never reached the publish job')
+      ) {
+        assert.equal(kind, 'infra_failed', sentence);
+      }
+    }
+    assert.ok([...kinds.values()].includes('resolved_moved'));
+    assert.ok([...kinds.values()].includes('dry_run'));
+    assert.equal(
+      [...kinds.values()].filter((k) => k === 'push_failed').length,
+      3,
+    );
+    // And the constants this file uses are real producer sentences.
+    for (const sentence of [
+      PUSHED,
+      AGENT_FAILED,
+      SKIPPED,
+      NOOP,
+      ARTIFACT_MISSING,
+    ]) {
+      assert.ok(
+        producer.includes(sentence),
+        `stale test constant: ${sentence}`,
+      );
+    }
+  });
+
+  it('matches requests the way the workflow trigger does', () => {
+    assert.ok(isRequest('@qwen-code /resolve'));
+    assert.ok(isRequest('@qwen-code /resolve\nplease'));
+    assert.ok(isRequest('@qwen-code /resolve\r\n'));
+    assert.ok(isRequest('@qwen-code /resolve now'));
+    assert.ok(!isRequest(' @qwen-code /resolve'));
+    assert.ok(!isRequest('> @qwen-code /resolve'));
+    assert.ok(!isRequest('@qwen-code /resolved'));
+  });
+
+  it('pins the producer gate that makes a refused request unanswerable', () => {
+    // ANSWERABLE_ASSOCIATIONS exists because a refused request is silent:
+    // `resolve-pr` runs only when `authorize` says yes, and
+    // `publish-resolution` only publishes a run `resolve-pr` decided to
+    // make — so both report steps (`Report skipped request`, `Report
+    // result`) sit behind that gate. Should the producer ever answer a
+    // refusal, this test fails and the association gate can be dropped
+    // instead of quietly hiding requests the lane now does report on.
+    const resolvePr = producerJob('resolve-pr');
+    assert.match(
+      resolvePr,
+      /needs\.authorize\.outputs\.should_review == 'true'/,
+    );
+    assert.ok(resolvePr.includes("- name: 'Report skipped request'"));
+    // The acceptance signal the deficit gate reads (isOwed in assess()):
+    // the job's acknowledgement step posts the `eyes` reaction on the
+    // request comment behind the same authorize gate, so it is present
+    // exactly on the requests the lane accepted. Should the step go or
+    // the reaction kind change, every request reads as refused and the
+    // deficit signal goes silent.
+    assert.ok(resolvePr.includes("- name: 'Acknowledge resolve request'"));
+    assert.match(resolvePr, /-f content='eyes'/);
+    const publish = producerJob('publish-resolution');
+    assert.match(publish, /needs\.resolve-pr\.outputs\.decision == 'run'/);
+    assert.ok(publish.includes("- name: 'Report result'"));
+    // ...and the permission set that gate applies. The watch's set is wider
+    // on purpose, never narrower — the acknowledgement gate (isOwed), not
+    // the set, is what keeps a refused request from reading as a deficit.
+    const authorize = producer.slice(
+      producer.indexOf('\n  authorize:'),
+      producer.indexOf('\n  review-pr:'),
+    );
+    assert.match(authorize, /admin\|maintain\|write\)/);
+    for (const association of ANSWERABLE_ASSOCIATIONS) {
+      assert.ok(
+        ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association),
+        `${association} cannot imply write permission`,
+      );
+    }
+  });
+});
+
+describe('resolve-health: assessment', () => {
+  const now = new Date('2026-08-27T12:00:00Z');
+
+  it('counts the trailing failure streak across PRs and ignores skips', () => {
+    const prs = [
+      {
+        number: 1,
+        comments: [
+          result('2026-08-20T00:00:00Z', PUSHED, 1),
+          result('2026-08-21T00:00:00Z', AGENT_FAILED, 1),
+          result('2026-08-23T00:00:00Z', SKIPPED, 1),
+        ],
+      },
+      {
+        number: 2,
+        comments: [
+          result('2026-08-22T00:00:00Z', INFRA_FAILED, 2),
+          result('2026-08-24T00:00:00Z', INFRA_FAILED, 2),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, threshold: 3 });
+    assert.equal(a.streak, 3);
+    assert.equal(a.infraInStreak, 2);
+    assert.deepEqual(
+      a.streakItems.map((r) => r.pr),
+      [1, 2, 2],
+    );
+    assert.equal(a.alarm, true);
+    // A moved-head resolution is a success: it resets the streak.
+    prs[1].comments.push(result('2026-08-25T00:00:00Z', MOVED, 2));
+    assert.equal(assess(prs, { now, threshold: 3 }).streak, 0);
+    // A broken push and an unrecognised sentence both extend it.
+    prs[1].comments.push(result('2026-08-25T01:00:00Z', PERMISSION, 2));
+    prs[1].comments.push(result('2026-08-25T02:00:00Z', UNKNOWN, 2));
+    const b = assess(prs, { now, threshold: 3 });
+    assert.equal(b.streak, 2);
+    assert.deepEqual(
+      b.streakItems.map((r) => r.kind),
+      ['push_failed', 'unknown'],
+    );
+  });
+
+  it('does not depend on the order PRs or comments arrive in', () => {
+    // `fetchPrs` returns search order (best match), not chronology; the
+    // streak must come from timestamps alone.
+    const chronological = [
+      {
+        number: 1,
+        comments: [
+          result('2026-08-20T00:00:00Z', PUSHED, 1),
+          result('2026-08-24T00:00:00Z', AGENT_FAILED, 1),
+        ],
+      },
+      {
+        number: 2,
+        comments: [
+          result('2026-08-22T00:00:00Z', AGENT_FAILED, 2),
+          result('2026-08-23T00:00:00Z', PUSHED, 2),
+        ],
+      },
+      {
+        number: 3,
+        comments: [result('2026-08-25T00:00:00Z', INFRA_FAILED, 3)],
+      },
+    ];
+    const shuffled = [chronological[2], chronological[0], chronological[1]].map(
+      (pr) => ({
+        ...pr,
+        comments: [...pr.comments].reverse(),
+      }),
+    );
+    const a = assess(chronological, { now });
+    const b = assess(shuffled, { now });
+    assert.equal(a.streak, 2);
+    assert.equal(b.streak, 2);
+    assert.deepEqual(
+      b.attempts.map((r) => r.at),
+      a.attempts.map((r) => r.at),
+    );
+  });
+
+  it('settles same-second ties on the comment id, not on input order', () => {
+    // GitHub's `created_at` is second-granular, so two results in one second
+    // tie and a stable sort keeps the order the input arrived in — for
+    // `fetchPrs` that is search ranking, which moves between ticks. The
+    // streak, the latest attempt, and the roster must not move with it.
+    const at = '2026-08-26T00:00:00Z';
+    const pushed = {
+      number: 1,
+      state: 'open',
+      comments: [result(at, PUSHED, 1)],
+    };
+    const failed = {
+      number: 2,
+      state: 'open',
+      comments: [result(at, AGENT_FAILED, 2)],
+    };
+    const forward = assess([pushed, failed], { now });
+    const backward = assess([failed, pushed], { now });
+    assert.equal(forward.streak, backward.streak);
+    assert.equal(forward.latestAttempt.id, backward.latestAttempt.id);
+    // The id settles it, so the later-posted failure is the latest attempt
+    // and the streak counts it whichever way the two PRs arrived.
+    assert.equal(forward.streak, 1);
+    assert.equal(forward.latestAttempt.id, failed.comments[0].id);
+
+    // The roster feeds sameState()'s order-sensitive comparison, so a tie
+    // that reordered it would report a changed picture about an unchanged one.
+    const first = {
+      number: 3,
+      state: 'open',
+      comments: [request(at, 3, 'writer1')],
+    };
+    const second = {
+      number: 4,
+      state: 'open',
+      comments: [request(at, 4, 'writer2')],
+    };
+    const one = assess([first, second], { now });
+    const other = assess([second, first], { now });
+    assert.deepEqual(
+      one.unanswered.map((u) => u.id),
+      [first.comments[0].id, second.comments[0].id],
+    );
+    assert.deepEqual(
+      other.unanswered.map((u) => u.id),
+      one.unanswered.map((u) => u.id),
+    );
+  });
+
+  it('alarms at the default threshold and not one below it', () => {
+    const failures = (n) => [
+      {
+        number: 5,
+        comments: Array.from({ length: n }, (_, i) =>
+          result(`2026-08-2${i + 1}T00:00:00Z`, AGENT_FAILED, 5),
+        ),
+      },
+    ];
+    assert.equal(assess(failures(4), { now }).alarm, false);
+    assert.equal(assess(failures(5), { now }).alarm, true);
+  });
+
+  it('ignores events older than the window, whatever PR carries them', () => {
+    // The search window bounds PR discovery only; a PR touched yesterday can
+    // carry a request or a failure from a month ago, which must neither
+    // count as unanswered nor sit in the streak.
+    const prs = [
+      {
+        number: 9,
+        state: 'open',
+        comments: [
+          request('2026-07-01T00:00:00Z', 9),
+          result('2026-07-02T00:00:00Z', AGENT_FAILED, 9),
+          result('2026-08-26T00:00:00Z', PUSHED, 9),
+        ],
+      },
+      {
+        // The discriminator for the request path: an out-of-window request
+        // with NO result after it. On PR 9 the in-window success answers the
+        // old request whatever the filter does; here only the window bound
+        // keeps it out of the unanswered list.
+        number: 11,
+        state: 'open',
+        comments: [request('2026-07-05T00:00:00Z', 11)],
+      },
+    ];
+    const a = assess(prs, { now, unansweredThreshold: 1 });
+    assert.deepEqual(
+      a.unanswered.map((u) => u.pr),
+      [],
+    );
+    assert.equal(a.alarm, false);
+    assert.deepEqual(
+      a.attempts.map((r) => r.kind),
+      ['pushed'],
+    );
+    assert.equal(a.windowStart.slice(0, 10), '2026-08-20');
+  });
+
+  it('flags a request with no result once it is older than the stale window', () => {
+    const prs = [
+      {
+        number: 7,
+        state: 'open',
+        comments: [
+          request('2026-08-27T00:00:00Z', 7),
+          result('2026-08-27T00:10:00Z', PUSHED, 7),
+          request('2026-08-27T02:00:00Z', 7),
+          // Too young to count.
+          request('2026-08-27T11:30:00Z', 7),
+        ],
+      },
+      {
+        number: 8,
+        state: 'open',
+        comments: [
+          // The bot quoting the command is not a request.
+          comment(BOT, '2026-08-26T00:00:00Z', '@qwen-code /resolve', 8),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    assert.deepEqual(
+      a.unanswered.map((u) => u.at),
+      ['2026-08-27T02:00:00Z'],
+    );
+    assert.equal(a.alarm, true);
+    assert.equal(assess(prs, { now, staleHours: 3 }).alarm, false);
+  });
+
+  it('treats any later result as the answer, so a retry cannot orphan the first request', () => {
+    // Two requests typed before the first run reports, then one result:
+    // both are answered. Runs on a PR are serialised by the workflow, so a
+    // later result implies the earlier run finished.
+    const prs = [
+      {
+        number: 10,
+        state: 'open',
+        comments: [
+          request('2026-08-27T00:00:00Z', 10),
+          request('2026-08-27T00:05:00Z', 10),
+          result('2026-08-27T00:20:00Z', AGENT_FAILED, 10),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+  });
+
+  it('answers a request only with a result on the same PR', () => {
+    // `fetchPrs` returns PRs in search order, so a cross-PR answer would
+    // make a stale request count or not depending on array position. An
+    // earlier-listed PR carrying a fresh success must not answer the stale
+    // request on a later-listed PR.
+    const prs = [
+      {
+        number: 2,
+        state: 'open',
+        comments: [result('2026-08-27T06:00:00Z', PUSHED, 2)],
+      },
+      {
+        number: 1,
+        state: 'open',
+        comments: [request('2026-08-27T00:00:00Z', 1)],
+      },
+    ];
+    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    assert.deepEqual(
+      a.unanswered.map((u) => u.pr),
+      [1],
+    );
+    assert.equal(a.alarm, true);
+    assert.deepEqual(
+      assess([prs[1], prs[0]], { now, staleHours: 3 }).unanswered.map(
+        (u) => u.pr,
+      ),
+      [1],
+    );
+  });
+
+  it('only counts result comments the bot posted', () => {
+    // Anyone can comment the marker plus a fixed sentence; a forged success
+    // must not break a failure streak (masking an outage), and forged
+    // failures must not build one (filing a spurious issue).
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 14),
+    );
+    const forgedPush = comment(
+      'stranger',
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${PUSHED}`,
+      14,
+    );
+    const prs = [
+      { number: 14, state: 'open', comments: [...failures, forgedPush] },
+    ];
+    const a = assess(prs, { now });
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
+    // And nothing a stranger posts counts as an attempt at all.
+    const forgedOnly = [
+      {
+        number: 15,
+        state: 'open',
+        comments: [1, 2, 3, 4, 5].map((d) =>
+          comment(
+            'stranger',
+            `2026-08-2${d}T00:00:00Z`,
+            `${RESULT_MARKER}\n${AGENT_FAILED}`,
+            15,
+          ),
+        ),
+      },
+    ];
+    const b = assess(forgedOnly, { now });
+    assert.equal(b.attempts.length, 0);
+    assert.equal(b.alarm, false);
+  });
+
+  it('never counts requests the lane could not have answered', () => {
+    // The producer requires an open PR; a request on a closed or merged PR
+    // gets no result comment ever and must not read as an unanswered one.
+    const prs = ['closed', 'merged', 'closed'].map((state, i) => ({
+      number: 16 + i,
+      state,
+      comments: [request('2026-08-27T00:00:00Z', 16 + i)],
+    }));
+    const a = assess(prs, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+    // Results on such PRs keep counting: attempts that finished before the
+    // PR closed still feed the streak and the recovery evidence.
+    prs[0].comments.unshift(result('2026-08-26T00:00:00Z', AGENT_FAILED, 16));
+    const b = assess(prs, { now });
+    assert.equal(b.attempts.length, 1);
+    assert.equal(b.streak, 1);
+  });
+
+  it('does not count a request from someone the lane would refuse', () => {
+    // `resolve-pr` runs only when `authorize` says yes, and that job demands
+    // admin/maintain/write and fails closed; on denial the whole job is
+    // skipped, including its own `Report skipped request` step, so a refused
+    // request gets no result comment at all. Counting it would read a healthy
+    // lane as a dead one — three fork-PR authors asking is the exact
+    // population /resolve exists for, and this happened live on #8169.
+    const denied = ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE'].map(
+      (association, i) => ({
+        number: 40 + i,
+        state: 'open',
+        comments: [
+          request(
+            '2026-08-27T00:00:00Z',
+            40 + i,
+            'fork-author',
+            '2026-08-27T00:00:00Z',
+            association,
+          ),
+        ],
+      }),
+    );
+    const a = assess(denied, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+    // The discriminator: the identical requests from someone the lane would
+    // have served still alarm, so the gate narrows the population without
+    // silencing the signal.
+    const served = denied.map((pr) => ({
+      ...pr,
+      comments: [request('2026-08-27T00:00:00Z', pr.number, 'maintainer')],
+    }));
+    const b = assess(served, { now });
+    assert.equal(b.unanswered.length, 3);
+    assert.equal(b.alarm, true);
+  });
+
+  it('counts every association that can hold write, and no other', () => {
+    // Write access renders as exactly one of these three — the repository
+    // owner as OWNER, an organisation member as MEMBER, anyone granted access
+    // directly as COLLABORATOR — so the set is a superset of "has write" and
+    // dropping the rest can never hide a request the lane would have served.
+    // A missing field is dropped too: the producer denies when it cannot
+    // establish permission, and the watch takes the same direction.
+    const counted = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+    const dropped = [
+      'CONTRIBUTOR',
+      'FIRST_TIME_CONTRIBUTOR',
+      'FIRST_TIMER',
+      'MANNEQUIN',
+      'NONE',
+      '',
+      // The field absent entirely, as an API that stopped returning it would
+      // leave it — not the fixture default.
+      null,
+    ];
+    assert.deepEqual([...ANSWERABLE_ASSOCIATIONS].sort(), [...counted].sort());
+    for (const association of [...counted, ...dropped]) {
+      const req = request(
+        '2026-08-27T00:00:00Z',
+        50,
+        'someone',
+        '2026-08-27T00:00:00Z',
+        association ?? 'COLLABORATOR',
+      );
+      if (association === null) {
+        delete req.author_association;
+      }
+      const a = assess([{ number: 50, state: 'open', comments: [req] }], {
+        now,
+        unansweredThreshold: 1,
+      });
+      assert.equal(
+        a.unanswered.length,
+        counted.includes(association) ? 1 : 0,
+        `association ${association === null ? '(absent)' : association}`,
+      );
+    }
+  });
+
+  it('keeps a request whose association demoted after the first tick saw it', () => {
+    // GitHub evaluates author_association at READ time: judged live on every
+    // tick, a requester losing write-equivalent status mid-window would drop
+    // out of the roster and silence the alarm their own request raised. The
+    // first tick records the judgment in the state marker; the next tick
+    // reads the record, not the live field.
+    const asks = [0, 1, 2].map((h) =>
+      request(`2026-08-27T0${h}:00:00Z`, 60 + h),
+    );
+    const lane = (comments) =>
+      comments.map((req, i) => ({
+        number: 60 + i,
+        state: 'open',
+        comments: [req],
+      }));
+    const first = assess(lane(asks), { now });
+    assert.equal(first.unanswered.length, 3);
+    assert.equal(first.alarm, true);
+    const filed = decide(first, null)[0];
+    assert.equal(filed.type, 'create');
+    // Read the way production's next tick reads it: the record comment
+    // apply() posts with the create is what findOpenIssue returns as
+    // `texts`; the body never feeds state.
+    const recorded = readState([filed.record]).requests;
+    assert.equal(recorded.length, 3);
+    // The next tick: one requester's membership lapsed, so the live field
+    // reads NONE. Judged live the roster drops below the threshold; judged
+    // by the record nothing moved.
+    const demoted = { ...asks[0], author_association: 'NONE' };
+    const liveRead = assess(lane([demoted, asks[1], asks[2]]), { now });
+    assert.equal(liveRead.unanswered.length, 2);
+    assert.equal(liveRead.alarm, false);
+    const carried = assess(lane([demoted, asks[1], asks[2]]), {
+      now,
+      recorded,
+    });
+    assert.equal(carried.unanswered.length, 3);
+    assert.equal(carried.alarm, true);
+  });
+
+  it('never admits a request whose association promoted after the first tick', () => {
+    // The other direction: a request the producer refused at creation
+    // (authorize denied — no run, no result comment) must not become
+    // answerable when its author is granted write mid-window, or three such
+    // requests file "0 consecutive failures" against a healthy lane. The
+    // first tick records the refusal too.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 70),
+    );
+    const asked = request(
+      '2026-08-27T06:00:00Z',
+      71,
+      'fork-author',
+      '2026-08-27T06:00:00Z',
+      'CONTRIBUTOR',
+    );
+    const lane = (req) => [
+      { number: 70, state: 'open', comments: failures },
+      { number: 71, state: 'open', comments: [req] },
+    ];
+    const first = assess(lane(asked), { now });
+    assert.equal(first.unanswered.length, 0, 'the lane refused this request');
+    const filed = decide(first, null)[0];
+    assert.equal(filed.type, 'create');
+    // The refusal is in the record — read the way production's next tick
+    // reads it, from the record comment apply() posts with the create, not
+    // the body.
+    const recorded = readState([filed.record]).requests;
+    assert.deepEqual(recorded, [
+      [asked.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR', 71],
+    ]);
+    // ...so the mid-window promotion admits nothing — neither the roster nor
+    // the barrier.
+    const promoted = { ...asked, author_association: 'COLLABORATOR' };
+    const liveRead = assess(lane(promoted), { now });
+    assert.equal(liveRead.unanswered.length, 1);
+    assert.equal(liveRead.newestRequest, '2026-08-27T06:00:00Z');
+    const carried = assess(lane(promoted), { now, recorded });
+    assert.equal(carried.unanswered.length, 0);
+    assert.equal(carried.newestRequest, null);
+  });
+
+  it('gates every deficit on the producer having acknowledged the request', () => {
+    // ANSWERABLE_ASSOCIATIONS is deliberately wider than "has write" (a
+    // read-only collaborator is inside it), and the producer refuses the
+    // extra population in silence: authorize skips the whole job, so a
+    // refused request gets no run, no result — and no acknowledgement.
+    // Counted as a deficit, three such requests file "0 consecutive
+    // failures, 3 unanswered requests" against a healthy lane, and one
+    // holds the close gate for the rest of the window. The signal that
+    // separates them is the producer's own: resolve-pr's first step posts
+    // an `eyes` reaction on the request comment only when authorize said
+    // yes. A deficit — the roster, or the close gate's veto — requires it.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    // The witness population: three refused requests from read-only
+    // collaborators, hours old and never acknowledged, on a lane that is
+    // demonstrably healthy. They neither alarm nor veto.
+    const refused = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${h}:00:00Z`,
+          51 + h,
+          'read-only-collaborator',
+          `2026-08-27T0${h}:00:00Z`,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const healthy = {
+      number: 90,
+      state: 'open',
+      comments: [result('2026-08-27T09:00:00Z', PUSHED, 90)],
+    };
+    const refusedLane = assess([...refused, healthy], { now });
+    assert.equal(refusedLane.unanswered.length, 0);
+    assert.equal(refusedLane.alarm, false);
+    assert.equal(refusedLane.unserved, null);
+    assert.deepEqual(
+      decide(refusedLane, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // The same three requests WITH the acknowledgement behave as they
+    // always have: answered by their own results, they neither alarm nor
+    // veto, and the close proceeds.
+    const served = [0, 1, 2].map((h) => ({
+      number: 61 + h,
+      state: 'open',
+      comments: [
+        request(`2026-08-27T0${h}:00:00Z`, 61 + h),
+        result(`2026-08-27T0${h}:05:00Z`, PUSHED, 61 + h),
+      ],
+    }));
+    const servedLane = assess(served, { now });
+    assert.equal(servedLane.unanswered.length, 0);
+    assert.equal(servedLane.alarm, false);
+    assert.equal(servedLane.unserved, null);
+    assert.deepEqual(
+      decide(servedLane, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // And an acknowledged request that never got its result still counts.
+    const owedLane = assess(
+      [
+        {
+          number: 71,
+          state: 'open',
+          comments: [request('2026-08-27T06:00:00Z', 71)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(owedLane.unanswered.length, 1);
+    // The one grace: the reaction lands minutes after the comment, so a
+    // request still inside the queue gap is owed without it — an
+    // in-flight request must keep vetoing a recovery close. Half an hour
+    // old, never acknowledged, and the veto is the ONLY thing refusing
+    // this close: the push postdates the request, and nothing else does.
+    const inFlight = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            request(
+              '2026-08-27T11:30:00Z',
+              81,
+              'maintainer',
+              '2026-08-27T11:30:00Z',
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T11:35:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(inFlight.unanswered.length, 0);
+    assert.equal(inFlight.unserved, '2026-08-27T11:30:00Z');
+    assert.deepEqual(
+      decide(inFlight, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
+  it('counts stale unacknowledged requests when the lane produced no output anywhere', () => {
+    // The window-level arm of the owed gate: three requests, each on its
+    // own open PR, all older than staleHours, none acknowledged — and not
+    // one result comment or acknowledgement anywhere in the window. The
+    // missing reactions are then the outage itself (a workflow that fails
+    // to parse, Actions disabled, an expired PAT), not three refusals, and
+    // the roster must say so: this is the thirteen-day silence from the
+    // header, which the acknowledgement gate alone reads as all-refused.
+    const lane = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${6 + h}:00:00Z`,
+          51 + h,
+          'maintainer',
+          undefined,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const silent = assess(lane, { now });
+    assert.equal(silent.unanswered.length, 3);
+    assert.equal(silent.alarm, true);
+    assert.deepEqual(
+      decide(silent, null).map((a) => a.type),
+      ['create'],
+    );
+    // An acknowledgement alone does NOT switch the per-request reading
+    // back on: the projected count cannot say who reacted, so one 👀 from
+    // any account would otherwise silence the never-ran arm for the whole
+    // window. Until a classified result lands somewhere every stale request
+    // counts — the acknowledged one included.
+    const acked = request('2026-08-27T09:00:00Z', 90);
+    const noOutput = assess(
+      [...lane, { number: 90, state: 'open', comments: [acked] }],
+      { now },
+    );
+    assert.equal(noOutput.unanswered.length, 4);
+    assert.equal(noOutput.alarm, true);
+    // A result comment — bot-authored and unedited — is what proves the
+    // lane ran: the three unacknowledged requests read as refusals again,
+    // and the acknowledged one, still owed its result, counts alone.
+    const alive = assess(
+      [
+        ...lane,
+        {
+          number: 90,
+          state: 'open',
+          comments: [acked, result('2026-08-27T08:55:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.deepEqual(
+      alive.unanswered.map((u) => u.id),
+      [acked.id],
+    );
+    assert.equal(alive.alarm, false);
+  });
+
+  it('reads an old sign of life as silence once it ages past the horizon', () => {
+    // The life signal answers "is the lane producing output NOW", and a
+    // result from days ago cannot answer it: reading the whole window as
+    // alive keeps an outage that began yesterday invisible until every
+    // pre-outage result ages out — up to windowDays — instead of the hours
+    // the roster's own clock promises. Three stale, unacknowledged
+    // maintainer requests on their own open PRs; the lane's only classified
+    // result is 36 hours old — past silentHours.
+    const asks = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${6 + h}:00:00Z`,
+          51 + h,
+          'maintainer',
+          undefined,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const withResult = (at) => [
+      ...asks,
+      { number: 90, state: 'open', comments: [result(at, PUSHED, 90)] },
+    ];
+    const stale = assess(withResult('2026-08-26T00:00:00Z'), { now });
+    assert.equal(stale.unanswered.length, 3);
+    assert.equal(stale.alarm, true);
+    // The same lane with a recent result is demonstrably alive: the three
+    // unacknowledged requests read as refusals again.
+    const alive = assess(withResult('2026-08-27T09:00:00Z'), { now });
+    assert.equal(alive.unanswered.length, 0);
+    assert.equal(alive.alarm, false);
+    // The record's timestamps fold into the same horizon: a recorded result
+    // past silentHours is no more evidence of life than a live one.
+    const recorded = assess(asks, {
+      now,
+      recordedResults: [[904242, 90, '2026-08-26T00:00:00Z']],
+    });
+    assert.equal(recorded.unanswered.length, 3);
+    assert.equal(recorded.alarm, true);
+  });
+
+  it('treats a reaction from just anyone as no sign of life', () => {
+    // The laneSilent arm exists for the outage that produces NOTHING — no
+    // run, no result, no ack — so its life signal must be one whose author
+    // the watch can check. The projected eyes count cannot say WHO reacted:
+    // one 👀 from an account with no repository access, on a closed PR and
+    // edited after posting, would otherwise switch the never-ran arm off
+    // for the whole window, renewable at will. (isOwed keeps reading the
+    // count: both its consumers move toward alarming, where the
+    // unattributed read is safe.)
+    const outage = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${6 + h}:00:00Z`,
+          51 + h,
+          'maintainer',
+          undefined,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const driveBy = {
+      number: 60,
+      state: 'closed',
+      comments: [
+        request(
+          '2026-08-27T05:00:00Z',
+          60,
+          'passer-by',
+          '2026-08-27T05:30:00Z',
+          'NONE',
+          1,
+        ),
+      ],
+    };
+    const a = assess([...outage, driveBy], { now });
+    assert.equal(a.unanswered.length, 3);
+    assert.equal(a.alarm, true);
+  });
+
+  it('keeps the life signal when the only result in the window was edited after recording', () => {
+    // laneSilent's bot arm carries its own copy of the unedited check, so
+    // editing the window's one result flips the lane back to silent and
+    // every stale refused request joins the roster at once — an alarm
+    // against a lane that demonstrably ran. A result the record carries
+    // was seen unedited by an earlier tick, so the later edit cannot take
+    // back the life the lane showed.
+    const served = result('2026-08-26T09:05:00Z', PUSHED, 41);
+    const refused = () =>
+      [0, 1, 2].map((h) => ({
+        number: 51 + h,
+        state: 'open',
+        comments: [
+          request(
+            `2026-08-26T0${6 + h}:00:00Z`,
+            51 + h,
+            'read-only-collaborator',
+            undefined,
+            'COLLABORATOR',
+            0,
+          ),
+        ],
+      }));
+    const tick1 = assess(
+      [{ number: 41, state: 'open', comments: [served] }, ...refused()],
+      { now },
+    );
+    assert.equal(tick1.unanswered.length, 0);
+    const refresh = decide(tick1, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [],
+    })[0];
+    assert.equal(refresh.type, 'comment');
+    const record = readState([refresh.body]);
+    const tick2 = assess(
+      [
+        {
+          number: 41,
+          state: 'open',
+          comments: [{ ...served, updated_at: '2026-08-26T10:00:00Z' }],
+        },
+        ...refused(),
+      ],
+      {
+        now,
+        recorded: record.requests,
+        recordedResults: record.resultsSeen,
+      },
+    );
+    assert.equal(tick2.unanswered.length, 0);
+    assert.equal(tick2.alarm, false);
+  });
+
+  it('keeps the close-gate veto for an unacknowledged request on a PR the lane has served', () => {
+    // A retry typed while an autofix round holds the PR's shared
+    // concurrency slot can wait that round's whole 345-minute timeout for
+    // its acknowledgement, and the ack POST's failure is swallowed by the
+    // producer — so past the short grace, an accepted request reads exactly
+    // like a refused one. This one is seven hours old, never acknowledged,
+    // and a healthy push lands on ANOTHER PR after it: the grace alone
+    // would drop the veto and post "Recovered" over a run that has not
+    // started (it is exactly what the code did before this arm). What
+    // separates it from a refusal is its own PR: the lane served this PR
+    // earlier in the window, so its silence toward this one request cannot
+    // be told apart from the parked queue.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    const lane = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            result('2026-08-27T04:30:00Z', PUSHED, 81),
+            request(
+              '2026-08-27T05:00:00Z',
+              81,
+              'maintainer',
+              undefined,
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T05:05:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lane, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
+  it('floors the recovery barrier at a request the owed gate does not read', () => {
+    // newestRequest deliberately keeps its looser predicate: an
+    // accepted-but-unacknowledged request the owed gate excludes must still
+    // stop a recovery close, because the barrier cannot tell "accepted,
+    // ack lost" from "refused, will never run". Here the request is
+    // unacknowledged and hours old on a PR the lane never served, so
+    // neither the roster nor the veto claims it — only the barrier does,
+    // and the predating push must not close over it. Inserting the owed
+    // gate into newestRequest drops that floor and closes.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    const lane = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            request(
+              '2026-08-27T05:00:00Z',
+              81,
+              'maintainer',
+              undefined,
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T04:30:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, null);
+    assert.equal(lane.newestRequest, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lane, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
+  it('does not count a comment edited into a request', () => {
+    // The producer fires on comment creation only; an edit never starts a
+    // run, so an edited comment never receives a result and must not be
+    // tallied as unanswered (a maintainer typo-fixing `/resolv` by editing
+    // would otherwise alarm on a healthy lane).
+    const prs = [
+      {
+        number: 19,
+        state: 'open',
+        comments: [1, 2, 3].map((h) =>
+          request(
+            `2026-08-27T0${h}:00:00Z`,
+            19,
+            'maintainer',
+            `2026-08-27T09:0${h}:00Z`,
+          ),
+        ),
+      },
+    ];
+    const a = assess(prs, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+  });
+
+  it('counts a request aged exactly the stale window', () => {
+    // The boundary is inclusive (`>=`): a request aged exactly staleHours
+    // counts; one one second younger does not. Run on the DEFAULT: every
+    // other staleness test passes staleHours explicitly and main() never
+    // overrides it, so this is also the only pin on the documented
+    // three-hour window itself.
+    const prs = [
+      {
+        number: 30,
+        state: 'open',
+        comments: [
+          request('2026-08-27T09:00:00Z', 30),
+          request('2026-08-27T09:00:01Z', 30),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, unansweredThreshold: 1 });
+    assert.deepEqual(
+      a.unanswered.map((u) => u.at),
+      ['2026-08-27T09:00:00Z'],
+    );
+  });
+
+  it('does not count result comments edited after posting', () => {
+    // The producer posts a fresh comment per run and never edits one; anyone
+    // with triage-or-better on the repo can still edit one, so an edited
+    // result must count as no result at all — a failure edited into a
+    // success must not pose as recovery evidence, and a success edited into
+    // a failure phrase must not build a streak.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 29),
+    );
+    const editedPushed = comment(
+      BOT,
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${PUSHED}`,
+      29,
+      '2026-08-26T06:00:00Z',
+    );
+    const a = assess(
+      [{ number: 29, state: 'open', comments: [...failures, editedPushed] }],
+      { now },
+    );
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
+    assert.equal(a.latestAttempt.kind, 'agent_failed');
+    // The other direction: a success edited into a failure phrase builds
+    // no streak either.
+    const editedFailure = comment(
+      BOT,
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${AGENT_FAILED}`,
+      29,
+      '2026-08-26T06:00:00Z',
+    );
+    const b = assess(
+      [
+        {
+          number: 29,
+          state: 'open',
+          comments: [result('2026-08-25T00:00:00Z', PUSHED, 29), editedFailure],
+        },
+      ],
+      { now },
+    );
+    assert.equal(b.streak, 0);
+    assert.deepEqual(
+      b.attempts.map((r) => r.kind),
+      ['pushed'],
+    );
+  });
+
+  it('keeps a request answered by a result that was edited after serving it', () => {
+    // The edit exclusion above guards CLASSIFICATION — a failure edited
+    // into a success must not pose as recovery evidence. Applied to every
+    // reader, though, an edit after the fact also un-answers the request
+    // the result already served: the roster reports it unanswered and the
+    // close gate's pairing runs out on it, vetoing a recovery the lane
+    // earned. The first-sight record carries the answer across the edit:
+    // a result seen unedited is recorded, and the roster and the pairing
+    // read the record beside the live set.
+    const ask = request('2026-08-26T03:00:00Z', 41);
+    const served = result('2026-08-26T03:05:00Z', PUSHED, 41);
+    // The failing lane the issue is filed on: five failures AFTER the push,
+    // so the streak the create rides on survives it.
+    const failures = [4, 5, 6, 7, 8].map((h) =>
+      result(`2026-08-26T0${h}:00:00Z`, AGENT_FAILED, 30),
+    );
+    const lane = (comments) => [
+      { number: 30, state: 'open', comments: [...failures] },
+      { number: 41, state: 'open', comments },
+    ];
+    // Tick 1 files the issue on the failing lane, recording the unedited
+    // result that served the request.
+    const tick1 = assess(lane([ask, served]), { now });
+    assert.equal(tick1.unanswered.length, 0);
+    assert.equal(tick1.unserved, null);
+    const record = readState([decide(tick1, null)[0].record]);
+    assert.ok(
+      record.resultsSeen.some(([id]) => id === served.id),
+      'the filing tick records the result it saw unedited',
+    );
+    // Tick 2: the result comment has been edited since (a redaction, an
+    // annotation). The answer it gave must survive the edit — while the
+    // edited body still counts as nothing toward the streak or recovery.
+    const tick2 = assess(
+      lane([ask, { ...served, updated_at: '2026-08-26T08:00:00Z' }]),
+      {
+        now,
+        recorded: record.requests,
+        recordedResults: record.resultsSeen,
+      },
+    );
+    assert.equal(tick2.unanswered.length, 0);
+    assert.equal(tick2.unserved, null);
+    assert.equal(tick2.streak, 5);
+    assert.equal(tick2.latestAttempt.kind, 'agent_failed');
+  });
+
+  it('keeps the recorded failures counting toward the streak after edits', () => {
+    // The founding incident's own shape: five requests, each answered by its
+    // own agent_failed comment, so the roster stays empty and the streak is
+    // the only signal. A triage annotation on a failure comment never
+    // reverts — `updated_at` never comes back — so judged live-only the
+    // streak drops below the threshold forever, and no issue is ever filed.
+    // The first-sight record carries the classification, and the streak
+    // reads the live attempts union the record; latestAttempt and the
+    // recovery evidence stay live-only, so an edit cannot certify recovery.
+    const prs = [0, 1, 2, 3, 4].map((h) => ({
+      number: 61 + h,
+      state: 'open',
+      comments: [
+        request(`2026-08-26T0${h}:00:00Z`, 61 + h),
+        result(`2026-08-26T0${h}:05:00Z`, AGENT_FAILED, 61 + h),
+      ],
+    }));
+    // Tick 1 files the issue, recording all five failures unedited.
+    const tick1 = assess(prs, { now });
+    assert.equal(tick1.streak, 5);
+    assert.equal(tick1.unanswered.length, 0);
+    const filed = decide(tick1, null)[0];
+    const record = readState([filed.record]);
+    assert.equal(record.resultsSeen.length, 5);
+    const editResults = (list) =>
+      list.map((pr) => ({
+        ...pr,
+        comments: pr.comments.map((c) =>
+          c.user === BOT ? { ...c, updated_at: '2026-08-26T10:00:00Z' } : c,
+        ),
+      }));
+    // Tick 2: the newest failure comment is annotated during triage. Read
+    // live-only the streak is four; the record holds it at five.
+    const tick2 = assess([...prs.slice(0, 4), ...editResults(prs.slice(4))], {
+      now,
+      recorded: record.requests,
+      recordedResults: record.resultsSeen,
+    });
+    assert.equal(tick2.streak, 5, 'the recorded failure still counts');
+    assert.equal(tick2.alarm, true);
+    assert.equal(
+      tick2.unanswered.length,
+      0,
+      'the recorded result still answers its request',
+    );
+    // Tick 3: all five are annotated. The streak still says five and no
+    // request reads as unanswered — while the recovery evidence is gone.
+    const tick3 = assess(editResults(prs), {
+      now,
+      recorded: record.requests,
+      recordedResults: record.resultsSeen,
+    });
+    assert.equal(tick3.streak, 5);
+    assert.equal(tick3.alarm, true);
+    assert.equal(tick3.unanswered.length, 0);
+    assert.equal(
+      tick3.latestAttempt,
+      null,
+      'the recovery evidence stays live-only',
+    );
+    const existing = { number: 42, createdAt: FILED_AT, texts: [filed.body] };
+    assert.deepEqual(
+      decide(tick3, existing).map((a) => a.type),
+      ['comment'],
+      'the open issue still gets the update, never a recovery',
+    );
+  });
+
+  it('counts no-conflict and dry-run results neither way', () => {
+    // Neither pushes anything: they must not break a push-failure streak
+    // (masking a push outage) and cannot serve as recovery evidence.
+    const alternating = [
+      result('2026-08-21T00:00:00Z', PERMISSION, 20),
+      result('2026-08-21T06:00:00Z', NOOP, 20),
+      result('2026-08-22T00:00:00Z', PERMISSION, 20),
+      result('2026-08-22T06:00:00Z', NOOP, 20),
+      result('2026-08-23T00:00:00Z', PERMISSION, 20),
+      result('2026-08-23T06:00:00Z', NOOP, 20),
+      result('2026-08-24T00:00:00Z', PERMISSION, 20),
+      result('2026-08-24T06:00:00Z', NOOP, 20),
+      result('2026-08-25T00:00:00Z', PERMISSION, 20),
+      result('2026-08-25T06:00:00Z', DRY_RUN, 20),
+    ];
+    const a = assess([{ number: 20, state: 'open', comments: alternating }], {
+      now,
+    });
+    assert.deepEqual(
+      a.attempts.map((r) => r.kind),
+      Array(5).fill('push_failed'),
+    );
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
+  });
+});
+
+describe('resolve-health: decisions', () => {
+  const now = new Date('2026-08-27T12:00:00Z');
+  const failing = assess(
+    [
+      {
+        number: 3,
+        comments: [1, 2, 3, 4, 5].map((d) =>
+          result(
+            `2026-08-2${d}T00:00:00Z`,
+            d < 4 ? INFRA_FAILED : AGENT_FAILED,
+            3,
+          ),
+        ),
+      },
+    ],
+    { now },
+  );
+  const healthy = assess(
+    [{ number: 3, comments: [result('2026-08-26T00:00:00Z', PUSHED, 3)] }],
+    { now },
+  );
+
+  it('opens one issue carrying the marker, the state, and the last attempts', () => {
+    const actions = decide(failing, null);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].type, 'create');
+    assert.match(actions[0].title, /5 consecutive failures/);
+    assert.ok(actions[0].body.includes(HEALTH_MARKER));
+    assert.deepEqual(readState([actions[0].body]), {
+      streak: 5,
+      unanswered: [],
+      newestRequest: null,
+      requests: [],
+      resultsSeen: failing.resultSightings,
+      latest: failing.latestAttempt.id,
+    });
+    assert.ok(
+      actions[0].body.includes('| 2026-08-25 00:00Z | #3 | ❌ agent_failed |'),
+    );
+    assert.ok(actions[0].body.includes('3 never reached the agent'));
+  });
+
+  it('opens an issue on unanswered requests alone and lists them', () => {
+    const stale = assess(
+      [
+        {
+          number: 12,
+          state: 'open',
+          comments: [1, 2, 3].map((h) =>
+            request(`2026-08-27T0${h}:00:00Z`, 12, `writer${h}`),
+          ),
+        },
+      ],
+      { now },
+    );
+    assert.equal(stale.streak, 0);
+    assert.equal(stale.unanswered.length, 3);
+    const actions = decide(stale, null);
+    assert.equal(actions.length, 1);
+    assert.match(actions[0].title, /0 consecutive failures, 3 unanswered/);
+    assert.ok(actions[0].body.includes('Requests with no result comment:'));
+    assert.ok(actions[0].body.includes('#12 by @writer2'));
+    // The state records WHICH requests are unanswered, not how many, plus the
+    // newest request the watch saw — the barrier decide() postdates recovery
+    // pushes by, recorded so it survives the request comments being deleted.
+    assert.deepEqual(readState([actions[0].body]), {
+      streak: 0,
+      unanswered: stale.unanswered.map((u) => u.id),
+      newestRequest: stale.unanswered.at(-1).at,
+      requests: stale.unanswered.map((u) => [u.id, u.at, 'COLLABORATOR', u.pr]),
+      resultsSeen: [],
+      latest: null,
+    });
+  });
+
+  it('comments when the unanswered roster changes even if its size does not', () => {
+    // During a never-ran outage a skip answers one request while another
+    // ages past the stale window: count 3 → 3, streak 0, latest unchanged.
+    // Keying change detection on the count would freeze the issue's roster
+    // on week one while it describes week two.
+    const tick1 = assess(
+      [
+        {
+          number: 12,
+          state: 'open',
+          comments: [1, 2, 3].map((h) =>
+            request(`2026-08-27T0${h}:00:00Z`, 12),
+          ),
+        },
+      ],
+      { now },
+    );
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [decide(tick1, null)[0].body],
+    };
+    assert.deepEqual(decide(tick1, existing), []);
+    const later = new Date('2026-08-27T13:00:00Z');
+    const tick2 = assess(
+      [
+        {
+          number: 12,
+          state: 'open',
+          comments: [
+            ...tick1.unanswered.map((u) =>
+              comment('maintainer', u.at, '@qwen-code /resolve', 12),
+            ),
+            // A skip result answers the three earlier requests (any later
+            // result answers a request)…
+            result('2026-08-27T04:00:00Z', SKIPPED, 12),
+            // …and three newer requests have aged past the stale window.
+            ...[5, 6, 7].map((h) => request(`2026-08-27T0${h}:00:00Z`, 12)),
+          ],
+        },
+      ],
+      { now: later },
+    );
+    assert.equal(tick2.unanswered.length, 3);
+    assert.equal(tick2.streak, 0);
+    const actions = decide(tick2, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.deepEqual(
+      readState([actions[0].body]).unanswered,
+      tick2.unanswered.map((u) => u.id),
+    );
+  });
+
+  it('attributes a push-rejected streak to the push, not to the agent', () => {
+    // Five push_failed results are the push-outage incident class; the
+    // headline must send the reader to credentials, not to the model.
+    const outage = assess(
+      [
+        {
+          number: 21,
+          state: 'open',
+          comments: [1, 2, 3, 4, 5].map((d) =>
+            result(`2026-08-2${d}T00:00:00Z`, PERMISSION, 21),
+          ),
+        },
+      ],
+      { now },
+    );
+    const body = decide(outage, null)[0].body;
+    assert.ok(
+      body.includes(
+        "5 in a row (0 never reached the agent's verdict, 5 resolved the conflict but the push was rejected, 0 were the agent giving up",
+      ),
+      body,
+    );
+  });
+
+  it('does not claim a change on the first tick that reads no state', () => {
+    // The issue body carries the marker but findOpenIssue never reads it
+    // back as state, so when the record comment apply() posts with the
+    // create is lost or never landed, `texts` is empty and `previous` is
+    // null. The write must happen — it is how state reaches a comment the
+    // watch trusts again — but the picture has not changed, and the comment
+    // must not say it has. Every other decide() test seeds `texts` with the
+    // creation body, a shape production never makes.
+    const first = decide(failing, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [],
+    });
+    assert.deepEqual(
+      first.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(first[0].body.includes(HEALTH_MARKER));
+    assert.deepEqual(
+      readState([first[0].body]),
+      readState([decide(failing, null)[0].body]),
+    );
+    assert.ok(
+      !first[0].body.includes('the picture has changed'),
+      first[0].body,
+    );
+    // ...and once that state is readable, a real change still reports as one.
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [first[0].body],
+    };
+    const moved = assess(
+      [
+        {
+          number: 3,
+          comments: [
+            ...[1, 2, 3, 4, 5].map((d) =>
+              result(`2026-08-2${d}T00:00:00Z`, INFRA_FAILED, 3),
+            ),
+            result('2026-08-26T00:00:00Z', AGENT_FAILED, 3),
+          ],
+        },
+      ],
+      { now },
+    );
+    const update = decide(moved, existing);
+    assert.deepEqual(
+      update.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      update[0].body.includes('the picture has changed'),
+      update[0].body,
+    );
+  });
+
+  it('writes nothing while the picture is unchanged, one comment when it moves', () => {
+    const created = decide(failing, null)[0];
+    const existing = { number: 42, createdAt: FILED_AT, texts: [created.body] };
+    assert.deepEqual(decide(failing, existing), []);
+    const grown = assess(
+      [
+        {
+          number: 3,
+          comments: [
+            ...[1, 2, 3, 4, 5].map((d) =>
+              result(`2026-08-2${d}T00:00:00Z`, INFRA_FAILED, 3),
+            ),
+            result('2026-08-26T00:00:00Z', UNKNOWN, 3),
+          ],
+        },
+      ],
+      { now },
+    );
+    const actions = decide(grown, existing);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].type, 'comment');
+    assert.equal(actions[0].number, 42);
+    assert.equal(readState([...existing.texts, actions[0].body]).streak, 6);
+    // The drifted sentence is visible in the update as what it is.
+    assert.ok(actions[0].body.includes('❌ unknown'));
+  });
+
+  it('comments the recovery and closes the issue once an attempt succeeds', () => {
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [decide(failing, null)[0].body],
+    };
+    const actions = decide(healthy, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
+    assert.match(
+      actions[0].body,
+      /Recovered: the latest attempt .* is `pushed`/,
+    );
+    // If the close fails after the comment landed, the next tick retries
+    // the close without repeating the recovery comment: the `recovered`
+    // field the comment's state marker wrote dedupes the comment only,
+    // never the close.
+    const after = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [...existing.texts, actions[0].body],
+    };
+    assert.deepEqual(
+      decide(healthy, after).map((a) => a.type),
+      ['close'],
+    );
+  });
+
+  it('does not treat loss of evidence as recovery', () => {
+    // An open unanswered-driven issue whose requests fell out of the
+    // discovery window, or a streak that merely dropped below the threshold
+    // with no success: alarm is false, but nothing has been shown to work.
+    const stale = assess(
+      [
+        {
+          number: 12,
+          state: 'open',
+          comments: [1, 2, 3].map((h) =>
+            request(`2026-08-27T0${h}:00:00Z`, 12),
+          ),
+        },
+      ],
+      { now },
+    );
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [decide(stale, null)[0].body],
+    };
+    assert.deepEqual(decide(assess([], { now }), existing), []);
+    const belowThreshold = assess(
+      [
+        {
+          number: 3,
+          comments: [
+            result('2026-08-26T00:00:00Z', AGENT_FAILED, 3),
+            result('2026-08-26T01:00:00Z', PERMISSION, 3),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(belowThreshold.alarm, false);
+    // The quiet tick records the newly sighted failures; what it must not
+    // do is close — nothing has been shown to work.
+    assert.deepEqual(
+      decide(belowThreshold, existing).map((a) => a.type),
+      ['comment'],
+    );
+    // The shared `healthy` push (2026-08-26) PREDATES this issue's requests
+    // (2026-08-27), so it is no evidence that anything ran after them.
+    assert.deepEqual(
+      decide(healthy, existing).map((a) => a.type),
+      ['comment'],
+    );
+    // A success NEWER than the requests is what closes it.
+    const recovered = assess(
+      [
+        {
+          number: 3,
+          comments: [result('2026-08-27T04:00:00Z', PUSHED, 3)],
+        },
+      ],
+      { now },
+    );
+    assert.deepEqual(
+      decide(recovered, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('does not close an open issue on attempts that pushed nothing', () => {
+    // A push-failure streak opens the issue; a moved head, a no-conflict
+    // run, or a dry run pushes nothing, so none of them is evidence the
+    // push outage healed — even though a moved head resets the streak.
+    // The same failure comments are reused across the assessments so only
+    // the added attempt differs.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, PERMISSION, 21),
+    );
+    const pushOutage = assess(
+      [{ number: 21, state: 'open', comments: [...failures] }],
+      { now },
+    );
+    assert.equal(pushOutage.alarm, true);
+    const existing = {
+      number: 43,
+      createdAt: FILED_AT,
+      texts: [decide(pushOutage, null)[0].body],
+    };
+    const afterMoved = assess(
+      [
+        {
+          number: 21,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T00:00:00Z', MOVED, 21)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(afterMoved.streak, 0); // the streak reset stays
+    // The moved-head sighting is recorded, but it pushes nothing, so the
+    // close stays refused.
+    assert.deepEqual(
+      decide(afterMoved, existing).map((a) => a.type),
+      ['comment'],
+    );
+    const noop = result('2026-08-26T00:00:00Z', NOOP, 21);
+    const dryRun = result('2026-08-26T01:00:00Z', DRY_RUN, 21);
+    const afterNoPush = assess(
+      [
+        {
+          number: 21,
+          state: 'open',
+          comments: [...failures, noop, dryRun],
+        },
+      ],
+      { now },
+    );
+    assert.equal(afterNoPush.alarm, true); // noop/dry_run break no streak
+    // The unchanged alarm picture still records the newly sighted results —
+    // the alarm branch's half of the record key — and never closes on them.
+    const record = decide(afterNoPush, existing);
+    assert.deepEqual(
+      record.map((a) => a.type),
+      ['comment'],
+    );
+    const recordedIds = readState(record.map((a) => a.body)).resultsSeen.map(
+      ([id]) => id,
+    );
+    assert.ok(
+      recordedIds.includes(noop.id) && recordedIds.includes(dryRun.id),
+      'the alarm tick records the newly sighted non-attempt results',
+    );
+    // Once the sightings are recorded the same picture writes nothing again.
+    assert.deepEqual(
+      decide(afterNoPush, {
+        ...existing,
+        texts: [...existing.texts, record[0].body],
+      }),
+      [],
+    );
+  });
+
+  it('closes on a success that arrived while unanswered requests alarmed', () => {
+    // A success landing on another PR while unanswered requests still hold
+    // the alarm is recorded by the alarm update; once those requests age
+    // out of the window the issue must still close on that success.
+    const requests22 = [1, 2, 3].map((h) =>
+      request(`2026-08-20T0${h}:00:00Z`, 22),
+    );
+    const withSuccess = [
+      { number: 22, state: 'open', comments: requests22 },
+      {
+        number: 23,
+        state: 'open',
+        comments: [result('2026-08-26T00:00:00Z', PUSHED, 23)],
+      },
+    ];
+    const texts = [
+      decide(
+        assess([{ number: 22, state: 'open', comments: requests22 }], {
+          now: new Date('2026-08-20T12:00:00Z'),
+        }),
+        null,
+      )[0].body,
+    ];
+    // The success arrives while the requests still alarm.
+    const mid = assess(withSuccess, { now: new Date('2026-08-26T12:00:00Z') });
+    assert.equal(mid.alarm, true);
+    const update = decide(mid, { number: 44, createdAt: FILED_AT, texts })[0];
+    assert.equal(update.type, 'comment');
+    texts.push(update.body);
+    // The requests age out of the window; the success remains.
+    const cleared = assess(withSuccess, {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(cleared.alarm, false);
+    assert.deepEqual(
+      decide(cleared, { number: 44, createdAt: FILED_AT, texts }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it('never closes on a push older than the unanswered requests', () => {
+    // A `pushed` attempt that landed BEFORE the requests the issue was
+    // opened on cannot be evidence that anything ran after them — yet the
+    // alarm clears as those requests stop counting while the stale push
+    // stays in the window. Two entrances: their PRs close without ever
+    // receiving a result (assess() drops closed-PR requests by design), or
+    // enough of them get answered to fall below the threshold.
+    // Hoisted, so the record membership the write key compares is made of
+    // the same comment ids on every tick, as production's stable ids are.
+    const asked = [0, 1, 2].map((i) =>
+      request(`2026-08-2${5 + i}T01:00:00Z`, 25 + i),
+    );
+    // Hoisted for the same reason: the result record compares ids too.
+    const stalePush = result('2026-08-24T00:00:00Z', PUSHED, 24);
+    const prsWith = (states) => [
+      {
+        number: 24,
+        state: 'open',
+        comments: [stalePush],
+      },
+      ...states.map((state, i) => ({
+        number: 25 + i,
+        state,
+        comments: [asked[i]],
+      })),
+    ];
+    const opened = assess(prsWith(['open', 'open', 'open']), { now });
+    assert.equal(opened.unanswered.length, 3);
+    const existing = {
+      number: 45,
+      createdAt: FILED_AT,
+      texts: [decide(opened, null)[0].body],
+    };
+
+    // (a) all three PRs close unanswered; the stale push stays the latest.
+    const closedPrs = assess(prsWith(['closed', 'closed', 'closed']), { now });
+    assert.equal(closedPrs.alarm, false);
+    assert.equal(closedPrs.latestAttempt.kind, 'pushed');
+    assert.deepEqual(decide(closedPrs, existing), []);
+
+    // (b) one request gets a skip, two stay unanswered: below the threshold
+    // the alarm clears with the same stale push still the latest attempt.
+    const partialPrs = prsWith(['open', 'open', 'open']);
+    partialPrs[1].comments.push(result('2026-08-25T02:00:00Z', SKIPPED, 25));
+    const partial = assess(partialPrs, { now });
+    assert.equal(partial.alarm, false);
+    // The skip that answered one request is recorded — and the deficit it
+    // shrank from — but the stale push still cannot close the issue.
+    assert.deepEqual(
+      decide(partial, existing).map((a) => a.type),
+      ['comment'],
+    );
+
+    // A push that postdates the requests still closes once the alarm clears.
+    const healedPrs = prsWith(['closed', 'closed', 'closed']);
+    healedPrs[0].comments.push(result('2026-08-27T02:00:00Z', PUSHED, 24));
+    assert.deepEqual(
+      decide(assess(healedPrs, { now }), existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('keeps a deleted request on record through alarm updates', () => {
+    // An alarm update rewrites the marker, so it must carry the request floor
+    // forward rather than re-derive it from what this tick can still see: a
+    // request whose comment is deleted while the alarm holds leaves the live
+    // scan, and an update that recorded only the scan would lower the barrier
+    // to the newest request still readable — letting a push older than the
+    // deleted request close the issue, although that request never got an
+    // attempt.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
+    );
+    // Hoisted, so the roster membership `sameState` compares is made of the
+    // same comment ids on every tick.
+    const askOldest = request('2026-08-25T01:00:00Z', 31);
+    const skipOldest = result('2026-08-25T02:00:00Z', SKIPPED, 31);
+    const askMiddle = request('2026-08-26T01:00:00Z', 32);
+    const pushMiddle = result('2026-08-26T02:00:00Z', PUSHED, 32);
+    const askNewest = request('2026-08-27T01:00:00Z', 33);
+    const issue = (texts) => ({ number: 46, createdAt: FILED_AT, texts });
+
+    const tick1 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        { number: 31, state: 'open', comments: [askOldest] },
+        { number: 32, state: 'open', comments: [askMiddle] },
+        { number: 33, state: 'open', comments: [askNewest] },
+      ],
+      { now },
+    );
+    assert.equal(tick1.unanswered.length, 3);
+    const texts = [decide(tick1, null)[0].body];
+    assert.equal(readState(texts).newestRequest, '2026-08-27T01:00:00Z');
+
+    // The newest request's comment is deleted and the oldest is answered by a
+    // skip: the roster moved, so the alarm still fires and the watch posts an
+    // update — which has to carry the deleted request's timestamp.
+    const tick2 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        { number: 31, state: 'open', comments: [askOldest, skipOldest] },
+        { number: 32, state: 'open', comments: [askMiddle] },
+        { number: 33, state: 'open', comments: [] },
+      ],
+      { now },
+    );
+    assert.equal(tick2.alarm, true);
+    assert.equal(
+      tick2.newestRequest,
+      '2026-08-26T01:00:00Z',
+      'the deleted request left the live scan',
+    );
+    const update = decide(tick2, issue(texts))[0];
+    assert.equal(update.type, 'comment');
+    texts.push(update.body);
+    assert.equal(
+      readState(texts).newestRequest,
+      '2026-08-27T01:00:00Z',
+      'the update carried the floor the scan can no longer see',
+    );
+
+    // The last request is answered by a push that postdates every request
+    // still readable, yet PREDATES the deleted one: the alarm clears and the
+    // live scan would clear the push, so only the carried floor holds.
+    const tick3 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        { number: 31, state: 'open', comments: [askOldest, skipOldest] },
+        { number: 32, state: 'open', comments: [askMiddle, pushMiddle] },
+        { number: 33, state: 'open', comments: [] },
+      ],
+      { now },
+    );
+    assert.equal(tick3.alarm, false);
+    assert.equal(tick3.latestAttempt.kind, 'pushed');
+    assert.equal(tick3.unserved, null, 'every readable request has a result');
+    assert.equal(tick3.newestRequest, '2026-08-26T01:00:00Z');
+    // The push sighting is newly recorded; the write must not close, and
+    // must carry the floor the live scan can no longer see.
+    const final = decide(tick3, issue(texts));
+    assert.deepEqual(
+      final.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState(final.map((a) => a.body)).newestRequest,
+      '2026-08-27T01:00:00Z',
+    );
+  });
+
+  it('records a barrier that rose while the alarm stayed below threshold', () => {
+    // The barrier only reaches a marker on a tick that WRITES one, so a
+    // request that goes unanswered BELOW the threshold — moving neither the
+    // streak nor the roster membership — is recorded nowhere while the lane
+    // is quiet. Once its comment is deleted or it ages out of the window the
+    // live scan loses it too, the barrier falls back to the one the
+    // streak-only issue filed (null), and the recovery gate closes on a push
+    // OLDER than that request — a false recovery needing no adversary and no
+    // tampered marker.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
+    );
+    const opened = assess(
+      [{ number: 30, state: 'open', comments: [...failures] }],
+      { now },
+    );
+    const texts = [decide(opened, null)[0].body];
+    assert.equal(readState(texts).newestRequest, null);
+
+    // The lane pushes, then breaks never-ran: one request, unanswered, below
+    // the threshold of three.
+    const push = result('2026-08-26T19:00:00Z', PUSHED, 30);
+    const unanswered = request('2026-08-26T19:30:00Z', 31);
+    const withRequest = (state) => [
+      { number: 30, state: 'open', comments: [...failures, push] },
+      { number: 31, state, comments: [unanswered] },
+    ];
+    const tick2 = assess(withRequest('open'), { now });
+    assert.equal(tick2.alarm, false);
+    assert.equal(tick2.unanswered.length, 1);
+    // The in-tick barrier already blocks the close; what was missing is the
+    // write that keeps it once the request leaves the assessment.
+    const refresh = decide(tick2, { number: 47, texts });
+    assert.deepEqual(
+      refresh.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([...texts, refresh[0].body]).newestRequest,
+      '2026-08-26T19:30:00Z',
+    );
+    texts.push(refresh[0].body);
+
+    // The request's PR closes unanswered and the stale push stays in window.
+    const tick3 = assess(withRequest('closed'), { now });
+    assert.equal(tick3.alarm, false);
+    assert.equal(tick3.unanswered.length, 0);
+    assert.equal(tick3.latestAttempt.kind, 'pushed');
+    // Not closed — and not refreshed again either: the floor recorded above
+    // no longer rises, so the write does not repeat every tick.
+    assert.deepEqual(decide(tick3, { number: 47, texts }), []);
+  });
+
+  it('records a request that arrives while the alarm holds its picture', () => {
+    // A request below `staleHours` joins no roster, moves no streak and is not
+    // the latest attempt, so `sameState` is true and the alarm branch would
+    // write nothing — and the quiet branch's rise-keyed refresh is unreachable
+    // while the alarm fires. The request would then live only in the live
+    // scan, and its deletion would take the barrier with it.
+    const stale = [1, 2, 3].map((i) =>
+      request(`2026-08-24T0${i}:00:00Z`, 40 + i),
+    );
+    const attempts = [
+      ...[1, 2, 3, 4, 5].map((d) =>
+        result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 39),
+      ),
+      result('2026-08-26T06:00:00Z', PUSHED, 39),
+    ];
+    const lane = (fresh) => [
+      { number: 39, state: 'open', comments: attempts },
+      ...stale.map((r, i) => ({
+        number: 41 + i,
+        state: 'open',
+        comments: [r],
+      })),
+      ...(fresh
+        ? [
+            {
+              number: 50,
+              state: 'open',
+              comments: [request('2026-08-27T10:00:00Z', 50)],
+            },
+          ]
+        : []),
+    ];
+    const steady = assess(lane(false), { now });
+    assert.equal(steady.alarm, true);
+    const filed = decide(steady, null)[0].body;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [filed] };
+    // The picture itself has not moved...
+    assert.deepEqual(decide(steady, existing), []);
+    // ...but a request arriving on top of it must still be recorded.
+    const withRequest = assess(lane(true), { now });
+    assert.equal(withRequest.alarm, true);
+    assert.equal(withRequest.unanswered.length, 3, 'the roster is unchanged');
+    const recorded = decide(withRequest, existing);
+    assert.deepEqual(
+      recorded.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([recorded[0].body]).newestRequest,
+      '2026-08-27T10:00:00Z',
+    );
+    assert.ok(
+      !recorded[0].body.includes('the picture has changed'),
+      recorded[0].body,
+    );
+    // Days later the request comment is gone and the roster has aged out of
+    // the window. The recorded barrier still refuses the older push.
+    const later = new Date('2026-09-01T12:00:00Z');
+    const cleared = assess(
+      [{ number: 39, state: 'open', comments: attempts }],
+      {
+        now: later,
+      },
+    );
+    assert.equal(cleared.alarm, false);
+    assert.equal(cleared.latestAttempt.at, '2026-08-26T06:00:00Z');
+    assert.deepEqual(
+      decide(cleared, {
+        number: 42,
+        createdAt: FILED_AT,
+        texts: [filed, recorded[0].body],
+      }),
+      [],
+      'the push predates the request the watch recorded',
+    );
+  });
+
+  it('keeps a request edited out of shape paired with its own result', () => {
+    // The third way a request leaves the live arm, after ageing out and being
+    // deleted: an edit that stops the body reading as a request — retracting
+    // it, prepending a note, leading whitespace from a mobile edit. Excluding
+    // the vanished arm by comment id instead of by request-shaped id puts
+    // such a comment in neither arm, and its result goes to the next request.
+    const r2 = request('2026-09-07T10:05:00Z', 100);
+    const report = result('2026-09-07T10:20:00Z', PUSHED, 100);
+    const recorded = [
+      [901, '2026-09-07T10:00:00Z', 'COLLABORATOR', 100],
+      [r2.id, r2.created_at, 'COLLABORATOR', 100],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          resultsSeen: [[report.id, 100, report.created_at]],
+          latest: null,
+        })} -->`,
+      ],
+    };
+    const withFirst = (first) =>
+      assess(
+        [
+          {
+            number: 100,
+            state: 'open',
+            comments: [...first, r2, report],
+          },
+        ],
+        { now: new Date('2026-09-07T18:00:00Z'), recorded },
+      );
+    const intact = {
+      ...comment(
+        'maintainer',
+        '2026-09-07T10:00:00Z',
+        '@qwen-code /resolve',
+        100,
+      ),
+      id: 901,
+    };
+    const editedAway = {
+      ...intact,
+      body: '(retracted, ignore this)',
+      updated_at: '2026-09-07T11:00:00Z',
+    };
+    for (const [label, first] of [
+      ['intact', [intact]],
+      ['deleted', []],
+      ['edited out of shape', [editedAway]],
+    ]) {
+      const lane = withFirst(first);
+      assert.equal(lane.unserved, '2026-09-07T10:00:00Z', label);
+      assert.deepEqual(decide(lane, existing), [], label);
+    }
+  });
+
+  it('does not re-inject a request the lane would have refused', () => {
+    // `isRequestShaped` gates on the association, so the exclusion set built
+    // from it holds only ANSWERABLE live ids — which let a recorded refusal in
+    // through the vanished arm whether or not its comment is still there. The
+    // producer's authorize job refuses such a request in silence, so it is
+    // owed no result, and injecting it hands the gate a veto that one comment
+    // from an account with no write access can arm for the rest of the window.
+    const genuine = comment(
+      'maintainer',
+      '2026-09-07T00:00:00Z',
+      '@qwen-code /resolve',
+      50,
+    );
+    const driveBy = comment(
+      'passer-by',
+      '2026-09-07T01:00:00Z',
+      '@qwen-code /resolve',
+      50,
+      '2026-09-07T01:00:00Z',
+      'NONE',
+    );
+    const push = result('2026-09-07T02:00:00Z', PUSHED, 50);
+    const recorded = [
+      [genuine.id, genuine.created_at, 'COLLABORATOR', 50],
+      [driveBy.id, driveBy.created_at, 'NONE', 50],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: genuine.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // Both while the refused comment is still there, and after it is deleted.
+    for (const [label, comments] of [
+      ['live', [genuine, driveBy, push]],
+      ['deleted', [genuine, push]],
+    ]) {
+      const lane = assess([{ number: 50, state: 'open', comments }], {
+        now: new Date('2026-09-07T12:00:00Z'),
+        recorded,
+      });
+      assert.equal(lane.unserved, null, label);
+      assert.deepEqual(
+        decide(lane, existing).map((a) => a.type),
+        ['comment', 'close'],
+        label,
+      );
+    }
+  });
+
+  it('blames a lost result on the oldest ask, not on whichever is newest', () => {
+    // Which request lost its result is not observable. Walking oldest-first
+    // blames whichever request the cursor runs out on, which is always the
+    // NEWEST — so a single permanent deficit slides onto each new ask and the
+    // reported barrier never stops advancing. Walking newest-first leaves it
+    // on the oldest unmatched ask, which leaves the window when that ask does.
+    const asks = [1, 2, 3].map((d) => request(`2026-09-0${d}T00:00:00Z`, 60));
+    const results = [
+      // r1's own run was cancelled: no result of its own.
+      result('2026-09-02T01:00:00Z', PUSHED, 60),
+      result('2026-09-05T00:00:00Z', PUSHED, 60),
+    ];
+    const recorded = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR', 60]);
+    const lane = (extra) =>
+      assess(
+        [
+          {
+            number: 60,
+            state: 'open',
+            comments: [
+              ...asks,
+              ...extra.requests,
+              ...results,
+              ...extra.results,
+            ],
+          },
+        ],
+        { now: new Date('2026-09-05T12:00:00Z'), recorded },
+      );
+    const deficit = lane({ requests: [], results: [] });
+    assert.equal(deficit.unserved, asks[0].created_at);
+    // A new ask that DID get its own result must not inherit the deficit.
+    const later = request('2026-09-05T02:00:00Z', 60);
+    const served = lane({
+      requests: [later],
+      results: [result('2026-09-05T03:00:00Z', PUSHED, 60)],
+    });
+    assert.equal(
+      served.unserved,
+      asks[0].created_at,
+      'the deficit stays on the ask that could have lost a result',
+    );
+  });
+
+  it('does not re-inject a recorded request no result could be donated to', () => {
+    // The vanished arm exists to stop a result being donated. Where the PR has
+    // no result to donate, re-injecting the request only holds the gate — and
+    // the refusal writes nothing, so the prune that would drop the entry never
+    // runs and the tracking issue could never close again.
+    const asks = [0, 1, 2].map((i) => request(`2026-08-27T0${i}:00:00Z`, 22));
+    const recorded = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR', 22]);
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 0,
+          unanswered: asks.map((r) => r.id),
+          newestRequest: '2026-08-27T02:00:00Z',
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // A week on: the requests have aged out of the comment window, PR 22 never
+    // produced a result at all, and the lane has since pushed on PR 23.
+    const healed = assess(
+      [
+        { number: 22, state: 'open', comments: [] },
+        {
+          number: 23,
+          state: 'open',
+          comments: [result('2026-09-01T00:00:00Z', PUSHED, 23)],
+        },
+      ],
+      { now: new Date('2026-09-05T12:00:00Z'), recorded },
+    );
+    assert.equal(healed.unserved, null);
+    assert.deepEqual(
+      decide(healed, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('will not let the PR closing switch the lag check off', () => {
+    // Merging the PR is the ORDINARY end of a successful `/resolve`, and the
+    // pairing used to be skipped for a closed one — so the barrier and the
+    // recovery evidence still came from that PR while the check that
+    // qualifies them did not. A retry typed inside the previous run's
+    // push→comment lag then had nothing holding the gate.
+    const r1 = request('2026-09-06T00:00:00Z', 100);
+    const r2 = request('2026-09-06T00:03:00Z', 100);
+    const report = result('2026-09-06T00:05:00Z', PUSHED, 100);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 100],
+      [r2.id, r2.created_at, 'COLLABORATOR', 100],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          resultsSeen: [[report.id, 100, report.created_at]],
+          latest: null,
+        })} -->`,
+      ],
+    };
+    for (const state of ['open', 'closed']) {
+      const lane = assess(
+        [{ number: 100, state, comments: [r1, r2, report] }],
+        {
+          now: new Date('2026-09-06T12:00:00Z'),
+          recorded,
+        },
+      );
+      assert.equal(lane.unserved, r1.created_at, state);
+      assert.deepEqual(decide(lane, existing), [], state);
+    }
+  });
+
+  it('does not hold a recovery over requests on PRs that were closed', () => {
+    // The mirror of the case above, and the ordinary end of an incident: the
+    // requests went unanswered, their PRs were closed or merged, and the lane
+    // later worked on a different PR. Only the evidence's OWN PR can veto it.
+    const asks = [0, 1].map((i) => request(`2026-08-26T0${i}:00:00Z`, 70 + i));
+    const lane = assess(
+      [
+        ...asks.map((r, i) => ({
+          number: 70 + i,
+          state: 'closed',
+          comments: [r],
+        })),
+        {
+          number: 72,
+          state: 'open',
+          comments: [result('2026-08-26T09:00:00Z', PUSHED, 72)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, null, 'a closed PR does not veto on its own');
+    assert.equal(lane.latestAttempt.kind, 'pushed');
+    assert.deepEqual(
+      decide(lane, { number: 42, createdAt: FILED_AT, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it('keeps a vanished request whose own result was a benign skip', () => {
+    // The record's prune and the pairing have to read the same results. A
+    // skip is not an attempt, so pruning on attempts alone drops the entry
+    // whose own result is a skip — and the next tick donates that skip to the
+    // request behind it.
+    const r1 = request('2026-08-27T00:00:00Z', 31);
+    const r2 = request('2026-08-27T04:00:00Z', 31);
+    const skip = result('2026-08-27T05:00:00Z', SKIPPED, 31);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 31],
+      [r2.id, r2.created_at, 'COLLABORATOR', 31],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // r1 has aged out of the comment window; its skip has not.
+    const aged = assess(
+      [
+        { number: 31, state: 'open', comments: [r2, skip] },
+        {
+          // Served, so it only raises the barrier — which is what makes this
+          // tick write — without standing in for the request under test.
+          number: 32,
+          state: 'open',
+          comments: [
+            request('2026-09-03T02:00:00Z', 32),
+            result('2026-09-03T02:10:00Z', SKIPPED, 32),
+          ],
+        },
+      ],
+      { now: new Date('2026-09-03T02:30:00Z'), recorded },
+    );
+    assert.equal(aged.unserved, r1.created_at);
+    const written = decide(aged, existing);
+    assert.deepEqual(
+      written.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      readState([written[0].body]).requests.some((e) => e[0] === r1.id),
+      'the entry survives the prune while its skip can still be donated',
+    );
+  });
+
+  it('keeps a vanished request paired with its own result', () => {
+    // The pairing set is built from the live comment view, while the barrier
+    // is carried forward. When the older request leaves that view its result
+    // is donated to the retry behind it, `unserved` clears, and the gate
+    // certifies a push that left before the request it is being spent on.
+    // Neither arm needs an adversary: one is the author deleting their own
+    // comment, the other is only the clock reaching the slot between the two
+    // requests ageing out — `R2 - R1` wide, against a six-hourly tick.
+    const r1 = request('2026-08-27T00:00:00Z', 31);
+    // Typed inside run A's push→comment lag; its own run never reports.
+    const r2 = request('2026-08-27T05:00:00Z', 31);
+    const report = result('2026-08-27T05:05:00Z', PUSHED, 31);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 31],
+      [r2.id, r2.created_at, 'COLLABORATOR', 31],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          resultsSeen: [[report.id, 31, report.created_at]],
+          latest: null,
+        })} -->`,
+      ],
+    };
+    const tick = (comments, at) =>
+      assess([{ number: 31, state: 'open', comments }], {
+        now: new Date(at),
+        recorded,
+      });
+    // Both live: the retry has no result of its own, so no close.
+    const live = tick([r1, r2, report], '2026-08-27T12:00:00Z');
+    assert.equal(live.unserved, r1.created_at);
+    assert.deepEqual(decide(live, existing), []);
+    // The first request's author deletes it. The record still holds its claim.
+    const deleted = tick([r2, report], '2026-08-27T12:00:00Z');
+    assert.equal(deleted.unserved, r1.created_at);
+    assert.deepEqual(decide(deleted, existing), []);
+    // Nothing deleted: the tick simply lands after the first request aged out
+    // of the comment window and before the second does.
+    const ageing = tick([r1, r2, report], '2026-09-03T02:00:00Z');
+    assert.equal(ageing.unserved, r1.created_at);
+    assert.deepEqual(decide(ageing, existing), []);
+    // ...and the claim has to SURVIVE that tick's write, or the next one
+    // loses it: the prune cannot run on the same window that hid the comment
+    // while a result on its PR can still be spent on it.
+    const written = decide(
+      assess(
+        [
+          { number: 31, state: 'open', comments: [r1, r2, report] },
+          // A newer request elsewhere, so the quiet tick records something.
+          {
+            number: 32,
+            state: 'open',
+            comments: [request('2026-09-03T01:00:00Z', 32)],
+          },
+        ],
+        { now: new Date('2026-09-03T02:00:00Z'), recorded },
+      ),
+      existing,
+    );
+    assert.deepEqual(
+      written.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      readState([written[0].body]).requests.some((e) => e[0] === r1.id),
+      'the aged-out request keeps its entry while its result can still be spent',
+    );
+  });
+
+  it('keeps a vanished request paired with its recorded result after an edit', () => {
+    // The prune and the pairing must read the same results: the pairing
+    // spends gateResults (live union the record), so a prune reading the
+    // live set alone evicts a request whose result was edited after the
+    // record saw it — and the next tick donates that recorded result to the
+    // request behind it, closing over a request that was never served.
+    const r1 = request('2026-08-27T00:00:00Z', 31);
+    // Typed inside run A's push→comment lag; its own run never reported.
+    const r2 = request('2026-08-27T05:00:00Z', 31);
+    const report = result('2026-08-27T05:05:00Z', PUSHED, 31);
+    const editedReport = { ...report, updated_at: '2026-08-27T06:00:00Z' };
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 31],
+      [r2.id, r2.created_at, 'COLLABORATOR', 31],
+    ];
+    const resultsSeen = [[report.id, 31, report.created_at, 'pushed']];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          resultsSeen,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // r1 has aged out of the comment window; its result survives only in
+    // the record, edited since. The write must keep r1's entry, or the next
+    // tick loses the claim.
+    const written = decide(
+      assess(
+        [
+          { number: 31, state: 'open', comments: [r2, editedReport] },
+          // A newer request elsewhere, so the quiet tick records something.
+          {
+            number: 32,
+            state: 'open',
+            comments: [request('2026-09-03T01:00:00Z', 32)],
+          },
+        ],
+        {
+          now: new Date('2026-09-03T02:00:00Z'),
+          recorded,
+          recordedResults: resultsSeen,
+        },
+      ),
+      existing,
+    );
+    assert.deepEqual(
+      written.map((a) => a.type),
+      ['comment'],
+    );
+    const carried = readState([written[0].body]);
+    assert.ok(
+      carried.requests.some((e) => e[0] === r1.id),
+      'the aged-out request keeps its entry while its recorded result can still be spent',
+    );
+    // The next tick reads that record back: the edited result is not
+    // donated to r2, r1 still holds the gate, and a fresh push elsewhere
+    // closes nothing.
+    const next = assess(
+      [
+        { number: 31, state: 'open', comments: [r2, editedReport] },
+        {
+          number: 33,
+          state: 'open',
+          comments: [
+            request('2026-09-03T02:30:00Z', 33),
+            result('2026-09-03T03:00:00Z', PUSHED, 33),
+          ],
+        },
+      ],
+      {
+        now: new Date('2026-09-03T03:30:00Z'),
+        recorded: carried.requests,
+        recordedResults: carried.resultsSeen,
+      },
+    );
+    assert.equal(next.unserved, r1.created_at);
+    assert.deepEqual(
+      decide(next, { ...existing, texts: [written[0].body] }).map(
+        (a) => a.type,
+      ),
+      ['comment'],
+      'no close over a request that was never served',
+    );
+  });
+
+  it('fills the PR into a judgment recorded before this file wrote one', () => {
+    // Markers written by the previous version carry [id, at, association] and
+    // no PR, so their entries can never claim their own result. While the
+    // comment is still live the record is healed in place — first sight still
+    // wins for the judgment, only the PR is filled in.
+    const asks = [0, 1, 2].map((h) =>
+      request(`2026-08-27T0${h}:00:00Z`, 31 + h),
+    );
+    const legacy = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR']);
+    const seen = assess(
+      asks.map((r, i) => ({
+        number: 31 + i,
+        state: 'open',
+        comments: [r],
+      })),
+      { now, recorded: legacy },
+    );
+    assert.equal(seen.alarm, true);
+    // Read back the way production does: the legacy entries arrive in the
+    // marker the previous version wrote, not as an option.
+    const stale = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: 0,
+      unanswered: [],
+      newestRequest: null,
+      requests: legacy,
+      latest: null,
+    })} -->`;
+    const written = decide(seen, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [stale],
+    })[0];
+    assert.equal(written.type, 'comment');
+    assert.deepEqual(
+      readState([written.body]).requests,
+      asks.map((r, i) => [r.id, r.created_at, 'COLLABORATOR', 31 + i]),
+    );
+  });
+
+  it('reads a request the producer would have run, whatever its case', () => {
+    // The producer's gate is a GitHub Actions expression — `==` and
+    // `startsWith(...)`, both case-insensitive — so `@Qwen-Code /Resolve`
+    // runs the lane. Read case-sensitively here it would leave the roster,
+    // the barrier and the sighting record at once, and the never-ran outage
+    // it belongs to would go unalarmed.
+    for (const body of [
+      '@qwen-code /resolve',
+      '@Qwen-Code /Resolve',
+      '@QWEN-CODE /RESOLVE please',
+    ]) {
+      assert.equal(isRequest(body), true, body);
+    }
+    for (const body of [
+      '@qwen-code /resolved',
+      '@qwen-code /resolvex',
+      'see @qwen-code /resolve',
+    ]) {
+      assert.equal(isRequest(body), false, body);
+    }
+    const shifted = comment(
+      'maintainer',
+      '2026-08-27T05:00:00Z',
+      '@Qwen-Code /Resolve',
+      31,
+    );
+    const lane = assess([{ number: 31, state: 'open', comments: [shifted] }], {
+      now,
+    });
+    assert.equal(lane.unanswered.length, 1, 'it is on the roster');
+    assert.equal(
+      lane.newestRequest,
+      '2026-08-27T05:00:00Z',
+      'and floors the barrier',
+    );
+  });
+
+  it('will not read a push as recovery while a request has no result at all', () => {
+    // The barrier compares COMMENT times, and the producer pushes before it
+    // posts: a request typed inside that lag raises the barrier only to its
+    // own timestamp, which the trailing comment clears. The request itself is
+    // the evidence the clocks cannot give — one the lane never answered is
+    // refused whatever the timestamps say.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const lane = (served) => [
+      {
+        number: 31,
+        state: 'open',
+        comments: [
+          request('2026-08-27T00:00:00Z', 31),
+          // Pushed before 05:00; the report posts five minutes after.
+          result('2026-08-27T05:05:00Z', PUSHED, 31),
+        ],
+      },
+      {
+        number: 32,
+        state: 'open',
+        comments: [
+          request('2026-08-27T05:00:00Z', 32),
+          ...(served ? [result('2026-08-27T05:10:00Z', PUSHED, 32)] : []),
+        ],
+      },
+    ];
+    const lagged = assess(lane(false), { now });
+    assert.equal(lagged.latestAttempt.at, '2026-08-27T05:05:00Z');
+    assert.equal(lagged.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lagged, existing).map((a) => a.type),
+      ['comment'],
+      'refuses to certify while PR 32 has no result at all',
+    );
+    // The same shape on ONE PR is the harder half: the trailing comment that
+    // lets the push clear the barrier is also the comment the roster's "any
+    // later result" reading would spend a second time, marking the lagged
+    // retry answered. The close gate matches each request to a result of its
+    // own, so that comment cannot be spent twice.
+    const samePr = assess(
+      [
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-27T00:00:00Z', 31),
+            // Typed inside run A's push→comment lag, on run A's own PR. Its
+            // run never reports.
+            request('2026-08-27T05:00:00Z', 31),
+            result('2026-08-27T05:05:00Z', PUSHED, 31),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(samePr.unserved, '2026-08-27T00:00:00Z');
+    assert.deepEqual(
+      decide(samePr, existing).map((a) => a.type),
+      ['comment'],
+      'one comment cannot be both the recovery and the retry it served',
+    );
+    // Comment timestamps are second-granular, so a request and a result can
+    // tie. A result posted in the same second cannot be that request's — a
+    // run takes minutes — so the match must skip it, or a tie would certify.
+    const tied = assess(
+      [
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-27T05:00:00Z', 31),
+            result('2026-08-27T05:00:00Z', PUSHED, 31),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(tied.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(tied, existing).map((a) => a.type),
+      ['comment'],
+      'a same-second result cannot be the answer to that request',
+    );
+    // And it must not be read off the ROSTER, which needs `staleHours`: on the
+    // first tick the request is minutes old, the roster is empty and the alarm
+    // is quiet, yet the trailing comment still clears its timestamp. This is
+    // the arm that separates the two readings.
+    const firstTick = assess(lane(false), {
+      now: new Date('2026-08-27T06:00:00Z'),
+    });
+    assert.equal(
+      firstTick.unanswered.length,
+      0,
+      'a 1h-old request is not stale',
+    );
+    assert.equal(firstTick.alarm, false);
+    assert.equal(firstTick.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(firstTick, existing).map((a) => a.type),
+      ['comment'],
+      'refuses before the request is old enough to be on any roster',
+    );
+    // The guard is not a freeze: once every request has its result, the close
+    // resumes.
+    const answered = assess(lane(true), { now });
+    assert.equal(answered.unserved, null);
+    assert.deepEqual(
+      decide(answered, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('holds for a request its author edited after posting', () => {
+    // The producer fires on comment creation only, so the unanswered ROSTER
+    // must ignore an edited comment: a trusted account could otherwise edit an
+    // old comment into request shape and manufacture entries. The barrier and
+    // the close gate must not inherit that blindness — the lane really was
+    // asked at 11:00, and a typo fix at 11:30 cannot un-ask it — or every
+    // request its author touched re-opens the false-close this floor exists
+    // to shut.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 70),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 70);
+    const edited = request(
+      '2026-08-26T11:00:00Z',
+      71,
+      'maintainer',
+      '2026-08-26T11:30:00Z',
+    );
+    const lane = [
+      { number: 70, state: 'open', comments: [...failures, push] },
+      { number: 71, state: 'open', comments: [edited] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    // The roster stays strict: an edited comment never ran a lane, so it is
+    // not evidence of an unanswered request...
+    assert.equal(quiet.unanswered.length, 0);
+    // ...but the barrier reads it, at the creation time no edit can move.
+    assert.equal(quiet.newestRequest, '2026-08-26T11:00:00Z');
+    const held = decide(quiet, { number: 70, createdAt: FILED_AT, texts: [] });
+    assert.deepEqual(
+      held.map((a) => a.type),
+      ['comment'],
+      'refuses to read the 10:00 push as a recovery from an 11:00 request',
+    );
+    // A push on ANOTHER PR that postdates the request still does not close:
+    // the edited request has no result of its own. (Re-decided — while the
+    // gate read the strict roster predicate this arm closed, certifying a
+    // recovery while the request was never served.)
+    const strangerPush = assess(
+      [
+        {
+          number: 70,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T12:00:00Z', PUSHED, 70)],
+        },
+        lane[1],
+      ],
+      { now },
+    );
+    assert.equal(strangerPush.unserved, '2026-08-26T11:00:00Z');
+    assert.deepEqual(
+      decide(strangerPush, { number: 70, createdAt: FILED_AT, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment'],
+      'an edited request still needs a result of its own',
+    );
+    // The close resumes once every request has one — the edited one included.
+    const served = assess(
+      [
+        {
+          number: 70,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T12:00:00Z', PUSHED, 70)],
+        },
+        {
+          number: 71,
+          state: 'open',
+          comments: [edited, result('2026-08-26T11:45:00Z', PUSHED, 71)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(served.unserved, null);
+    assert.deepEqual(
+      decide(served, { number: 70, createdAt: FILED_AT, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it('refuses to close while an edited request has no result of its own', () => {
+    // The close gate's pairing reads the barrier's loose predicate, so an
+    // edited request keeps its claim on a result. Judged by the strict
+    // roster predicate, the edit would either re-pair this PR's results onto
+    // a later request (shape A) or erase the request while the barrier still
+    // floors at its created_at (shape B) — both certify a recovery that did
+    // not happen, on a push that predates the request.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    // Shape A: run A answered the 05:00 request with the push it reported at
+    // 05:45; the 05:30 retry's run never reported. The first requester's
+    // typo fix must not spend run A's result on the retry.
+    const retry = request('2026-08-27T05:30:00Z', 31);
+    const shapeA = (first) => [
+      {
+        number: 31,
+        state: 'open',
+        comments: [first, retry, result('2026-08-27T05:45:00Z', PUSHED, 31)],
+      },
+    ];
+    const controlA = assess(shapeA(request('2026-08-27T05:00:00Z', 31)), {
+      now,
+    });
+    assert.equal(controlA.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(controlA, existing).map((a) => a.type),
+      ['comment'],
+    );
+    const editedA = assess(
+      shapeA(
+        request(
+          '2026-08-27T05:00:00Z',
+          31,
+          'maintainer',
+          '2026-08-27T06:00:00Z',
+        ),
+      ),
+      { now },
+    );
+    assert.equal(
+      editedA.unserved,
+      '2026-08-27T05:00:00Z',
+      'an edited request keeps its claim on a result of its own',
+    );
+    assert.deepEqual(
+      decide(editedA, existing).map((a) => a.type),
+      ['comment'],
+      'no close: the retry was never served',
+    );
+    // Shape B: the request was typed on ANOTHER PR inside the recovery run's
+    // push→comment lag (the push left at 10:00; its report posted at 10:05)
+    // and edited before the next tick. The 10:05 comment clears the 10:02
+    // barrier, so only the request itself can hold the gate.
+    const shapeB = (lagged) => [
+      {
+        number: 31,
+        state: 'open',
+        comments: [
+          request('2026-08-27T09:50:00Z', 31),
+          result('2026-08-27T10:05:00Z', PUSHED, 31),
+        ],
+      },
+      { number: 32, state: 'open', comments: [lagged] },
+    ];
+    const controlB = assess(shapeB(request('2026-08-27T10:02:00Z', 32)), {
+      now,
+    });
+    assert.equal(controlB.unserved, '2026-08-27T10:02:00Z');
+    assert.deepEqual(
+      decide(controlB, existing).map((a) => a.type),
+      ['comment'],
+    );
+    const editedB = assess(
+      shapeB(
+        request(
+          '2026-08-27T10:02:00Z',
+          32,
+          'maintainer',
+          '2026-08-27T10:30:00Z',
+        ),
+      ),
+      { now },
+    );
+    assert.equal(editedB.unserved, '2026-08-27T10:02:00Z');
+    assert.deepEqual(
+      decide(editedB, existing).map((a) => a.type),
+      ['comment'],
+      'no close: the lagged request was never served',
+    );
+  });
+
+  it('holds the cap when answerable judgments alone reach it', () => {
+    // `slice(-0)` is `slice(0)` — the whole array — so a cap that computes the
+    // remaining room and slices without checking it voids itself at exactly
+    // its own boundary: the saturation case the cap exists for.
+    const wave = [];
+    for (let i = 0; i < JUDGMENT_CAP + 50; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-26T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(`asker${i}`, at, '@qwen-code /resolve', 7, at, 'COLLABORATOR'),
+      );
+    }
+    for (let i = 0; i < 1000; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-27T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(`drive-by${i}`, at, '@qwen-code /resolve', 7, at, 'NONE'),
+      );
+    }
+    const saturated = assess([{ number: 7, state: 'open', comments: wave }], {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const body = decide(saturated, null)[0].body;
+    const recorded = readState([body]).requests;
+    assert.equal(recorded.length, JUDGMENT_CAP);
+    assert.ok(
+      recorded.every((e) => e[2] === 'COLLABORATOR'),
+      'the room left for refusals is none, so none come back',
+    );
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(marker.length < 30000, `state marker is ${marker.length} bytes`);
+  });
+
+  it('caps the judgment record so a comment wave cannot wedge the write', () => {
+    // Every request-SHAPED comment is sighted, from anyone, so the window
+    // prune alone does not bound the record: a wave of `/resolve`-shaped
+    // comments from accounts the lane would never serve grows the state
+    // comment past GitHub's 65,536-character body limit, and the watch can
+    // then write no state at all. What survives the cap is not symmetric —
+    // an answerable judgment guards the direction that hides a real outage.
+    const wave = [];
+    for (let i = 0; i < JUDGMENT_CAP * 4; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-27T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(
+          `drive-by${i}`,
+          at,
+          '@qwen-code /resolve',
+          7,
+          at,
+          // A handful of real maintainer requests, buried oldest in the wave.
+          i < 5 ? 'COLLABORATOR' : 'NONE',
+        ),
+      );
+    }
+    const flooded = assess([{ number: 7, state: 'open', comments: wave }], {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const body = decide(flooded, null)[0].body;
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(
+      marker.length < 20000,
+      `state marker is ${marker.length} bytes, which a comment wave can push past GitHub's limit`,
+    );
+    const recorded = readState([body]).requests;
+    assert.equal(recorded.length, JUDGMENT_CAP);
+    // The five answerable judgments are the oldest in the wave, so a plain
+    // newest-first cap would have dropped every one of them.
+    const answerable = recorded.filter((e) => e[2] === 'COLLABORATOR');
+    assert.equal(answerable.length, 5, 'answerable judgments are kept first');
+    assert.deepEqual(
+      recorded,
+      [...recorded].sort((a, b) => a[1].localeCompare(b[1]) || a[0] - b[0]),
+      'and the record stays in the order the reader expects',
+    );
+  });
+
+  it('caps the result record so a run wave cannot wedge the write', () => {
+    // The result sightings ride the same marker, so they need their own
+    // bound: a request wave means a run wave, and an unbounded record
+    // overflows the comment the state rides in. Kept newest-first — the
+    // recent results are the ones that can still answer a live request.
+    const flood = [];
+    for (let i = 0; i < RESULT_RECORD_CAP + 50; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-21T00:00:00Z') + i * 60_000,
+      ).toISOString();
+      flood.push(result(at, AGENT_FAILED, 7));
+    }
+    const a = assess([{ number: 7, state: 'open', comments: flood }], {
+      now,
+    });
+    const body = decide(a, null)[0].body;
+    const recorded = readState([body]).resultsSeen;
+    assert.equal(recorded.length, RESULT_RECORD_CAP);
+    assert.equal(recorded.at(-1)[0], flood.at(-1).id, 'newest kept');
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(marker.length < 30000, `state marker is ${marker.length} bytes`);
+  });
+
+  it('carries first-sight judgments forward and prunes the ones that aged out', () => {
+    // The record rides in the state marker: entries from earlier ticks
+    // survive only while their comments are still inside the window — an
+    // unbounded record would eventually overflow the comment it rides in.
+    const stale =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestRequest":"2026-08-25T00:00:00Z","latest":null,"requests":[[55,"2026-08-10T00:00:00Z","COLLABORATOR"],[56,"2026-08-25T00:00:00Z","CONTRIBUTOR"]]} -->';
+    const fresh = request('2026-08-27T06:00:00Z', 31);
+    const a = assess([{ number: 31, state: 'open', comments: [fresh] }], {
+      now,
+    });
+    const written = decide(a, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [stale],
+    })[0];
+    assert.equal(written.type, 'comment');
+    // The 08-10 entry aged out of the 7-day window and is gone; the 08-25
+    // one and this tick's sighting carry forward, in (created_at, id) order.
+    assert.deepEqual(readState([written.body]).requests, [
+      [56, '2026-08-25T00:00:00Z', 'CONTRIBUTOR'],
+      [fresh.id, '2026-08-27T06:00:00Z', 'COLLABORATOR', 31],
+    ]);
+  });
+
+  it('records a newly sighted refused request on an unchanged quiet picture', () => {
+    // The record's own write key. A request the lane would have refused
+    // moves neither the roster, nor the streak, nor the request barrier,
+    // so a tick whose only change is sighting one writes nothing under
+    // those keys — and the refusal is re-derived from the live field on a
+    // later tick, after a promotion drifted it, frozen as the first sight.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestRequest":null,"latest":null,"requests":[]} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const refused = request(
+      '2026-08-27T06:00:00Z',
+      31,
+      'fork-author',
+      '2026-08-27T06:00:00Z',
+      'CONTRIBUTOR',
+    );
+    const quiet = assess([{ number: 31, state: 'open', comments: [refused] }], {
+      now,
+    });
+    assert.equal(quiet.alarm, false);
+    assert.equal(
+      quiet.newestRequest,
+      null,
+      'a refused request raises no barrier to key the write on',
+    );
+    const actions = decide(quiet, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(actions[0].body, /State refresh:/);
+    assert.deepEqual(readState([actions[0].body]).requests, [
+      [refused.id, '2026-08-27T06:00:00Z', 'CONTRIBUTOR', 31],
+    ]);
+    // One per newly sighted id, never one per tick: the marker now carries
+    // the judgment, so the same picture again writes nothing.
+    assert.deepEqual(
+      decide(quiet, { ...existing, texts: [actions[0].body] }),
+      [],
+    );
+  });
+
+  it('records a newly sighted result on an unchanged quiet picture', () => {
+    // The result record's own write key: a result that lands on a quiet
+    // tick moves neither the barrier nor the request record, so without its
+    // own key the sighting waits for a tick that writes — and an edit before
+    // then un-answers the request the result served.
+    const ask = request('2026-08-26T01:00:00Z', 31);
+    const served = result('2026-08-26T02:00:00Z', PUSHED, 31);
+    const seeded = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: 0,
+      unanswered: [],
+      newestRequest: '2026-08-26T03:00:00Z',
+      requests: [[ask.id, ask.created_at, 'COLLABORATOR', 31]],
+      resultsSeen: [],
+      latest: null,
+    })} -->`;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const a = assess([{ number: 31, state: 'open', comments: [ask, served] }], {
+      now,
+    });
+    assert.equal(a.alarm, false);
+    const actions = decide(a, existing);
+    assert.deepEqual(
+      actions.map((x) => x.type),
+      ['comment'],
+    );
+    assert.deepEqual(readState(actions.map((x) => x.body)).resultsSeen, [
+      [served.id, 31, '2026-08-26T02:00:00Z', 'pushed'],
+    ]);
+  });
+
+  it('records a newly sighted refused request while the alarm holds its picture', () => {
+    // The alarm branch's half of the key: with the picture unchanged the
+    // rise leg keys the write, but a refused request raises no barrier, so
+    // only the gained id keys it here. Without the write the refusal is
+    // judged live again next tick — and a mid-window promotion would be
+    // frozen as the first sight.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 39),
+    );
+    const refused = request(
+      '2026-08-27T10:00:00Z',
+      50,
+      'fork-author',
+      '2026-08-27T10:00:00Z',
+      'CONTRIBUTOR',
+    );
+    const steady = assess(
+      [
+        { number: 39, state: 'open', comments: failures },
+        { number: 50, state: 'open', comments: [refused] },
+      ],
+      { now },
+    );
+    assert.equal(steady.alarm, true);
+    assert.equal(steady.unanswered.length, 0);
+    const seeded = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: steady.streak,
+      unanswered: [],
+      newestRequest: null,
+      latest: steady.latestAttempt.id,
+      requests: [],
+    })} -->`;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const actions = decide(steady, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(actions[0].body.includes('the same picture'), actions[0].body);
+    assert.deepEqual(readState([actions[0].body]).requests, [
+      [refused.id, '2026-08-27T10:00:00Z', 'CONTRIBUTOR', 50],
+    ]);
+    // The write carries the id, so the same tick again writes nothing.
+    assert.deepEqual(
+      decide(steady, { ...existing, texts: [actions[0].body] }),
+      [],
+    );
+  });
+
+  it('records a newly sighted non-attempt result while the alarm holds its picture', () => {
+    // The quiet branch's gained-result key must exist in the alarm branch
+    // too: a skip or noop sighted on an unchanged alarm picture moves
+    // neither the streak nor the roster, so without the result leg the
+    // sighting is thrown away — and a later edit to that comment un-answers
+    // the request it served while the watch reports it as never served.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 39),
+    );
+    const ask = request('2026-08-27T10:00:00Z', 50);
+    const skip = result('2026-08-27T10:30:00Z', SKIPPED, 50);
+    const steady = assess(
+      [
+        { number: 39, state: 'open', comments: failures },
+        { number: 50, state: 'open', comments: [ask, skip] },
+      ],
+      { now },
+    );
+    assert.equal(steady.alarm, true);
+    assert.equal(steady.unanswered.length, 0, 'the skip answered the request');
+    const seeded = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: steady.streak,
+      unanswered: [],
+      newestRequest: ask.created_at,
+      latest: steady.latestAttempt.id,
+      requests: [[ask.id, ask.created_at, 'COLLABORATOR', 50]],
+      resultsSeen: steady.resultSightings.filter(([id]) => id !== skip.id),
+    })} -->`;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const actions = decide(steady, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(actions[0].body.includes('the same picture'), actions[0].body);
+    assert.ok(
+      readState(actions.map((a) => a.body)).resultsSeen.some(
+        ([id, , , kind]) => id === skip.id && kind === 'skipped',
+      ),
+      'the alarm-branch record key carries the newly sighted result',
+    );
+    // The write carries the id, so the same tick again writes nothing.
+    assert.deepEqual(
+      decide(steady, { ...existing, texts: [actions[0].body] }),
+      [],
+    );
+  });
+
+  it('records the request it saw, so a later deletion cannot certify recovery', () => {
+    // The live floor reads comments, so it cannot read a request that has been
+    // deleted. Carrying it in the state the watch writes means any tick that
+    // SAW the request keeps it: only a deletion before the first tick — at
+    // most one tick interval — reaches neither source.
+    const filedOnStreak =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
+    const failures = [1, 2, 3, 4].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 72),
+    );
+    const push = result('2026-08-27T10:00:00Z', PUSHED, 72);
+    const lane = (withRequest) => [
+      { number: 72, state: 'open', comments: [...failures, push] },
+      {
+        number: 73,
+        state: 'open',
+        comments: withRequest ? [request('2026-08-27T11:00:00Z', 73)] : [],
+      },
+    ];
+    // Tick 1: the request is an hour old, too young for the roster, so it
+    // reaches no marker on its own. The refresh must still record it.
+    const seen = assess(lane(true), { now });
+    assert.equal(seen.unanswered.length, 0, 'a 1h-old request is not stale');
+    const tick1 = decide(seen, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [filedOnStreak],
+    });
+    assert.deepEqual(
+      tick1.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([tick1[0].body]).newestRequest,
+      '2026-08-27T11:00:00Z',
+    );
+    // Tick 2: the request comment is gone. The recorded floor still holds the
+    // 10:00 push back.
+    const gone = assess(lane(false), { now });
+    assert.equal(
+      gone.newestRequest,
+      null,
+      'nothing can read a deleted comment',
+    );
+    assert.equal(gone.latestAttempt.kind, 'pushed');
+    assert.deepEqual(
+      decide(gone, {
+        number: 42,
+        createdAt: FILED_AT,
+        texts: [tick1[0].body],
+      }),
+      [],
+      'no close, and nothing new to record',
+    );
+  });
+
+  it('holds for a request no tick ever saw, because its PR closed first', () => {
+    // The remembered barrier only ever covers requests a tick observed stale
+    // on a still-open PR. A request whose PR closes inside the stale window
+    // is never observed, so it reaches no marker — and assess() then drops it
+    // by design. With the barrier resting on the record alone, the gate falls
+    // to the creation-time floor and closes on a push OLDER than that
+    // request: a false recovery needing no adversary. The window itself is
+    // the evidence — the request comment is still there to be read.
+    const filed = '2026-08-20T00:00:00Z';
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 60),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 60);
+    // Asked after the push, never served, and its PR closed within the 3h
+    // stale window — so no 6-hourly tick could ever have seen it stale.
+    const neverSeen = request('2026-08-26T11:00:00Z', 61);
+    const lane = [
+      { number: 60, state: 'open', comments: [...failures, push] },
+      { number: 61, state: 'closed', comments: [neverSeen] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    assert.equal(quiet.unanswered.length, 0, 'a closed PR cannot be served');
+    assert.equal(quiet.latestAttempt.kind, 'pushed');
+    // The request is still visible in the window even though it counts for
+    // nothing, and that is what holds the barrier above the push.
+    assert.equal(quiet.newestRequest, '2026-08-26T11:00:00Z');
+    const held = decide(quiet, { number: 60, createdAt: filed, texts: [] });
+    // Refuses the close; records what it can see.
+    assert.deepEqual(
+      held.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(held[0].body, /State refresh:/);
+    // A push that postdates the request does close it.
+    const served = assess(
+      [
+        {
+          number: 60,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T12:00:00Z', PUSHED, 60)],
+        },
+        lane[1],
+      ],
+      { now },
+    );
+    assert.deepEqual(
+      decide(served, { number: 60, createdAt: filed, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it("holds when the watch's own state comments are deleted", () => {
+    // Deleting the watch's comments (triage, no edit) erases the remembered
+    // barrier. It must not thereby certify a recovery: while the request that
+    // raised the barrier is still in the window, the watch can see it without
+    // any record at all, so the gate holds where it held before.
+    const filed = '2026-08-20T00:00:00Z';
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 62),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 62);
+    const asked = request('2026-08-26T11:00:00Z', 63);
+    const lane = [
+      { number: 62, state: 'open', comments: [...failures, push] },
+      { number: 63, state: 'open', comments: [asked] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    // With the watch's own record present, the barrier holds...
+    const recorded = decide(quiet, {
+      number: 62,
+      createdAt: filed,
+      texts: [],
+    })[0].body;
+    assert.equal(readState([recorded]).newestRequest, '2026-08-26T11:00:00Z');
+    const intact = { number: 62, createdAt: filed, texts: [recorded] };
+    assert.deepEqual(decide(quiet, intact), []);
+    // ...and with every watch comment deleted it still holds, because the
+    // request itself is still readable in the window.
+    const wiped = { number: 62, createdAt: filed, texts: [] };
+    assert.deepEqual(
+      decide(quiet, wiped).map((a) => a.type),
+      ['comment'],
+      'refuses the close and re-records rather than closing',
+    );
+  });
+
+  it('falls back to the creation-time floor on a state it could not read', () => {
+    // A marker this tick cannot read is not evidence that no barrier was ever
+    // recorded — the comment carrying it can be edited into junk, and an
+    // earlier rule read that as "never close", which handed anyone with
+    // triage a permanent veto over the self-close. The barrier instead falls
+    // back to the issue's own creation time, which GitHub maintains and no
+    // one can edit: destroying the record can lower the barrier only to
+    // there, never to nothing.
+    const junk = (createdAt) => ({
+      number: 49,
+      createdAt,
+      texts: [
+        `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {not json} -->`,
+      ],
+    });
+    assert.equal(readState(junk(FILED_AT).texts), null);
+    // `healthy` is a single pushed attempt on 2026-08-26. Filed before it:
+    // the push happened while the issue was open, so it is real evidence.
+    assert.deepEqual(
+      decide(healthy, junk(FILED_AT)).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // Filed after it: the push predates the issue's own reason to exist and
+    // cannot show the lane recovered, so the floor refuses — and the refresh
+    // keeps that refusal from wedging the issue open.
+    const later = junk('2026-08-27T00:00:00Z');
+    const actions = decide(healthy, later);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(actions[0].body, /State refresh:/);
+  });
+
+  it('does nothing when healthy and no issue is open', () => {
+    assert.deepEqual(decide(healthy, null), []);
+  });
+});
+
+describe('resolve-health: reading the comment feed', () => {
+  it('asks the API for the association assess() gates on', () => {
+    // The gate is only as good as the field reaching it: if the jq stops
+    // selecting author_association every request parses as unanswerable and
+    // the signal goes silent, which no assess() test would notice.
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      if (args[3] === 'search/issues') {
+        return '7\topen\n';
+      }
+      return [
+        [
+          '1',
+          'fork-author',
+          'CONTRIBUTOR',
+          '2026-08-27T00:00:00Z',
+          '2026-08-27T00:00:00Z',
+          'u1',
+          Buffer.from('@qwen-code /resolve').toString('base64'),
+          '1',
+        ].join('\t'),
+        // An empty association column, as `(.author_association // "")`
+        // emits when the API omits the field: the row must still parse
+        // positionally rather than shifting every later field left.
+        [
+          '2',
+          'ghost',
+          '',
+          '2026-08-27T00:10:00Z',
+          '2026-08-27T00:10:00Z',
+          'u2',
+          Buffer.from('@qwen-code /resolve').toString('base64'),
+          '0',
+        ].join('\t'),
+        '',
+      ].join('\n');
+    };
+    const prs = fetchPrs(gh, 'QwenLM/qwen-code', '2026-08-20');
+    const jq = calls[1][calls[1].indexOf('--jq') + 1];
+    assert.match(jq, /author_association/);
+    // The acknowledgement count is the same kind of lifeline: if the jq
+    // stops projecting it, every request parses as refused and the deficit
+    // signal goes just as silently.
+    assert.match(jq, /reactions\.eyes/);
+    assert.equal(prs[0].comments[0].author_association, 'CONTRIBUTOR');
+    assert.deepEqual(
+      prs[0].comments.map((c) => c.eyes),
+      [1, 0],
+    );
+    assert.deepEqual(
+      prs[0].comments.map((c) => [c.author_association, c.created_at]),
+      [
+        ['CONTRIBUTOR', '2026-08-27T00:00:00Z'],
+        ['', '2026-08-27T00:10:00Z'],
+      ],
+    );
+    // ...and the fetched shape flows into assess() unchanged: neither
+    // request is one the lane would have served, so neither is counted.
+    assert.equal(
+      assess(prs, {
+        now: new Date('2026-08-27T12:00:00Z'),
+        unansweredThreshold: 1,
+      }).unanswered.length,
+      0,
+    );
+  });
+});
+
+describe('resolve-health: writes', () => {
+  it('creates with the dedup label, comments, and closes through the issues API', () => {
+    const calls = [];
+    const gh = (args, input) => {
+      calls.push({ args, input: input ? JSON.parse(input) : null });
+      return '{}';
+    };
+    apply(
+      gh,
+      'QwenLM/qwen-code',
+      [
+        { type: 'create', title: 'T', body: 'B' },
+        { type: 'comment', number: 7, body: 'C' },
+        { type: 'close', number: 7 },
+      ],
+      'scope/ci-cd',
+    );
+    assert.deepEqual(
+      calls.map((c) => [c.args[2], c.args[3]]),
+      [
+        ['POST', 'repos/QwenLM/qwen-code/issues'],
+        ['POST', 'repos/QwenLM/qwen-code/issues/7/comments'],
+        ['PATCH', 'repos/QwenLM/qwen-code/issues/7'],
+      ],
+    );
+    assert.deepEqual(calls[0].input, {
+      title: 'T',
+      body: 'B',
+      labels: ['scope/ci-cd'],
+    });
+    assert.deepEqual(calls[1].input, { body: 'C' });
+    assert.deepEqual(calls[2].input, {
+      state: 'closed',
+      state_reason: 'completed',
+    });
+    // The payload only reaches gh through `--input -`; without it gh ignores
+    // stdin, the comment POST goes out empty (422) and the close PATCH is a
+    // no-op that leaves a recovered issue open forever.
+    for (const c of calls) {
+      const i = c.args.indexOf('--input');
+      assert.ok(
+        i !== -1 && c.args[i + 1] === '-',
+        `delivery mechanism lost: ${c.args.join(' ')}`,
+      );
+    }
+  });
+});
+
+describe('resolve-health: reading state back', () => {
+  it('reads back only the shape the watch writes', () => {
+    // A marker is text on a GitHub issue, so a payload of the wrong TYPE is
+    // as reachable as one of the wrong value — and type confusion defeats
+    // several gates at once: `newestRequest: []` is truthy, so a floor that
+    // was never recorded reads as one, and it compares greater-than against
+    // every timestamp, so the postdating gate refuses forever. Anything
+    // malformed must read as no state, which the gates already handle.
+    const wrap = (payload) =>
+      `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state ${payload} -->`;
+    for (const payload of [
+      '{"streak":0,"unanswered":[],"newestRequest":[],"latest":null}',
+      '{"streak":0,"unanswered":[],"newestRequest":{},"latest":null}',
+      '{"streak":0,"unanswered":[],"newestRequest":9,"latest":null}',
+      '{"streak":"5","unanswered":[],"newestRequest":null}',
+      '{"streak":0,"unanswered":"all","newestRequest":null}',
+      '{"streak":0,"unanswered":["a"],"newestRequest":null}',
+      '{"streak":0,"unanswered":[],"latest":"7"}',
+      '{"streak":0,"unanswered":[],"recovered":"7"}',
+      '{"streak":0,"unanswered":[],"requests":"all"}',
+      '{"streak":0,"unanswered":[],"requests":[1]}',
+      '{"streak":0,"unanswered":[],"requests":[["a","b","c"]]}',
+      '{"streak":0,"unanswered":[],"requests":[[1,"b",2]]}',
+      '{"streak":0,"unanswered":[],"requests":[[1,"b"]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":"all"}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[1]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[["a",1,"b"]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[[1,2]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[[1,"a","b"]]}',
+      '{"streak":0,"unanswered":[],"resultsSeen":[[1,2,"b",5]]}',
+      '[]',
+      'null',
+      'not json at all',
+    ]) {
+      assert.equal(readState([wrap(payload)]), null, payload);
+    }
+    // The shapes the watch really writes still read back, including a marker
+    // written before a field existed (absent reads as "not recorded") and one
+    // still carrying a field this version stopped writing, whatever its type:
+    // a dropped field feeds no gate, so it is ignored rather than rejected.
+    const good =
+      '{"streak":2,"unanswered":[1,2],"newestRequest":"2026-08-27T00:00:00Z","latest":9,"recovered":9}';
+    assert.equal(readState([wrap(good)]).streak, 2);
+    assert.equal(
+      readState([
+        wrap(
+          '{"streak":2,"unanswered":[1,2],"newestUnanswered":[],"newestRequest":"2026-08-27T00:00:00Z","latest":9}',
+        ),
+      ]).newestRequest,
+      '2026-08-27T00:00:00Z',
+    );
+    assert.equal(
+      readState([wrap('{"streak":1,"unanswered":[],"latest":7}')]).streak,
+      1,
+    );
+    assert.deepEqual(
+      readState([
+        wrap(
+          '{"streak":0,"unanswered":[],"requests":[[9,"2026-08-27T00:00:00Z","OWNER"]]}',
+        ),
+      ]).requests,
+      [[9, '2026-08-27T00:00:00Z', 'OWNER']],
+    );
+    assert.deepEqual(
+      readState([
+        wrap(
+          '{"streak":0,"unanswered":[],"resultsSeen":[[9,31,"2026-08-27T00:00:00Z"]]}',
+        ),
+      ]).resultsSeen,
+      [[9, 31, '2026-08-27T00:00:00Z']],
+      'the shape written before the classification was recorded still reads',
+    );
+    assert.deepEqual(
+      readState([
+        wrap(
+          '{"streak":0,"unanswered":[],"resultsSeen":[[9,31,"2026-08-27T00:00:00Z","pushed"]]}',
+        ),
+      ]).resultsSeen,
+      [[9, 31, '2026-08-27T00:00:00Z', 'pushed']],
+      'and so does the shape carrying it',
+    );
+  });
+});
+
+describe('resolve-health: the tracking issue feed', () => {
+  const b64 = (s) => Buffer.from(s).toString('base64');
+
+  it("trusts only the watch's own comments as state", () => {
+    // Anyone can comment a state marker on the open tracking issue; only
+    // markers the watch itself posted (github-actions[bot] today, the bot
+    // login if it ever switches to the bot PAT) may feed readState — a
+    // forged marker must neither suppress updates nor force a recovery. An
+    // EDIT forgery just as surely: the watch posts a fresh comment per tick
+    // and never edits one, so an edited marker is someone else's word.
+    const botState =
+      '<!-- qwen-resolve-health-state {"streak":1,"unanswered":[],"latest":7} -->';
+    const forgedState =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"latest":null} -->';
+    const filed = '2026-08-20T00:00:00Z';
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      const path = args[3];
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          [
+            '91',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            b64(`${HEALTH_MARKER}\n${botState}`),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
+        return [
+          ['github-actions[bot]', filed, filed, b64(botState)].join('\t'),
+          [BOT, filed, filed, b64(botState)].join('\t'),
+          ['stranger', filed, filed, b64(forgedState)].join('\t'),
+          // A watch comment a triage user edited into a forgery, last so that
+          // dropping the edit filter lets it win readState's last-marker read.
+          [
+            'github-actions[bot]',
+            filed,
+            '2026-08-26T00:00:00Z',
+            b64(forgedState),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
+    assert.equal(issue.number, 91);
+    // ONLY the two unedited bot-authored comments — the body is not among
+    // them. The stranger's marker and the edited one are dropped, so the last
+    // marker readState sees is honest.
+    assert.equal(issue.texts.length, 2);
+    assert.equal(readState(issue.texts).streak, 1);
+    // The gates are only as good as the fields reaching them: a comment's
+    // own timestamps are what make the edit check possible (unlike an
+    // issue's, which move on every reply).
+    const jq = calls.at(-1)[calls.at(-1).indexOf('--jq') + 1];
+    assert.match(jq, /\.created_at/);
+    assert.match(jq, /\.updated_at/);
+  });
+
+  it('adopts only an issue the watch filed, and never its body as state', () => {
+    // The issue has to be the watch's own — a planted decoy needs the label,
+    // and applying one needs triage, the adversary assess() models — because
+    // adopting it would let its comments, which ARE the state source, be
+    // chosen wholesale. The body is only ever what FINDS the issue: it feeds
+    // no state, edited or not, so nothing an editor writes there can reach a
+    // gate. Discovery must still match the marker in an edited body: gate
+    // that too and a triage user deletes the marker by editing, so every
+    // later tick files a duplicate.
+    const forgedState =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestRequest":null,"latest":null} -->';
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      const path = args[3];
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          // The issues API returns created-desc, so a planted decoy is the
+          // newest candidate and is reached first.
+          ['99', 'stranger', b64(`${HEALTH_MARKER}\n${forgedState}`)].join(
+            '\t',
+          ),
+          // The watch's own, but NOT the tracking issue: same author, same
+          // label, no marker. Adopting it would point the watch's whole state
+          // feed — its comments — at an unrelated issue, and leave the real
+          // one never updated and never closed. Ordered before the genuine
+          // one so a missing marker check adopts this instead.
+          [
+            '98',
+            'github-actions[bot]',
+            '2026-08-21T00:00:00Z',
+            b64('unrelated bot issue'),
+          ].join('\t'),
+          // The genuine issue, whose body a triage user has since edited.
+          [
+            '91',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            b64(`${HEALTH_MARKER}\n${forgedState}`),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
+        return '';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
+    // The decoy is not the watch's, so the genuine issue is still tracked...
+    assert.equal(issue.number, 91);
+    // ...and its body fed no state, while still being what found it.
+    assert.equal(readState(issue.texts), null);
+    assert.ok(!issue.texts.some((t) => t.includes(HEALTH_MARKER)));
+    const jq = calls[0][calls[0].indexOf('--jq') + 1];
+    assert.match(jq, /select\(\.pull_request == null\)/);
+    assert.match(jq, /\.user\.login/);
+    // The issue's creation time IS read — it is the unforgeable floor the
+    // recovery gate falls back to. Its `updated_at` is deliberately not: it
+    // moves on every reply, so it can never tell an edited body from a
+    // replied-to one, and the body is not state anyway.
+    assert.match(jq, /\.created_at/);
+    assert.doesNotMatch(jq, /updated_at/);
+  });
+
+  it('never lets an edited body seed a barrier the close gate trusts', () => {
+    // The Issues API bumps an issue's `updated_at` on ANY comment, so the
+    // watch cannot tell an edited body from a replied-to one — which is why
+    // the body feeds no state at all. Carrying one field out of it anyway
+    // (the barrier) was worse than dropping it: the quiet-tick refresh wrote
+    // that value into a comment the watch DOES trust, so an attacker-chosen
+    // barrier became trusted state one tick later and closed the issue on a
+    // push that predates the real one.
+    const now = new Date('2026-08-27T12:00:00Z');
+    const barrier = '2026-08-27T01:00:00Z';
+    const stale = '2026-08-26T00:00:00Z'; // a push OLDER than the barrier
+    const asked = (at, pr, state = 'open') => ({
+      number: pr,
+      state,
+      comments: [request(at, pr)],
+    });
+    const lane = [
+      { number: 40, state: 'open', comments: [result(stale, PUSHED, 40)] },
+      asked('2026-08-26T01:00:00Z', 41),
+      asked('2026-08-26T02:00:00Z', 42),
+      asked(barrier, 43),
+    ];
+    const body = decide(assess(lane, { now }), null)[0].body;
+    assert.equal(readState([body]).newestRequest, barrier);
+
+    // The issue as the API returns it, with an attacker-chosen barrier edited
+    // into the body and no watch comment yet.
+    const forge = (payload) =>
+      body.replace(
+        /<!-- qwen-resolve-health-state \{[^\n]*?\} -->/,
+        `<!-- qwen-resolve-health-state ${payload} -->`,
+      );
+    const feed =
+      (issueBody, watchComments = []) =>
+      (args) => {
+        if (args[3] === 'repos/QwenLM/qwen-code/issues') {
+          return [
+            ['91', 'github-actions[bot]', ISSUE_FILED, b64(issueBody)].join(
+              '\t',
+            ),
+            '',
+          ].join('\n');
+        }
+        return [
+          ...watchComments.map((text) =>
+            ['github-actions[bot]', filedAt, filedAt, b64(text)].join('\t'),
+          ),
+          '',
+        ].join('\n');
+      };
+    const filedAt = '2026-08-27T05:00:00Z';
+    // The issue is filed BECAUSE of those requests, so its creation time —
+    // the one field nobody can edit — postdates them and the older push.
+    const ISSUE_FILED = '2026-08-27T02:00:00Z';
+    const issueWith = (issueBody, watchComments = []) =>
+      findOpenIssue(
+        feed(issueBody, watchComments),
+        'QwenLM/qwen-code',
+        DEFAULTS.label,
+      );
+
+    // The unanswered PRs close, so the roster clears and the alarm goes quiet
+    // with the pre-barrier push still the latest attempt.
+    const quiet = assess(
+      lane.map((pr) => (pr.number === 40 ? pr : { ...pr, state: 'closed' })),
+      { now },
+    );
+    assert.equal(quiet.alarm, false);
+    assert.equal(quiet.latestAttempt.kind, 'pushed');
+
+    // Every payload an editor could plant — a forged-low barrier, a
+    // wrong-typed one that is truthy and compares greater than any timestamp,
+    // and junk that parses to nothing — reaches no gate, on this tick or the
+    // next: with no trusted comment there is no state, so the watch refuses
+    // to close and refreshes from the live assessment instead.
+    for (const payload of [
+      `{"streak":0,"unanswered":[],"newestRequest":"${stale}","latest":null}`,
+      '{"streak":0,"unanswered":[],"newestRequest":[],"latest":null}',
+      'not json at all',
+    ]) {
+      const edited = issueWith(forge(payload));
+      assert.equal(readState(edited.texts), null, payload);
+      const first = decide(quiet, edited);
+      assert.deepEqual(
+        first.map((a) => a.type),
+        ['comment'],
+        payload,
+      );
+      assert.match(first[0].body, /State refresh:/);
+      // Nothing from the body survived into the refresh...
+      assert.notEqual(readState([first[0].body]).newestRequest, stale);
+      // ...and the next tick, reading that refresh, still refuses to close on
+      // the stale push.
+      const next = issueWith(forge(payload), [first[0].body]);
+      assert.deepEqual(decide(quiet, next), [], payload);
+    }
+
+    // Control: the floor is a floor, not a ceiling. A request that goes
+    // unanswered AFTER the issue was filed postdates the floor, and the
+    // watch records it in a comment of its own; the gate then holds out for
+    // a push later than THAT, not merely later than the filing.
+    const later = new Date('2026-08-29T12:00:00Z');
+    const afterFiling = '2026-08-28T00:00:00Z';
+    const between = '2026-08-27T06:00:00Z'; // after the floor, before it
+    const withNewRequest = [
+      { number: 40, state: 'open', comments: [result(between, PUSHED, 40)] },
+      asked(afterFiling, 44),
+      asked(afterFiling.replace('T00', 'T01'), 45),
+      asked(afterFiling.replace('T00', 'T02'), 46),
+    ];
+    const alarming = assess(withNewRequest, { now: later });
+    assert.equal(alarming.alarm, true);
+    const recordedBy = decide(alarming, issueWith(body))[0].body;
+    assert.equal(
+      readState([recordedBy]).newestRequest,
+      afterFiling.replace('T00', 'T02'),
+    );
+    const honest = issueWith(body, [recordedBy]);
+
+    // Those PRs close, so the roster clears and only the older push remains.
+    // It postdates the filing floor, and is still refused: the recorded
+    // barrier is the stronger of the two.
+    const clearedAgain = assess(
+      withNewRequest.map((pr) =>
+        pr.number === 40 ? pr : { ...pr, state: 'closed' },
+      ),
+      { now: later },
+    );
+    assert.equal(clearedAgain.alarm, false);
+    assert.ok(between > ISSUE_FILED);
+    assert.deepEqual(decide(clearedAgain, honest), []);
+
+    // A push that postdates the recorded barrier does close it.
+    const recovered = assess(
+      [
+        {
+          number: 40,
+          state: 'open',
+          comments: [result('2026-08-28T06:00:00Z', PUSHED, 40)],
+        },
+      ],
+      { now: later },
+    );
+    assert.deepEqual(
+      decide(recovered, honest).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+});
+
+describe('resolve-health: end to end against a recording gh', () => {
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  function recordingGh(calls) {
+    return (args, input) => {
+      calls.push({ args, input });
+      const path = args[3];
+      if (path === 'search/issues') {
+        // Two quoted tokens, never the contiguous phrase — GitHub search
+        // measurably misses comments containing the exact phrase, so a
+        // return to the one-phrase form must go red (see fetchPrs).
+        assert.match(
+          args[5],
+          /^q=repo:QwenLM\/qwen-code is:pr "@qwen-code" "\/resolve" in:comments updated:>=2026-08-20$/,
+        );
+        assert.doesNotMatch(args[5], /"@qwen-code \/resolve"/);
+        return '11\topen\n12\topen\n';
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/11/comments') {
+        assert.ok(args.includes('--paginate') && args.includes('per_page=100'));
+        return [
+          [
+            '1',
+            'maintainer',
+            'COLLABORATOR',
+            '2026-08-25T00:00:00Z',
+            '2026-08-25T00:00:00Z',
+            'u1',
+            b64('@qwen-code /resolve'),
+            '1',
+          ].join('\t'),
+          [
+            '2',
+            BOT,
+            'COLLABORATOR',
+            '2026-08-25T00:05:00Z',
+            '2026-08-25T00:05:00Z',
+            'u2',
+            b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
+            '0',
+          ].join('\t'),
+          [
+            '3',
+            'maintainer',
+            'COLLABORATOR',
+            '2026-08-26T00:00:00Z',
+            '2026-08-26T00:00:00Z',
+            'u3',
+            b64('@qwen-code /resolve'),
+            '1',
+          ].join('\t'),
+          [
+            '4',
+            BOT,
+            'COLLABORATOR',
+            '2026-08-26T00:05:00Z',
+            '2026-08-26T00:05:00Z',
+            'u4',
+            b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
+            '0',
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/12/comments') {
+        return [
+          [
+            '5',
+            BOT,
+            'COLLABORATOR',
+            '2026-08-26T01:00:00Z',
+            '2026-08-26T01:00:00Z',
+            'u5',
+            b64(`${RESULT_MARKER}\n${AGENT_FAILED}`),
+            '0',
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        // Only OPEN issues carrying the dedup label are candidates; without
+        // `state=open` a closed, older tracking issue would be revived, and
+        // without the label every open issue's body is fetched and scanned.
+        assert.ok(
+          args.includes('state=open'),
+          'issue lookup must filter state=open',
+        );
+        assert.ok(
+          args.includes(`labels=${DEFAULTS.label}`),
+          'issue lookup must filter by the dedup label',
+        );
+        assert.ok(args.includes('--paginate'));
+        return [
+          ['90', 'maintainer', b64('unrelated open issue')].join('\t'),
+          [
+            '91',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            b64(
+              `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":2,"unanswered":[],"latest":4} -->`,
+            ),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
+        return '';
+      }
+      if (args[2] === 'POST' || args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+  }
+
+  it('reads PRs and comments, finds the marked issue, and only then writes', () => {
+    const calls = [];
+    const { assessment, actions } = main({
+      gh: recordingGh(calls),
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_THRESHOLD: '3' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(assessment.streak, 3);
+    assert.equal(assessment.unanswered.length, 0);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    const writes = calls.filter(
+      (c) => c.args[2] === 'POST' || c.args[2] === 'PATCH',
+    );
+    assert.equal(writes.length, 1);
+    assert.equal(
+      writes[0].args[3],
+      'repos/QwenLM/qwen-code/issues/91/comments',
+    );
+    const body = JSON.parse(writes[0].input).body;
+    assert.ok(body.includes(HEALTH_MARKER));
+    assert.equal(readState([body]).streak, 3);
+    // No write happens before every read has completed.
+    const firstWrite = calls.findIndex((c) => c.args[2] === 'POST');
+    assert.ok(calls.slice(firstWrite).every((c) => c.args[2] !== 'GET'));
+  });
+
+  // A recording gh with its own feed: `prs` is [{ number, state, comments }]
+  // in the shape assess() reads, `issues` the rows the open-issue lookup
+  // returns, `issueComments` the tracking issue's own comment feed (four
+  // columns, as findOpenIssue's jq emits them). Used where the shared
+  // fixture's streak (3, below the default threshold) cannot tell a fallback
+  // from a bug.
+  function feedGh(calls, prs, issues = [], issueComments = {}) {
+    return (args, input) => {
+      calls.push({ args, input });
+      const path = args[3];
+      if (path === 'search/issues') {
+        return prs.map((p) => `${p.number}\t${p.state}\n`).join('');
+      }
+      const m = path.match(
+        /^repos\/QwenLM\/qwen-code\/issues\/(\d+)\/comments$/,
+      );
+      if (m && args[2] === 'GET') {
+        const pr = prs.find((p) => String(p.number) === m[1]);
+        if (pr) {
+          return pr.comments
+            .map((c) =>
+              [
+                c.id,
+                c.user,
+                c.author_association ?? 'COLLABORATOR',
+                c.created_at,
+                c.updated_at ?? c.created_at,
+                c.html_url,
+                b64(c.body),
+                c.eyes ?? 0,
+              ].join('\t'),
+            )
+            .map((l) => `${l}\n`)
+            .join('');
+        }
+        return (issueComments[m[1]] ?? [])
+          .map((c) =>
+            [
+              c.user,
+              c.created_at,
+              c.updated_at ?? c.created_at,
+              b64(c.body),
+            ].join('\t'),
+          )
+          .map((l) => `${l}\n`)
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        // The issues jq emits number, author, created, body — no `updated_at`:
+        // it moves on every reply, so it can say nothing about the body, and
+        // the body feeds no state anyway. A row defaults to the watch's own.
+        return issues
+          .map(
+            ([
+              n,
+              body,
+              author = 'github-actions[bot]',
+              created = '2026-08-20T00:00:00Z',
+            ]) => `${n}\t${author}\t${created}\t${b64(body)}\n`,
+          )
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'POST') {
+        // The create response carries the new number; apply() addresses
+        // the record comment to it.
+        return '{"number":500}';
+      }
+      if (args[2] === 'POST' || args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+  }
+
+  // A stateful gh for multi-tick scenarios: whatever apply() writes — the
+  // created issue, the comments — is what the next main() call reads back,
+  // as production's GitHub does. `store` is the test's to mutate between
+  // ticks: `prs` in fetchPrs' input shape, `issues` the filed issues,
+  // `comments` each issue's comment feed, `now` the timestamp new writes
+  // are stamped with.
+  function statefulGh(store) {
+    return (args, input) => {
+      const path = args[3];
+      if (path === 'search/issues') {
+        return store.prs.map((pr) => `${pr.number}\t${pr.state}\n`).join('');
+      }
+      const feed = path.match(
+        /^repos\/QwenLM\/qwen-code\/issues\/(\d+)\/comments$/,
+      );
+      if (feed && args[2] === 'GET') {
+        const pr = store.prs.find((x) => String(x.number) === feed[1]);
+        if (pr) {
+          return pr.comments
+            .map(
+              (c) =>
+                `${[
+                  c.id,
+                  c.user,
+                  c.author_association ?? 'COLLABORATOR',
+                  c.created_at,
+                  c.updated_at ?? c.created_at,
+                  c.html_url,
+                  b64(c.body),
+                  c.eyes ?? 0,
+                ].join('\t')}\n`,
+            )
+            .join('');
+        }
+        return (store.comments[feed[1]] ?? [])
+          .map(
+            (c) =>
+              `${[c.user, c.created_at, c.updated_at, b64(c.body)].join('\t')}\n`,
+          )
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        // The state filter the caller asked for; a row without one is open.
+        const wanted = args.find((a) => a.startsWith('state='))?.split('=')[1];
+        return store.issues
+          .filter((i) => (i.state ?? 'open') === wanted)
+          .map(
+            (i) =>
+              `${i.number}\tgithub-actions[bot]\t${i.created_at}\t${b64(i.body)}\n`,
+          )
+          .join('');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'POST') {
+        const number = (store.next += 1);
+        store.issues.push({
+          number,
+          created_at: store.now,
+          body: JSON.parse(input).body,
+        });
+        return JSON.stringify({ number });
+      }
+      if (feed && args[2] === 'POST') {
+        const comments = (store.comments[feed[1]] ??= []);
+        comments.push({
+          user: 'github-actions[bot]',
+          created_at: store.now,
+          updated_at: store.now,
+          body: JSON.parse(input).body,
+        });
+        return '{}';
+      }
+      if (args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+  }
+  const fiveFailures = () => [
+    {
+      number: 11,
+      state: 'open',
+      comments: [1, 2, 3, 4, 5].map((d) =>
+        result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 11),
+      ),
+    },
+  ];
+
+  it('falls back to the default threshold on a non-numeric knob instead of NaN', () => {
+    // A streak of exactly the default (5) is the discriminator: with the
+    // fallback the alarm fires and an issue is filed; under the NaN bug every
+    // `streak >= threshold` comparison is false and nothing is written.
+    const calls = [];
+    const { assessment, actions } = main({
+      gh: feedGh(calls, fiveFailures()),
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_THRESHOLD: 'abc' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(assessment.streak, 5);
+    assert.equal(assessment.alarm, true);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['create'],
+    );
+    const creates = calls.filter(
+      (c) =>
+        c.args[2] === 'POST' && c.args[3] === 'repos/QwenLM/qwen-code/issues',
+    );
+    assert.equal(creates.length, 1);
+    // And a knob one above the streak keeps it quiet, so the number is read.
+    const quiet = [];
+    assert.equal(
+      main({
+        gh: feedGh(quiet, fiveFailures()),
+        env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_THRESHOLD: '6' },
+        now: new Date('2026-08-27T12:00:00Z'),
+      }).assessment.alarm,
+      false,
+    );
+  });
+
+  it('files the tracking issue with the same label the lookup filters by', () => {
+    // If the create used another label, the lookup would never find the
+    // issue again and every later tick would file a duplicate.
+    const calls = [];
+    main({
+      gh: feedGh(calls, fiveFailures()),
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const lookup = calls.find(
+      (c) =>
+        c.args[2] === 'GET' && c.args[3] === 'repos/QwenLM/qwen-code/issues',
+    );
+    assert.ok(lookup.args.includes(`labels=${DEFAULTS.label}`));
+    const create = calls.find(
+      (c) =>
+        c.args[2] === 'POST' && c.args[3] === 'repos/QwenLM/qwen-code/issues',
+    );
+    assert.deepEqual(JSON.parse(create.input).labels, [DEFAULTS.label]);
+    // The value itself, not only its self-consistency: every assertion
+    // above reads DEFAULTS.label, so a rename would ship green while
+    // orphaning the live tracking issue (found by the old label) and
+    // filing a duplicate beside it.
+    assert.equal(DEFAULTS.label, 'scope/ci-cd');
+  });
+
+  it('pins the acknowledgement grace at or below the stale window', () => {
+    // The value itself, not only its use: the suite greens at every
+    // ackHours in (0.5, 10], so an unreviewed change of the constant would
+    // ship silently. It must stay at or below staleHours — past it a
+    // refused request re-enters the roster on age alone (measured:
+    // unanswered=1 at ackHours=4) — and no value under that ceiling covers
+    // the producer's own 345-minute queue budget, which is why the close
+    // gate does not rest on the grace alone.
+    assert.equal(DEFAULTS.ackHours, 1);
+    assert.ok(DEFAULTS.ackHours <= DEFAULTS.staleHours);
+  });
+
+  it('pins the liveness horizon inside the comment window', () => {
+    // A silentHours at or past windowDays could never fire — assess() drops
+    // comments older than the window, so every reading would look alive,
+    // restoring the blindness the bound exists to remove. And it must
+    // outlast an ordinary quiet day, or a healthy-but-askless lane flips
+    // the per-request reading off.
+    assert.ok(DEFAULTS.silentHours >= 24);
+    assert.ok(DEFAULTS.silentHours < DEFAULTS.windowDays * 24);
+  });
+
+  it('honours the unanswered-request knob through main()', () => {
+    // One stale request: alarms under `unanswered=1`, not under `4`, so a
+    // dropped or misnamed env read would flip the first assertion.
+    const stale = () => [
+      {
+        number: 12,
+        state: 'open',
+        comments: [request('2026-08-26T00:00:00Z', 12)],
+      },
+    ];
+    const loud = [];
+    const a = main({
+      gh: feedGh(loud, stale()),
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_UNANSWERED: '1' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(a.assessment.unanswered.length, 1);
+    assert.equal(a.assessment.alarm, true);
+    assert.deepEqual(
+      a.actions.map((x) => x.type),
+      ['create'],
+    );
+    const quiet = [];
+    const b = main({
+      gh: feedGh(quiet, stale()),
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_UNANSWERED: '4' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(b.assessment.alarm, false);
+    assert.deepEqual(b.actions, []);
+  });
+
+  it('judges a recorded request by its first-sight association, not the live read', () => {
+    // main() threads the tracking issue's recorded judgments into assess():
+    // the comments API evaluates author_association at read time, so without
+    // the record a mid-window demotion would drop the requester whose
+    // unanswered request the issue is tracking.
+    const calls = [];
+    const asked = request('2026-08-27T06:00:00Z', 11);
+    const state = `<!-- qwen-resolve-health-state ${JSON.stringify({
+      streak: 0,
+      unanswered: [asked.id],
+      newestRequest: '2026-08-27T06:00:00Z',
+      latest: null,
+      requests: [[asked.id, '2026-08-27T06:00:00Z', 'COLLABORATOR']],
+    })} -->`;
+    const gh = feedGh(
+      calls,
+      [
+        {
+          number: 11,
+          state: 'open',
+          comments: [{ ...asked, author_association: 'NONE' }],
+        },
+      ],
+      [[91, `${HEALTH_MARKER}\nthe tracking issue`]],
+      {
+        91: [
+          {
+            user: 'github-actions[bot]',
+            created_at: '2026-08-27T07:00:00Z',
+            body: `${HEALTH_MARKER}\n${state}`,
+          },
+        ],
+      },
+    );
+    const { assessment } = main({
+      gh,
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_UNANSWERED: '1' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(assessment.unanswered.length, 1);
+    assert.equal(assessment.unanswered[0].id, asked.id);
+    assert.equal(assessment.alarm, true);
+  });
+
+  it('persists the judgments of the filing tick in a comment the next tick reads', () => {
+    // Production lifecycle across two ticks, against a stateful gh: the
+    // filing tick's record used to reach a trusted comment only on a LATER
+    // write, so a requester demoted between the two ticks was re-judged by
+    // the live field — the roster dropped below the threshold, the alarm
+    // went quiet, and that tick's refresh froze the demotion as the first
+    // sight. apply() now posts the record with the create, so the next
+    // tick judges by it.
+    const asks = [0, 1, 2].map((h) =>
+      request(`2026-08-27T0${h}:00:00Z`, 60 + h, `writer${h}`),
+    );
+    const lane = (comments) =>
+      comments.map((req, i) => ({
+        number: 60 + i,
+        state: 'open',
+        comments: [req],
+      }));
+    const store = {
+      prs: lane(asks),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-27T06:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    // The create and the record comment land in the same run.
+    assert.equal(store.issues.length, 1);
+    const filed = store.issues[0];
+    assert.equal(store.comments[filed.number]?.length, 1);
+    const record = readState(store.comments[filed.number].map((c) => c.body));
+    assert.deepEqual(
+      record.requests,
+      asks.map((r, i) => [r.id, r.created_at, 'COLLABORATOR', 60 + i]),
+    );
+    // Tick 2: one requester's membership lapsed, so the live field reads
+    // NONE. Judged live the roster drops below the threshold; judged by
+    // the record nothing moved — and an unchanged picture writes nothing.
+    store.prs = lane([
+      { ...asks[0], author_association: 'NONE' },
+      asks[1],
+      asks[2],
+    ]);
+    store.now = '2026-08-27T12:00:00Z';
+    const tick2 = main({ gh, env, now: new Date(store.now) });
+    assert.equal(tick2.assessment.unanswered.length, 3);
+    assert.equal(tick2.assessment.alarm, true);
+    assert.deepEqual(tick2.actions, []);
+  });
+
+  it('holds the recorded deficit across the heal tick until the requests leave the window', () => {
+    // A never-ran outage files the issue with the starved requests recorded
+    // as unanswered. At the heal tick the live rules read them as refusals
+    // — their PRs show no result and no ack ever landed — so a live-only
+    // reading closes the issue over requests that were never served, and
+    // the quiet tick's refresh erases the deficit from the record. The
+    // recorded deficit must hold the close gate until the requests it
+    // names actually leave the window.
+    const asks = [0, 1, 2].map((h) =>
+      request(
+        `2026-08-24T0${6 + h}:00:00Z`,
+        11 + h,
+        'maintainer',
+        undefined,
+        'COLLABORATOR',
+        0,
+      ),
+    );
+    const lane = (state13) => [
+      { number: 11, state: 'open', comments: [asks[0]] },
+      { number: 12, state: 'open', comments: [asks[1]] },
+      { number: 13, state: state13, comments: [asks[2]] },
+    ];
+    const store = {
+      prs: lane('open'),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-24T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    const filed = store.issues[0];
+    assert.deepEqual(
+      readState(store.comments[filed.number].map((c) => c.body)).unanswered,
+      asks.map((a) => a.id),
+    );
+
+    // The heal tick: the lane demonstrably works again — a fresh request
+    // on another PR is acknowledged and pushed — while two of the starved
+    // requests still sit live, open and result-less. The third's PR was
+    // closed — the ordinary end of an incident — so it no longer holds the
+    // GATE, but its id must stay in the recorded deficit while the request
+    // is live: a reopening would otherwise read it as never owed. The
+    // recorded deficit must still veto the close, and the quiet tick's
+    // refresh must not erase it.
+    const healed = {
+      number: 14,
+      state: 'open',
+      comments: [
+        request('2026-08-26T11:00:00Z', 14),
+        result('2026-08-26T11:30:00Z', PUSHED, 14),
+      ],
+    };
+    store.prs = [...lane('closed'), healed];
+    store.now = '2026-08-26T12:00:00Z';
+    const heal = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      heal.actions.map((a) => a.type),
+      ['comment'],
+      'the heal tick must not close over the recorded deficit',
+    );
+    assert.deepEqual(
+      readState(store.comments[filed.number].map((c) => c.body)).unanswered,
+      asks.map((a) => a.id),
+      'the refresh carries the still-outstanding deficit forward, closed PRs included',
+    );
+
+    // A later quiet tick with an unchanged world: still no close.
+    store.now = '2026-08-26T18:00:00Z';
+    const quiet = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      quiet.actions.map((a) => a.type),
+      [],
+      'the deficit survives until the requests leave the window',
+    );
+
+    // The closed PR is REOPENED while the lane has since served the
+    // other two requests. a2 was never served, and its id survived the
+    // closed ticks in the record, so the deficit arm re-admits it and the
+    // close stays vetoed — erasing the id at the heal tick returned
+    // ['comment', 'close'] here, certifying a recovery over a request the
+    // watch itself recorded as never served.
+    store.prs = [
+      {
+        number: 11,
+        state: 'open',
+        comments: [asks[0], result('2026-08-27T01:00:00Z', PUSHED, 11)],
+      },
+      {
+        number: 12,
+        state: 'open',
+        comments: [asks[1], result('2026-08-27T01:05:00Z', PUSHED, 12)],
+      },
+      { number: 13, state: 'open', comments: [asks[2]] },
+      healed,
+    ];
+    store.now = '2026-08-27T12:00:00Z';
+    const reopened = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      reopened.assessment.unanswered.map((u) => u.id),
+      [asks[2].id],
+      'the reopened request re-joins the roster from the recorded deficit',
+    );
+    assert.deepEqual(
+      reopened.actions.map((a) => a.type),
+      ['comment'],
+      'the recorded deficit vetoes the close the moment the PR reopens',
+    );
+
+    // Once the starved requests age out of the window, the ordinary
+    // recovery close proceeds.
+    store.now = '2026-09-01T12:00:00Z';
+    const drained = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      drained.actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('reads the first-sight record from the closed tracking issue when none is open', () => {
+    // The record's home outlives the issue. Three requests were served by
+    // their own pushes and recorded while the issue was open; the lane
+    // recovered and the issue closed — and only then were the three result
+    // comments edited (a triage annotation each). Read live, the edits
+    // un-answer all three requests and the watch files "0 consecutive
+    // failures, 3 unanswered requests" against a lane that demonstrably
+    // served them. The closed issue's final record still answers them, so
+    // no issue is filed — and the closed issue itself is never written.
+    const served = [0, 1, 2].map((h) => ({
+      ask: request(`2026-08-26T0${h + 1}:00:00Z`, 71 + h),
+      push: result(`2026-08-26T0${h + 1}:30:00Z`, PUSHED, 71 + h),
+    }));
+    const record = {
+      streak: 0,
+      unanswered: [],
+      newestRequest: served[2].ask.created_at,
+      requests: served.map((s, i) => [
+        s.ask.id,
+        s.ask.created_at,
+        'COLLABORATOR',
+        71 + i,
+      ]),
+      resultsSeen: served.map((s, i) => [
+        s.push.id,
+        71 + i,
+        s.push.created_at,
+        'pushed',
+      ]),
+      latest: null,
+    };
+    const store = {
+      prs: served.map((s, i) => ({
+        number: 71 + i,
+        state: 'open',
+        comments: [
+          s.ask,
+          { ...s.push, updated_at: '2026-08-26T06:00:00Z' }, // edited since
+        ],
+      })),
+      issues: [
+        {
+          number: 90,
+          state: 'closed',
+          created_at: '2026-08-20T00:00:00Z',
+          body: `${HEALTH_MARKER}\nthe tracking issue, closed on recovery`,
+        },
+      ],
+      comments: {
+        90: [
+          {
+            user: 'github-actions[bot]',
+            created_at: '2026-08-26T04:00:00Z',
+            updated_at: '2026-08-26T04:00:00Z',
+            body: `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state ${JSON.stringify(record)} -->`,
+          },
+        ],
+      },
+      next: 500,
+      now: '2026-08-27T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const { assessment, actions } = main({
+      gh,
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date(store.now),
+    });
+    assert.equal(assessment.unanswered.length, 0);
+    assert.equal(assessment.alarm, false);
+    assert.deepEqual(actions, []);
+    assert.equal(store.issues.length, 1, 'no issue is filed');
+    assert.equal(
+      store.comments[90].length,
+      1,
+      'the closed issue is never written',
+    );
+  });
+
+  it('recovers even when a stranger forged the state marker', () => {
+    // Comment ids are public API data, so anyone can comment a marker
+    // recording `recovered` on the open issue; state is read only from the
+    // watch's own comments, so the forgery cannot suppress the recovery.
+    const calls = [];
+    const gh = (args, input) => {
+      calls.push({ args, input });
+      const path = args[3];
+      if (path === 'search/issues') {
+        return '13\topen\n';
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/13/comments') {
+        return [
+          [
+            '6',
+            'maintainer',
+            'COLLABORATOR',
+            '2026-08-26T00:00:00Z',
+            '2026-08-26T00:00:00Z',
+            'u6',
+            b64('@qwen-code /resolve'),
+            '1',
+          ].join('\t'),
+          [
+            '7',
+            BOT,
+            'COLLABORATOR',
+            '2026-08-26T01:00:00Z',
+            '2026-08-26T01:00:00Z',
+            'u7',
+            b64(`${RESULT_MARKER}\n${PUSHED}`),
+            '0',
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          [
+            '92',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            b64(
+              `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"latest":3} -->`,
+            ),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/92/comments') {
+        return [
+          [
+            'stranger',
+            '2026-08-26T02:00:00Z',
+            '2026-08-26T02:00:00Z',
+            b64(
+              '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"latest":7,"recovered":7} -->',
+            ),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (args[2] === 'POST' || args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const { actions } = main({
+      gh,
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
+    assert.match(
+      actions[0].body,
+      /Recovered: the latest attempt .* is `pushed`/,
+    );
+  });
+
+  it('keeps reporting when the tracking issue body was edited into the current state', () => {
+    // The body is never a state source — state is read only from the
+    // watch's own unedited comments — so a triage user editing the body's
+    // marker to the state the next tick computes must not make sameState()
+    // true and silence the watch through an evolving outage. The decoy is the
+    // cheaper shape of the same attack: plant a labelled issue carrying the
+    // marker and a forged state, and the created-desc lookup adopts it
+    // instead of the genuine one, which is then never updated or closed.
+    const calls = [];
+    const now = new Date('2026-08-27T12:00:00Z');
+    const prs = fiveFailures();
+    // The body the watch filed on the previous tick: its marker is the state
+    // this tick computes, which is exactly what an attacker edits it into.
+    const filed = decide(assess(prs, { now }), null)[0].body;
+    const { actions } = main({
+      gh: feedGh(calls, prs, [
+        [99, filed, 'stranger', '2026-08-26T00:00:00Z'],
+        [
+          91,
+          filed,
+          'github-actions[bot]',
+          '2026-08-25T00:00:00Z',
+          '2026-08-26T09:00:00Z',
+        ],
+      ]),
+      env: { REPO: 'QwenLM/qwen-code' },
+      now,
+    });
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(actions[0].number, 91);
+    assert.deepEqual(
+      calls.filter((c) => c.args[2] === 'POST').map((c) => c.args[3]),
+      ['repos/QwenLM/qwen-code/issues/91/comments'],
+    );
+  });
+
+  it('refuses to run without a repository', () => {
+    assert.throws(() => main({ gh: () => '', env: {} }), /REPO is required/);
+  });
+});
+
+describe('qwen-resolve-health.yml', () => {
+  it('is guarded to the upstream repository with least-privilege permissions', () => {
+    const job = workflow.jobs.check;
+    assert.equal(job.if, "github.repository == 'QwenLM/qwen-code'");
+    assert.deepEqual(workflow.permissions, {});
+    assert.deepEqual(job.permissions, { contents: 'read', issues: 'write' });
+    assert.equal(job['runs-on'], 'ubuntu-latest');
+    const checkout = job.steps.find((s) =>
+      s.uses?.startsWith('actions/checkout@'),
+    );
+    assert.equal(checkout.with['persist-credentials'], false);
+    const run = job.steps.find((s) => s.run);
+    assert.equal(run.run, 'node .github/scripts/resolve-health.mjs');
+    assert.equal(run.env.GH_TOKEN, '${{ github.token }}');
+    // main() throws without REPO; the thresholds are the operator's knobs.
+    assert.equal(run.env.REPO, '${{ github.repository }}');
+    assert.equal(
+      run.env.RESOLVE_HEALTH_THRESHOLD,
+      '${{ github.event.inputs.threshold || 5 }}',
+    );
+    assert.equal(
+      run.env.RESOLVE_HEALTH_UNANSWERED,
+      '${{ github.event.inputs.unanswered || 3 }}',
+    );
+    assert.equal(workflow.concurrency.group, 'qwen-resolve-health');
+    assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  });
+
+  it('runs on a schedule and can be dispatched with both knobs', () => {
+    assert.ok(
+      Array.isArray(workflow.on.schedule) && workflow.on.schedule.length === 1,
+    );
+    // The string, not only the shape: the header's "four times a day" and
+    // the per-tick API-volume math both rest on it, and a shape-only
+    // assertion lets a rewrite ship green.
+    assert.equal(workflow.on.schedule[0].cron, '23 */6 * * *');
+    // The inputs are the operator's knobs; the env expressions above fall
+    // back to the same defaults, so the two spellings must agree.
+    const inputs = workflow.on.workflow_dispatch.inputs;
+    assert.deepEqual(inputs.threshold, {
+      description: 'Consecutive failures that raise the alarm (default 5)',
+      required: false,
+      default: String(DEFAULTS.threshold),
+      type: 'string',
+    });
+    assert.deepEqual(inputs.unanswered, {
+      description:
+        'Requests with no result comment after 3h that raise the alarm (default 3)',
+      required: false,
+      default: String(DEFAULTS.unansweredThreshold),
+      type: 'string',
+    });
+  });
+
+  it('has its test wired into the CI helper-test list', () => {
+    // HELPER_TESTS is the single list both runner profiles expand; membership
+    // there, not a mention anywhere in the file, is what runs the test.
+    const helperTests = parse(ci).env.HELPER_TESTS.split(/\s+/);
+    assert.ok(helperTests.includes('.github/scripts/resolve-health.test.mjs'));
+  });
+});
