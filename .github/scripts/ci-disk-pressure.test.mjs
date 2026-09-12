@@ -135,6 +135,103 @@ describe('ci.yml disk-pressure evidence', () => {
     );
   });
 
+  it('pins the infra-flake gate that reads the tee capture', () => {
+    const runTests = step('Run tests and generate reports');
+    const tests = runTests.run;
+
+    // PIPESTATUS is reset by any statement between the pipeline and the
+    // capture, so adjacency is the property: inserting one line there leaves
+    // RC=0 and the required Test check goes green on any workspaces failure,
+    // with no other pin in the repo noticing. Comments are allowed on either
+    // side of the capture; a statement is not.
+    assert.match(
+      tests,
+      /\| tee "\$WORKSPACES_LOG"\n(?:#[^\n]*\n)*RC=\$\{PIPESTATUS\[0\]\} TEE_RC=\$\{PIPESTATUS\[1\]\}\n(?:#[^\n]*\n)*if /,
+    );
+
+    // tee's own status must gate the verdict: a sink that hit a write error on
+    // this TMPDIR leaves a truncated capture, and "no FAIL line" measured over
+    // a prefix of the run is not evidence. The switch is compared against '1'
+    // rather than '!= 0' so an operator's 'off' or a typo disables the
+    // tolerance instead of silently leaving it on.
+    //
+    // The producer side of the same truncation: RC is compared against 1 —
+    // npm's "a workspace lifecycle script failed" — rather than non-zero, so a
+    // top-level npm or cross-env wrapper OOM-killed (137) or heap-aborted (134)
+    // skips the classifier instead of certifying the prefix of the walk it
+    // managed to print. Widening this back to `-ne 0` is the mutation.
+    assert.match(
+      tests,
+      /if \[ "\$RC" -eq 1 \] && \[ "\$TEE_RC" -eq 0 \] && \[ "\$\{QWEN_CI_TOLERATE_RPC_TIMEOUT:-1\}" = '1' \]; then\n {2}node \.github\/scripts\/ci\/classify-infra-flake\.mjs/,
+    );
+    assert.ok(
+      !tests.includes('[ "$RC" -ne 0 ] && [ "$TEE_RC" -eq 0 ]'),
+      'the classifier gate must not run on a producer that died by signal',
+    );
+
+    // The tokens that make the tolerance *conditional*, which the match above
+    // stops short of: `&& RC=0` is the only thing keeping a refused verdict
+    // red, and `--log "$WORKSPACES_LOG"` is what binds that verdict to the
+    // capture the tee gate just validated. Three mutations survive a pin that
+    // ends at the script name — `&& RC=0` becoming `; RC=0`, an unconditional
+    // `RC=0`, and `--log /dev/null` — and two of them green the required Test
+    // check on every workspaces failure, real assertion failures included. The
+    // argument list is matched around, not literally, so adding a harmless flag
+    // does not red this.
+    assert.match(
+      tests,
+      /node \.github\/scripts\/ci\/classify-infra-flake\.mjs[^\n]*--log "\$WORKSPACES_LOG"[^\n]*&& RC=0\n/,
+    );
+    // Counted, not only matched: `RC=0` unconditional, or hoisted past the
+    // `fi`, leaves the line above intact while making the tolerance
+    // unconditional — which is the false green this whole `it` exists to
+    // prevent. One assignment, inside the guard, is the contract.
+    assert.equal(
+      tests.match(/\bRC=0\b/g)?.length,
+      1,
+      'RC=0 must be assigned only by the classifier line inside the gate',
+    );
+
+    // Executed, because the adjacency match above pins text and this pins what
+    // that text yields: bash resets PIPESTATUS on the next command, so both
+    // statuses have to be captured in ONE statement. The statement is taken
+    // from the workflow itself, so a rewrite that keeps its shape but loses a
+    // status (`RC=$?`, or the two-statement form) reds here rather than only
+    // in a lane. Mirrors the PIPESTATUS probe in
+    // scripts/tests/qwen-triage-workflow.test.js.
+    const capture = tests
+      .split('\n')
+      .find((line) => line.startsWith('RC=${PIPESTATUS[0]}'));
+    assert.ok(capture, 'the one-statement PIPESTATUS capture is gone');
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        `(exit 3) | tee /dev/null\n${capture}\necho "RC=$RC TEE_RC=$TEE_RC"`,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.equal(probe.stdout.trim(), 'RC=3 TEE_RC=0');
+
+    // The gate being false is a third outcome, and the only one that emits
+    // nothing: a refusal writes its reason, a tolerance writes its warning, and
+    // GitHub never echoes a step `env:` value. Without this branch a red step
+    // whose producer died by signal — or whose switch an operator turned off —
+    // is indistinguishable in the log from a classifier that looked and refused.
+    assert.match(
+      tests,
+      /elif \[ "\$RC" -ne 0 \]; then\n(?: {2}#[^\n]*\n)* {2}echo "::notice::infra-flake classifier skipped[^\n]*RC=\$RC TEE_RC=\$TEE_RC tolerate='\$\{QWEN_CI_TOLERATE_RPC_TIMEOUT:-1\}'"\nfi/,
+    );
+
+    // The reader's `:-1` default keeps the tolerance on if this binding is
+    // dropped or renamed, so pin the binding beside the shell comparison.
+    assert.equal(
+      runTests.env['QWEN_CI_TOLERATE_RPC_TIMEOUT'],
+      "${{ vars.QWEN_CI_TOLERATE_RPC_TIMEOUT || '1' }}",
+    );
+  });
+
   it('gives lint_and_static the same sampler and its own collector', () => {
     // The install step is pinned byte-identical to test's by
     // ci-platform-lanes.test.js's shared-prelude equality; what that pin
