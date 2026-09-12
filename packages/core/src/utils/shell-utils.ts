@@ -237,6 +237,20 @@ export function getShellConfiguration(): ShellConfiguration {
 export const isWindows = () => os.platform() === 'win32';
 
 /**
+ * Whether a child-process spawn of the given shell must pass its arguments
+ * verbatim (windowsVerbatimArguments: true) on Windows.
+ *
+ * cmd.exe needs verbatim arguments: Node's MSVC CRT escaping mangles quotes
+ * and backslashes, which breaks quoted paths (e.g.
+ * `bash "C:\Program Files\...\script.sh"`). PowerShell (.NET) uses the default
+ * escaping so args round-trip through CommandLineToArgvW. Shared by every
+ * cmd.exe spawn site so the policy cannot drift. #8649.
+ */
+export function needsVerbatimArguments(shell: ShellType): boolean {
+  return os.platform() === 'win32' && shell === 'cmd';
+}
+
+/**
  * Escapes a string so that it can be safely used as a single argument
  * in a shell command, preventing command injection.
  *

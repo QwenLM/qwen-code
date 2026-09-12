@@ -28,6 +28,7 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
   escapeShellArg,
   getShellConfiguration,
+  needsVerbatimArguments,
   type ShellType,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
@@ -1163,6 +1164,10 @@ export class HookRunner {
             shell: false,
             // Own a process group so cancellation can signal the entire tree.
             detached: process.platform !== 'win32',
+            // cmd.exe needs verbatim arguments (Node's MSVC CRT escaping
+            // mangles quoted paths); PowerShell keeps the default escaping.
+            // #8649.
+            windowsVerbatimArguments: needsVerbatimArguments(shellConfig.shell),
           },
         );
       }
