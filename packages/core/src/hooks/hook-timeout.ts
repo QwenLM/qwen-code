@@ -4,20 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  createDebugLogger,
+  isDebugLogFileEnabled,
+} from '../utils/debugLogger.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 const debugLogger = createDebugLogger('HOOK_TIMEOUT');
 
 /** Default timeout for a command hook, in seconds. */
-export const DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS = 600;
-
-/**
- * Default timeout, in seconds, for command hooks on events whose hooks keep
- * running after Qwen Code exits (MessageDisplay, StopFailure, SessionDelete).
- * Nothing waits for their result, so a long default would only leave a
- * detached process group running.
- */
-export const SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS = 60;
+export const DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS = 60;
 
 /**
  * Command hook timeouts used to be read as milliseconds. A configured value at
@@ -27,7 +23,7 @@ export const SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS = 60;
  */
 export const LEGACY_MILLISECOND_TIMEOUT_THRESHOLD = 1000;
 
-const warnedLegacyTimeouts = new Set<string>();
+const warnedHookTimeouts = new Set<string>();
 
 /** True when a command hook `timeout` is still read as legacy milliseconds. */
 export function isLegacyMillisecondHookTimeout(timeout: number): boolean {
@@ -53,23 +49,65 @@ export function formatLegacyHookTimeoutWarning(
   );
 }
 
+function describeConfiguredTimeout(timeout: unknown): string {
+  if (typeof timeout === 'number') {
+    return String(timeout);
+  }
+  try {
+    return JSON.stringify(timeout) ?? String(timeout);
+  } catch {
+    return String(timeout);
+  }
+}
+
+/** Describes a configured timeout that cannot be used, and the default used instead. */
+export function formatUnusableHookTimeoutWarning(
+  timeout: unknown,
+  hookLabel: string,
+): string {
+  return (
+    `Hook "${hookLabel}" sets timeout ${describeConfiguredTimeout(timeout)}, which is not a positive number of seconds, ` +
+    `so the default of ${DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS} seconds is used instead.`
+  );
+}
+
 /**
- * Forgets which legacy timeouts were already warned about. Only for tests;
- * the runtime relies on the one-warning-per-hook deduplication.
+ * Writes a timeout warning once per session, hook and configured value. The
+ * key is recorded only when the warning can actually be written, so a hook
+ * first resolved while debug logging is off is still named once it is on.
+ */
+function warnOnce(key: string, message: () => string): void {
+  const sessionKey = `${sessionIdContext.getStore() ?? ''}\0${key}`;
+  if (warnedHookTimeouts.has(sessionKey)) {
+    return;
+  }
+  if (!isDebugLogFileEnabled() || !debugLogger.isEnabled()) {
+    return;
+  }
+  warnedHookTimeouts.add(sessionKey);
+  debugLogger.warn(message());
+}
+
+/**
+ * Forgets which timeouts were already warned about. Only for tests; the
+ * runtime relies on the one-warning-per-hook deduplication.
  */
 export function resetLegacyTimeoutWarnings(): void {
-  warnedLegacyTimeouts.clear();
+  warnedHookTimeouts.clear();
 }
 
 /**
  * Resolves a command hook's configured `timeout`, in seconds, to milliseconds.
- * Missing or unusable values fall back to `defaultSeconds`.
+ * A missing value uses the default; an unusable one also uses the default and
+ * is named in the debug log.
  */
 export function resolveCommandHookTimeoutMs(
   timeout: unknown,
   hookLabel: string,
-  defaultSeconds: number = DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
 ): number {
+  if (timeout === undefined) {
+    return DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS * 1000;
+  }
   // Settings files are not type-checked, so a numeric string such as
   // "60000" can arrive here. The timer used to coerce it, so keep honouring
   // it rather than silently replacing it with the default.
@@ -78,14 +116,16 @@ export function resolveCommandHookTimeoutMs(
       ? Number(timeout)
       : timeout;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return defaultSeconds * 1000;
+    warnOnce(
+      `unusable\0${hookLabel}\0${describeConfiguredTimeout(timeout)}`,
+      () => formatUnusableHookTimeoutWarning(timeout, hookLabel),
+    );
+    return DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS * 1000;
   }
   if (isLegacyMillisecondHookTimeout(value)) {
-    const key = `${hookLabel}\0${value}`;
-    if (!warnedLegacyTimeouts.has(key)) {
-      warnedLegacyTimeouts.add(key);
-      debugLogger.warn(formatLegacyHookTimeoutWarning(value, hookLabel));
-    }
+    warnOnce(`legacy\0${hookLabel}\0${value}`, () =>
+      formatLegacyHookTimeoutWarning(value, hookLabel),
+    );
     return value;
   }
   return value * 1000;

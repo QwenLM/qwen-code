@@ -230,15 +230,11 @@ describe('MessageDisplayDispatcher', () => {
   it('logs a failed delivery with the message_id and still delivers the final flush', async () => {
     const warn = vi.fn();
     const sent: SentPayload[] = [];
-    // The bus resolves with success: false when the hook system fails to
-    // run the hook; it rejects only on abort.
     const request = vi.fn((message: { input: SentPayload }) => {
       sent.push(message.input);
-      return Promise.resolve(
-        message.input.is_final
-          ? { success: true }
-          : { success: false, error: new Error('hook process failed') },
-      );
+      return message.input.is_final
+        ? Promise.resolve({})
+        : Promise.reject(new Error('hook process failed'));
     });
     const dispatcher = createDispatcher({ request } as unknown as MessageBus, {
       warn,
@@ -265,46 +261,6 @@ describe('MessageDisplayDispatcher', () => {
     expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
   });
 
-  it('releases an in-flight delivery through the turn signal without warning when the turn is cancelled', async () => {
-    const warn = vi.fn();
-    const controller = new AbortController();
-    let settled = false;
-    const request = vi.fn(
-      (
-        _message: unknown,
-        _responseType: unknown,
-        _timeoutMs: unknown,
-        signal?: AbortSignal,
-      ) =>
-        new Promise((_resolve, reject) => {
-          signal?.addEventListener('abort', () =>
-            reject(new Error('Request aborted')),
-          );
-        }).finally(() => {
-          settled = true;
-        }),
-    );
-    const dispatcher = createDispatcher({ request } as unknown as MessageBus, {
-      signal: controller.signal,
-      warn,
-    });
-
-    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight until aborted
-    controller.abort();
-    // Let the rejection travel through the dispatcher's own handlers.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(request).toHaveBeenCalledWith(
-      expect.objectContaining({ signal: controller.signal }),
-      expect.anything(),
-      undefined,
-      controller.signal,
-    );
-    expect(settled).toBe(true);
-    expect(warn).not.toHaveBeenCalled();
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
-  });
-
   it('does not warn when a superseded mid-stream delivery fails after the final was dispatched', async () => {
     const warn = vi.fn();
     const sent: SentPayload[] = [];
@@ -325,8 +281,9 @@ describe('MessageDisplayDispatcher', () => {
     await dispatcher.finish(); // final dispatched alongside, settles fine
 
     // The stale delivery's outcome no longer matters — the final payload
-    // superseded it and was delivered. A late failure must not alarm anyone
-    // about a turn that actually completed correctly.
+    // superseded it and was delivered. A late failure (e.g. the bus
+    // request's own timeout) must not alarm anyone about a turn that
+    // actually completed correctly.
     rejectMidStream(new Error('request timed out'));
     await Promise.resolve();
     await Promise.resolve();

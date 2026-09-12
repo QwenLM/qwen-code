@@ -21,8 +21,8 @@ import {
 /**
  * Ceiling on how long {@link MessageDisplayDispatcher.finish} waits for the
  * final payload's delivery to complete before letting the turn's teardown
- * proceed anyway. Well short of the default MessageDisplay command hook
- * timeout (60s, `SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS` in hooks/hook-timeout.ts)
+ * proceed anyway. Well short of the 60s default command hook timeout
+ * (`DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS` in hooks/hook-timeout.ts)
  * because a slow or hung MessageDisplay hook shouldn't be able to freeze
  * `qwen -p` or an ACP stream loop's `finally` for anywhere near that long.
  * The budget is shared across finish() calls (client.ts calls it from an
@@ -174,24 +174,14 @@ export class MessageDisplayDispatcher {
           signal: this.signal,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
-        undefined,
-        this.signal,
       )
-      .then((response) => {
-        if (response.success === false) {
-          throw response.error ?? new Error('hook execution failed');
-        }
-      })
+      .then(() => undefined)
       .catch((err) => {
-        if (this.signal.aborted) {
-          // The turn was cancelled: the abort released this delivery, and a
-          // cancelled message is expected to go quiet rather than warn.
-          return;
-        }
         if (this.finished && !isFinal) {
           // This delivery was superseded by the final payload before it
-          // settled; its outcome no longer matters, so a late failure must
-          // not alarm anyone about a turn that completed correctly.
+          // settled; its outcome no longer matters, so a late failure (e.g.
+          // the bus request's own timeout) must not alarm anyone about a
+          // turn that completed correctly.
           return;
         }
         this.emitWarning(

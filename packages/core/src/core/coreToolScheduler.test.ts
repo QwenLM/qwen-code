@@ -2482,8 +2482,6 @@ describe('CoreToolScheduler', () => {
         }),
       }),
       expect.anything(),
-      undefined,
-      expect.any(AbortSignal),
     );
   });
 
@@ -5123,10 +5121,6 @@ describe('CoreToolScheduler', () => {
             }),
           }),
           MessageBusType.HOOK_EXECUTION_RESPONSE,
-          // Tool-use hooks also hand the bus the tool's abort signal.
-          ...(eventName === 'PermissionRequest'
-            ? []
-            : [undefined, expect.any(AbortSignal)]),
         );
       }
       expect(execute).toHaveBeenCalledOnce();
@@ -16912,11 +16906,8 @@ describe('Fire hook functions integration', () => {
             tool_input: { param: 'value' },
             tool_use_id: 'toolu_test',
           },
-          signal: undefined,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
-        undefined,
-        undefined,
       );
     });
 

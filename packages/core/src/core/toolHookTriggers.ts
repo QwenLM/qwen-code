@@ -125,9 +125,6 @@ export async function firePreToolUseHook(
   }
 
   try {
-    // The signal travels in the payload so the hook runner can stop the hook,
-    // and as the request signal so an abort also releases this wait. With a
-    // signal the bus sets no deadline of its own; the hook's timeout bounds it.
     const response = await messageBus.request<
       HookExecutionRequest,
       HookExecutionResponse
@@ -145,8 +142,6 @@ export async function firePreToolUseHook(
         signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
-      undefined,
-      signal,
     );
 
     if (!response.success || !response.output) {
@@ -271,8 +266,6 @@ export async function firePostToolUseHook(
         signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
-      undefined,
-      signal,
     );
 
     if (!response.success || !response.output) {
@@ -371,8 +364,6 @@ export async function firePostToolUseFailureHook(
         signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
-      undefined,
-      signal,
     );
 
     if (!response.success || !response.output) {

@@ -3280,27 +3280,22 @@ export class LlmClient {
           options.submittedPrompt.trim().length > 0
             ? options.submittedPrompt
             : undefined;
-        const response = await messageBus
-          .request<HookExecutionRequest, HookExecutionResponse>(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'UserPromptSubmit',
-              input: {
-                prompt: promptText,
-                ...(submittedPrompt !== undefined
-                  ? { submitted_prompt: submittedPrompt }
-                  : {}),
-              },
-              signal,
+        const response = await messageBus.request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: promptText,
+              ...(submittedPrompt !== undefined
+                ? { submitted_prompt: submittedPrompt }
+                : {}),
             },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-            undefined,
-            signal,
-          )
-          // A cancelled send stops here as an abort, whether the abort
-          // released the wait or raced a response settling at the same
-          // moment, so the prompt is never recorded or sent for it.
-          .finally(() => signal.throwIfAborted());
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
         const hookOutput = response.output
           ? createHookOutput('UserPromptSubmit', response.output)
           : undefined;

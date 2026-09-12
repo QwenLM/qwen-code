@@ -51,15 +51,13 @@ Command hooks execute commands via child processes. Input JSON is passed through
 | `command`       | `string`                 | Yes      | Command to execute                          |
 | `name`          | `string`                 | No       | Hook name (for logging)                     |
 | `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in seconds, default 600             |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
 | `async`         | `boolean`                | No       | Whether to run asynchronously in background |
 | `env`           | `Record<string, string>` | No       | Environment variables                       |
 | `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
 | `statusMessage` | `string`                 | No       | Status message displayed during execution   |
 
-`timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`; with debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each such hook is also named in the debug log the first time it runs. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. Command hooks on `MessageDisplay`, `StopFailure` and `SessionDelete` keep running after Qwen Code exits, so without a `timeout` they stop after 60 seconds instead of 600.
-
-A synchronous hook on an event that waits for its result, such as `PreToolUse` or `Stop`, holds the turn until the hook exits or its timeout expires. A hook that hangs can therefore keep the session busy for up to 600 seconds by default; give hooks that should fail fast a shorter `timeout`.
+`timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
 **Example:**
 
@@ -1367,7 +1365,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 - Cannot return decision control (operation has already occurred)
 - Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
-- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (600 seconds by default; 60 on `MessageDisplay`, `StopFailure` and `SessionDelete`, whose hooks outlive the process)
+- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default)
 
 **Example:**
 
@@ -1408,7 +1406,7 @@ fi
 
 - Hooks run in the user's environment with user privileges
 - Project-level hooks require trusted folder status
-- Timeouts prevent hanging hooks (default: 600 seconds for command hooks)
+- Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
 

@@ -1702,7 +1702,7 @@ describe('HookRunner', () => {
       expect(killSpy.mock.calls).toContainEqual([-mockProcess.pid, 'SIGTERM']);
     });
 
-    it('reads timeout in seconds with a 600 second default', async () => {
+    it('reads timeout in seconds with a 60 second default', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
@@ -1729,14 +1729,13 @@ describe('HookRunner', () => {
         .finally(() => {
           settled = true;
         });
-      // The previous 60 second default has passed without a timeout.
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(59_999);
       expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(540_000);
+      await vi.advanceTimersByTimeAsync(1);
       mockProcess.emit('close', null);
       const result = await resultPromise;
 
-      expect(result.error?.message).toBe('Hook timed out after 600s');
+      expect(result.error?.message).toBe('Hook timed out after 60s');
     });
 
     it.each([

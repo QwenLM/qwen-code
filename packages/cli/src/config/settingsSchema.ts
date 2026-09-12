@@ -244,7 +244,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           timeout: {
             type: 'number',
             description:
-              'Timeout in seconds for the hook execution. Defaults to 600 for command and http hooks (60 for command hooks on MessageDisplay, StopFailure and SessionDelete, which keep running after Qwen Code exits) and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.',
+              'Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.',
           },
           env: {
             type: 'object',

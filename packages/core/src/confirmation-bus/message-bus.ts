@@ -10,8 +10,6 @@ import { MessageBusType, type Message } from './types.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 export class MessageBus extends EventEmitter {
@@ -91,22 +89,10 @@ export class MessageBus extends EventEmitter {
   async request<TRequest extends Message, TResponse extends Message>(
     request: Omit<TRequest, 'correlationId'>,
     responseType: TResponse['type'],
-    timeoutMs?: number,
+    timeoutMs: number = 60000,
     signal?: AbortSignal,
   ): Promise<TResponse> {
     const correlationId = randomUUID();
-    // A hook execution request that carries an abort signal has no bus
-    // deadline unless the caller sets one: the hook is bounded by its own
-    // timeout and cancelled through that signal, and a shorter bus deadline
-    // would give up on a hook that is still allowed to run. A request without
-    // a signal cannot be cancelled, so it keeps the default deadline.
-    const isCancellableHookRequest =
-      request.type === MessageBusType.HOOK_EXECUTION_REQUEST &&
-      'signal' in request &&
-      request.signal instanceof AbortSignal;
-    const effectiveTimeoutMs =
-      timeoutMs ??
-      (isCancellableHookRequest ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
 
     return new Promise<TResponse>((resolve, reject) => {
       // Check if already aborted
@@ -115,20 +101,13 @@ export class MessageBus extends EventEmitter {
         return;
       }
 
-      const timeoutId =
-        effectiveTimeoutMs === undefined
-          ? undefined
-          : setTimeout(() => {
-              cleanup();
-              reject(
-                new Error(`Request timed out waiting for ${responseType}`),
-              );
-            }, effectiveTimeoutMs);
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Request timed out waiting for ${responseType}`));
+      }, timeoutMs);
 
       const cleanup = () => {
-        if (timeoutId !== undefined) {
-          clearTimeout(timeoutId);
-        }
+        clearTimeout(timeoutId);
         this.unsubscribe(responseType, responseHandler);
         if (signal) {
           signal.removeEventListener('abort', abortHandler);

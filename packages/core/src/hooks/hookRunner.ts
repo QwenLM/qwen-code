@@ -10,11 +10,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHookOutput, HookEventName, HookType } from './types.js';
-import {
-  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
-  SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
-  resolveCommandHookTimeoutMs,
-} from './hook-timeout.js';
+import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
 import type {
   HookConfig,
   HookInput,
@@ -254,21 +250,6 @@ let parentExitCleanupRegistered = false;
  */
 const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
-
-/** Events whose command hooks keep running after Qwen Code exits. */
-function hookSurvivesParentExit(eventName: HookEventName): boolean {
-  return (
-    eventName === HookEventName.MessageDisplay ||
-    eventName === HookEventName.StopFailure ||
-    eventName === HookEventName.SessionDelete
-  );
-}
-
-function defaultCommandHookTimeoutSeconds(eventName: HookEventName): number {
-  return hookSurvivesParentExit(eventName)
-    ? SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS
-    : DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS;
-}
 
 /**
  * Events whose plain-text stdout on a successful exit is handed to the model
@@ -758,11 +739,7 @@ export class HookRunner {
       hookEvent: eventName,
       sessionId: input.session_id,
       startTime: Date.now(),
-      timeout: resolveCommandHookTimeoutMs(
-        hookConfig.timeout,
-        hookName,
-        defaultCommandHookTimeoutSeconds(eventName),
-      ),
+      timeout: resolveCommandHookTimeoutMs(hookConfig.timeout, hookName),
       stdout: '',
       stderr: '',
     });
@@ -1026,7 +1003,6 @@ export class HookRunner {
     const timeout = resolveCommandHookTimeoutMs(
       hookConfig.timeout,
       hookConfig.name || hookConfig.command,
-      defaultCommandHookTimeoutSeconds(eventName),
     );
 
     return new Promise((resolve) => {
@@ -1127,7 +1103,10 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
-      const survivesParentExit = hookSurvivesParentExit(eventName);
+      const survivesParentExit =
+        eventName === HookEventName.MessageDisplay ||
+        eventName === HookEventName.StopFailure ||
+        eventName === HookEventName.SessionDelete;
       let parentIndependentInputPath: string | undefined;
       let child: ChildProcess;
       if (survivesParentExit) {

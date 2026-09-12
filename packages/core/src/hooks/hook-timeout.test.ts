@@ -8,54 +8,63 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
   LEGACY_MILLISECOND_TIMEOUT_THRESHOLD,
-  SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
   formatLegacyHookTimeoutWarning,
   resetLegacyTimeoutWarnings,
   resolveCommandHookTimeoutMs,
 } from './hook-timeout.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
-const warn = vi.hoisted(() => vi.fn());
+const logger = vi.hoisted(() => ({
+  warn: vi.fn(),
+  loggingOn: true,
+}));
 
 vi.mock('../utils/debugLogger.js', () => ({
-  createDebugLogger: () => ({ warn, debug: vi.fn() }),
+  createDebugLogger: () => ({
+    warn: logger.warn,
+    debug: vi.fn(),
+    isEnabled: () => logger.loggingOn,
+  }),
+  isDebugLogFileEnabled: () => logger.loggingOn,
 }));
+
+const { warn } = logger;
 
 describe('resolveCommandHookTimeoutMs', () => {
   beforeEach(() => {
     warn.mockClear();
+    logger.loggingOn = true;
     resetLegacyTimeoutWarnings();
   });
 
-  it('defaults to 600 seconds', () => {
-    expect(DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS).toBe(600);
-    expect(resolveCommandHookTimeoutMs(undefined, 'default-hook')).toBe(
-      600_000,
-    );
+  it('defaults to 60 seconds', () => {
+    expect(DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS).toBe(60);
+    expect(resolveCommandHookTimeoutMs(undefined, 'default-hook')).toBe(60_000);
+    expect(warn).not.toHaveBeenCalled();
   });
 
-  it('uses the caller-provided default when no timeout is configured', () => {
-    expect(
-      resolveCommandHookTimeoutMs(
-        undefined,
-        'surviving-hook',
-        SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
-      ),
-    ).toBe(60_000);
-    expect(
-      resolveCommandHookTimeoutMs(
-        10,
-        'surviving-hook',
-        SURVIVING_COMMAND_HOOK_TIMEOUT_SECONDS,
-      ),
-    ).toBe(10_000);
-  });
+  it.each([
+    [0, '0'],
+    [-1, '-1'],
+    [Number.NaN, 'NaN'],
+    [Number.POSITIVE_INFINITY, 'Infinity'],
+    ['', '""'],
+    ['   ', '"   "'],
+    ['30s', '"30s"'],
+    [null, 'null'],
+    [true, 'true'],
+    [{}, '{}'],
+  ])(
+    'falls back to the default for %j and names the value once',
+    (timeout, rendered) => {
+      expect(resolveCommandHookTimeoutMs(timeout, 'invalid-hook')).toBe(60_000);
+      expect(resolveCommandHookTimeoutMs(timeout, 'invalid-hook')).toBe(60_000);
 
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
-    'falls back to the default for %s',
-    (timeout) => {
-      expect(resolveCommandHookTimeoutMs(timeout, 'invalid-hook')).toBe(
-        600_000,
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain(
+        `Hook "invalid-hook" sets timeout ${rendered}`,
       );
+      expect(warn.mock.calls[0]?.[0]).toContain('default of 60 seconds');
     },
   );
 
@@ -93,17 +102,27 @@ describe('resolveCommandHookTimeoutMs', () => {
     expect(warn.mock.calls[0]?.[0]).toContain('Set it to 30');
   });
 
-  it('stays silent for a hook it already warned about until warnings are reset', () => {
-    resolveCommandHookTimeoutMs(45_000, 'shared-label');
-    resolveCommandHookTimeoutMs(45_000, 'shared-label');
+  it('names a hook later when it was first resolved with debug logging off', () => {
+    logger.loggingOn = false;
+    resolveCommandHookTimeoutMs(45_000, 'late-log-hook');
+    expect(warn).not.toHaveBeenCalled();
+
+    logger.loggingOn = true;
+    resolveCommandHookTimeoutMs(45_000, 'late-log-hook');
+    resolveCommandHookTimeoutMs(45_000, 'late-log-hook');
     expect(warn).toHaveBeenCalledTimes(1);
+  });
 
-    resolveCommandHookTimeoutMs(46_000, 'shared-label');
+  it('names the same hook once in each session', () => {
+    sessionIdContext.run('session-a', () => {
+      resolveCommandHookTimeoutMs(45_000, 'shared-hook');
+      resolveCommandHookTimeoutMs(45_000, 'shared-hook');
+    });
+    sessionIdContext.run('session-b', () => {
+      resolveCommandHookTimeoutMs(45_000, 'shared-hook');
+    });
+
     expect(warn).toHaveBeenCalledTimes(2);
-
-    resetLegacyTimeoutWarnings();
-    resolveCommandHookTimeoutMs(45_000, 'shared-label');
-    expect(warn).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -116,13 +135,6 @@ describe('resolveCommandHookTimeoutMs', () => {
       expect(resolveCommandHookTimeoutMs(timeout, 'string-hook')).toBe(
         expectedMs,
       );
-    },
-  );
-
-  it.each(['', '   ', 'soon'])(
-    'falls back to the default for the non-numeric string %j',
-    (timeout) => {
-      expect(resolveCommandHookTimeoutMs(timeout, 'string-hook')).toBe(600_000);
     },
   );
 });
