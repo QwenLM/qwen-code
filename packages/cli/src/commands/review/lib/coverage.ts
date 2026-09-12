@@ -186,6 +186,53 @@ export const READ_NOTHING_CLASSES = new Set<ChunkFailureClass>([
   'unopened',
 ]);
 
+/**
+ * The causes that ASSERT a read happened. `declared-uncoverable` is the only
+ * one: an admitted declaration is an agent reporting what it found in the
+ * window it was pointed at. `rewritten-prompt` asserts nothing either way —
+ * it is a fact about the launch, not about the reading — which is why it
+ * cannot be read as the negation of "read nothing".
+ */
+const READ_SOMETHING_CLASSES = new Set<ChunkFailureClass>([
+  'declared-uncoverable',
+]);
+
+/**
+ * Did this chunk's agents read nothing? THE definition, for every channel.
+ *
+ * Three channels state this fact — `check-coverage`'s stderr line, the
+ * posted body's `Not reviewed:` sentence, and `verdictLine`'s cap reason —
+ * and the previous round gave them one SET to consult while leaving each to
+ * spell its own predicate over it. That is how `every` and `some` diverge:
+ * a chunk carrying `[idle, rewritten-prompt]` reads as "nothing was read"
+ * under one and "something was read" under the other, and the `every`
+ * spelling printed "their reads could not be accepted" directly beneath the
+ * line saying the agent made no tool call (R36-1).
+ *
+ * Reads the FACT axis (`causes`), not the repair axis (`classification`):
+ * `classify()` collapses the cause set by which repair subsumes which, so
+ * the same chunk reports `rewritten-prompt`, which answers a different
+ * question. A chunk read nothing when something it carries says so and
+ * nothing it carries says otherwise. With no named cause at all the
+ * collapsed class is `no-agent` or `unknown`, which answer this directly.
+ */
+export function chunkReadNothing(item: {
+  classification?: ChunkFailureClass;
+  causes?: readonly ChunkFailureClass[];
+}): boolean {
+  const causes = item.causes ?? [];
+  if (causes.length > 0) {
+    return (
+      causes.some((c) => READ_NOTHING_CLASSES.has(c)) &&
+      !causes.some((c) => READ_SOMETHING_CLASSES.has(c))
+    );
+  }
+  return (
+    item.classification !== undefined &&
+    READ_NOTHING_CLASSES.has(item.classification)
+  );
+}
+
 /** One planned chunk's entry in the coverage ledger. */
 export interface ChunkCoverageItem {
   id: number;
@@ -217,6 +264,23 @@ export interface ChunkCoverageItem {
    * diagnostic, never credit.
    */
   agents: string[];
+  /**
+   * Every cause this walk recorded for the chunk, unordered and uncollapsed
+   * — the FACT axis, beside `classification`'s REPAIR axis.
+   *
+   * `classify()` ranks the causes by which repair subsumes which and reports
+   * the winner, which is the right answer for "what should the operator do".
+   * It is the wrong answer for "did anyone read these lines": a chunk whose
+   * agent made zero tool calls AND was launched on a prompt the run never
+   * built collapses to `rewritten-prompt`, and every consumer reading the
+   * collapsed class as a fact printed "their reads could not be accepted"
+   * directly beneath the line saying that agent read nothing (R36-1).
+   *
+   * So the two axes are carried separately rather than one being derived
+   * from the other. Set only where `classification` is — on `missing` and
+   * `uncoverable` — and empty when the walk recorded no named cause.
+   */
+  causes?: ChunkFailureClass[];
 }
 
 /**
@@ -1013,6 +1077,25 @@ export function coverageFromTranscripts(
     assignedChunkTotal(rec) === plan.chunks.length &&
     markedOfThisPlan(rec.launchPrompt) &&
     declarationStillOnTerritory(pointedAt(rec.launchPrompt, plan), chunkId);
+  /**
+   * Do these reads REACH the chunk's lines — overlap, not containment?
+   *
+   * The geometry alone, shared by the two callers whose fail-open POLICIES
+   * differ: naming must not fail open on absent reads, the credit veto must.
+   * Spelled twice, the geometry drifted into containment once already and
+   * excluded every agent that paged its chunk (R37-2); spelled once, only
+   * the policies are per-site, and they are the part that genuinely differs.
+   */
+  const readsReachChunk = (
+    reads: ReadonlyArray<[number, number]>,
+    chunkId: number,
+  ): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    if (c === undefined) return false;
+    return merge([...reads]).some(
+      ([s, e]) => s <= c.endLine && e >= c.startLine,
+    );
+  };
   const noteChunkAgent = (
     rec: AgentRecord,
     c: number | null,
@@ -1049,9 +1132,29 @@ export function coverageFromTranscripts(
     // split left for it to protect — name the assigned owners, and the
     // class reads `unknown` (the run cannot say) rather than sending the
     // operator to a relaunch (audit finding on R34-4's fix).
+    // The COUNT conjunct, with the same distinction the token one got. A
+    // stale `of M` is evidence the launch was written against another
+    // chunking — but it is not evidence about THIS record when the record's
+    // own reads demonstrably reach this chunk's lines. Refusing to name it
+    // put `no-agent` ("no record in this run was assigned to the chunk at
+    // all") one line below a report that names that very agent, and drove
+    // the stderr and verdict sentences to "Nobody read those lines" over
+    // lines the record read exactly (R37-1).
+    //
+    // The sibling shape the count conjunct is FOR keeps its answer: a stale
+    // record that read elsewhere, or read nothing at all, reaches none of
+    // these lines and is still refused — which is the pinned stale-idle
+    // case, whose reads are empty and whose window is 700 lines away. So
+    // the escape needs REACHED, with no fail-open on absent reads: an
+    // empty `diffReads` proves nothing about which plan this record served.
+    const countAgrees = assignedChunkTotal(rec) === plan.chunks.length;
+    // No fail-open on absent reads: an empty `diffReads` proves nothing
+    // about which plan this record served.
+    const reachedTheseLines =
+      rec.diffReads.length > 0 && readsReachChunk(rec.diffReads, c);
     if (
       !plan.chunks.some((k) => k.id === c) ||
-      assignedChunkTotal(rec) !== plan.chunks.length ||
+      (!countAgrees && !reachedTheseLines) ||
       // Marker ABSENCE is not marker MISMATCH, and only the second says the
       // record was sent for another plan's lines. A launch that keeps this
       // plan's identity line and `of M` count but lost its `Plan identity:`
@@ -1485,6 +1588,23 @@ export function coverageFromTranscripts(
     unreadableMemo.set(chunkId, answer);
     return answer;
   };
+  /**
+   * Did this record's reads REACH the chunk's lines at all?
+   *
+   * The veto's bar, deliberately weaker than `declarerReadItsChunk`'s
+   * containment: paging is how a large chunk is read, and a pager reaches
+   * its lines without any one read spanning them. Same two fail-open arms,
+   * so the shapes those protect are unchanged.
+   */
+  const declarerTouchedItsChunk = (
+    rec: AgentRecord,
+    chunkId: number,
+  ): boolean => {
+    if (rec.diffReads.length === 0) return true;
+    if (chunkTruncatableByPlan(chunkId)) return true;
+    return readsReachChunk(rec.diffReads, chunkId);
+  };
+
   const unanimouslyDeclared = (chunkId: number): boolean => {
     const ownAgents = records.filter(
       (r) =>
@@ -1498,15 +1618,27 @@ export function coverageFromTranscripts(
         // declare (audit of R34-6). Excluded from BOTH sides of the
         // unanimity — it is neither a declarer nor the repair.
         r.diffToolCalls > 0 &&
-        // And the same predicate the declaration arm uses, not a weaker
-        // spelling of it: a record whose ranged reads avoid the chunk is a
-        // whiff the arm itself refuses, and letting it veto a returned
-        // spanning reader's credit contradicts the paragraph above. Reused
-        // rather than re-spelled, so the two bars cannot drift apart again
-        // (R36-8). It fails OPEN on a limit-less read and on a chunk the
-        // plan proves unspannable, which is exactly what keeps the honest
-        // declarer in the unanimity set.
-        declarerReadItsChunk(r, chunkId) &&
+        // Reached the chunk's lines AT ALL — overlap, not containment.
+        //
+        // `declarerReadItsChunk` was reused here for R36-8, and it was the
+        // wrong bar by one word: that predicate asks whether a read SPANNED
+        // the window, which is what the declaration arm needs (an honest
+        // declarer is pointed at its whole chunk). The veto needs the
+        // weaker question this filter's own paragraph promises — did the
+        // record reach those lines at all — because an agent that PAGES its
+        // chunk reaches them without any single read spanning them. Measured,
+        // two honest declarers paging a 101-200 chunk at `offset=100,
+        // limit=50` were both excluded, `ownAgents` came back empty, the veto
+        // never fired, and a whole-diff read certified the chunk: `ok: true`,
+        // nothing disclosed, over a chunk both of its own agents reported
+        // unreadable (R37-2).
+        //
+        // The two fail-open arms are kept deliberately: a limit-less read
+        // (`diffReads` empty) and a chunk the plan proves unspannable both
+        // leave the honest declarer in the set, exactly as the span test did.
+        // A read that does not overlap at all — the `[0,50]`-against-101-200
+        // whiff — is still excluded, which is the pinned case.
+        declarerTouchedItsChunk(r, chunkId) &&
         // Sealed like every other arm that lets a declaration reach a
         // verdict: a record from an earlier chunking carries an id that can
         // collide with a planned one, and a STALE declaration must not veto
@@ -1854,7 +1986,23 @@ export function coverageFromTranscripts(
     const declaringOwnChunk =
       rec.returned &&
       (chunk !== null
-        ? chunkTruncatableByPlan(chunk) && declaresOwnUncoverable(rec, chunk)
+        ? chunkTruncatableByPlan(chunk) &&
+          declaresOwnUncoverable(rec, chunk) &&
+          // Pointed at its chunk ALONE — the same scope its chunk-less twin
+          // carries, and the reason that twin was written with it. Without
+          // it the bypass admitted a pasted-two-blocks launch that made ZERO
+          // diff calls: the `unopened` arm's `continue` was skipped, the
+          // record walked to the credit gate, and its told-range presumption
+          // certified the NEIGHBOURING chunk it had never opened — `covered`
+          // with `agents: []`, and `missingChunks` never asked for it
+          // (R37-3). A launch this CLI built spells exactly its own window,
+          // so the verbatim shape this bypass exists for is contained by
+          // construction and is unaffected.
+          told.length > 0 &&
+          told.every(([s, e]) => {
+            const dc = plan.chunks.find((k) => k.id === chunk);
+            return dc !== undefined && s >= dc.startLine && e <= dc.endLine;
+          })
         : // The chunk-LESS twin of the same agent. The orchestrator
           // paraphrased the identity line, so the assignment grammar
           // refused it — nothing else about the record changed: the plan
@@ -2625,6 +2773,12 @@ export function coverageFromTranscripts(
     }
     return 'unknown';
   };
+  /** The uncollapsed cause set, in the vocabulary's own order for stability. */
+  const causesOf = (id: number): ChunkFailureClass[] => {
+    const seen = chunkCauses.get(id);
+    if (seen === undefined || seen.size === 0) return [];
+    return CHUNK_FAILURE_CLASSES.filter((c) => seen.has(c));
+  };
   // Sorted by id, not left in plan order: the doc on `chunkItems` promises it,
   // and `chunkIdsProblem` requires ids to be unique positive integers without
   // requiring them to be ASCENDING. A hand-written or reordered plan would
@@ -2640,6 +2794,7 @@ export function coverageFromTranscripts(
           files,
           outcome: 'uncoverable' as const,
           classification: classify(id),
+          causes: causesOf(id),
           agents,
         };
       }
@@ -2658,6 +2813,7 @@ export function coverageFromTranscripts(
         files,
         outcome: 'missing' as const,
         classification: classify(id),
+        causes: causesOf(id),
         agents,
       };
     });
@@ -3095,12 +3251,28 @@ export interface VerificationReport {
     /**
      * True when the gap is a tier's BY-DESIGN omission rather than a
      * repairable floor failure — the balanced (medium) tier's skipped
-     * reverse audit. No verification clears it and no repair lifts it,
-     * so `compose-review` routes the cap it fires onto the posture axis
-     * instead of sending an automated caller to relaunch verification
-     * against a permanently uncleared axis.
+     * reverse audit. It says the run's SCOPE is still proven: the diff was
+     * read in full, only the second look was skipped. `compose-review`
+     * reads it for the ledger anchor (`scopeUnproven`) and for the
+     * bare-subject echo exemption, where "is there an auditor that could
+     * have whiffed" is the question.
      */
     byDesign?: boolean;
+    /**
+     * True when NO repair can lift the gap — the axis question, which is
+     * not the scope question.
+     *
+     * Every `byDesign` gap is also `noRepair`, but not the reverse: the
+     * focused-navigation profile's gap is pushed unconditionally whenever
+     * the plan carries the profile, so no verification clears it either —
+     * and yet its scope IS unproven, because that profile reviews part of
+     * the change on purpose. Marking it `byDesign` to fix the axis would
+     * have granted it the ledger anchor and falsified the documented
+     * premise that the profile withholds the anchor on every round (R37-4).
+     * Two facts, two flags: `compose-review` routes the cap's AXIS on this
+     * one and leaves the anchor to `byDesign`.
+     */
+    noRepair?: boolean;
   }>;
   /**
    * The per-shape fix for each gap, in the same order — for stderr, where the
@@ -3458,6 +3630,7 @@ export function verificationGaps(
       reasonZh:
         '未运行——均衡（medium）档跳过二次审查步骤，因此本次判定上限为 Comment，不会 Approve',
       byDesign: true,
+      noRepair: true,
     });
   }
 
@@ -3472,6 +3645,11 @@ export function verificationGaps(
       subjectZh: '完整审查与反向审计',
       reasonZh:
         '本次仅覆盖静态导航改动，发现仍需独立验证，因此无法认证 Approve',
+      // Not `byDesign`: this profile's SCOPE is deliberately partial, so the
+      // anchor stays withheld. But the gap is pushed unconditionally, so no
+      // repair lifts it either — and an automated caller told to relaunch
+      // verification against it is being sent at a cap that cannot move.
+      noRepair: true,
     });
   }
   return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };

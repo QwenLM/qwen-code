@@ -724,6 +724,29 @@ describe('focused navigation publishing', () => {
     },
   );
 
+  it('routes its permanently-uncleared cap onto posture, and still withholds the anchor', () => {
+    // Two facts that were riding one flag. The profile's gap is pushed
+    // unconditionally whenever the plan carries it, so no verification lifts
+    // it — a posture fact — yet it landed on the `verification` axis, which
+    // tells an automated caller to relaunch against a cap that cannot move
+    // (R37-4). Marking it `byDesign` to fix the axis would have granted it
+    // the ledger anchor and falsified the documented premise that this
+    // profile withholds the anchor on every round, so the axis reads
+    // `noRepair` and the anchor keeps reading `byDesign`.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: focusedPlan(true),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    // The anchor stays withheld — the half that must NOT move.
+    expect(parseLedger(r.body)).not.toHaveProperty('sha');
+  });
+
   it('still requires the focused reviewer to read the diff', () => {
     const r = composeReview({
       planPath: focusedPlan(false, false),
@@ -18134,13 +18157,54 @@ describe('terminalState — coverage, not verdict', () => {
             ),
         );
       expect({ file, handSpelled }).toEqual({ file, handSpelled: [] });
-      // ...and each file does consult the shared set, so the check above is
-      // not passing because the channel disappeared.
-      expect({ file, uses: src.includes('READ_NOTHING_CLASSES') }).toEqual({
+      // ...and each file does call the shared PREDICATE, so the check above
+      // is not passing because the channel disappeared. The predicate, not
+      // the set: one round gave the three channels a shared
+      // `READ_NOTHING_CLASSES` and left each to spell its own quantifier
+      // over it, and `every` vs `some` diverged on a chunk carrying
+      // `[idle, rewritten-prompt]` (R36-1). A shared vocabulary is not a
+      // shared decision.
+      expect({ file, uses: src.includes('chunkReadNothing(') }).toEqual({
         file,
         uses: true,
       });
+      // And nobody re-derives it locally from the class set.
+      expect({ file, local: src.includes('READ_NOTHING_CLASSES') }).toEqual({
+        file,
+        local: false,
+      });
     }
+  });
+
+  it('reads the FACT axis in the verdict line too', () => {
+    // The third channel, on the axis question rather than the wording one:
+    // an idle chunk whose prompt was also rewritten collapses to
+    // `rewritten-prompt`, and reading that as a fact made `chunkGapReason`
+    // say the reads could not be credited for a chunk whose agent made no
+    // tool call (R36-1).
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 0 });
+    recordBuilt(p, 1, goodPrompt(1));
+    recordBuilt(
+      p,
+      2,
+      goodPrompt(2).replace('offset=100, limit=100', 'offset=100, limit=77'),
+    );
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    const entry = r.chunkLedger.find((i) => i.id === 2);
+    expect(entry?.classification).toBe('rewritten-prompt');
+    expect(entry?.causes).toContain('idle');
+    expect(verdictLine(r)).toContain('part of the diff was never read');
   });
 
   it('says the same thing in the body and the verdict line', () => {

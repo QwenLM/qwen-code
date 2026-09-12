@@ -408,6 +408,37 @@ function coverageTriple(verdict: Record<string, unknown>): {
         `Composed verdict.chunkLedger[${i}] is ${outcome} with no classification.`,
       );
     }
+    // The FACT axis rides across the boundary beside the repair one, and is
+    // validated the same way. Dropping it silently — which reconstructing
+    // the item field by field did — left the durable record with only the
+    // COLLAPSED class, so a caller re-deriving "did anyone read these lines"
+    // from the artifact got the repair answer to a fact question: exactly
+    // the defect `causes` was added to remove, re-entering through
+    // persistence (R36-1, undirected audit).
+    //
+    // Absent is allowed and preserved: an artifact written before the field
+    // existed carries none, and `chunkReadNothing` falls back to the class
+    // for those, which is what it did everywhere before this.
+    if (item['causes'] !== undefined) {
+      const causes = stringArray(
+        item['causes'],
+        `Composed verdict.chunkLedger[${i}].causes`,
+      );
+      const bad = causes.find(
+        (c) => !(CHUNK_FAILURE_CLASSES as readonly string[]).includes(c),
+      );
+      if (bad !== undefined) {
+        throw new Error(
+          `Composed verdict.chunkLedger[${i}].causes must each be one of ${CHUNK_FAILURE_CLASSES.join(' / ')}.`,
+        );
+      }
+      if (!needsCause && causes.length > 0) {
+        throw new Error(
+          `Composed verdict.chunkLedger[${i}] is ${outcome} but carries causes.`,
+        );
+      }
+      parsed.causes = causes as ChunkCoverageItem['causes'];
+    }
     return parsed;
   });
   // The composed result derives `terminalState` from this very ledger (and a

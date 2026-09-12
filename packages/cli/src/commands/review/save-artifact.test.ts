@@ -737,6 +737,44 @@ describe('saveReviewArtifact', () => {
       ).toEqual([...CHUNK_FAILURE_CLASSES].sort());
     });
 
+    it('carries the FACT axis across, and refuses a malformed one', () => {
+      // `causes` is the uncollapsed cause set that three channels read to
+      // answer "did anyone read these lines". Reconstructing the item field
+      // by field dropped it silently, so the durable record kept only the
+      // COLLAPSED repair class and a caller re-deriving the fact from the
+      // artifact got the repair answer — the defect `causes` exists to
+      // remove, re-entering through persistence (undirected audit of R36-1).
+      const paths = fixture();
+      const withCauses = chunkLedger.map((e) =>
+        e.outcome === 'missing' || e.outcome === 'uncoverable'
+          ? { ...e, causes: [e.classification as string] }
+          : e,
+      );
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        chunkLedger: withCauses,
+      });
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.chunkLedger,
+      ).toEqual(withCauses);
+      rmSync(paths.out, { force: true });
+
+      // Out of vocabulary is refused like every sibling field.
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        chunkLedger: chunkLedger.map((e) =>
+          e.outcome === 'missing' ? { ...e, causes: ['not-a-class'] } : e,
+        ),
+      });
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/causes/);
+      expect(existsSync(paths.out)).toBe(false);
+    });
+
     it('accepts an old composed file carrying none of the three, preserving the absence', () => {
       // The base fixture models a pre-feature artifact. Acceptance is not
       // enough — defaulting the absence would invent a run state out of a

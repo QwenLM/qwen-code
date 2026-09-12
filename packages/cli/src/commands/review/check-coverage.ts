@@ -38,7 +38,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   ChunkPartitionError,
   coverageFromTranscripts,
-  READ_NOTHING_CLASSES,
+  chunkReadNothing,
   TranscriptsUnavailableError,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
@@ -77,11 +77,9 @@ function readWhatHappened(report: {
   missingChunks: readonly number[];
   chunkItems: readonly ChunkCoverageItem[];
 }): string {
-  const classOf = (id: number) =>
-    report.chunkItems.find((i) => i.id === id)?.classification;
   const readNothing = report.missingChunks.filter((id) => {
-    const cls = classOf(id);
-    return cls !== undefined && READ_NOTHING_CLASSES.has(cls);
+    const item = report.chunkItems.find((i) => i.id === id);
+    return item !== undefined && chunkReadNothing(item);
   }).length;
   if (readNothing === report.missingChunks.length) {
     return `Nobody read those lines. `;

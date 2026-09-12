@@ -3140,6 +3140,89 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     }
   });
 
+  it('scopes the assigned declarer bypass to the chunk it declared', () => {
+    // The bypass skips the `unopened` arm for the one shape the template is
+    // handed to. Unscoped on the assigned side, a pasted-two-blocks launch
+    // that made ZERO diff calls rode it to the credit gate and certified the
+    // NEIGHBOURING chunk off its told-range presumption — `covered` with
+    // `agents: []`, and `missingChunks` never asked for it (R37-3). A launch
+    // this CLI builds spells exactly its own window, so the shape the bypass
+    // exists for is contained by construction.
+    const p = plan(2, { longLineChunk: 2 });
+    transcript(
+      'a2',
+      good(2) + `\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      {
+        calls: 0,
+        opens: [chunkBrief(2)],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).not.toContain(1);
+    expect(r.unopenedAgents).toEqual(['chunk 2']);
+
+    // The control the bypass is for: the verbatim built launch, same zero
+    // calls, still admitted.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a2.jsonl'));
+    transcript('a2', good(2), {
+      calls: 0,
+      opens: [chunkBrief(2)],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    const c = coverageFromTranscripts(p, ENV);
+    expect(c.uncoverableChunks).toEqual([2]);
+    expect(c.unopenedAgents).toEqual([]);
+  });
+
+  it('reads the FACT axis, not the collapsed repair class', () => {
+    // `classify()` ranks causes by which repair subsumes which, so an idle
+    // chunk whose prompt was also rewritten reports `rewritten-prompt`.
+    // Reading that as a fact printed "their reads could not be accepted"
+    // directly beneath "made no tool call — chunk 2. They read nothing."
+    // (R36-1). `causes` carries the uncollapsed set beside it.
+    const p = plan(2, { maxLineChars: 42 });
+    built(
+      p,
+      2,
+      good(2).replace('offset=100, limit=100', 'offset=100, limit=77'),
+    );
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    // The repair axis keeps its precedence value...
+    expect(entry?.classification).toBe('rewritten-prompt');
+    // ...and the fact axis carries both.
+    expect(entry?.causes).toEqual(['idle', 'rewritten-prompt']);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+      const line = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.includes('chunk(s) were not reviewed'));
+      expect(line).toContain('Nobody read those lines');
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  });
+
   it('says "nobody read" for every class whose own doc says nothing was read', () => {
     // The split was keyed on `no-agent` alone, so `blind-prompt`, `idle` and
     // `unopened` — the three classes the ledger itself documents as having
@@ -3736,6 +3819,41 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(after.missingChunks).toEqual([]);
     expect(after.rewrittenPrompts.join(' ')).not.toContain('cannot place');
     expect(after.ok).toBe(true);
+  });
+
+  it('vetoes for declarers that PAGED their chunk, not only spanned it', () => {
+    // The veto reused `declarerReadItsChunk`, whose bar is containment —
+    // right for the declaration arm, wrong here. An agent that pages a large
+    // chunk reaches its lines without any one read spanning them, so both
+    // honest declarers were excluded, `ownAgents` came back empty, the veto
+    // never fired, and a whole-diff read certified the chunk: `ok: true`,
+    // nothing disclosed (R37-2). Asserted against the spanning twin, so what
+    // is pinned is that paging and spanning land the same place.
+    const run = (range: [number, number]) => {
+      const p = plan(2, { maxLineChars: 0 });
+      transcript('a1', good(1), { calls: 2 });
+      for (const id of ['a2', 'a2b']) {
+        transcript(id, good(2), {
+          calls: 1,
+          range,
+          text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+        });
+      }
+      transcript('w1', wholeDiff(), {
+        ranges: [
+          [0, 100],
+          [100, 100],
+        ],
+      });
+      const r = coverageFromTranscripts(p, ENV);
+      for (const f of readdirSync(join(dir, 'subagents', 'S1'))) {
+        rmSync(join(dir, 'subagents', 'S1', f));
+      }
+      return { ok: r.ok, covered: r.coveredChunks, missing: r.missingChunks };
+    };
+    const paging = run([100, 50]);
+    expect(paging).toEqual({ ok: false, covered: [1], missing: [2] });
+    expect(run([100, 100])).toEqual(paging);
   });
 
   it('a declarer whose reads avoid the chunk does not veto a spanning reader', () => {
@@ -4753,6 +4871,56 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('uncoverable');
     expect(entry?.classification).toBe('declared-uncoverable');
+  });
+
+  it('names an owner whose `of M` is stale but whose reads hit the window', () => {
+    // The third conjunct of the same seal. Membership and the token were
+    // widened for naming (R36-2); the COUNT was not, so a launch the CLI
+    // built with its identity line hand-edited `of 2` -> `of 9` was refused
+    // a name — `classify()` answered `no-agent` ("no record in this run was
+    // assigned to the chunk at all") one line below a report naming that
+    // agent, and both sentence channels said nobody read lines the record
+    // read exactly (R37-1).
+    const p = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2).replace('chunk 2 of 2', 'chunk 2 of 9'), {
+      calls: 1,
+      range: [100, 100],
+      opens: [chunkBrief(2)],
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.chunkItems.find((i) => i.id === 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'unknown',
+      agents: ['chunk 2'],
+    });
+    // Credit is untouched — naming is diagnostic, never credit.
+    expect(r.coveredChunks).toEqual([1]);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+      const line = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.includes('chunk(s) were not reviewed'));
+      expect(line).not.toContain('Nobody read those lines');
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 
   it('names the owner of a window a shrinking re-plan moved — not `no-agent`', () => {

@@ -33,7 +33,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
   ChunkPartitionError,
-  READ_NOTHING_CLASSES,
+  chunkReadNothing,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
@@ -5180,6 +5180,12 @@ function composeReviewBody(
   // but no repair lifts that cap and no verification clears it — the axis
   // view below routes it to posture, not verification.
   const byDesignFloorEntries = new Set<(typeof coverageEntries)[number]>();
+  /**
+   * Floor entries no repair can lift — the AXIS question. A superset of
+   * `byDesignFloorEntries`, which answers the SCOPE question; see the
+   * `noRepair` docblock in `lib/coverage.ts` (R37-4).
+   */
+  const noRepairFloorEntries = new Set<(typeof coverageEntries)[number]>();
   // The budget-stop marker: when the reverse-audit round builder refused a
   // round on the review's time budget, it recorded the refusal beside the
   // prompt records. Synthesizing the disclosure from the marker makes the
@@ -6092,6 +6098,7 @@ function composeReviewBody(
         coverageEntries.push(entry);
         verificationFloorEntries.add(entry);
         if (gap.byDesign === true) byDesignFloorEntries.add(entry);
+        if (gap.noRepair === true) noRepairFloorEntries.add(entry);
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
@@ -6565,7 +6572,11 @@ function composeReviewBody(
       ? 'coverage'
       : nonBudgetCoverageEntries.length > 0 &&
           nonBudgetCoverageEntries.every((entry) =>
-            byDesignFloorEntries.has(entry),
+            // The AXIS reads `noRepair`, not `byDesign`: a cap no repair can
+            // lift is a posture fact whether or not the run's scope was
+            // proven, and routing it to `verification` sends an automated
+            // caller to relaunch against a cap that cannot move (R37-4).
+            noRepairFloorEntries.has(entry),
           ) &&
           nonEchoedDimensionGaps.every(
             (entry) =>
@@ -7404,8 +7415,8 @@ function composeReviewBody(
       // definition with three homes is what let this family drift in the
       // first place. One home, three readers.
       const everyOneUnlaunched = unexplainedReceipts.every((id) => {
-        const cls = chunkLedger.find((i) => i.id === id)?.classification;
-        return cls !== undefined && READ_NOTHING_CLASSES.has(cls);
+        const item = chunkLedger.find((i) => i.id === id);
+        return item !== undefined && chunkReadNothing(item);
       });
       notReviewedParts.push(
         coverageSealRefusedAll
@@ -9977,8 +9988,8 @@ export function buildLedger(
  * something this run could not accept". Measured, one run said "no read of
  * it could be accepted for this plan" in its body and "part of the diff was
  * never read" in its verdict line, about the same chunk (undirected audit of
- * R36-1). All three now read `READ_NOTHING_CLASSES`, which is defined once
- * beside the vocabulary it is a subset of.
+ * R36-1). All three now call `chunkReadNothing`, the one predicate, which
+ * reads the FACT axis (`causes`) rather than the collapsed repair class.
  *
  * A mixed set claims neither, for the reason the stderr twin does: the cap
  * covers a LIST, and no single clause is true of one holding both kinds.
@@ -9991,11 +10002,7 @@ function chunkGapReason(r: ComposeReviewResult): string {
   // An artifact written before the ledger existed carries none, and an
   // absent ledger cannot contradict the older sentence — keep it.
   if (missing.length === 0) return 'part of the diff was never read';
-  const readNothing = missing.filter(
-    (i) =>
-      i.classification !== undefined &&
-      READ_NOTHING_CLASSES.has(i.classification),
-  ).length;
+  const readNothing = missing.filter((i) => chunkReadNothing(i)).length;
   if (readNothing === missing.length) return 'part of the diff was never read';
   if (readNothing === 0) {
     return 'part of the diff was read but could not be credited to this plan';
