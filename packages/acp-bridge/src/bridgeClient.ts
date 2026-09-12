@@ -22,6 +22,8 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
@@ -828,11 +830,14 @@ export class BridgeClient implements Client {
      * Called by the A2 `current_mode_update` demux when the agent
      * switches approval mode in-session (exit_plan_mode, ProceedAlways,
      * /mode). `previous` is read from the bridge state cache.
+     * `planExecutionMode` is the validated non-Plan execution policy while
+     * modeId is Plan; undefined outside Plan or when no valid policy is sent.
      */
     private readonly onModePromoted?: (
       entry: BridgeClientSessionEntry,
       modeId: string,
       originatorClientId: string | undefined,
+      planExecutionMode?: string,
     ) => void,
     /**
      * Reverse tool channel (issue #5626, Phase 2). Resolves the
@@ -1961,12 +1966,27 @@ export class BridgeClient implements Client {
       );
     }
     const model = params['model'];
+    const groupId = params['groupId'];
+    if (model !== undefined && !isValidCronTaskRoutingId(model)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`model\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters`,
+      );
+    }
+    if (
+      groupId !== undefined &&
+      (!isScheduledTaskRunSource(source) || !isValidCronTaskRoutingId(groupId))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`groupId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters and is only supported for scheduled-task runs`,
+      );
+    }
     const result = await this.onCreateSubSession({
       prompt,
       completion,
-      ...(typeof model === 'string' && model.length > 0 && model.length <= 128
-        ? { model }
-        : {}),
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...source,
       callerSessionId,
@@ -2226,17 +2246,37 @@ export class BridgeClient implements Client {
     ) {
       return;
     }
+    if (method === 'qwen/notify/session/sources-changed') {
+      const sessionId = params['sessionId'];
+      const revision = params['revision'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof revision !== 'number' ||
+        !Number.isSafeInteger(revision) ||
+        revision < 0 ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'source_changed',
+        data: { sessionId, revision },
+      });
+      return;
+    }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
-        // Sessions the child claims but this channel does not own are dropped
-        // rather than rejecting the whole snapshot: the rest of it is still
-        // usable, and a channel must never influence another channel's state.
+        // Retain rows while a Session is registering so the bridge can apply
+        // a report that races the newSession response.
         this.onActiveWork?.({
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
           seq: snapshot.seq,
-          sessions: snapshot.sessions.filter((session) =>
-            this.ownsSession(session.sessionId),
+          sessions: snapshot.sessions.filter(
+            (session) =>
+              this.ownsSession(session.sessionId) ||
+              this.hasSessionSpawnInFlight(),
           ),
         });
       }
@@ -2867,6 +2907,14 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    const selected = params['planExecutionMode'];
+    const planExecutionMode =
+      currentModeId === 'plan' &&
+      typeof selected === 'string' &&
+      selected !== 'plan' &&
+      KNOWN_APPROVAL_MODES.has(selected)
+        ? selected
+        : undefined;
     const entry = this.resolveEntry(sessionId);
     if (!entry) {
       writeStderrLine(
@@ -2885,6 +2933,7 @@ export class BridgeClient implements Client {
         entry,
         currentModeId,
         entry.activePromptOriginatorClientId,
+        planExecutionMode,
       );
     } else {
       // Fallback path (no `onModePromoted` injected — tests / non-bridge
@@ -2908,6 +2957,7 @@ export class BridgeClient implements Client {
           previous: 'default',
           next: currentModeId,
           persisted: false,
+          ...(planExecutionMode ? { planExecutionMode } : {}),
         },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }

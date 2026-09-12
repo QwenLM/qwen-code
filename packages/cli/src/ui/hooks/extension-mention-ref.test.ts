@@ -282,7 +282,7 @@ describe('buildExtensionContextText', () => {
     });
     const text = buildExtensionContextText(ext);
     expect(text).toContain('Available capabilities');
-    expect(text).toContain('Skills: skill-a, skill-b');
+    expect(text).toContain('Skills: full:skill-a, full:skill-b');
     expect(text).toContain('MCP Servers: server-1, server-2');
     expect(text).toContain('Agents: agent-x');
   });

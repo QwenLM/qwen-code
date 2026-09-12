@@ -229,6 +229,8 @@ export interface BridgeTelemetry {
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
+  /** Captured owner runtime for saved webpage bytes and references. */
+  artifactSnapshotRuntimeBaseDir?: string;
   /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp
@@ -711,6 +713,8 @@ export interface CreateSubSessionInfo {
   completion: 'sent' | 'first-turn';
   /** Optional model service id for the sub-session (falls back to default). */
   model?: string;
+  /** Optional named group for a scheduled-task run session. */
+  groupId?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
   /** Optional immutable creator attribution for the fresh session. */

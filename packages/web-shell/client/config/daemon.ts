@@ -45,7 +45,8 @@ function readStoredDaemonToken(): string | undefined {
   }
 }
 
-function persistDaemonToken(token: string): void {
+export function persistDaemonToken(token: string): void {
+  cachedDaemonToken = token;
   try {
     window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
   } catch {
@@ -54,27 +55,54 @@ function persistDaemonToken(token: string): void {
   }
 }
 
+/**
+ * The one parse of the URL token grammar: `#token=` (preferred — unlike a
+ * query param it is never sent to the server, so it stays out of access logs
+ * and Referer headers; this is what `qwen serve --open` uses) with `?token=`
+ * as legacy fallback (the dev launcher, hand-built URLs). Shared by
+ * `getDaemonToken()` (which caches and persists the result) and
+ * `hasReloadSurvivableDaemonToken()` (which must not touch the cache), so the
+ * accepted spellings can never drift apart.
+ */
+function readTokenFromLocation(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const fromHash = new URLSearchParams(
+    window.location.hash.replace(/^#/, ''),
+  ).get('token');
+  return (
+    fromHash ||
+    new URLSearchParams(window.location.search).get('token') ||
+    undefined
+  );
+}
+
+/**
+ * Whether a fresh load of this page could still authenticate: a token in the
+ * URL or in the per-tab persisted copy survives a reload. Retry affordances
+ * that reload the page must check this first — when the token lives only in
+ * this module's memory (URL stripped at boot, persist threw), a reload
+ * strands the shell unauthenticated. Must not consult `getDaemonToken()`:
+ * its in-memory cache always reports a token after boot.
+ */
+export function hasReloadSurvivableDaemonToken(): boolean {
+  return (
+    readTokenFromLocation() !== undefined ||
+    readStoredDaemonToken() !== undefined
+  );
+}
+
 export function getDaemonToken(): string | undefined {
   if (cachedDaemonToken) return cachedDaemonToken;
   if (typeof window === 'undefined') {
     return undefined;
   }
-  // Prefer the URL fragment (#token=) — unlike a ?token= query it is never
-  // sent to the server, so it stays out of access logs and Referer headers
-  // (this is what `qwen serve --open` now uses). Fall back to ?token= for
-  // backward compatibility (e.g. the dev launcher / hand-built URLs).
-  const fromHash = new URLSearchParams(
-    window.location.hash.replace(/^#/, ''),
-  ).get('token');
-  const fromUrl =
-    fromHash || new URLSearchParams(window.location.search).get('token') || '';
+  const fromUrl = readTokenFromLocation();
   if (fromUrl) {
     // Persist per-tab so the token survives navigations that do not carry it.
     // sessionStorage (not localStorage) keeps the token scoped to this tab and
     // cleared when the tab closes.
     persistDaemonToken(fromUrl);
-    cachedDaemonToken = fromUrl;
-    return cachedDaemonToken;
+    return fromUrl;
   }
   // Refresh path: the URL was already cleaned on the first load — fall
   // back to the per-tab persisted copy.
@@ -131,7 +159,6 @@ export function waitForDaemonTokenMessage(
 
 export function removeDaemonTokenFromUrl(): void {
   if (typeof window === 'undefined') return;
-  if (import.meta.env.DEV) return;
   const url = new URL(window.location.href);
   let changed = false;
   if (url.searchParams.has('token')) {

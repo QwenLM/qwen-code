@@ -27,8 +27,6 @@ import {
   PollingChannelBase,
   sanitizeDisplayText,
   sanitizeLogText,
-  sanitizePromptText,
-  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
@@ -523,7 +521,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,
@@ -1420,7 +1417,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? await this.fetchPrMeta(ctx)
         : await this.fetchIssueMeta(ctx);
     const title = meta.title || ctx.subjectTitle;
-    const displayTitle = truncateCodePoints(sanitizePromptText(title), 500);
     const details =
       reason === 'review_requested'
         ? `Author: ${meta.user?.login || 'unknown'} | State: ${meta.state || 'unknown'} | Draft: ${meta.draft ? 'true' : 'false'} | Branch: ${meta.head?.ref || 'unknown'} → ${meta.base?.ref || 'unknown'}`
@@ -1438,10 +1434,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
-      displayText:
-        reason === 'review_requested'
-          ? `Review requested: ${displayTitle}`
-          : `Issue assigned: ${displayTitle}`,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1461,7 +1453,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
@@ -1469,18 +1461,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.gate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const comments = newComments
+      .map((comment) => ({ comment, body: (comment.body || '').trim() }))
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1491,7 +1484,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
-      displayText: summary,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1499,7 +1491,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });

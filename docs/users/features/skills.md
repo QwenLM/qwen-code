@@ -25,6 +25,8 @@ If you want to invoke a Skill explicitly, type it as a slash command using the S
 
 Start typing `/` to autocomplete and browse available Skills alongside their descriptions. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively.
 
+`<skill-name>` is always the Skill's registered name. For a Skill from an installed extension that name carries its owner — `rust:pdf`, not `pdf` — so you type `/rust:pdf`. See [How extension Skills are named](#how-extension-skills-are-named).
+
 > **Note:** If you previously ran a Skill with `/skills <skill-name>`, that syntax now just opens the Skills panel and ignores the trailing argument. Use `/<skill-name>` to run a Skill directly.
 
 ### Benefits
@@ -133,7 +135,7 @@ Show concrete examples of using this Skill.
 
 Qwen Code currently validates that:
 
-- `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time.
+- `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time. The admitted `:` is what lets a Skill registered by an extension (`rust:pdf`) and an author who chooses a colon themselves (`rust:chat`, written inside the `rust` extension) share one pattern, so a colon in a registered name is not proof of an owner — see [How extension Skills are named](#how-extension-skills-are-named).
 - `description` is a non-empty string
 - `priority` is optional. When present, it must be a finite number. Higher values sort earlier in the `/skills` listing only — slash-command completion (typing `/`) and the `/help` custom commands view stay alphabetical, so a high-priority Skill never reorders built-in commands. Omitted or invalid values are treated as unset, which behaves like `0`.
 
@@ -190,6 +192,46 @@ disable-model-invocation: true
 
 You can combine both fields, but then the Skill is not reachable through the normal user or model invocation paths.
 
+### Optional: enforce a rule deterministically (`hooks:`)
+
+Everything in a `SKILL.md` body is an instruction to the model: it is prompt text, so following it depends on the model. When a rule must hold no matter what the model decides — refuse to run unless a required value was injected, never touch a protected path — declare a [hook](hooks.md) in the frontmatter instead. Hooks run as code, so they do not depend on the model's cooperation:
+
+```yaml
+---
+name: gated-skill
+description: Calls the downstream CLI using a runtime-injected session ID
+hooks:
+  PreToolUse:
+    - matcher: run_shell_command
+      hooks:
+        - type: command
+          command: '"$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"'
+---
+```
+
+`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. The command string is handed to a shell, so **keep the inner quotes**: unquoted, a project path containing a space splits into two words and the gate never runs. **Make the script executable** (`chmod +x`) too. Both mistakes fail open in the same way: the tool call proceeds, and nothing appears in the transcript or the log to say the gate did not run. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
+
+```bash
+#!/usr/bin/env bash
+if [ -z "${DOWNSTREAM_SESSION_ID:-}" ]; then
+  echo "Required input DOWNSTREAM_SESSION_ID is not available. Cannot proceed." >&2
+  exit 2
+fi
+exit 0
+```
+
+Notes:
+
+- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
+- Session hooks live only in memory, so resuming a session with `--continue` / `--resume` does **not** restore them, on either invocation path. The Skill's instructions can come back with the replayed conversation while the hooks meant to enforce them are gone — re-run the Skill after resuming to re-arm its gate.
+- Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
+- Always give a tool event an explicit `matcher:`. An omitted one is stored as the empty pattern, which is compiled to `^$` and matches no tool name — the hook registers and then never fires, with nothing to say so. Use `*` if you mean every tool.
+- The `command:` runs through the platform shell: `bash` on macOS and Linux, and on Windows Git Bash when it is detected (`MSYSTEM`/`TERM`), otherwise `cmd.exe` or PowerShell. The example above is POSIX shell — under `cmd.exe` `$QWEN_SKILL_ROOT` is not expanded and a `.sh` script is not executable, so the gate fails open there. A hook may set `shell: bash` to force bash, but that resolves to whatever `bash` is on `PATH`, so on Windows outside Git Bash write the gate for the shell you actually have.
+- Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there. Bare mode goes further: no Skills are discovered at all, so there is no body and no `allowedTools` either.
+- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and trust is re-read every time a hook fires and every time a permission is decided. With an IDE companion connected that value is live: revoking trust silences an already-registered gate — and suspends the Skill's `allowedTools` — at the next tool call, without a restart. Without an IDE connection the value is fixed when the CLI starts, so a change made through the CLI's own trust dialog takes effect on restart. Granting trust never retro-registers: invoke the Skill again.
+- `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
+- See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
+
 ## Add supporting files
 
 Create additional files alongside `SKILL.md`:
@@ -233,6 +275,33 @@ Extensions can provide custom skills that become available when the extension is
 Extension skills are automatically discovered and loaded when the extension is installed and enabled.
 
 To see which extensions provide skills, check the extension's `qwen-extension.json` file for a `skills` field.
+
+#### How extension Skills are named
+
+Qwen Code registers a Skill from an installed extension as `<extensionName>:<name>`, where `<extensionName>` is the `name` field of that extension's `qwen-extension.json` and `<name>` is the Skill's own frontmatter `name`. A Skill named `pdf` in the `rust` extension is registered as `rust:pdf`.
+
+The prefix is added while the Skill is loaded, not written into the file: your `SKILL.md` keeps the name you authored, and Qwen Code never recovers the authored name by splitting the registered one apart (an author may legitimately write `rust:chat` inside `rust`). Only extension Skills are prefixed — personal, project, and bundled Skills keep the single spelling you authored.
+
+Use the registered name everywhere you refer to the Skill:
+
+- Invoke it as `/rust:pdf`. The bare `/pdf` is not an alias — the extension's Skill is reachable only under its registered name.
+- The model calls it as `Skill { skill: "rust:pdf" }`, the same name it reads in `<available_skills>`.
+- Two extensions that each ship a Skill named `pdf` give you two Skills (`rust:pdf` and `docs-suite:pdf`) rather than one winning and one disappearing.
+
+The surfaces where you read and choose Skills also name the owner: the Skills panel (including the rows a setting has locked), the read-only listing a bare `/skills` prints outside the interactive UI (ACP and other non-interactive modes — interactively the command opens the panel), and the badge in the `/` command palette, which reads `[Extension: Rust]` rather than a bare `[Extension]`. Those labels prefer the extension's `displayName` and fall back to its `name` when it declares none.
+
+#### Extension Skills and the `skills.*` settings
+
+`skills.disabled`, `skills.defaultDisabled`, and `slashCommands.disabled` match an extension Skill under **either** spelling, so a `skills.disabled: ["pdf"]` you wrote before the prefix existed still hides `rust:pdf`. A restriction can only remove capability, so renaming a Skill is not allowed to lift one.
+
+`skills.enabled` is the exception, and the one visible change for an existing settings file: it grants capability, so it matches the registered name only. `skills.enabled: ["pdf"]` no longer opts an extension's `pdf` in on its own — write `skills.enabled: ["rust:pdf"]`. The one bare pair that keeps working is a pre-prefix opt-in sitting in `skills.defaultDisabled` with the same spelling: cancellation compares the entries themselves, so `defaultDisabled: ["pdf"]` + `enabled: ["pdf"]` cancels the entry — the skill then ends up enabled per the enablement stored for this workspace, else the extension's own default; for a default-off skill, write `rust:pdf` in `skills.enabled`.
+
+Toggling a Skill in the Skills panel writes the registered name and removes only that entry, so enabling `rust:pdf` leaves a legacy `disabled: ["pdf"]` untouched. When that legacy entry sits in a higher scope — system defaults, user, or system settings — the panel says so and locks the row, naming the scope to edit rather than offering a toggle that cannot move it. A legacy entry in this workspace's own settings locks the row the same way, naming the entry and its scope (`skills.disabled 'pdf' (Workspace)` or `skills.defaultDisabled 'pdf' (Workspace)`) so you know which list in which file to edit.
+
+Two limits worth knowing:
+
+- Cross-level precedence is unchanged and still compares registered names exactly (`project` > `user` > `extension` > `bundled`), so a personal or project Skill you author as `rust:pdf` outranks the extension's `pdf`. Bare-name collisions between a personal or project Skill and a bundled Skill are likewise still settled by that precedence, not by the prefix. A Skill that collides with a custom command is not — on the slash surface the last loader wins, and custom commands load after Skills, so `/pdf` runs the custom command while the Skill stays available to the model.
+- Skill names are also used as filenames: the file a Skill reads its invocation arguments from replaces every character outside `[A-Za-z0-9._-]` with `_`, so an extension Skill registered as `rust:pdf` and a personal or project Skill authored `rust_pdf` both resolve to `qwen-skill-args-rust_pdf.txt` and share one arguments file. (The prefix rarely collides with itself — `rust:rust_pdf` becomes `rust_rust_pdf` — but extension names may contain `_`, so `rust_pdf:x` and `rust:pdf_x` fold to the same filename.) Non-ASCII letters fold the same way, so an authored `café` and an authored `caf_` land on `caf_` too — a limitation that predates the prefix, which only makes it easier to hit. Avoid a Skill name that is another name with `:` turned into `_`.
 
 To view available Skills, ask Qwen Code directly:
 

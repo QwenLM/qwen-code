@@ -159,6 +159,167 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds continuation admission to the session without waiting for SSE', async () => {
+    const body = {
+      accepted: true,
+      interruption: 'interrupted_turn',
+      promptId: 'continue-1',
+      lastEventId: 12,
+      eventEpoch: 'epoch-1',
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+      lastEventId: 20,
+      eventEpoch: 'epoch-1',
+    });
+
+    await expect(session.continueSession()).resolves.toEqual(body);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      url: 'http://daemon/session/s-1/continue',
+      headers: { 'x-qwen-client-id': 'client-1' },
+    });
+    expect(session.lastEventId).toBe(20);
+    expect(pendingPromptIds(session)).toEqual([]);
+  });
+
+  it('re-registers only an explicitly rejected continuation identity', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'fresh-client',
+        });
+      }
+      return req.headers['x-qwen-client-id'] === 'old-client'
+        ? jsonResponse(400, {
+            code: 'invalid_client_id',
+            error: 'Invalid client',
+          })
+        : jsonResponse(200, { accepted: false, interruption: 'none' });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'old-client',
+      },
+    });
+
+    await expect(session.continueSession()).resolves.toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/session/s-1/continue',
+      '/session/s-1/resume',
+      '/session/s-1/continue',
+    ]);
+    expect(calls[2]?.headers['x-qwen-client-id']).toBe('fresh-client');
+  });
+
+  it('does not retry an unknown continuation admission outcome', async () => {
+    const { fetch, calls } = recordingFetch(() => {
+      throw new TypeError('fetch failed');
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.continueSession()).rejects.toThrow('fetch failed');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('binds agent, trace, and attachment reads to the session identity', async () => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/agents')) {
+        return jsonResponse(200, { v: 1, sessionId: 's-1', tasks: [] });
+      }
+      if (req.url.includes('/agent-trace')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          nodes: [],
+          rootAgentIds: [],
+          warnings: [],
+        });
+      }
+      return jsonResponse(200, { attachments: [] });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.agents(signal)).resolves.toMatchObject({ tasks: [] });
+    await expect(
+      session.agentTrace({ rootAgentId: 'root-1', signal }),
+    ).resolves.toMatchObject({ nodes: [] });
+    await expect(session.listAttachments(signal)).resolves.toEqual([]);
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://daemon/session/s-1/agents',
+      'http://daemon/session/s-1/agent-trace?rootAgentId=root-1',
+      'http://daemon/session/s-1/attachments',
+    ]);
+    controller.abort();
+    expect(calls.every((call) => call.signal?.aborted)).toBe(true);
+    expect(
+      calls.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
+    ).toBe(true);
+  });
+
+  it('binds turn-index reads to the session and client identity', async () => {
+    const body = {
+      v: 1 as const,
+      sessionId: 's-1',
+      snapshot: 'snap-1',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getTurnIndexPage({ limit: 10 })).resolves.toEqual(
+      body,
+    );
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/turn-index?limit=10');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('reads a saved workflow definition for its own session', async () => {
     const status = {
       v: 1 as const,
@@ -377,7 +538,12 @@ describe('DaemonSessionClient', () => {
     expect(loaded.replayDegraded).toBe(true);
     expect(loaded.replaySnapshot.compactedReplay[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        attachmentId: 'media-1',
+        data: 'AQID',
+        mimeType: 'image/png',
+      },
     });
     expect(resumed.restoreStrategy).toEqual({ kind: 'standalone' });
     expect(resumed.state).toEqual({ mode: 'resumed' });
@@ -848,12 +1014,22 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
       update: {
         sessionUpdate: 'user_message_chunk',
-        content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        content: {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          attachmentId: 'media-1',
+        },
       },
     });
     expect(session.replaySnapshot.compactedReplay[1]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'media-1',
+      },
     });
     expect(session.replaySnapshot.compactedReplay[2]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
@@ -876,7 +1052,12 @@ describe('DaemonSessionClient', () => {
     const page = await session.getTranscriptPage();
     expect(page.events[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'media-1',
+      },
     });
     expect(
       calls.find((call) => call.url.endsWith('/attachments/media-1'))?.headers[
@@ -886,6 +1067,14 @@ describe('DaemonSessionClient', () => {
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/media-1')),
     ).toHaveLength(1);
+
+    const reloaded = await DaemonSessionClient.load(client, 's-1');
+    expect(reloaded.replaySnapshot.compactedReplay[0]?.data).toMatchObject({
+      update: { content: { attachmentId: 'media-1' } },
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/attachments/media-1')),
+    ).toHaveLength(2);
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/notes.json')),
     ).toHaveLength(0);
@@ -1041,7 +1230,12 @@ describe('DaemonSessionClient', () => {
     const page = await session.getTranscriptPage();
     expect(page.events[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'flaky-media',
+      },
     });
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/flaky-media')),
@@ -1901,6 +2095,25 @@ describe('DaemonSessionClient', () => {
           servers: [],
         });
       }
+      if (req.url.endsWith('/session/s-1/resources')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          skills: {
+            v: 1,
+            workspaceCwd: '/work/a',
+            initialized: true,
+            skills: [],
+          },
+          mcp: {
+            v: 1,
+            workspaceCwd: '/work/a',
+            initialized: true,
+            servers: [],
+          },
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
@@ -1987,6 +2200,12 @@ describe('DaemonSessionClient', () => {
       notStartedServers: 0,
       servers: [],
     });
+    await expect(session.resources()).resolves.toMatchObject({
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      skills: { initialized: true, skills: [] },
+      mcp: { initialized: true, servers: [] },
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
@@ -2012,6 +2231,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/tasks',
       'http://daemon/session/s-1/tasks?includeWorkflows=true',
       'http://daemon/session/s-1/lsp',
+      'http://daemon/session/s-1/resources',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
@@ -2025,6 +2245,7 @@ describe('DaemonSessionClient', () => {
       persist: true,
     });
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',
@@ -3200,6 +3421,154 @@ describe('DaemonSessionClient clientId self-heal', () => {
     });
   }
 
+  function newWorktreeSession(client: DaemonClient): DaemonSessionClient {
+    return new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+        worktree: { slug: 'task', path: '/work/a-wt', branch: 'task' },
+        worktreeState: 'persisted-v1',
+      },
+    });
+  }
+
+  it('retries a worktree prompt only after matching durable reattachment', async () => {
+    let promptCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          worktree: { slug: 'task', path: '/work/a-wt', branch: 'task-v2' },
+          worktreeState: 'persisted-v1',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return promptCalls === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newWorktreeSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(promptCalls).toBe(2);
+    expect(session.clientId).toBe('client-2');
+    expect(session.worktreeState).toBe('persisted-v1');
+    expect(session.worktree).toEqual({
+      slug: 'task',
+      path: '/work/a-wt',
+      branch: 'task-v2',
+    });
+  });
+
+  it.each([
+    ['missing attestation', undefined, '/work/a-wt'],
+    ['changed path', 'persisted-v1', '/work/other-wt'],
+  ] as const)(
+    'does not retry a worktree prompt after %s',
+    async (_label, worktreeState, worktreePath) => {
+      let promptCalls = 0;
+      let detachCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/resume')) {
+          return jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-2',
+            worktree: { slug: 'task', path: worktreePath, branch: 'task' },
+            ...(worktreeState ? { worktreeState } : {}),
+            state: {},
+          });
+        }
+        if (req.url.endsWith('/session/s-1/detach')) {
+          detachCalls++;
+          return new Response(null, { status: 204 });
+        }
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          promptCalls++;
+          return invalidClientIdResponse();
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newWorktreeSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+
+      await expect(
+        session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+      ).rejects.toThrow('durable worktree identity');
+      expect(promptCalls).toBe(1);
+      expect(detachCalls).toBe(1);
+      expect(session.clientId).toBe('client-1');
+      expect(session.worktreeState).toBe('persisted-v1');
+      expect(session.worktree).toEqual({
+        slug: 'task',
+        path: '/work/a-wt',
+        branch: 'task',
+      });
+      expect(
+        calls.find((call) => call.url.endsWith('/detach'))?.headers[
+          'x-qwen-client-id'
+        ],
+      ).toBe('client-2');
+    },
+  );
+
+  it('heals the cached worktree claim when the daemon resumes with no worktree object', async () => {
+    let promptCalls = 0;
+    let detachCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        // The worktree was legitimately exited (its sidecar is gone), so the
+        // daemon's own restore gate resumed the session without one.
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/detach')) {
+        detachCalls++;
+        return new Response(null, { status: 204 });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return promptCalls === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newWorktreeSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(promptCalls).toBe(2);
+    expect(detachCalls).toBe(0);
+    expect(session.clientId).toBe('client-2');
+    expect(session.worktreeState).toBeUndefined();
+    expect(session.worktree).toBeUndefined();
+  });
+
   it('re-registers and retries once when the blocking prompt is rejected with invalid_client_id', async () => {
     let promptCalls = 0;
     let resumeCalls = 0;
@@ -3380,6 +3749,7 @@ describe('DaemonSessionClient clientId self-heal', () => {
       type: 'image',
       data: 'AQID',
       mimeType: 'image/png',
+      attachmentId: 'media-read',
     });
 
     expect(resumeCalls).toBe(3);

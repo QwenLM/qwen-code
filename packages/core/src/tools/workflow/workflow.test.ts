@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,9 +24,33 @@ import { Storage } from '../../config/storage.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
+import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
+import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
+import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
 
+/**
+ * The tool description has two shapes, chosen at construction: it points at
+ * the `workflow-authoring` skill when the model can load it, and inlines the
+ * whole reference when it cannot. A bare `{}` would take the inline branch,
+ * so the default fixture models the ordinary session: skills on, Skill tool
+ * registered. `workflow-description.test.ts` covers the other shape.
+ */
 function fakeConfig(): Config {
-  return {} as unknown as Config;
+  return {
+    getSkillManager: () => ({ getCachedSkills: () => null }),
+    getToolRegistry: () => ({
+      getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+      getTool: () => undefined,
+    }),
+    isSkillEnabled: () => true,
+  } as unknown as Config;
+}
+
+function paramDescription(tool: WorkflowTool, name: string): string {
+  const schema = tool.schema.parametersJsonSchema as {
+    properties: Record<string, { description: string }>;
+  };
+  return schema.properties[name].description;
 }
 
 /**
@@ -75,11 +99,12 @@ describe('WorkflowTool', () => {
     );
   });
 
-  // The description is what makes the model pick pipeline() over a barrier
-  // and verify a finding before reporting it. A refactor that drops the
-  // policy prose leaves a runtime nobody drives well, and no other test
-  // would notice — so anchor the load-bearing claims.
-  it('description carries both the runtime facts and the orchestration policy', () => {
+  // The description is what makes the model call this tool for the right
+  // request and plan around the right limits. The authoring contract moved
+  // to the `workflow-authoring` skill — see SKILL.test.ts for the anchors
+  // that live there now, and the `not.toMatch` block below for the ones
+  // that must NOT come back here.
+  it('description carries the opt-in rule and the runtime facts', () => {
     const { description } = new WorkflowTool(fakeConfig());
     // Every env knob the description names is anchored. The four that the
     // orchestrator exports are anchored *through the exported constant*, so
@@ -89,7 +114,7 @@ describe('WorkflowTool', () => {
     // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
     // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
     for (const anchor of [
-      'min(16, cpus-2)',
+      'min(16, availableParallelism()-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
       WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
@@ -101,22 +126,9 @@ describe('WorkflowTool', () => {
     ]) {
       expect(description).toContain(anchor);
     }
-    // The per-call options this half of the description advertises are
-    // anchored too — a refactor that drops their sentences leaves the
-    // capabilities undiscoverable from the tool surface and no other test
-    // would notice.
-    expect(description).toContain('workingDir');
-    expect(description).toMatch(/no-progress stall watchdog/);
-    // One anchor per policy section — dropping any whole section has to
-    // turn this test red, which is the regression it exists to catch.
+    // Why a workflow at all — the one line of policy that stays, because it
+    // is what stops the model reaching for orchestration by reflex.
     expect(description).toMatch(/Parallelism on its own is not a reason/);
-    expect(description).toMatch(/only before the orchestration step/);
-    expect(description).toMatch(/Common single-phase shapes/);
-    expect(description).toMatch(/Default to `pipeline\(\)`/);
-    expect(description).toMatch(/A barrier is right only when/);
-    expect(description).toMatch(/refute/);
-    expect(description).toMatch(/against everything already seen/);
-    expect(description).toMatch(/log\(\)` what was dropped/);
     // Limits the model has to plan around rather than discover from a
     // mid-run failure — the numbers themselves, not just the knob names.
     // Anchored *through* the exported constant rather than as a literal:
@@ -129,8 +141,6 @@ describe('WorkflowTool', () => {
     // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
     // this one is still a hand-synced literal on both sides.
     expect(description).toMatch(/30-minute wall-clock cap/);
-    expect(description).toMatch(/nests one level only/);
-    expect(description).toMatch(/read `budget\.total`/);
     // The `/workflows` capability list is the one part of the description
     // that trails the runtime: #8320 added cooperative pause/resume to the
     // dialog while this branch was moving the description into a constant,
@@ -142,6 +152,54 @@ describe('WorkflowTool', () => {
     // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
     // absolute path it cannot construct.
     expect(description).toContain('.qwen/workflows');
+    // The result surface is part of the runtime the model has to plan
+    // around: without these sentences it has no reason to expect a script
+    // path back, and resumes by re-sending the whole source.
+    expect(description).toMatch(/Every run hands back its runId/);
+    expect(description).toMatch(/read it before diagnosing/);
+    // The journal writes a `started` line per dispatch and a `result` or
+    // `failed` line after it, so any per-agent count here would be wrong. The
+    // skill states the line taxonomy; the description only says to read it.
+    expect(description).not.toMatch(/journal holds one/);
+    // The null/throw split stays here rather than moving to the skill: it
+    // governs how the model READS a result, which every turn that touches a
+    // workflow result needs, not just the turn that writes the script.
+    expect(description).toMatch(
+      /`agent\(\)` resolves to `null` when that admitted agent fails on its own/,
+    );
+    expect(description).toMatch(/exhausted stall retries/);
+    expect(description).not.toMatch(/user stopped it/);
+    expect(description).toMatch(
+      /run-level rejections no later call could survive/i,
+    );
+  });
+
+  // Which guidance left this description for the `workflow-authoring` skill is
+  // pinned in one two-way table in `skills/bundled/workflow-authoring/
+  // SKILL.test.ts`: every anchor is asserted present in the skill and absent
+  // from this description, with whitespace collapsed on both sides.
+
+  // Both parameter descriptions describe the same persisted file — the one
+  // `resumeFromRunId` tells the model to edit. A change on one side that
+  // leaves the other pointing at the old contract (re-send the script) is
+  // the regression this catches.
+  it('scriptPath and resumeFromRunId describe the persisted inline script', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        scriptPath: { description: string };
+        resumeFromRunId: { description: string };
+      };
+    };
+    expect(schema.properties.scriptPath.description).toContain(
+      'inline/<runId>.js',
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /Pass the `scriptPath` the original run returned/,
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /not the script text/,
+    );
   });
 
   // The policy prose above tells the model how to orchestrate *well*; on its
@@ -321,6 +379,20 @@ await agent('scan package.json')
       // Empty, not absent: `injectPermissionRulesIfMissing` only fills in the
       // bare-tool-name rule when the tool supplies none, and that rule is
       // documented as matching every invocation of the tool.
+      expect(details.permissionRules).toEqual([]);
+    });
+
+    it('never pre-approves a persisted inline script path', async () => {
+      const { config, storage } = configWithStorage();
+      const details = (await detailsFor(
+        {
+          scriptPath: storage.getInlineWorkflowScriptPath('wf_1234abcd'),
+          resumeFromRunId: 'wf_1234abcd',
+        },
+        config,
+      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+
+      expect(details.hideAlwaysAllow).toBe(true);
       expect(details.permissionRules).toEqual([]);
     });
 
@@ -573,26 +645,91 @@ await agent('scan package.json')
     expect(text).not.toContain('Workflow failed');
   });
 
-  // The tool description is not the only model-visible copy of the caps —
-  // the `script` parameter description states them a second time, and a
-  // model reading one tool call sees both. Anchoring only the tool
-  // description lets a maintainer raise a cap, watch the test above go
-  // green again, and stop while `script` still advertises the old number.
-  it('script parameter description states the same caps as the tool description', () => {
+  // The caps used to be stated twice — once in the tool description and
+  // again in `script` — and a maintainer raising one could leave the other
+  // advertising the old number. There is now exactly one model-visible copy
+  // in the tool surface, and the detail lives in the skill. This pins that:
+  // the second copy must not grow back, and the one that remains must be
+  // the interpolated constant.
+  it('states each cap once, in the tool description only', () => {
     const tool = new WorkflowTool(fakeConfig());
     const schema = tool.schema.parametersJsonSchema as {
       properties: { script: { description: string } };
     };
     const scriptDescription = schema.properties.script.description;
-    expect(scriptDescription).toContain(
-      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
-    );
-    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
-    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
-    // Both halves must agree on the agent cap, whatever it is.
+
     expect(tool.description).toContain(
-      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
     );
+    for (const cap of [
+      String(DEFAULT_MAX_AGENTS_PER_RUN),
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+    ]) {
+      expect(scriptDescription).not.toContain(cap);
+    }
+    // The per-option error strings a script has to check for moved with the
+    // options themselves; the skill's test asserts they are there.
+    expect(scriptDescription).not.toContain(
+      'subagent completed without calling StructuredOutput',
+    );
+    expect(scriptDescription).not.toContain('agent type');
+    // Regression pins from the throw-to-null settlement change (#11196): a
+    // resurrected "throws" claim would contradict the description beside it.
+    expect(scriptDescription).not.toContain('Unresolved names throw');
+    expect(scriptDescription).not.toContain("'remote' throws");
+    // What `script` still owns: the shape of the source itself, and where
+    // to go for the rest.
+    expect(scriptDescription).toContain('async IIFE');
+    expect(scriptDescription).toContain(
+      'Pass THUNKS to parallel(), not eager calls',
+    );
+    expect(scriptDescription).toContain('all of `Date`');
+    expect(scriptDescription).toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+  });
+
+  // Every model-visible string in the tool surface is paid for on every turn,
+  // so each has a budget. The headroom is a paragraph, not a sentence: one
+  // legitimate clause fits, a block of option prose pasted back does not.
+  it.each([
+    ['the description', (tool: WorkflowTool) => tool.description, 4_500],
+    ['script', (tool: WorkflowTool) => paramDescription(tool, 'script'), 900],
+    [
+      'scriptPath',
+      (tool: WorkflowTool) => paramDescription(tool, 'scriptPath'),
+      950,
+    ],
+    ['args', (tool: WorkflowTool) => paramDescription(tool, 'args'), 250],
+    [
+      'resumeFromRunId',
+      (tool: WorkflowTool) => paramDescription(tool, 'resumeFromRunId'),
+      850,
+    ],
+    [
+      'run_in_background',
+      (tool: WorkflowTool) => paramDescription(tool, 'run_in_background'),
+      450,
+    ],
+  ])('keeps %s within its per-turn budget', (_name, read, budget) => {
+    expect(read(new WorkflowTool(fakeConfig())).length).toBeLessThanOrEqual(
+      budget,
+    );
+  });
+
+  // The inline fallback is large by construction — it carries the whole
+  // reference — and grows whenever the reference does. It still needs a
+  // ceiling, or growth passes every other assertion about its size.
+  it('keeps the inline fallback description within its budget', () => {
+    const tool = new WorkflowTool({
+      ...fakeConfig(),
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.WORKFLOW],
+        getTool: () => undefined,
+      }),
+    } as unknown as Config);
+
+    expect(tool.authoringSurface).toBe('inline');
+    expect(tool.description.length).toBeLessThanOrEqual(24_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -683,34 +820,96 @@ await agent('scan package.json')
     ).toThrow(/interactive TUI/i);
   });
 
+  // A retry of a saved workflow whose file is no longer readable falls back to
+  // the run's inline source and passes no name — the ACP retry path. The runner
+  // still resolves the name from the resumed run, so the notice says to copy
+  // the saved workflow, and must not also say "fix the script". The same
+  // holds for a foreground resume, whose trailer carries the same advice.
+  it('keeps the authoring hint off a saved workflow resumed from its inline source', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-hint-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      ...fakeConfig(),
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    const script = 'throw new Error("boom");';
+
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      expect(tool.authoringSurface).toBe('pointer');
+      const first = (await tool
+        .buildSessionOwnedBackground({ script }, 'review-and-fix')
+        .execute(new AbortController().signal)) as { workflowRunId?: string };
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
+      const runId = first.workflowRunId;
+      expect(runId).toMatch(/^wf_/);
+
+      await tool
+        .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      const retryText = completion.mock.calls[1][1] as string;
+      expect(retryText).toContain(
+        'This reads the saved /review-and-fix workflow',
+      );
+      expect(retryText).not.toContain('hint:');
+
+      const foreground = await tool
+        .build({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      const trailer = (foreground.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('hint:');
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
   it('starts a session-owned background run outside the interactive TUI', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-owned-'),
+    );
     const registry = new WorkflowRunRegistry();
     registry.setCompletionCallback(vi.fn());
     const config = {
-      storage: new Storage(path.join(os.tmpdir(), 'workflow-session-owned')),
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
       isInteractive: () => false,
       getWorkflowRunRegistry: () => registry,
       getSkipWorkflowUsageWarning: () => true,
     } as unknown as Config;
 
-    const result = await new WorkflowTool(config, {
-      dispatch: async () => 'unused',
-    })
-      .buildSessionOwnedBackground(
-        {
-          script: `phase('Inspect'); return { status: 'ready' };`,
-        },
-        'review-and-fix',
-      )
-      .execute(new AbortController().signal);
+    try {
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .buildSessionOwnedBackground(
+          {
+            script: `phase('Inspect'); return { status: 'ready' };`,
+          },
+          'review-and-fix',
+        )
+        .execute(new AbortController().signal);
 
-    expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
-    const run = registry.get(result.workflowRunId!);
-    expect(run?.isBackgrounded).toBe(true);
-    expect(run?.workflowName).toBe('review-and-fix');
-    await vi.waitFor(() =>
-      expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
-    );
+      expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
+      const run = registry.get(result.workflowRunId!);
+      expect(run?.isBackgrounded).toBe(true);
+      expect(run?.workflowName).toBe('review-and-fix');
+      await vi.waitFor(() =>
+        expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+      );
+      await registry.getHandle(result.workflowRunId!)?.completion;
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('does not register a background run when the caller is already aborted', async () => {
@@ -753,7 +952,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -798,7 +997,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -836,7 +1035,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         caller.abort();
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -896,7 +1095,10 @@ await agent('scan package.json')
     expect(result.workflowRunId).toBe(entry.runId);
     expect(result.llmContent).toEqual([
       {
-        text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
+        text:
+          `Workflow started in background.\nRun ID: ${entry.runId}\n` +
+          `Status: running\nYou will be notified when it settles. ` +
+          `Use /workflows ${entry.runId} for the live phase tree.`,
       },
     ]);
     expect(result.returnDisplay).toBe(
@@ -960,15 +1162,17 @@ await agent('scan package.json')
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
     const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
     try {
       const registry = new WorkflowRunRegistry();
+      const storage = new Storage(projectDir, runtimeDir);
       const config = {
         getWorkflowRunRegistry: () => registry,
-        storage: new Storage(projectDir),
+        storage,
       } as unknown as Config;
       // The scriptPath MUST live under a saved-workflow dir (the resolver
       // refuses paths outside it — the #2 path-traversal / symlink guard).
-      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      const dir = storage.getProjectWorkflowsDir();
       await fs.mkdir(dir, { recursive: true });
       const scriptPath = path.join(dir, 'greet.js');
       await fs.writeFile(scriptPath, 'return await agent("hi");', 'utf8');
@@ -987,6 +1191,7 @@ await agent('scan package.json')
       expect(entries[0].workflowName).toBe('greet');
     } finally {
       await fs.rm(projectDir, { recursive: true, force: true });
+      await fs.rm(runtimeDir, { recursive: true, force: true });
     }
   });
 
@@ -1246,10 +1451,20 @@ await agent('scan package.json')
       script: 'return { kind: "report", body: "hello" };',
     });
     const result = await invocation.execute(new AbortController().signal);
-    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
-    // The llmText should be the JSON of just the script's return value,
+    const parts = result.llmContent as Array<{ text: string }>;
+    // The first part should be the JSON of just the script's return value,
     // NOT a wrapper with {runId, result, phases, logs}.
-    expect(JSON.parse(llmText)).toEqual({ kind: 'report', body: 'hello' });
+    expect(JSON.parse(parts[0].text)).toEqual({
+      kind: 'report',
+      body: 'hello',
+    });
+    // The run handle is a SECOND part, so the first one still parses as
+    // whatever the script returned. (Downstream the scheduler joins the two
+    // with a newline — see the convertToFunctionResponse tests below.)
+    expect(parts).toHaveLength(2);
+    expect(parts[1].text).toMatch(
+      /^--- workflow run ---\nrunId: wf_[0-9a-f]+\ntokens: 0 spent \(no cap\)$/,
+    );
   });
 
   // FIX-C9 (TST-M2): scripts without an explicit `return` resolve to
@@ -1618,5 +1833,639 @@ await agent('scan package.json')
         process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = originalEnv;
       }
     }
+  });
+  // ── The run handle the model gets back ──────────────────────────────
+  //
+  // A workflow result used to be the script's return value and nothing else:
+  // no run id to name to `/workflows`, no journal to read the per-agent
+  // results from, and no way to resume short of re-sending the source. These
+  // cover the trailer that carries all three — and the property that makes it
+  // safe to add, namely that it never touches the first part.
+  describe('run handle trailer', () => {
+    let runtimeDir: string;
+    let projectRoot: string;
+    let previousRuntimeDir: string | undefined;
+    let previousTokenCap: string | undefined;
+
+    beforeEach(async () => {
+      runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
+      projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-proj-'));
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      previousTokenCap = process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      if (previousTokenCap === undefined) {
+        delete process.env[MAX_TOKENS_PER_WORKFLOW_ENV];
+      } else {
+        process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = previousTokenCap;
+      }
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    });
+
+    function storedConfig(): { config: Config; storage: Storage } {
+      const registry = new WorkflowRunRegistry();
+      const storage = new Storage(projectRoot);
+      const config = {
+        storage,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+        // Same shape as `fakeConfig()`: an ordinary session where the
+        // authoring reference is a skill the model can load, which is what
+        // the failure hint tells it to do.
+        getSkillManager: () => ({ getCachedSkills: () => null }),
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+        isSkillEnabled: () => true,
+      } as unknown as Config;
+      return { config, storage };
+    }
+
+    it('names the persisted script, the journal and the resume call', async () => {
+      const { config, storage } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      const trailer = parts[1].text;
+      const runId = result.scriptPath!.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(trailer).toContain(`runId: ${runId}`);
+      expect(trailer).toContain(
+        `script: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        `journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        'agents: 1 dispatched · 1 completed · 0 cached · 0 failed · 0 cancelled',
+      );
+      expect(trailer).toContain('tokens: 0 spent (no cap)');
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+      );
+      // Named paths are real files, not a format the runtime never wrote.
+      await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
+        'await agent("one"); return "done";',
+      );
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+      expect(trailer).toContain('longest unchanged prefix');
+    });
+
+    it('creates the journal before a dispatch-free result names it', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+    });
+
+    it('annotates the dispatched count when a resume re-runs an agent', async () => {
+      const { config } = storedConfig();
+      const first = await new WorkflowTool(config, {
+        dispatch: async () => {
+          throw new WorkflowAgentFailedError('first attempt failed', 'error');
+        },
+      })
+        .build({ script: `return await agent('one');` })
+        .execute(new AbortController().signal);
+      const runId = first.scriptPath!.match(/(wf_[0-9a-f]+)\.js$/)![1];
+
+      const resumed = await new WorkflowTool(config, {
+        dispatch: async () => 'recovered',
+      })
+        .build({
+          scriptPath: first.scriptPath,
+          resumeFromRunId: runId,
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (resumed.llmContent as Array<{ text: string }>)[1]!.text;
+      expect(trailer).toContain(
+        'agents: 1 dispatched (1 re-ran from a prior run) · 1 completed',
+      );
+      expect(trailer).not.toContain('· 1 respawned');
+    });
+
+    it('omits the file lines when the config has no storage', async () => {
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      expect(parts[1].text).toContain('runId: ');
+      expect(parts[1].text).not.toContain('script: ');
+      expect(parts[1].text).not.toContain('journal: ');
+      expect(parts[1].text).not.toContain('resume: ');
+      expect(result.scriptPath).toBeUndefined();
+      expect(result.journalPath).toBeUndefined();
+    });
+
+    // The failure path is where the logs matter: `returnDisplay` carries them
+    // for the user, but the scheduler replaces it with `error.message` for the
+    // model, so without this part the model sees the message alone.
+    // A workflow can return a perfectly well-formed result built from the
+    // agents that DID come back, so "completed" is not evidence the fan-out
+    // was whole. The failures section is what makes the gap visible.
+    it('names the failed agents in the trailer of a successful run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async (prompt: string) => {
+          if (prompt === 'bad') {
+            throw new WorkflowAgentFailedError(
+              'Workflow subagent did not complete (terminate mode: MAX_TURNS).',
+              'max_turns',
+              'MAX_TURNS',
+            );
+          }
+          return `r:${prompt}`;
+        },
+      })
+        .build({
+          script:
+            'const out = await parallel([' +
+            "() => agent('good', { label: 'good' }), " +
+            "() => agent('bad', { label: 'flaky' })]); " +
+            'return out;',
+        })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      // The script's own value is untouched: the failed slot is `null`.
+      expect(JSON.parse(parts[0].text)).toEqual(['r:good', null]);
+      const trailer = parts[1].text;
+      expect(trailer).toContain('1 failed');
+      expect(trailer).toContain('failures (1):');
+      expect(trailer).toContain('[flaky] Workflow subagent did not complete');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('omits the failures section when every agent came back', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'fine',
+      })
+        .build({ script: "return await agent('x');" })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).not.toContain('failures (');
+      // `respawned` is a resume-only fact; a fresh run must not report a
+      // fifth outcome that is always zero.
+      expect(trailer).not.toContain('respawned');
+    });
+
+    // The contract the description states, end to end through the real
+    // sandbox: a sequential `await agent()` reads `null` for an agent that
+    // failed on its own, and the run still succeeds.
+    it('hands a sequential await agent() null instead of ending the run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => {
+          throw new WorkflowAgentFailedError('model errored', 'error', 'ERROR');
+        },
+      })
+        .build({
+          script:
+            "const a = await agent('x'); " +
+            "return a === null ? 'agent failed' : 'agent said ' + a;",
+        })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('agent failed');
+      expect(result.error).toBeUndefined();
+      expect(parts[1].text).toContain('failures (1):');
+
+      // The record actually reaches the file a resume will read. The
+      // orchestrator tests pin WHEN it is written against an in-memory
+      // journal and the journal tests pin the append itself; this is the
+      // one place both halves are exercised through a real run.
+      const lines = (await fs.readFile(result.journalPath!, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(lines.map((line) => line['type'])).toEqual(['started', 'failed']);
+      expect(lines[1]['key']).toBe(lines[0]['key']);
+      expect(lines[1]['agentId']).toBe(lines[0]['agentId']);
+    });
+
+    it('carries the trailer and the last log lines on the failure path', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('Workflow failed: boom');
+      expect(parts[1].text).toContain('--- workflow run ---');
+      expect(parts[1].text).toContain('script: ');
+      expect(parts[1].text).toContain('logs (last ');
+      expect(parts[1].text).toContain('about to fail');
+      expect(result.error?.message).toContain('--- workflow run ---');
+      // A script that threw is a script to rewrite, and the description only
+      // points at the reference — the model may never have read it.
+      expect(parts[1].text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // Telling the model to load a skill it cannot reach is worse than saying
+    // nothing: the reference is already inlined in the description it read.
+    // Both halves are asserted on the same tool, so the hint and the shape of
+    // the description cannot drift apart.
+    it('points at the inlined reference when the skill is unreachable', async () => {
+      const { config } = storedConfig();
+      Object.assign(config, {
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+      });
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain('# Workflow authoring reference');
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        "hint: See the authoring reference in this tool's description",
+      );
+      expect(trailer).not.toContain('hint: Load the');
+    });
+
+    // The description is fixed when the tool is built. A `/skills` toggle
+    // after that must not flip the hint into describing a different
+    // description than the one the model is holding.
+    it('keeps the hint consistent with the description after a mid-session toggle', async () => {
+      const { config } = storedConfig();
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      Object.assign(config, { isSkillEnabled: () => false });
+
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain(
+        `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // A script that never compiled is the earliest and most common
+    // first-attempt failure, and it returns no trailer — the hint has to ride
+    // on the message itself.
+    it('carries the hint on a script that fails to compile', async () => {
+      const result = await new WorkflowTool(fakeConfig())
+        .build({ script: "const target: string = 'x';\nawait agent(target);" })
+        .execute(new AbortController().signal);
+
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(text).toContain('was not launched');
+      expect(text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      expect(result.error?.message).toContain('hint:');
+    });
+
+    // The hint belongs to a failure, not to every run: a successful trailer
+    // that told the model to go read the reference would be noise on the
+    // path that needs it least.
+    it('adds no authoring hint to a successful run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'fine',
+      })
+        .build({ script: "return await agent('x');" })
+        .execute(new AbortController().signal);
+
+      expect(
+        (result.llmContent as Array<{ text: string }>)[1].text,
+      ).not.toContain('hint:');
+    });
+
+    it('does not offer to restart a user-cancelled foreground run', async () => {
+      const { config } = storedConfig();
+      const registry = config.getWorkflowRunRegistry()!;
+      let finishDispatch: ((value: string) => void) | undefined;
+      const execution = new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      })
+        .build({ script: 'return await agent("slow");' })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(registry.list()).toHaveLength(1));
+      const runId = registry.list()[0]!.runId;
+      await vi.waitFor(() =>
+        expect(registry.get(runId)?.dispatches).toHaveLength(1),
+      );
+      registry.cancel(runId, Date.now());
+      finishDispatch?.('late');
+
+      const result = await execution;
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(text).toContain('Workflow cancelled');
+      expect(text).toContain('1 cancelled');
+      expect(text).not.toContain('resume: Workflow(');
+      expect(text).not.toContain('hint:');
+      expect(result.error).toBeDefined();
+    });
+
+    it('does not advise editing a saved workflow to resume one run', async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deploy.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('edit that file first');
+      // "Fix the script, and retry" would contradict the resume advice to
+      // copy the saved workflow before changing it.
+      expect(trailer).not.toContain('hint:');
+    });
+
+    it('does not promise replay when the journal path is unavailable', async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deploy.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+      vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
+        false,
+      );
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('no journal was written for this run');
+      expect(trailer).not.toContain('longest unchanged prefix');
+      expect(result.journalPath).toBeUndefined();
+    });
+
+    it('keeps only the bounded tail of failure logs', async () => {
+      const { config } = storedConfig();
+      const logs = Array.from(
+        { length: 25 },
+        (_, index) => `log("progress ${index + 1}");`,
+      ).join('');
+      const result = await new WorkflowTool(config)
+        .build({ script: `${logs}throw new Error("boom");` })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('logs (last 20):');
+      expect(trailer).toContain('progress 25');
+      expect(trailer).toContain('progress 6');
+      expect(trailer).not.toContain('progress 5\n');
+    });
+
+    it('reports disjoint failed dispatch counts', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async (prompt) => {
+          if (prompt === 'bad') throw new Error('failed');
+          return 'fine';
+        },
+      })
+        .build({
+          script:
+            'return await parallel([() => agent("good"), () => agent("bad")]);',
+        })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain(
+        'agents: 2 dispatched · 1 completed · 0 cached · 1 failed · 0 cancelled',
+      );
+    });
+
+    it('reports the configured token cap in spent-over-total order', async () => {
+      process.env[MAX_TOKENS_PER_WORKFLOW_ENV] = '1000';
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config)
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+
+      expect(trailer).toContain('tokens: 0 / 1000 spent');
+    });
+
+    it('names the script and journal on a background launch', async () => {
+      const { config, storage } = storedConfig();
+      Object.assign(config, { isInteractive: () => true });
+      config.getWorkflowRunRegistry()!.setCompletionCallback(vi.fn());
+      let resolveDispatch: ((value: string) => void) | undefined;
+      const result = await new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            resolveDispatch = resolve;
+          }),
+      })
+        .build({
+          script: 'return await agent("slow");',
+          run_in_background: true,
+        })
+        .execute(new AbortController().signal);
+
+      const runId = result.workflowRunId!;
+      const text = (result.llmContent as Array<{ text: string }>)[0].text;
+      expect(text).toContain(
+        `Script file: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(text).toContain(
+        `Journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(text).toContain(`Use /workflows ${runId}`);
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+
+      resolveDispatch?.('done');
+      await config.getWorkflowRunRegistry!()!.getHandle(runId)!.completion;
+    });
+
+    // The whole point of persisting the script: a resume can edit the file
+    // and re-run without re-sending the source, and the journal still serves
+    // every agent() call whose prompt and opts did not change.
+    it('resumes from the persisted script after the file is edited', async () => {
+      const { config } = storedConfig();
+      const dispatch = vi.fn(async () => 'from the agent');
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'const a = await agent("one"); return a;' })
+        .execute(new AbortController().signal);
+
+      const scriptPath = first.scriptPath!;
+      const runId = scriptPath.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(dispatch).toHaveBeenCalledTimes(1);
+
+      // Only the post-processing changes; the agent() call is byte-identical,
+      // so the journal keys still match.
+      await fs.writeFile(
+        scriptPath,
+        'const a = await agent("one"); return a.toUpperCase();',
+        'utf8',
+      );
+      dispatch.mockClear();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((second.llmContent as Array<{ text: string }>)[0].text).toBe(
+        'FROM THE AGENT',
+      );
+      expect((second.llmContent as Array<{ text: string }>)[1].text).toContain(
+        '1 cached',
+      );
+    });
+    // The trailer tells the model to resume by passing the generated copy
+    // back as `scriptPath`. That copy is still the model's script, so a
+    // failure there keeps the hint the first run had.
+    it('keeps the hint when a generated script is re-run by path and fails', async () => {
+      const { config } = storedConfig();
+      const dispatch = async () => 'unused';
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'throw new Error("first");' })
+        .execute(new AbortController().signal);
+      expect(first.scriptPath).toBeDefined();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath: first.scriptPath! })
+        .execute(new AbortController().signal);
+
+      const trailer = (second.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('edit that generated copy first');
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    it('carries the original args in the resume call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return await agent(`one ${args.who}`);',
+          args: { who: 'world' },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      // A resume without the original args still runs — it just misses every
+      // journal key, because the script bakes args into the agent prompts.
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+      );
+      expect(trailer).toContain('args: {"who":"world"}');
+      expect(trailer).not.toContain('too large to inline');
+    });
+
+    it('names args it cannot inline instead of truncating the call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return "done";',
+          args: { blob: 'x'.repeat(400) },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('resume: Workflow({');
+      expect(trailer).not.toContain('args:');
+      expect(trailer).toContain('too large to inline here');
+    });
+
+    // What the model actually reads. `convertToFunctionResponse` folds every
+    // text part into one `functionResponse.output` joined by newlines (the
+    // #1520 behavior), so the trailer arrives appended to the return value —
+    // not as a part the model can ignore, and not as something that alters
+    // the return value's own bytes.
+    it('reaches the model as the return value with the trailer appended', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return { kind: "report" };' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      const [response] = convertToFunctionResponse(
+        'Workflow',
+        'call-1',
+        result.llmContent,
+      );
+      const output = response.functionResponse?.response?.['output'];
+      expect(output).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(String(output)).toContain('"kind": "report"');
+      expect(String(output)).toContain('}\n--- workflow run ---\n');
+    });
+
+    it('reaches the model with the failure message followed by the trailer', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(result.error?.message).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(result.error?.message).toMatch(
+        /^Workflow failed: boom\n--- workflow run ---/,
+      );
+    });
   });
 });

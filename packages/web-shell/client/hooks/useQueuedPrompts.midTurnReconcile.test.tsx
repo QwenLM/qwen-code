@@ -3054,7 +3054,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         'settled late',
         undefined,
-        undefined,
+        { promptId: messageId },
         undefined,
       );
     } finally {
@@ -3840,7 +3840,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         '',
         [{ data: 'aW1n', mimeType: 'image/png' }],
-        undefined,
+        { promptId: messageId },
         undefined,
       );
     } finally {
@@ -4382,7 +4382,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         'look at this',
         [{ data: 'aW1n', mimeType: 'image/png' }],
-        undefined,
+        { promptId: messageId },
         undefined,
       );
     } finally {
@@ -4431,7 +4431,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
         '',
         [{ data: 'aW1n', mimeType: 'image/png' }],
-        undefined,
+        { promptId: messageId },
         undefined,
       );
     } finally {

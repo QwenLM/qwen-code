@@ -32,6 +32,9 @@ import type {
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 import type { HookExecutionResult } from './types.js';
 import { logHookCall } from '../telemetry/loggers.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 // Mock the telemetry loggers module
 vi.mock('../telemetry/loggers.js', () => ({
@@ -52,6 +55,7 @@ describe('HookEventHandler', () => {
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       getSessionSourceId: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
     } as unknown as Config;
 
@@ -573,6 +577,7 @@ describe('HookEventHandler', () => {
         getSessionSourceType: vi.fn().mockReturnValue(undefined),
         getSessionSourceId: vi.fn().mockReturnValue(undefined),
         getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+        getApprovalMode: vi.fn().mockReturnValue('default'),
         getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       } as unknown as Config;
 
@@ -1428,6 +1433,52 @@ describe('HookEventHandler', () => {
   });
 
   describe('firePostToolBatchEvent', () => {
+    it('preserves question text for batch hooks without changing other results', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      const display = Object.freeze({
+        type: 'ask_user_question_answers',
+        text: 'Original answer text',
+        answers: [{ question: 'Continue?', answer: 'Yes' }],
+      });
+      const response = Object.freeze({
+        result_display: display,
+        response_parts: [],
+      });
+      const calls = ['ask_user_question', 'other_tool'].map((tool_name) =>
+        Object.freeze({
+          tool_name,
+          tool_input: {},
+          tool_use_id: tool_name,
+          status: 'success' as const,
+          tool_response: response,
+        }),
+      );
+      await hookEventHandler.firePostToolBatchEvent(calls);
+      expect(
+        vi.mocked(mockHookRunner.executeHooksParallel).mock.calls[0][2],
+      ).toMatchObject({
+        tool_calls: [
+          {
+            tool_response: { result_display: display.text, response_parts: [] },
+          },
+          { tool_response: { result_display: display, response_parts: [] } },
+        ],
+      });
+      expect(calls[0].tool_response.result_display).toBe(display);
+    });
+
     it('should execute hooks for PostToolBatch without matcher context', async () => {
       const mockPlan = createMockExecutionPlan([]);
       const mockAggregated = createMockAggregatedResult(true);
@@ -1743,6 +1794,114 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('common input fields', () => {
+    const fireAndCaptureInput = async (
+      fire: () => Promise<unknown>,
+    ): Promise<Record<string, unknown>> => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      await fire();
+      const calls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      return calls[calls.length - 1][2] as Record<string, unknown>;
+    };
+
+    it('reports the session approval mode on events without their own mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Yolo);
+    });
+
+    it('keeps the permission mode an event reports itself', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.firePreToolUseEvent(
+          'shell',
+          {},
+          'toolu_mode',
+          PermissionMode.Plan,
+        ),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Plan);
+    });
+
+    it('adds agent_id and prompt_id only when they are known', async () => {
+      const outside = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+      expect(outside).not.toHaveProperty('agent_id');
+      expect(outside).not.toHaveProperty('prompt_id');
+
+      const inside = await fireAndCaptureInput(() =>
+        runWithAgentContext('agent-7', () =>
+          promptIdContext.run('prompt-9', () =>
+            hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+          ),
+        ),
+      );
+      expect(inside['agent_id']).toBe('agent-7');
+      expect(inside['prompt_id']).toBe('prompt-9');
+    });
+
+    it('reports duration_ms on PostToolUse and PostToolUseFailure when given', async () => {
+      const post = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_post',
+          PermissionMode.Default,
+          undefined,
+          'call-post',
+          42,
+        ),
+      );
+      expect(post['duration_ms']).toBe(42);
+
+      const failure = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseFailureEvent(
+          'toolu_failure',
+          'shell',
+          {},
+          'boom',
+          false,
+          PermissionMode.Default,
+          undefined,
+          'call-failure',
+          7,
+        ),
+      );
+      expect(failure['duration_ms']).toBe(7);
+
+      const withoutDuration = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_untimed',
+          PermissionMode.Default,
+        ),
+      );
+      expect(withoutDuration).not.toHaveProperty('duration_ms');
+    });
+  });
+
   describe('firePreToolUseEvent', () => {
     it('should execute hooks for PreToolUse event', async () => {
       const mockPlan = createMockExecutionPlan([]);
@@ -2041,6 +2200,56 @@ describe('HookEventHandler', () => {
   });
 
   describe('firePostToolUseEvent', () => {
+    it.each(['ask_user_question', 'other_tool'])(
+      'preserves the hook display contract for %s without mutating results',
+      async (toolName) => {
+        vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+          createMockExecutionPlan([
+            {
+              type: HookType.Command,
+              command: 'echo test',
+              source: HooksConfigSource.Project,
+            },
+          ]),
+        );
+        vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+        vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+          createMockAggregatedResult(true),
+        );
+        const text =
+          'User has provided the following answers:\n\n**A**: first\n**B**: embedded';
+        const display = Object.freeze({
+          type: 'ask_user_question_answers',
+          text,
+          answers: [
+            { question: 'Question A?', answer: 'first\n**B**: embedded' },
+          ],
+        });
+        const response = Object.freeze({
+          llmContent: text,
+          returnDisplay: display,
+        });
+
+        await hookEventHandler.firePostToolUseEvent(
+          toolName,
+          {},
+          response,
+          'toolu_question',
+          PermissionMode.Default,
+        );
+
+        expect(
+          vi.mocked(mockHookRunner.executeHooksParallel).mock.calls[0][2],
+        ).toMatchObject({
+          tool_response: {
+            llmContent: text,
+            returnDisplay: toolName === 'ask_user_question' ? text : display,
+          },
+        });
+        expect(response.returnDisplay).toBe(display);
+      },
+    );
+
     it('should execute hooks for PostToolUse event', async () => {
       const mockPlan = createMockExecutionPlan([]);
       const mockAggregated = createMockAggregatedResult(true);

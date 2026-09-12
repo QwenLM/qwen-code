@@ -140,8 +140,8 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     'Все доступные навыки заблокированы на более высоком уровне (см. ниже).',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
+  'Locked by settings entries you cannot toggle here:':
+    'Заблокированы записями настроек (здесь переключить нельзя):',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',
@@ -429,6 +429,7 @@ export default {
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
+  'Show Tool Call Arguments': 'Показывать аргументы вызовов инструментов',
   'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
@@ -810,8 +811,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция, захваченная на поддерживаемой границе отправки).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':

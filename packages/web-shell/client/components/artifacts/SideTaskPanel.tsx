@@ -130,7 +130,15 @@ function SideTaskCreation({
   const { t } = useI18n();
   const creatingRef = useRef(false);
   const didAttemptCreateRef = useRef(false);
+  const mountedRef = useRef(true);
   const [creationError, setCreationError] = useState<unknown>();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const create = useCallback(async () => {
     if (creatingRef.current) return;
@@ -139,8 +147,11 @@ function SideTaskCreation({
     try {
       const created = await createSession(tabId, parentSessionId, title);
       onCreated(tabId, created.sessionId);
-      if (created.displayName) onTitleChange(tabId, created.displayName);
+      if (mountedRef.current && created.displayName) {
+        onTitleChange(tabId, created.displayName);
+      }
     } catch (error) {
+      if (!mountedRef.current) return;
       setCreationError(error);
       onError?.(error, t('sideTask.createFailed'));
     } finally {

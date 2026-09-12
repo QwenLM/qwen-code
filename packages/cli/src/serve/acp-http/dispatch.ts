@@ -53,10 +53,14 @@ import {
 } from '../auth/device-flow.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
   type BridgeRestoredSession,
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
@@ -284,6 +288,9 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/agents`,
+  `${QWEN_METHOD_NS}session/agent_trace`,
+  `${QWEN_METHOD_NS}session/attachments`,
   `${QWEN_METHOD_NS}session/tasks/cancel`,
   `${QWEN_METHOD_NS}session/tasks/workflow_action`,
   `${QWEN_METHOD_NS}session/lsp`,
@@ -2359,6 +2366,9 @@ export class AcpDispatcher {
               ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
+              ...(s.activeWorkState !== undefined
+                ? { activeWorkState: s.activeWorkState }
+                : {}),
               isArchived: s.isArchived === true,
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
@@ -3789,6 +3799,50 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/agents`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionAgentsStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/agent_trace`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const rootAgentId = params['rootAgentId'];
+          if (
+            rootAgentId !== undefined &&
+            (typeof rootAgentId !== 'string' ||
+              rootAgentId.length === 0 ||
+              rootAgentId.length > 500)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'Invalid rootAgentId'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionAgentTrace(
+            sessionId,
+            rootAgentId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/attachments`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const attachments = await this.bridge.listSessionAttachments(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, { attachments });
+          return;
+        }
+
         case `${QWEN_METHOD_NS}session/tasks/cancel`: {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {
@@ -4974,6 +5028,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 assertCanMutate: assertGenerationOpen,
+                runtimeWorkspaceCwd: this.boundWorkspace,
                 onError: ({ phase, sessionId, error }) => {
                   const safeSessionId = logSafe(sessionId.slice(0, 8));
                   const safeMessage = logSafe(error);
@@ -5819,6 +5874,8 @@ export class AcpDispatcher {
     binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
+    const metadata = params['_meta'] as Record<string, unknown> | undefined;
+    const submittedPrompt = metadata?.[SUBMITTED_PROMPT_META_KEY];
     try {
       const result = await this.bridge.sendPrompt(
         sessionId,
@@ -5830,7 +5887,15 @@ export class AcpDispatcher {
         // sessionId, prompt }`) so it can't become client-controlled.
         params as unknown as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
-        this.sessionCtx(conn, sessionId, fromLoopback),
+        {
+          ...this.sessionCtx(conn, sessionId, fromLoopback),
+          ...(typeof submittedPrompt === 'string' &&
+          metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
+          metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&
+          metadata?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY] === undefined
+            ? { submittedPrompt }
+            : {}),
+        },
       );
       if (id !== undefined) this.replySession(conn, sessionId, id, result);
     } catch (err) {

@@ -17,8 +17,13 @@
 import {
   canonicalizeMsgId,
   describeHoldCause,
+  describePeerInboxFailure,
   flattenPeerLabel,
+  getLastPeerInboxFailure,
   type HeldMessage,
+  listPeerControllers,
+  type PeerControllerRecord,
+  removePeerController,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -59,24 +64,72 @@ function preview(text: string, max = 100): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
-export function formatHeldList(held: readonly HeldMessage[]): string {
+/**
+ * How much of a message's hold is left, in words.
+ *
+ * The sender is waiting on this decision and stops waiting when the hold
+ * runs out, so the listing has to say how long the user has — a review
+ * screen that hides its own deadline invites decisions that arrive too
+ * late to mean anything. Rounded up, so "1 minute left" never means
+ * "already gone", and floored at "less than a minute" rather than
+ * counting seconds nobody can act on.
+ */
+function describeRemaining(
+  entry: HeldMessage,
+  expiryMs: number | null,
+): string {
+  if (expiryMs === null) return '';
+  // Aged the way the gate ages it: `InboundGate.ageOf` takes the larger
+  // of the wall-clock and monotonic elapsed times, so reading the wall
+  // clock alone here would promise time the gate will not grant. After a
+  // backward NTP correction four minutes into a five-minute hold the
+  // gate expires the message in about a minute while a wall-only
+  // reading prints "61 minutes left".
+  const wallAge = Date.now() - entry.heldAt;
+  const age =
+    entry.monotonicAt === undefined
+      ? wallAge
+      : Math.max(wallAge, performance.now() - entry.monotonicAt);
+  const remaining = expiryMs - age;
+  if (remaining <= 0) return ', expiring now';
+  const minutes = Math.ceil(remaining / 60_000);
+  return remaining < 60_000
+    ? ', less than a minute left'
+    : `, ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
+
+export function formatHeldList(
+  held: readonly HeldMessage[],
+  expiryMs: number | null = null,
+): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
     // Every field below is peer-controlled, and this is the screen where
     // the user decides untrusted messages: a forged listing line or a
     // terminal-rewriting ESC sequence here spoofs the review itself.
-    const peerLabel = flattenPeerLabel(
-      entry.frame.fromName ??
-        entry.frame.from ??
-        (entry.selfSent ? 'this session' : 'unknown session'),
-    );
-    const who = `${entry.selfSent ? '[own process]' : '[peer]'} ${peerLabel}`;
+    // A controller is named by the label its user gave it, never by the
+    // frame's `fromName`: this is the screen where a grant is judged, and
+    // a sender that could choose that string could dress itself as one.
+    const peerLabel = entry.controller
+      ? flattenPeerLabel(entry.controller.label)
+      : flattenPeerLabel(
+          entry.frame.fromName ??
+            entry.frame.from ??
+            (entry.selfSent ? 'this session' : 'unknown session'),
+        );
+    const origin = entry.controller
+      ? '[controller]'
+      : entry.selfSent
+        ? '[own process]'
+        : '[peer]';
+    const who = `${origin} ${peerLabel}`;
     const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
-      `      held because ${describeHoldCause(entry.cause)}`
+      `      held because ${describeHoldCause(entry.cause, entry.policyScope)}` +
+      describeRemaining(entry, expiryMs)
     );
   });
 
@@ -122,15 +175,127 @@ export function resolveHeld(
   return { kind: 'one', msgId: matches[0]!.frame.msgId };
 }
 
+/**
+ * Read the grants, reporting a failure as a line rather than throwing:
+ * a listing that cannot be produced is information, and `/peers` has
+ * nowhere to throw to.
+ */
+async function listControllers(): Promise<
+  PeerControllerRecord[] | { error: string }
+> {
+  try {
+    return await listPeerControllers();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function formatControllerList(
+  controllers: PeerControllerRecord[] | { error: string },
+): string {
+  if (!Array.isArray(controllers)) {
+    return `Could not read the trusted controllers: ${controllers.error}`;
+  }
+  if (controllers.length === 0) {
+    return (
+      'No trusted controllers. Without an explicit "accept" setting, a message that asserts no review class is held for your review, except one from a process this session started, which is always accepted. A sender\'s own review-class claim is not authenticated; set agents.crossSessionInbound to "hold" to review every inbound message.\n' +
+      'Add one with: qwen sessions controllers add --label <name>'
+    );
+  }
+  const lines = controllers.map(
+    (record) =>
+      `  ${record.id}  ${flattenPeerLabel(record.label)}  added ${formatCreated(
+        record.createdAt,
+      )}`,
+  );
+  return [
+    `${controllers.length} trusted controller${
+      controllers.length === 1 ? '' : 's'
+    }. Messages presenting one of these tokens are delivered without per-message review unless crossSessionInbound is "hold" or "refuse". A process this session started is always accepted; other senders' review-class claims are not authenticated, so set crossSessionInbound to "hold" to review every inbound message:`,
+    ...lines,
+    '',
+    'Revoke with /peers revoke <id>.',
+  ].join('\n');
+}
+
+function formatCreated(createdAt: number): string {
+  const date = new Date(createdAt);
+  return Number.isNaN(date.getTime())
+    ? 'unknown'
+    : date.toISOString().replace('T', ' ').slice(0, 16);
+}
+
 export const peersCommand: SlashCommand = {
   name: 'peers',
   kind: CommandKind.BUILT_IN,
   get description() {
     return t(
-      'Review messages held from other Qwen Code sessions (accept | deny)',
+      'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
     );
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
+    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+    // Controller grants live in the Qwen home, independently of whether
+    // this session managed to start a peer inbox.
+    if (verb === 'controllers') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatControllerList(await listControllers()),
+      };
+    }
+
+    if (verb === 'revoke') {
+      const id = rest[0];
+      if (id === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            'Which controller? Use /peers revoke <id> — /peers controllers lists the ids.',
+        };
+      }
+      let removed: PeerControllerRecord | null;
+      try {
+        removed = await removePeerController(id);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Could not revoke that controller: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!removed) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `No controller has the id "${flattenPeerLabel(id)}". Run /peers controllers to see them.`,
+        };
+      }
+      const forgotten =
+        context.services.peerMessaging?.forgetController(removed.id) ?? 0;
+      const backlog =
+        forgotten === 0
+          ? 'No held messages in this session used that grant.'
+          : `${forgotten} held message${forgotten === 1 ? '' : 's'} from it ${
+              forgotten === 1 ? 'remains' : 'remain'
+            } parked for review as ${
+              forgotten === 1
+                ? 'an ordinary peer message'
+                : 'ordinary peer messages'
+            }.`;
+      return {
+        type: 'message',
+        messageType: 'info',
+        content:
+          `Revoked the controller "${flattenPeerLabel(removed.label)}" (${removed.id}). ` +
+          `Running sessions revalidate active connections, and new connections can no longer use its token. ${backlog}`,
+      };
+    }
+
     const peerMessaging = context.services.peerMessaging;
     if (!peerMessaging) {
       // Absent for two different reasons, and telling a user to enable a
@@ -140,17 +305,19 @@ export const peersCommand: SlashCommand = {
       const enabled =
         context.services.settings?.merged?.agents?.crossSessionMessaging ===
         true;
+      const failure = enabled ? getLastPeerInboxFailure() : null;
       return {
         type: 'message',
         messageType: enabled ? 'error' : 'info',
-        content: enabled
-          ? 'Cross-session messaging is on, but this session has no inbox: it either failed to register in the session registry or failed to bind its socket. Re-run with DEBUG=1 to see the bind error.'
-          : 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.',
+        content: !enabled
+          ? 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.'
+          : failure
+            ? `Cross-session messaging is on, but this session has no inbox — it failed to bind its socket: ${describePeerInboxFailure(failure)}`
+            : 'Cross-session messaging is on, but this session has no inbox: it failed to register in the session registry, or the inbox is still starting. Re-run with DEBUG=1 to see the registration error.',
       };
     }
 
     const held = peerMessaging.getHeld();
-    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
     if (verb === undefined || verb === 'list') {
       // Decisions bind to this listing: record exactly which messages
@@ -160,7 +327,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: formatHeldList(held),
+        content: formatHeldList(held, peerMessaging.getHeldExpiryMs()),
       };
     }
 
@@ -168,7 +335,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, or /peers deny <id|all>.`,
+        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, /peers deny <id|all>, /peers controllers, or /peers revoke <id>.`,
       };
     }
 
@@ -212,10 +379,19 @@ export const peersCommand: SlashCommand = {
       const ids = held.map((entry) => entry.frame.msgId);
       let count = 0;
       let failed = 0;
+      // Counted separately, never folded into `failed`: a message that
+      // expired is settled and its sender already has an `expired`
+      // receipt, while a failed release is still waiting. `getHeld()`
+      // does not sweep, so a listing can show entries as "expiring now"
+      // and the first `decide()` then sweeps the whole overdue backlog --
+      // which makes every remaining id come back 'gone'. Without this the
+      // user reads "Released 0 messages." and is told nothing at all.
+      let gone = 0;
       for (const msgId of ids) {
         const outcome = peerMessaging.decide(msgId, decision);
         if (outcome === 'done') count += 1;
         else if (outcome === 'failed') failed += 1;
+        else if (outcome === 'gone') gone += 1;
       }
       // The user now knows what remains; bind later decisions to it.
       peerMessaging.recordHeldListing(peerMessaging.getHeld());
@@ -230,6 +406,9 @@ export const peersCommand: SlashCommand = {
             ? ` ${failed} could not be delivered and ${
                 failed === 1 ? 'is' : 'are'
               } still waiting — try again once the session catches up.`
+            : '') +
+          (gone > 0
+            ? ` ${gone} had already expired or been decided — run /peers to see what is waiting now.`
             : ''),
       };
     }

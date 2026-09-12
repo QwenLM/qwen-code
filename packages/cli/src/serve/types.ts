@@ -60,11 +60,21 @@ export interface ServeOptions {
   port: number;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
   mode: ServeMode;
+  /** Registration capacity, including primary and user scratch workspaces.
+   * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.
+   */
+  maxRegisteredWorkspaces?: number;
   /**
    * Per-workspace cap on concurrent live sessions. Once a runtime's
    * `bridge.sessionCount` reaches
@@ -84,10 +94,11 @@ export interface ServeOptions {
   maxSessions?: number;
   /**
    * Non-negative integer cap on concurrent live sessions across all workspace
-   * runtimes. `runQwenServe` derives a default once from the per-workspace cap
-   * and startup workspace count when several startup/restored workspaces are
-   * present; direct embeds may leave it unlimited. Dynamic registration does
-   * not recompute it. `0` or `Infinity` disables the cap.
+   * runtimes. `runQwenServe` defaults to 800 when registration capacity exceeds
+   * 25; otherwise it derives the default from the per-workspace cap and startup
+   * workspace count when several startup/restored workspaces are present.
+   * Direct embeds may leave it unlimited. Dynamic registration does not
+   * recompute it. `0` or `Infinity` disables the cap.
    */
   maxTotalSessions?: number;
   /**
@@ -302,7 +313,7 @@ export interface ServeOptions {
     timeoutMs?: number;
   };
   /**
-   * Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];
@@ -426,6 +437,8 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
+  sessionLiveStatePollIntervalMs?: number;
   mode: ServeMode;
   features: string[];
   /**
@@ -495,6 +508,8 @@ export interface CapabilitiesEnvelope {
    * `null` means the operator explicitly disabled that cap.
    */
   limits?: {
+    maxRegisteredWorkspaces?: number;
+    maxChannelControlWorkspaces?: number;
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;

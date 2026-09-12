@@ -59,6 +59,10 @@ import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import {
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+} from './workspace-skill-management.js';
+import {
   mountAcpHttp,
   type AcpHttpHandle,
   type ExtraWsRoute,
@@ -165,6 +169,7 @@ import {
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
+import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -224,7 +229,10 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
@@ -255,6 +263,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementHandle,
@@ -333,11 +342,11 @@ import {
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
+import { checkLegacyConversationRuntimeOwner } from './conversations/conversation-runtime-ownership.js';
 import {
-  createConversationRuntimeOwnership,
-  type ConversationRuntimeOwnership,
-} from './conversations/conversation-runtime-ownership.js';
-import { getStableLiveDiscoveryBaseDir } from './live/discovery.js';
+  assertLiveDiscoveryPublisher,
+  getStableLiveDiscoveryBaseDir,
+} from './live/discovery.js';
 import {
   installServeAppLifecycle,
   type ServeAppLifecycleController,
@@ -545,6 +554,8 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
@@ -677,11 +688,7 @@ export interface ServeAppDeps {
     readonly DurableCronTask[]
   >;
   liveDiscoveryStableBaseDir?: string;
-  conversationRuntimeOwnershipFactory?: (
-    pid: number,
-    instanceNonce: string,
-    stableBaseDir: string,
-  ) => ConversationRuntimeOwnership;
+  checkLegacyConversationOwner?: () => Promise<void>;
   serveAppLifecycle?: ServeAppLifecycleController;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
@@ -779,6 +786,22 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -945,8 +968,23 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: true,
+  });
+  const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: false,
+    includeUntrustedSkills: true,
+  });
+  const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const provider = trusted
+      ? trustedSkillsConfigStatus
+      : untrustedSkillsConfigStatus;
+    return provider(workspaceCwd);
+  };
+  const invalidateSkillsConfigStatus = (workspaceCwd: string) => {
+    trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+    untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+  };
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -1134,6 +1172,7 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
@@ -1451,25 +1490,9 @@ export function createServeApp(
         }
       },
     });
-  const conversationRuntimeOwnership = deps.liveConversationWorkspace
-    ? (deps.conversationRuntimeOwnershipFactory?.(
-        process.pid,
-        liveCoordinator.daemonInstanceNonce,
-        path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      ) ??
-      createConversationRuntimeOwnership({
-        pid: process.pid,
-        instanceNonce: liveCoordinator.daemonInstanceNonce,
-        stableBaseDir: path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      }))
-    : undefined;
-  if (conversationRuntimeOwnership) {
-    serveAppLifecycle.setOwnership(conversationRuntimeOwnership);
-  }
+  const stableLiveDiscoveryBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+  );
   liveCoordinator.setAppshotReadiness(
     liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
@@ -1484,7 +1507,12 @@ export function createServeApp(
   let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
-        ownership: conversationRuntimeOwnership!,
+        checkLegacyOwner:
+          deps.checkLegacyConversationOwner ??
+          (() =>
+            checkLegacyConversationRuntimeOwner({
+              stableBaseDir: stableLiveDiscoveryBaseDir,
+            })),
         workspace: deps.liveConversationWorkspace,
         registry: workspaceRegistry,
         publishRuntime: async (canonicalRoot, validate) => {
@@ -1569,7 +1597,7 @@ export function createServeApp(
     liveBoundRuntime = runtime;
     try {
       setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
-        liveCoordinator.captureScreenContext(callerSessionId),
+        liveCoordinator.captureVisualContext(callerSessionId),
       );
       setTaskHandler.call(runtime.bridge, (info) =>
         liveTaskService.handle(info),
@@ -1814,6 +1842,14 @@ export function createServeApp(
         liveTaskService.interruptWait(callerSessionId),
     });
   liveCoordinator.setHandlers({
+    beforeStart: async () => {
+      await ensureConversationRuntimeWithLifecycle();
+      await publishLiveVoiceEnabled(true);
+      await assertLiveDiscoveryPublisher(stableLiveDiscoveryBaseDir, {
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+      });
+    },
     onHostReady: () => {
       if (!liveVoiceEnabled) return;
       void verifyLiveAppshotChannel();
@@ -1974,8 +2010,6 @@ export function createServeApp(
   // disable. Re-registering middleware at that point is not an option:
   // Express fixes middleware order when the app is built.
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
-  app.use(allowOriginCors(originAllowlist));
-  app.use(hostAllowlist(opts.hostname, getPort));
   const credentials = new CredentialStore(opts.token);
   const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
@@ -1983,6 +2017,34 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject (the pre-change chain logged them because
+  // bearerAuth ran below the access log). The access log excludes the exact
+  // paths GET /health and POST */heartbeat before attaching its finish
+  // logger, so those liveness probes stay unlogged at any mount position
+  // (HEAD /health and GET /health/ are logged like any request); wall
+  // rejects on those exempt paths are likewise not logged. Capture the
+  // caller trace id BEFORE authenticate / rate limiter / body parser: those
+  // layers short-circuit (401/429/400) before the telemetry middleware ever
+  // runs, and the access log still needs the captured id to join their log
+  // lines (and 404s) with the caller's trace.
+  installAccessLogMiddleware(app, daemonLog);
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  // The loopback Host allowlist stays ahead of the pre-auth health routes so
+  // the DNS-rebinding defense covers them. On non-loopback binds only the
+  // PRIMARY gate is a pass-through (the bearer gate authenticates there);
+  // the Local Control listener keeps its own Host gate whatever the primary
+  // bind is.
+  app.use(hostAllowlist(opts.hostname, getPort));
+
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  app.use(allowOriginCors(originAllowlist));
+
+  // Pre-auth health sits below the origin wall so matched cross-origin health
+  // probes carry CORS headers. It stays unlogged (path-exempt above), so the
+  // position costs nothing in log volume.
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
@@ -1999,14 +2061,6 @@ export function createServeApp(
     });
     healthRoutes.register(app);
   }
-
-  installAccessLogMiddleware(app, daemonLog);
-
-  // Capture the caller trace id BEFORE authenticate / rate limiter / body
-  // parser: those layers short-circuit (401/429/400) before the telemetry
-  // middleware ever runs, and the access log still needs the captured id
-  // to join their log lines (and 404s) with the caller's trace.
-  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
@@ -2224,6 +2278,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
@@ -2251,6 +2306,8 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
@@ -2258,14 +2315,13 @@ export function createServeApp(
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
   });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+  });
 
   if (liveVoiceSurfaceAvailable) {
     registerLiveRoutes(app, {
       coordinator: liveCoordinator,
-      ensureRuntimeReady: async () => {
-        await ensureConversationRuntimeWithLifecycle();
-        await publishLiveVoiceEnabled(true);
-      },
       mutate,
       ...(deps.persistSetting
         ? {
@@ -2630,6 +2686,7 @@ export function createServeApp(
 
   // Dynamic workspace registration.
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -2641,6 +2698,7 @@ export function createServeApp(
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
+    onWorkspaceRemoved: invalidateSkillsConfigStatus,
     ...(deps.liveConversationWorkspace
       ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
       : {}),
@@ -3051,9 +3109,30 @@ export function createServeApp(
   });
   registerWorkspaceSkillsRoutes(app, {
     workspaceRuntime: primaryRuntime,
+    workspaceRegistry,
     mutate,
     safeBody,
     sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
+    installSkillConfig: (workspaceCwd, request) =>
+      installWorkspaceSkill(
+        workspaceCwd,
+        request,
+        primaryEffectiveEnv?.['GH_TOKEN'] ??
+          primaryEffectiveEnv?.['GITHUB_TOKEN'] ??
+          daemonEnvAtBoot['GH_TOKEN'] ??
+          daemonEnvAtBoot['GITHUB_TOKEN'],
+        capturePrimaryGenerationAssertion(),
+      ),
+    deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
+      deleteWorkspaceSkill(
+        workspaceCwd,
+        scope,
+        skillName,
+        installedPath,
+        capturePrimaryGenerationAssertion(),
+      ),
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -3062,6 +3141,8 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
   });
 
   // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).

@@ -313,6 +313,64 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  it('renders blocked retry guidance without offering a mode switch', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_blocked_retry',
+        message: 'This exact action was previously blocked.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('This exact action was previously blocked.');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).not.toContain('Switch to Default Mode');
+    expect(frame).not.toContain('Always allow');
+  });
+
+  it('offers a mode switch after consecutive classifier failures', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'consecutive_unavailable',
+        message: 'Auto Mode could not classify consecutive actions.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(
+      'Switch to Default Mode and allow once (recommended)',
+    );
+  });
+
   // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
   // self-review SR-1): the warnings block sits outside the MaxSizedBox
   // cap, so its footprint has to be reserved from `bodyContentHeight`
@@ -966,6 +1024,40 @@ describe('ToolConfirmationMessage', () => {
         'Switch to Default Mode and allow once (recommended)',
       );
       expect(frame).toContain('No');
+      expect(frame).not.toContain('Allow always');
+    });
+
+    it('budgets the two-option blocked retry layout on a tight terminal', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: ['line-1', 'line-2', 'line-3', 'line-4'].join('\n'),
+        rootCommand: 'line-1',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('previously blocked');
+      expect(frame).toContain('line-1');
+      expect(frame).toContain('last 2 lines hidden');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Switch to Default Mode');
       expect(frame).not.toContain('Allow always');
     });
 

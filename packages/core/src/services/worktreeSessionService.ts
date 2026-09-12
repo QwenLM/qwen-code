@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,6 +14,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
+const WORKTREE_SESSION_SIDECAR_MAX_BYTES = 64 * 1024;
 const RUNTIME_STATUS_SCAN_SKIP_DIRS = new Set([
   '.git',
   '.hg',
@@ -33,21 +35,20 @@ export interface WorktreeSession {
   worktreePath: string;
   worktreeBranch: string;
   /**
-   * The repo top-level (output of `GitWorktreeService.getRepoTopLevel()`)
-   * captured when the worktree was created — NOT the user's launch cwd.
+   * The root used by the worktree service that created this checkout.
    *
    * Named `originalCwd` for on-disk back-compat with sidecars written
-   * by earlier Phase C builds; semantically this is the value to pass
-   * back to `new GitWorktreeService(...)` for any subsequent cleanup
-   * (e.g. `handleWorktreeExit`'s remove path), because the worktree
-   * always lives under `<repoTopLevel>/.qwen/worktrees/`. When the
-   * CLI is launched from a monorepo subdirectory, `process.cwd()` and
-   * `getRepoTopLevel()` differ — this field stores the latter.
+   * by earlier Phase C builds. Tool and startup flows store the Git repo
+   * top-level here, while legacy daemon-created worktrees may store the
+   * registered workspace root. Consumers should use it only to resolve the
+   * worktree service, not as proof of daemon workspace ownership.
    *
    * Consumers expecting `process.cwd()` semantics should NOT use this
    * field; capture cwd separately at the time of need.
    */
   originalCwd: string;
+  /** Registered daemon workspace root for route-owned worktree attestation. */
+  workspaceCwd?: string;
   originalBranch: string;
   /**
    * HEAD commit SHA captured at the moment the worktree was created.
@@ -56,7 +57,25 @@ export interface WorktreeSession {
    * treat empty as "unknown" and skip the commit-count display.
    */
   originalHeadCommit: string;
+  /**
+   * Set on the superseded session's sidecar by a worktree reset: the
+   * replacement session this session's worktree ownership moved to. Readers
+   * redirect to it (and self-heal their registry) instead of restoring the
+   * superseded session.
+   */
+  supersededBy?: string;
+  /**
+   * Set on the replacement session's sidecar by a worktree reset: the
+   * session it took the worktree from. Cross-checked against the old
+   * session's `supersededBy` to classify an interrupted transfer.
+   */
+  supersedes?: string;
 }
+
+export type StrictWorktreeSession =
+  | { state: 'missing' }
+  | { state: 'valid'; session: WorktreeSession }
+  | { state: 'invalid'; reason: string };
 
 /**
  * Runtime shape check for a parsed sidecar object. Returns true only when
@@ -73,8 +92,13 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     typeof v['worktreePath'] === 'string' &&
     typeof v['worktreeBranch'] === 'string' &&
     typeof v['originalCwd'] === 'string' &&
+    (v['workspaceCwd'] === undefined ||
+      typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
-    typeof v['originalHeadCommit'] === 'string'
+    typeof v['originalHeadCommit'] === 'string' &&
+    (v['supersededBy'] === undefined ||
+      typeof v['supersededBy'] === 'string') &&
+    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
   );
 }
 
@@ -121,6 +145,96 @@ export async function readWorktreeSession(
   options.signal?.throwIfAborted();
   if (!isValidWorktreeSession(parsed)) return null;
   return parsed;
+}
+
+/** Strict daemon-only sidecar read that preserves corruption for recovery. */
+export async function readWorktreeSessionStrict(
+  filePath: string,
+): Promise<StrictWorktreeSession> {
+  let handle: fs.FileHandle | undefined;
+  let observedSidecar = false;
+  try {
+    const flags =
+      nodeFs.constants.O_RDONLY |
+      (nodeFs.constants.O_NOFOLLOW ?? 0) |
+      (nodeFs.constants.O_NONBLOCK ?? 0);
+    const before = await fs.lstat(filePath);
+    observedSidecar = true;
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+      return { state: 'invalid', reason: 'unsafe sidecar file type' };
+    }
+    if (before.ino === 0 || before.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
+    }
+    handle = await fs.open(filePath, flags);
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'sidecar identity changed before read',
+      };
+    }
+    const buffer = Buffer.alloc(WORKTREE_SESSION_SIDECAR_MAX_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
+    if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
+    }
+    const after = await handle.stat();
+    const pathStats = await fs.lstat(filePath);
+    if (
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.size !== bytesRead ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      !pathStats.isFile() ||
+      pathStats.nlink !== 1 ||
+      pathStats.dev !== after.dev ||
+      pathStats.ino !== after.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'sidecar identity changed during read',
+      };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+    } catch {
+      return { state: 'invalid', reason: 'invalid sidecar JSON' };
+    }
+    if (!isValidWorktreeSession(parsed)) {
+      return { state: 'invalid', reason: 'invalid sidecar contents' };
+    }
+    return { state: 'valid', session: parsed };
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return observedSidecar
+        ? { state: 'invalid', reason: 'sidecar disappeared during read' }
+        : { state: 'missing' };
+    }
+    return {
+      state: 'invalid',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 /** Writes the worktree session sidecar via `atomicWriteJSON`. */
@@ -383,6 +497,12 @@ export interface WorktreeRestoreResult {
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
  *
+ * A sidecar carrying `supersededBy` is refused the same way but deliberately
+ * NOT cleared: a worktree reset moved ownership of that checkout to the
+ * replacement session, and the daemon's reset route still reads this sidecar's
+ * `supersededBy` to redirect and to classify an interrupted transfer. Restoring
+ * here would point a live session at a checkout another session owns.
+ *
  * Shared by TUI / headless / ACP entry points so all three behave
  * consistently on `--resume`. Failures are logged via the supplied
  * `onWarn` callback but never thrown — worktree restore is best-effort,
@@ -422,6 +542,21 @@ export async function restoreWorktreeContext(
     return { contextMessage: null, session: null };
   }
 
+  if (session.supersededBy !== undefined) {
+    // A worktree reset moved ownership of this checkout to
+    // `session.supersededBy`. Refuse the restore — resuming here would direct
+    // a live session into a worktree another session now owns — but leave the
+    // sidecar alone: the daemon's reset route still reads this link to
+    // redirect and to classify an interrupted transfer.
+    onWarn?.(
+      new Error(
+        `worktree session was superseded by ${session.supersededBy}; ` +
+          `not restoring its worktree context.`,
+      ),
+    );
+    return { contextMessage: null, session: null };
+  }
+
   // Structural sanity check: the worktreePath MUST live under
   // `<originalCwd>/.qwen/worktrees/`. Schema validation (readWorktreeSession)
   // already ensures the fields are strings, but a manually-edited or
@@ -432,10 +567,7 @@ export async function restoreWorktreeContext(
   // (PR #4174 review #3256839787.)
   const expectedParent = path.join(session.originalCwd, '.qwen', 'worktrees');
   const resolvedWorktree = path.resolve(session.worktreePath);
-  if (
-    !resolvedWorktree.startsWith(expectedParent + path.sep) &&
-    resolvedWorktree !== expectedParent
-  ) {
+  if (!resolvedWorktree.startsWith(expectedParent + path.sep)) {
     onWarn?.(
       new Error(
         `worktreePath ${session.worktreePath} is outside ${expectedParent}; ` +

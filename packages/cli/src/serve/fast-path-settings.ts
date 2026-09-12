@@ -15,6 +15,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  isPrivateProvenanceEnvKey,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -46,6 +47,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
+  serve?: { channels?: unknown };
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -283,6 +285,11 @@ export function loadServeFastPathEnvironment(
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
         if (isLoaderEnvKey(key)) continue;
+        // Home-scoped files are exempt from the hardcoded exclusions below,
+        // so the private Conversations provenance marker — which the daemon
+        // would otherwise freeze into daemonRuntimeBaseEnv and hand to every
+        // spawned session — needs its own every-scope rejection here.
+        if (isPrivateProvenanceEnvKey(key)) continue;
         if (!isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
           continue;
         }
@@ -405,7 +412,10 @@ function isWorkspaceTrustedFastPath(
   return isPathTrustedFastPath(realWorkspaceDir);
 }
 
-function readSettingsSummary(filePath: string): ServeFastPathSettings {
+function readSettingsSummary(
+  filePath: string,
+  includeServe = false,
+): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
   let parsed: unknown;
@@ -423,7 +433,7 @@ function readSettingsSummary(filePath: string): ServeFastPathSettings {
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed);
+  return pickFastPathSettings(parsed, includeServe);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -440,6 +450,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 
 function pickFastPathSettings(
   value: Record<string, unknown>,
+  includeServe = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -632,6 +643,14 @@ function pickFastPathSettings(
     out.policy = pickedPolicy;
   }
 
+  const serve = value['serve'];
+  if (includeServe && isPlainObject(serve)) {
+    const channels = serve['channels'];
+    if (channels !== undefined) {
+      out.serve = { channels };
+    }
+  }
+
   return out;
 }
 
@@ -713,9 +732,16 @@ export function loadServeFastPathSettings(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
   const initialTrustCheckSettings = mergeFastPathSettings(system, user);
-  const isTrusted =
-    isWorkspaceTrustedFastPath(initialTrustCheckSettings, realWorkspaceDir) ??
-    true;
+  const trustDecision = isWorkspaceTrustedFastPath(
+    initialTrustCheckSettings,
+    realWorkspaceDir,
+  );
+  const isTrusted = trustDecision ?? true;
+  const startupChannelsTrusted =
+    isWorkspaceTrustedFastPath(
+      mergeFastPathSettings(systemDefaults, user, system),
+      realWorkspaceDir,
+    ) === true;
   let realHomeDir = resolvedHomeDir;
   try {
     realHomeDir = fs.realpathSync(resolvedHomeDir);
@@ -730,11 +756,16 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath)
+    ? readSettingsSummary(workspaceSettingsPath, startupChannelsTrusted)
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  if (startupChannelsTrusted && workspaceFromDisk.serve) {
+    merged.serve = {
+      channels: workspaceFromDisk.serve.channels,
+    };
+  }
   return resolveEnvVarsInObject(
     merged as Settings,
     getHomeEnvFallbackVarsFastPath(),
