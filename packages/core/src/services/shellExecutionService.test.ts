@@ -402,6 +402,88 @@ describe('ShellExecutionService', () => {
       expect(result.signal).toBeNull();
     });
 
+    it.each([
+      { exitCode: 0, signal: 0, timeout: false, aborted: false },
+      { exitCode: 0, signal: 15, timeout: false, aborted: true },
+      { exitCode: 1, signal: 0, timeout: false, aborted: true },
+      { exitCode: 0, signal: 0, timeout: true, aborted: true },
+    ])('classifies a dispatched PTY cancel: %j', async (expected) => {
+      mockPlatform.mockReturnValue('linux');
+      mockProcessKill.mockReturnValue(true);
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          pty.onData.mock.calls[0][0]('completed\n');
+          controller.abort(
+            expected.timeout
+              ? new DOMException('Timed out', 'TimeoutError')
+              : undefined,
+          );
+          pty.onExit.mock.calls[0][0](expected);
+        },
+      );
+
+      expect(mockProcessKill).toHaveBeenCalledWith(mockPtyProcess.pid, 0);
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGTERM',
+      );
+      expect(result.aborted).toBe(expected.aborted);
+      expect(result.exitCode).toBe(expected.exitCode);
+      expect(result.signal).toBe(expected.signal || null);
+      expect(result.output).toContain('completed');
+    });
+
+    it('does not flag a PTY timeout when the exited pid prevents kill dispatch', async () => {
+      mockPlatform.mockReturnValue('linux');
+      mockProcessKill.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      });
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(
+        mockProcessKill.mock.calls.every(([, signal]) => signal === 0),
+      ).toBe(true);
+    });
+
+    it('settles PTY cancellation when the abort reason name getter throws', async () => {
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          controller.abort({
+            get name() {
+              throw new Error('unreadable name');
+            },
+          });
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 15 });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(result.signal).toBe(15);
+    });
+
+    it('does not flag a late PTY timeout after exit without kill dispatch', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'command',
+        (pty, controller) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+    });
+
     it('disposes PTY terminal resources on natural exit', async () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
@@ -842,6 +924,223 @@ describe('ShellExecutionService', () => {
   });
 
   describe('Aborting Commands', () => {
+    it.each([
+      { reason: 'cancel', ignoresSigterm: false },
+      { reason: 'timeout', ignoresSigterm: false },
+      { reason: 'cancel', ignoresSigterm: true },
+      { reason: 'timeout', ignoresSigterm: true },
+    ])(
+      'cancels a surviving POSIX group after abnormal leader exit ($reason, ignores TERM: $ignoresSigterm)',
+      async ({ reason, ignoresSigterm }) => {
+        vi.useFakeTimers();
+        let groupAlive = true;
+        mockProcessKill.mockImplementation((pid, signal) => {
+          if (signal === 0 && (pid === mockPtyProcess.pid || !groupAlive)) {
+            throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+          }
+          if (
+            pid === -mockPtyProcess.pid &&
+            (signal === 'SIGKILL' || (signal === 'SIGTERM' && !ignoresSigterm))
+          ) {
+            groupAlive = false;
+          }
+          return true;
+        });
+
+        try {
+          const abortController = new AbortController();
+          const handle = await ShellExecutionService.execute(
+            'trap "" HUP; sleep 60 & wait',
+            '/test/dir',
+            onOutputEventMock,
+            abortController.signal,
+            true,
+            shellExecutionConfig,
+          );
+          const settled = handle.result.then((result) => ({
+            result,
+            groupAliveAtSettlement: groupAlive,
+          }));
+
+          abortController.abort(
+            reason === 'timeout'
+              ? new DOMException('Timed out', 'TimeoutError')
+              : undefined,
+          );
+          mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: 9 });
+          await vi.advanceTimersByTimeAsync(1000);
+          const { result, groupAliveAtSettlement } = await settled;
+
+          const groupKillSignals = mockProcessKill.mock.calls
+            .filter(
+              ([pid, signal]) => pid === -mockPtyProcess.pid && signal !== 0,
+            )
+            .map(([, signal]) => signal);
+          expect({
+            result,
+            groupAliveAtSettlement,
+            groupKillSignals,
+          }).toMatchObject({
+            result: { aborted: true, exitCode: 0, signal: 9 },
+            groupAliveAtSettlement: false,
+            groupKillSignals: ignoresSigterm
+              ? ['SIGTERM', 'SIGKILL']
+              : ['SIGTERM'],
+          });
+          expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+        } finally {
+          mockProcessKill.mockImplementation(() => true);
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    // Sibling of the abnormal-leader-exit case where the leader is ALIVE at
+    // cancel time: the group SIGTERM kills the leader (onExit flips `exited`
+    // inside the grace window) but a TERM-resistant member survives. The
+    // escalation must still SIGKILL the group — removing the group-liveness
+    // disjunct from the escalation makes this fail.
+    it('cancels a surviving POSIX group when the leader dies during the SIGTERM window', async () => {
+      vi.useFakeTimers();
+      let groupAlive = true;
+      mockProcessKill.mockImplementation((pid, signal) => {
+        if (signal === 0) {
+          // Leader (positive pid) stays alive for the pre-kill liveness gate;
+          // the group (-pid) reports alive until SIGKILL lands.
+          if (pid === -mockPtyProcess.pid && !groupAlive) {
+            throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+          }
+          return true;
+        }
+        if (pid === -mockPtyProcess.pid && signal === 'SIGKILL') {
+          groupAlive = false;
+        }
+        return true;
+      });
+
+      try {
+        const abortController = new AbortController();
+        const handle = await ShellExecutionService.execute(
+          'python3 -c "signal.SIG_IGN" & sleep 5',
+          '/test/dir',
+          onOutputEventMock,
+          abortController.signal,
+          true,
+          shellExecutionConfig,
+        );
+        const settled = handle.result;
+
+        abortController.abort();
+        // The leader dies from the group SIGTERM inside the grace window.
+        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: 15 });
+        await vi.advanceTimersByTimeAsync(1000);
+        const result = await settled;
+
+        const groupKillSignals = mockProcessKill.mock.calls
+          .filter(
+            ([pid, signal]) => pid === -mockPtyProcess.pid && signal !== 0,
+          )
+          .map(([, signal]) => signal);
+        expect(result.aborted).toBe(true);
+        expect(groupKillSignals).toEqual(['SIGTERM', 'SIGKILL']);
+        expect(groupAlive).toBe(false);
+        expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      { exitCode: 0, signal: 0, groupAlive: true },
+      { exitCode: 7, signal: 0, groupAlive: true },
+      { exitCode: 0, signal: 9, groupAlive: false },
+    ])(
+      'preserves a completed POSIX leader on cancel (exit: $exitCode, signal: $signal, group alive: $groupAlive)',
+      async ({ exitCode, signal, groupAlive }) => {
+        mockProcessKill.mockImplementation((pid, killSignal) => {
+          if (killSignal === 0 && (pid === mockPtyProcess.pid || !groupAlive)) {
+            throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+          }
+          return true;
+        });
+
+        try {
+          const { result } = await simulateExecution(
+            'sleep 60 &',
+            (pty, abortController) => {
+              abortController.abort();
+              pty.onExit.mock.calls[0][0]({ exitCode, signal });
+            },
+          );
+
+          expect(result).toMatchObject({
+            aborted: false,
+            exitCode,
+            signal: signal === 0 ? null : signal,
+          });
+          expect(mockProcessKill.mock.calls.filter(([, s]) => s !== 0)).toEqual(
+            [],
+          );
+          expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+        } finally {
+          mockProcessKill.mockImplementation(() => true);
+        }
+      },
+    );
+
+    it.each([
+      { platform: 'linux', reason: 'cancel' },
+      { platform: 'linux', reason: 'timeout' },
+      { platform: 'win32', reason: 'cancel' },
+      { platform: 'win32', reason: 'timeout' },
+    ])(
+      'does not abort a completed PTY before onExit on $platform ($reason)',
+      async ({ platform, reason }) => {
+        mockPlatform.mockReturnValue(platform);
+        mockProcessKill.mockImplementation((_pid, signal) => {
+          if (signal === 0) {
+            throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+          }
+          return true;
+        });
+
+        try {
+          const { result } = await simulateExecution(
+            'fast-and-cancelled',
+            (pty, abortController) => {
+              abortController.abort(
+                reason === 'timeout'
+                  ? new DOMException('Timed out', 'TimeoutError')
+                  : undefined,
+              );
+              pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+            },
+          );
+
+          expect(result).toMatchObject({
+            aborted: false,
+            exitCode: 0,
+            signal: null,
+            error: null,
+          });
+          expect(mockProcessKill).not.toHaveBeenCalledWith(
+            -mockPtyProcess.pid,
+            'SIGTERM',
+          );
+          expect(mockProcessKill).not.toHaveBeenCalledWith(
+            -mockPtyProcess.pid,
+            'SIGKILL',
+          );
+          expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+          expect(mockSpawnSync).not.toHaveBeenCalled();
+          expect(mockCpSpawn).not.toHaveBeenCalled();
+        } finally {
+          mockProcessKill.mockImplementation(() => true);
+        }
+      },
+    );
+
     it('should abort a running process and set the aborted flag', async () => {
       const { result } = await simulateExecution(
         'sleep 10',
@@ -1623,9 +1922,14 @@ describe('ShellExecutionService', () => {
       // runs the liveness check fails (ESRCH) — the common cancel-on-healthy-
       // ConPTY flow. The cancel still tree-kills (performCancelKill), and the
       // finalizer adds no shell-only kill. See #5873.
+      let shellAlive = true;
+      mockSpawnSync.mockImplementationOnce(() => {
+        shellAlive = false;
+        return { status: 0 };
+      });
       mockProcessKill.mockImplementation(
         (_pid: number, signal?: string | number) => {
-          if (signal === 0) {
+          if (signal === 0 && !shellAlive) {
             throw new Error('ESRCH');
           }
           return true;
@@ -1733,6 +2037,7 @@ describe('ShellExecutionService', () => {
       );
 
       expect(result.exitCode).toBe(0);
+      expect(result.aborted).toBe(false);
       expect(mockCpSpawn).toHaveBeenCalledWith(
         TASKKILL,
         ['/f', '/pid', String(mockPtyProcess.pid)],
@@ -3221,8 +3526,81 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       );
 
-      expect(result.aborted).toBe(true);
+      // The natural exit 0 settled the command with no kill-caused death
+      // observable, so the settlement gate resolves aborted: false; the pin
+      // here is the `if (!exited)` guard, not the flag.
+      expect(result.aborted).toBe(false);
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('a cancel in the post-exit zombie window does not retro-flag a completed command', async () => {
+      // The kernel reaped the child but Node has not delivered 'exit' yet:
+      // performCancelKill's guard is blind in this window and dispatches the
+      // kill, so the settlement gate (signal !== null || code !== 0) is the
+      // only thing standing between a completed `git push` and
+      // BEFORE-completion cancel copy. See R25-1.
+      const { result } = await simulateExecution(
+        'git push',
+        (cp, abortController) => {
+          cp.stdout?.emit('data', Buffer.from('pushed\n'));
+          abortController.abort();
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.executionMethod).toBe('child_process');
+      expect(result.aborted).toBe(false);
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain('pushed');
+    });
+
+    it('a cancel that actually kills the child still resolves aborted', async () => {
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          cp.emit('exit', null, 'SIGTERM');
+          cp.emit('close', null, 'SIGTERM');
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+    });
+
+    it('does not flag a late child timeout after exit without kill dispatch', async () => {
+      const { result } = await simulateExecution(
+        'command',
+        (cp, controller) => {
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          controller.abort(new DOMException('Timed out', 'TimeoutError'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+    });
+
+    it('a timeout abort keeps aborted even when the command trap-exits 0', async () => {
+      // shell.ts keys its timeout copy off `aborted`; a graceful-shutdown
+      // command exiting 0 on the timeout kill must not read as plain
+      // success (merge-base reported aborted for any timeout abort).
+      const { result } = await simulateExecution(
+        'serve --graceful',
+        (cp, abortController) => {
+          abortController.abort(new DOMException('Timed out', 'TimeoutError'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
@@ -3358,8 +3736,29 @@ describe('ShellExecutionService child_process fallback', () => {
 
       // Result is the normal exit shape, not the promoted shape.
       expect(result.promoted).toBeUndefined();
-      expect(result.aborted).toBe(true); // abortSignal.aborted is still true
+      expect(result.aborted).toBe(false);
       expect(result.exitCode).toBe(0);
+    });
+
+    it('does not abort a child that completed before cancellation arrived', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (cp, abortController) => {
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          abortController.abort();
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(result.exitCode).toBe(0);
+      expect(mockProcessKill).not.toHaveBeenCalled();
     });
 
     it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {

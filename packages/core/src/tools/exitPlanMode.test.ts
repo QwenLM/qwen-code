@@ -289,6 +289,7 @@ describe('ExitPlanModeTool', () => {
     const result = await invocation.execute(controller.signal);
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBe(true);
     expect(result.llmContent).toContain('cancelled');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
@@ -308,6 +309,7 @@ describe('ExitPlanModeTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBeUndefined();
     expect(result.llmContent).toContain('stale');
     expect(approvalMode).toBe(ApprovalMode.PLAN);
     expect(config.setApprovalMode).not.toHaveBeenCalled();
@@ -457,6 +459,39 @@ describe('ExitPlanModeTool', () => {
     );
 
     expect(result.error).toBeUndefined();
+    expect(result.aborted).toBe(true);
+    expect(result.llmContent).toContain('cancelled');
+    expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('treats a rejected teammate approval abort as cancellation, not failure', async () => {
+    // R21-2: TeamManager.requestPlanApproval turns every abort into a plain
+    // reject (not an AbortError), so a cancelled leader approval hits the catch
+    // — not the post-approval signal.aborted check. The catch must take the
+    // cooperative-cancel contract (error-free + aborted) so the scheduler does
+    // not count the user's cancellation as a leader-approval failure.
+    const controller = new AbortController();
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => {
+        controller.abort();
+        throw new Error('Plan approval request aborted.');
+      }),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(controller.signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.aborted).toBe(true);
     expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
   });

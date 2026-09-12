@@ -792,6 +792,7 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain(
         'Monitor was cancelled before it could start.',
       );
+      expect(result).toHaveProperty('aborted', true);
     });
 
     it('truncates long monitor descriptions in display surfaces', async () => {

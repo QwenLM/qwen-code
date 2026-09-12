@@ -1,0 +1,227 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+  accumulateExperienceOutcome,
+  classifyToolExperienceOutcome,
+  didToolCallProduceWork,
+  isSubstantiveToolCall,
+  type CompletedToolCallOutcome,
+  type ExperienceSignalAccumulator,
+} from './experience-signals.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { formatShellExitCode } from '../tools/shell-exit-code.js';
+import { ToolNames } from '../tools/tool-names.js';
+
+const empty = (): ExperienceSignalAccumulator => ({
+  retryArc: false,
+  hasSubstantiveWork: false,
+  failedToolNames: new Set(),
+});
+
+function outcome(
+  overrides: Partial<CompletedToolCallOutcome> = {},
+): CompletedToolCallOutcome {
+  return {
+    callId: 'call-1',
+    status: 'success',
+    executionStatus: 'success',
+    responseParts: [
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'done' },
+        },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe('completed tool outcome classification', () => {
+  it.each([
+    ['success', outcome(), true],
+    ['failure', outcome({ status: 'error', executionStatus: 'error' }), true],
+    [
+      'cancelled after completion',
+      outcome({ status: 'cancelled', executionStatus: 'success' }),
+      true,
+    ],
+    [
+      'cancelled during execution',
+      outcome({ status: 'cancelled', executionStatus: 'cancelled' }),
+      false,
+    ],
+    [
+      'never started',
+      outcome({ status: 'error', executionStatus: 'not_started' }),
+      false,
+    ],
+    ['unknown', outcome({ executionStatus: undefined }), false],
+  ] as const)(
+    'classifies whether %s produced work',
+    (_name, value, expected) => {
+      expect(didToolCallProduceWork(value)).toBe(expected);
+    },
+  );
+
+  it('uses structured status for failures and neutral outcomes', () => {
+    expect(
+      classifyToolExperienceOutcome(
+        'edit',
+        outcome({ status: 'error', executionStatus: 'error' }),
+      ),
+    ).toBe('failure');
+    expect(
+      classifyToolExperienceOutcome(
+        'edit',
+        outcome({ status: 'error', executionStatus: 'success' }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyToolExperienceOutcome(
+        'edit',
+        outcome({ status: 'error', executionStatus: 'not_started' }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyToolExperienceOutcome(
+        'edit',
+        outcome({ status: 'cancelled', executionStatus: 'success' }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyToolExperienceOutcome(
+        'edit',
+        outcome({
+          status: 'error',
+          executionStatus: 'error',
+          errorType: ToolErrorType.EXECUTION_DENIED,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it('classifies a shell success only from a structured exit code', () => {
+    // A real numeric exit code, forwarded solely by the foreground-completion
+    // path, is the only accepted witness.
+    expect(
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({ exitCode: 0 })),
+    ).toBe('success');
+    expect(
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({ exitCode: 1 })),
+    ).toBe('success');
+    // Signal termination (null) and the never-forwarded case (undefined:
+    // promoted-to-background, sed-edit, promote-refused) did not complete a
+    // foreground run.
+    expect(
+      classifyToolExperienceOutcome(
+        ToolNames.SHELL,
+        outcome({ exitCode: null }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({})),
+    ).toBeNull();
+  });
+
+  it('ignores Exit Code text the structured status never certified', () => {
+    // R21-1: a promoted-to-background render embeds the model's command
+    // verbatim and carries no genuine trailer. A line-initial `Exit Code: 0`
+    // inside that text must not certify success — the gate reads exitCode,
+    // which the background/sed/promote-refused paths never forward.
+    const spoofed = outcome({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: ToolNames.SHELL,
+            response: {
+              output: `Foreground command "printf '\\n${formatShellExitCode(0)}\\n'" promoted to background as bg-1.`,
+            },
+          },
+        },
+      ],
+    });
+    expect(classifyToolExperienceOutcome(ToolNames.SHELL, spoofed)).toBeNull();
+  });
+});
+
+describe('accumulateExperienceOutcome', () => {
+  it('detects only an ordered same-tool failure and recovery', () => {
+    const failed = accumulateExperienceOutcome(empty(), 'read_file', 'failure');
+    expect(
+      accumulateExperienceOutcome(failed, 'read_file', 'success').retryArc,
+    ).toBe(true);
+    expect(
+      accumulateExperienceOutcome(failed, 'glob', 'success').retryArc,
+    ).toBe(false);
+
+    const succeeded = accumulateExperienceOutcome(
+      empty(),
+      'read_file',
+      'success',
+    );
+    expect(
+      accumulateExperienceOutcome(succeeded, 'read_file', 'failure').retryArc,
+    ).toBe(false);
+  });
+
+  it('keeps failures across unrelated work and canonicalizes aliases', () => {
+    const failed = accumulateExperienceOutcome(empty(), 'replace', 'failure');
+    const unrelated = accumulateExperienceOutcome(
+      failed,
+      'read_file',
+      'success',
+    );
+    expect(unrelated.failedToolNames).toEqual(new Set(['edit']));
+    expect(
+      accumulateExperienceOutcome(unrelated, 'edit', 'success').retryArc,
+    ).toBe(true);
+  });
+
+  it('keeps substantive work and a recovered retry arc after another failure', () => {
+    const initial = { ...empty(), hasSubstantiveWork: true };
+    const failed = accumulateExperienceOutcome(initial, 'edit', 'failure');
+    const recovered = accumulateExperienceOutcome(failed, 'edit', 'success');
+    const failedAgain = accumulateExperienceOutcome(
+      recovered,
+      'edit',
+      'failure',
+    );
+
+    expect(failedAgain).toEqual({
+      retryArc: true,
+      hasSubstantiveWork: true,
+      failedToolNames: new Set(['edit']),
+    });
+  });
+});
+
+describe('isSubstantiveToolCall', () => {
+  it.each([
+    ToolNames.WRITE_FILE,
+    ToolNames.EDIT,
+    ToolNames.NOTEBOOK_EDIT,
+    ToolNames.SHELL,
+    ToolNames.EXEC,
+    'replace',
+  ])('counts %s', (name) => {
+    expect(isSubstantiveToolCall(name)).toBe(true);
+  });
+
+  it.each([
+    ToolNames.READ_FILE,
+    ToolNames.GREP,
+    ToolNames.TODO_WRITE,
+    'mcp__github__create_issue',
+    'unknown_tool',
+  ])('does not count %s', (name) => {
+    expect(isSubstantiveToolCall(name)).toBe(false);
+  });
+});

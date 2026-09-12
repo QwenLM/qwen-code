@@ -88,6 +88,7 @@ import {
   rejectPendingSkill,
   type PendingSkill,
 } from './pending-skills.js';
+import type { ExperienceSignals } from './experience-signals.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -144,10 +145,10 @@ export interface ScheduleSkillReviewParams {
   history: Content[];
   toolCallCount: number;
   skillsModified: boolean;
+  experienceSignals?: ExperienceSignals;
   now?: Date;
   config?: Config;
   enabled?: boolean;
-  threshold?: number;
   maxTurns?: number;
   timeoutMs?: number;
   /** When true, stage created skills for user confirmation instead of
@@ -216,6 +217,9 @@ export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
 export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
 export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
 export const AUTO_SKILL_THRESHOLD = 20;
+/** Minimum tool calls in the review window before experience signals alone can
+ * trigger a review — ensures the review agent has enough material to judge. */
+export const AUTO_SKILL_EXPERIENCE_FLOOR = 5;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -844,8 +848,14 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
     }
 
-    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
-    if (params.toolCallCount < threshold) {
+    const signals = params.experienceSignals;
+    const shouldSchedule = signals
+      ? ((signals.retryArc || signals.userSteer) &&
+          params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR) ||
+        (signals.hasSubstantiveWork &&
+          params.toolCallCount >= AUTO_SKILL_THRESHOLD)
+      : params.toolCallCount >= AUTO_SKILL_THRESHOLD;
+    if (!shouldSchedule) {
       return { status: 'skipped', skippedReason: 'below_threshold' };
     }
 
@@ -875,7 +885,7 @@ export class MemoryManager {
       metadata: {
         historyLength: params.history.length,
         toolCallCount: params.toolCallCount,
-        threshold,
+        threshold: AUTO_SKILL_THRESHOLD,
       },
     });
 

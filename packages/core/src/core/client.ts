@@ -87,7 +87,15 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
-import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  accumulateExperienceOutcome,
+  classifyToolExperienceOutcome,
+  didToolCallProduceWork,
+  isSubstantiveToolCall,
+  type CompletedToolCallOutcome,
+  type ExperienceSignalAccumulator,
+  type ToolExperienceOutcome,
+} from '../memory/experience-signals.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
@@ -181,7 +189,7 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
-import { type File, type IdeContext } from '../ide/types.js';
+import type { File, IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
 import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 
@@ -455,6 +463,17 @@ export class LlmClient {
   private readonly stopHookForcedPromptIds = new Set<string>();
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  /** Whether a steer message arrived since the last dispatched skill review. */
+  private userSteeredSinceReview = false;
+  private experienceSignalsSinceReview: ExperienceSignalAccumulator = {
+    retryArc: false,
+    hasSubstantiveWork: false,
+    failedToolNames: new Set(),
+  };
+  private readonly pendingExperienceOutcomes = new Map<
+    string,
+    { toolName: string; outcome: ToolExperienceOutcome }
+  >();
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -497,7 +516,7 @@ export class LlmClient {
   private agentRemindersInitialized = false;
 
   private static skillEntryKey(e: AvailableSkillEntry): string {
-    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+    return e.level === undefined ? `cmd:${e.name}` : `skill:${e.name}`;
   }
 
   /**
@@ -571,6 +590,10 @@ export class LlmClient {
       return;
     }
 
+    // Session switch (/resume, /branch) reuses this client: the review
+    // window belongs to the old session and must not leak into the new one.
+    this.resetSkillReviewWindow();
+
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
@@ -634,12 +657,10 @@ export class LlmClient {
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
+    } else if (sessionStartSource === undefined) {
+      await this.startChat(undefined, undefined, signal);
     } else {
-      if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource, signal);
-      } else {
-        await this.startChat(undefined, undefined, signal);
-      }
+      await this.startChat(undefined, sessionStartSource, signal);
     }
 
     signal?.throwIfAborted();
@@ -688,6 +709,7 @@ export class LlmClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+    this.acceptCompletedToolCallOutcomes(content);
   }
 
   getChat(): LlmChat {
@@ -1526,6 +1548,8 @@ export class LlmClient {
     }
 
     this.initializedSessionId = undefined;
+    // /clear starts a fresh session; the skill-review window must not leak.
+    this.resetSkillReviewWindow();
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2589,11 +2613,13 @@ export class LlmClient {
       return;
     }
 
-    // autoSkill counts tool calls and can trigger on both UserQuery and
-    // ToolResult turns so the threshold can fire mid-session.
+    // Accepted experience may finish in a Steer, Retry, or Hook continuation.
+    // Evaluate it there rather than waiting for another user/tool-result turn.
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.ToolResult
+      messageType === SendMessageType.ToolResult ||
+      this.userSteeredSinceReview ||
+      this.experienceSignalsSinceReview.retryArc
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
@@ -2602,6 +2628,13 @@ export class LlmClient {
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
       if (autoSkillEnabled) {
+        const { retryArc, hasSubstantiveWork } =
+          this.experienceSignalsSinceReview;
+        const experienceSignals = {
+          retryArc,
+          hasSubstantiveWork,
+          userSteer: this.userSteeredSinceReview,
+        };
         const skillReviewResult = mgr.scheduleSkillReview({
           projectRoot,
           sessionId,
@@ -2610,13 +2643,11 @@ export class LlmClient {
           toolCallCount: this.toolCallCount,
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
-          threshold: AUTO_SKILL_THRESHOLD,
+          experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter when a review is dispatched so the next
-          // review only fires after a full new threshold worth of tool calls.
-          this.toolCallCount = 0;
+          this.resetSkillReviewWindow();
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
@@ -2633,15 +2664,8 @@ export class LlmClient {
                 }),
             );
           }
-        } else if (
-          skillReviewResult.status === 'skipped' &&
-          skillReviewResult.skippedReason === 'already_running' &&
-          this.toolCallCount >= AUTO_SKILL_THRESHOLD
-        ) {
-          // A review is already in-flight; reset the counter so that when the
-          // current review completes the next call doesn't immediately trigger
-          // another review without accumulating a fresh threshold of tool calls.
-          this.toolCallCount = 0;
+        } else if (skillReviewResult.skippedReason === 'already_running') {
+          this.resetSkillReviewWindow();
         }
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
@@ -2722,10 +2746,53 @@ export class LlmClient {
     return promises;
   }
 
+  private resetSkillReviewWindow(): void {
+    this.toolCallCount = 0;
+    this.skillsModifiedInSession = false;
+    this.userSteeredSinceReview = false;
+    this.experienceSignalsSinceReview = {
+      retryArc: false,
+      hasSubstantiveWork: false,
+      failedToolNames: new Set(),
+    };
+    this.pendingExperienceOutcomes.clear();
+  }
+
   recordCompletedToolCall(
     toolName: string,
     args?: Record<string, unknown>,
+    outcome?: CompletedToolCallOutcome,
   ): void {
+    this.recordCompletedToolCalls([{ toolName, args, outcome }]);
+  }
+
+  recordCompletedToolCalls(
+    calls: ReadonlyArray<{
+      toolName: string;
+      args?: Record<string, unknown>;
+      outcome?: CompletedToolCallOutcome;
+    }>,
+  ): void {
+    const stagedIds: string[] = [];
+    for (const { toolName, args, outcome } of calls) {
+      const callId = this.stageCompletedToolCall(toolName, args, outcome);
+      if (callId) stagedIds.push(callId);
+    }
+    if (stagedIds.length === 0) return;
+    const historyIds = this.chat?.getHistoryFunctionResponseIds();
+    this.acceptCompletedToolCallBatch(
+      stagedIds.filter((callId) => historyIds?.has(callId)),
+    );
+  }
+
+  private stageCompletedToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+    outcome?: CompletedToolCallOutcome,
+  ): string | undefined {
+    if (outcome && !didToolCallProduceWork(outcome)) {
+      return;
+    }
     this.rememberCompletedToolName(toolName);
 
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
@@ -2737,7 +2804,49 @@ export class LlmClient {
         this.skillsModifiedInSession = true;
       }
     }
+    if (isSubstantiveToolCall(toolName)) {
+      this.experienceSignalsSinceReview.hasSubstantiveWork = true;
+    }
     this.toolCallCount += 1;
+
+    if (outcome) {
+      const experienceOutcome = classifyToolExperienceOutcome(
+        toolName,
+        outcome,
+      );
+      if (experienceOutcome && outcome.callId) {
+        this.pendingExperienceOutcomes.set(outcome.callId, {
+          toolName,
+          outcome: experienceOutcome,
+        });
+        return outcome.callId;
+      }
+    }
+    return undefined;
+  }
+
+  private acceptCompletedToolCallBatch(callIds: readonly string[]): void {
+    // Successes can resolve earlier batches, not failures from parallel siblings.
+    for (const outcome of ['success', 'failure'] as const) {
+      for (const callId of callIds) {
+        const pending = this.pendingExperienceOutcomes.get(callId);
+        if (pending?.outcome !== outcome) continue;
+        this.pendingExperienceOutcomes.delete(callId);
+        this.experienceSignalsSinceReview = accumulateExperienceOutcome(
+          this.experienceSignalsSinceReview,
+          pending.toolName,
+          pending.outcome,
+        );
+      }
+    }
+  }
+
+  private acceptCompletedToolCallOutcomes(content: Content): void {
+    this.acceptCompletedToolCallBatch(
+      (content.parts ?? []).flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ),
+    );
   }
 
   private rememberCompletedToolName(toolName: string): void {
@@ -2815,12 +2924,12 @@ export class LlmClient {
         const virtualAfter =
           (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
         const targetNote =
-          m.toolResultsLowWatermark !== undefined
-            ? `, target ${m.toolResultsLowWatermark}` +
+          m.toolResultsLowWatermark === undefined
+            ? ''
+            : `, target ${m.toolResultsLowWatermark}` +
               (virtualAfter > m.toolResultsLowWatermark
                 ? ' (soft-exceeded)'
-                : '')
-            : '';
+                : '');
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
@@ -2961,7 +3070,7 @@ export class LlmClient {
         pendingGoalStateEvents.push({
           type: LlmEventType.GoalState,
           value,
-          ...(cause !== undefined ? { cause } : {}),
+          ...(cause === undefined ? {} : { cause }),
         });
       });
       pendingGoalStateEvents.push({
@@ -3120,17 +3229,19 @@ export class LlmClient {
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
+      const accepted =
+        pushCountBefore !== undefined && currentPushCount() > pushCountBefore;
       try {
-        if (
-          pushCountBefore !== undefined &&
-          currentPushCount() > pushCountBefore
-        ) {
+        if (accepted) {
           steerInput.accept();
         } else {
           steerInput.restore();
         }
       } catch (error) {
         debugLogger.warn(`Failed to settle steer input: ${error}`);
+      }
+      if (accepted && steerInput.parts.length > 0) {
+        this.userSteeredSinceReview = true;
       }
     };
 
@@ -3158,6 +3269,43 @@ export class LlmClient {
       return typeof published === 'number' ? published : undefined;
     };
     let pushInitiated = false;
+    // Once-per-send latch (mirrors settledSteerInputs): this is invoked from the
+    // stream loop AND the outer finally, and the finally fires after
+    // runManagedAutoMemoryBackgroundTasks has already reset the review window, so
+    // an unlatched re-invocation writes userSteeredSinceReview back into the
+    // cleared window and re-dispatches a review for an already-reviewed steer.
+    let experienceInputRecorded = false;
+    // Acceptance for the attached carrier, mirroring settleSteerInput: a
+    // missing snapshot means this send exited before its push site, so no
+    // counter comparison may count it as accepted.
+    const attachedCarrierAccepted = (): boolean => {
+      const snapshot = attachedPushSnapshot();
+      return snapshot !== undefined && currentPushCount() > snapshot;
+    };
+    const recordAcceptedExperienceInput = () => {
+      if (experienceInputRecorded) return;
+      const content =
+        messageType === SendMessageType.ToolResult ||
+        messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.Teammate
+          ? createUserContent(request)
+          : undefined;
+      if (content?.parts?.some((part) => part.functionResponse)) {
+        this.acceptCompletedToolCallOutcomes(content);
+        // A steer attached to an accepted ToolResult submission counts as a
+        // user steer too: the CLI's mid-tool-loop steer flow submits steers
+        // under ToolResult, not SendMessageType.Steer.
+        if (attachedSteerInput && attachedSteerInput.parts.length > 0) {
+          this.userSteeredSinceReview = true;
+        }
+        experienceInputRecorded = true;
+      } else if (messageType === SendMessageType.Steer) {
+        this.userSteeredSinceReview = true;
+        experienceInputRecorded = true;
+      } else {
+        return;
+      }
+    };
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -3289,9 +3437,9 @@ export class LlmClient {
             eventName: 'UserPromptSubmit',
             input: {
               prompt: promptText,
-              ...(submittedPrompt !== undefined
-                ? { submitted_prompt: submittedPrompt }
-                : {}),
+              ...(submittedPrompt === undefined
+                ? {}
+                : { submitted_prompt: submittedPrompt }),
             },
           },
           MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -4112,6 +4260,9 @@ export class LlmClient {
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
+            if (attachedCarrierAccepted()) {
+              recordAcceptedExperienceInput();
+            }
             // Settle the attached steer input as soon as the first stream
             // event arrives — the user-content push has landed by now.
             // Settling here (before model-response events are committed to
@@ -4306,9 +4457,9 @@ export class LlmClient {
                     ? 'Rate limit exceeded'
                     : status !== undefined && status >= 500
                       ? 'Provider service unavailable'
-                      : status !== undefined
-                        ? `API request failed (${status})`
-                        : 'Provider request failed';
+                      : status === undefined
+                        ? 'Provider request failed'
+                        : `API request failed (${status})`;
               try {
                 await arenaAgentClient.reportError(arenaError);
               } catch {
@@ -4340,6 +4491,9 @@ export class LlmClient {
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
       );
+      if (attachedCarrierAccepted()) {
+        recordAcceptedExperienceInput();
+      }
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -4882,6 +5036,9 @@ export class LlmClient {
         // Snapshot published by the chat ⇒ compare against it; no snapshot
         // ⇒ the send exited before its push site (no await between the
         // publish and the push) and restores unconditionally.
+        if (attachedCarrierAccepted()) {
+          recordAcceptedExperienceInput();
+        }
         settleSteerInput(attachedSteerInput, attachedPushSnapshot());
       } else {
         // Exited before `turn.run` (cancelled during the hook await, setup

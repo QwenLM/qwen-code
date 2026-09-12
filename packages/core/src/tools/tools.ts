@@ -544,6 +544,23 @@ export interface ToolResult {
   };
 
   /**
+   * Set by abort-aware tools when they observed the abort signal and
+   * stopped mid-execution, but still resolved with an error-free result.
+   * Lets the scheduler tell a cooperative interruption apart from a
+   * cancellation that landed after the work had already completed.
+   */
+  aborted?: boolean;
+
+  /**
+   * Structured shell exit status, set only by the shell foreground-completion
+   * path. Lets the experience gate classify a shell outcome from a real exit
+   * code instead of scanning rendered output text, which backgrounded,
+   * sed-edit, and promote-refused renders never carry and command output can
+   * spoof.
+   */
+  exitCode?: number | null;
+
+  /**
    * Optional model override propagated from skill execution.
    * When present, the client should use this model for subsequent
    * turns within the same agentic loop.
