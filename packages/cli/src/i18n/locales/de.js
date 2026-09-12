@@ -120,7 +120,7 @@ export default {
   'No skills match the search.': 'Keine Skills passen zur Suche.',
   'Locked by settings entries you cannot toggle here:':
     'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
-  '(+{{count}} locked)': '(+{{count}} gesperrt)',
+  '{{count}} locked not shown': '{{count}} gesperrte Skills nicht angezeigt',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',

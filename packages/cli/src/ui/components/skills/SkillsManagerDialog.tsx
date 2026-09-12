@@ -7,9 +7,9 @@
  *
  * Two key invariants worth knowing before editing:
  *
- *   1. MultiSelect renders only workspace-toggleable skills. Higher-scope
- *      disabled skills render in a read-only section when unconstrained and
- *      as a count when height-constrained, avoiding MultiSelect's misleading
+ *   1. MultiSelect renders only workspace-toggleable skills. Locked skills
+ *      use remaining rows in a read-only section, with a
+ *      count for hidden matches, avoiding MultiSelect's misleading
  *      `[x]` rendering for disabled items.
  *
  *   2. When saving, locked names are NEVER re-emitted into the workspace
@@ -101,7 +101,8 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 const NAME_COLUMN = 24;
 // Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
 // + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
-// block adds 2 + N rows when present; not counted here.
+// block adds its heading, N rows, and a margin after actionable rows;
+// these come from the remaining list budget.
 const SKILLS_DIALOG_FIXED_ROWS = 11;
 
 /**
@@ -246,7 +247,6 @@ export function SkillsManagerDialog({
     : compact
       ? SKILLS_DIALOG_FIXED_ROWS - 6
       : SKILLS_DIALOG_FIXED_ROWS;
-  const constrained = availableTerminalHeight !== undefined;
 
   // The search row is hidden in bare mode, so a retained query must not
   // filter the list invisibly (mirrors the /statusline `hasFullLayout`
@@ -262,15 +262,14 @@ export function SkillsManagerDialog({
   }, [unlockedSkills, query, bare]);
 
   const filteredLocked = useMemo(() => {
-    if (constrained) return [];
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return lockedSkills;
+    if (!normalizedQuery || bare) return lockedSkills;
     return lockedSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(normalizedQuery) ||
         s.description.toLowerCase().includes(normalizedQuery),
     );
-  }, [lockedSkills, query, constrained]);
+  }, [lockedSkills, query, bare]);
 
   const items = useMemo<Array<MultiSelectItem<SkillItemValue>>>(
     () =>
@@ -561,9 +560,21 @@ export function SkillsManagerDialog({
   // Counts shown in the header so users can see filter effect at a glance.
   const totalCount = allSkills.length;
   const matchedCount = filteredUnlocked.length + filteredLocked.length;
-  const lockedCount = t('(+{{count}} locked)', {
-    count: String(lockedSkills.length),
+  const actionableRows = Math.min(items.length, maxItemsToShow);
+  const lockedChromeRows = actionableRows > 0 ? 2 : 1;
+  const lockedBudget = Math.max(0, residual - actionableRows);
+  // Bare mode has no subtitle for the hidden count, so reserve a list row.
+  const countRows =
+    bare && filteredLocked.length + lockedChromeRows > lockedBudget ? 1 : 0;
+  const visibleLocked = filteredLocked.slice(
+    0,
+    Math.max(0, lockedBudget - lockedChromeRows - countRows),
+  );
+  const hiddenLockedCount = filteredLocked.length - visibleLocked.length;
+  const lockedCount = t('{{count}} locked not shown', {
+    count: String(hiddenLockedCount),
   });
+  const countInList = items.length === 0 && visibleLocked.length === 0;
 
   return (
     <Box
@@ -586,7 +597,7 @@ export function SkillsManagerDialog({
                   total: String(totalCount),
                 })
               : t('{{count}} skills · ', { count: String(totalCount) })}
-            {constrained && lockedSkills.length > 0 ? `${lockedCount} ` : ''}
+            {hiddenLockedCount > 0 && !countInList ? `${lockedCount} · ` : ''}
             {t(
               'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
             )}
@@ -630,7 +641,7 @@ export function SkillsManagerDialog({
             truncateLabels
             maxItemsToShow={maxItemsToShow}
           />
-        ) : constrained && unlockedSkills.length === 0 ? (
+        ) : filteredLocked.length > 0 && visibleLocked.length === 0 ? (
           <Text color={theme.text.secondary} dimColor wrap="truncate">
             {lockedCount}
           </Text>
@@ -639,41 +650,46 @@ export function SkillsManagerDialog({
             {t('No skills match the search.')}
           </Text>
         )}
-      </Box>
 
-      {filteredLocked.length > 0 && (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={theme.text.secondary} wrap="truncate">
-            {t('Locked by settings entries you cannot toggle here:')}
-          </Text>
-          {filteredLocked.map((s) => {
-            // Scope identifiers (System / User / SystemDefaults) stay as
-            // untranslated technical labels — they refer to settings file
-            // scopes by name and matching them exactly helps users locate
-            // the offending entry.
-            const scopeName = higher.lockedIn(s) ?? t('higher scope');
-            return (
-              <Text key={s.name} dimColor wrap="truncate">
-                {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                  name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
-                    NAME_COLUMN,
-                  ),
-                  description: truncateToWidth(
-                    oneLine(s.description),
-                    LOCKED_DESCRIPTION_COLUMN,
-                  ),
-                  scope: scopeName,
-                })}
-                {/* Appended outside the template rather than interpolated: the
+        {visibleLocked.length > 0 && (
+          <Box marginTop={items.length > 0 ? 1 : 0} flexDirection="column">
+            <Text color={theme.text.secondary} wrap="truncate">
+              {t('Locked by settings entries you cannot toggle here:')}
+            </Text>
+            {visibleLocked.map((s) => {
+              // Scope identifiers (System / User / SystemDefaults) stay as
+              // untranslated technical labels — they refer to settings file
+              // scopes by name and matching them exactly helps users locate
+              // the offending entry.
+              const scopeName = higher.lockedIn(s) ?? t('higher scope');
+              return (
+                <Text key={s.name} dimColor wrap="truncate">
+                  {t('  {{name}} {{description}}  [locked: {{scope}}]', {
+                    name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
+                      NAME_COLUMN,
+                    ),
+                    description: truncateToWidth(
+                      oneLine(s.description),
+                      LOCKED_DESCRIPTION_COLUMN,
+                    ),
+                    scope: scopeName,
+                  })}
+                  {/* Appended outside the template rather than interpolated: the
                     origin is already translated inside `skillOriginLabel`, so
                     this costs no new string and the locked reason keeps its
                     place. Bounded like every other column on the row. */}
-                {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
-              </Text>
-            );
-          })}
-        </Box>
-      )}
+                  {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
+                </Text>
+              );
+            })}
+          </Box>
+        )}
+        {bare && hiddenLockedCount > 0 && lockedBudget > 0 && !countInList && (
+          <Text color={theme.text.secondary} dimColor wrap="truncate">
+            {lockedCount}
+          </Text>
+        )}
+      </Box>
 
       {!compact && (
         <Box marginTop={1}>

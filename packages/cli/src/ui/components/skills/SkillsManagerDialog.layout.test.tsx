@@ -180,28 +180,34 @@ describe('SkillsManagerDialog', () => {
     const { lastFrame } = renderDialog({ availableTerminalHeight: 18 });
 
     await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
-    expect(lastFrame()).toContain('(+5 locked)');
+    expect(lastFrame()).toContain('5 locked not shown');
     expect(lastFrame()).not.toContain('one skill');
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(18);
   });
 
-  it.each([12, 5, 1])(
-    'uses one locked-count row when every skill is locked at %i rows',
-    async (availableTerminalHeight) => {
+  it.each([
+    [12, 5],
+    [5, 2],
+    [1, 5],
+  ])(
+    'summarizes omitted locked skills at %i rows',
+    async (availableTerminalHeight, hiddenCount) => {
       const { lastFrame } = renderDialog({
         config: createConfig(lockedSkills),
         availableTerminalHeight,
       });
 
-      await vi.waitFor(() => expect(lastFrame()).toContain('(+5 locked)'));
-      expect(lastFrame()).not.toContain('one skill');
+      await vi.waitFor(() =>
+        expect(lastFrame()).toContain(`${hiddenCount} locked not shown`),
+      );
+      expect(lastFrame()).not.toContain('[x]');
       expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
         availableTerminalHeight,
       );
     },
   );
 
-  it('searches unlocked rows but not hidden locked rows when constrained', async () => {
+  it('searches both unlocked and locked rows when constrained', async () => {
     const { stdin, lastFrame } = renderDialog({
       availableTerminalHeight: 8,
     });
@@ -214,12 +220,127 @@ describe('SkillsManagerDialog', () => {
     act(() => stdin.write('\u001B'));
     await vi.waitFor(() => expect(lastFrame()).not.toContain('Search: six'));
     act(() => stdin.write('one'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    expect(lastFrame()).toContain('1 / 10 skills');
+    expect(lastFrame()).toContain('[locked: User]');
+    expect(lastFrame()).not.toContain('No skills match the search.');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(8);
+  });
+
+  it.each([
+    [100, 0],
+    [23, 0],
+    [22, 1],
+  ])(
+    'allocates remaining rows to locked skills at %i rows',
+    async (height, hidden) => {
+      const { lastFrame } = renderDialog({ availableTerminalHeight: height });
+      await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBeLessThanOrEqual(height);
+      expect((frame.match(/\[locked: User\]/g) ?? []).length).toBe(5 - hidden);
+      expect(frame).toContain('one skill');
+      if (hidden) {
+        expect(frame).toContain(`${hidden} locked not shown`);
+        expect(frame).not.toContain('two skill');
+      } else {
+        expect(frame).toContain('two skill');
+        expect(frame).not.toContain('locked not shown');
+      }
+    },
+  );
+
+  it.each([6, 7, 12, 13, 100])(
+    'reports a locked-only search truthfully at %i rows',
+    async (availableTerminalHeight) => {
+      const onClose = vi.fn();
+      const setInputBuffer = vi.fn();
+      const { stdin, lastFrame } = renderDialog({
+        availableTerminalHeight,
+        onClose,
+        setInputBuffer,
+      });
+      await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+      act(() => stdin.write('one'));
+      await vi.waitFor(() => expect(lastFrame()).toContain('1 / 10 skills'));
+      const frame = lastFrame() ?? '';
+      expect(frame).not.toContain('No skills match the search.');
+      expect(frame).not.toContain('[x]');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      if (availableTerminalHeight === 6 || availableTerminalHeight === 12) {
+        expect(frame).toContain('1 locked not shown');
+        expect(frame).not.toContain('one skill');
+      } else {
+        expect(frame).toContain('one skill');
+        expect(frame).toContain('[locked: User]');
+      }
+      act(() => stdin.write('\r'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(setInputBuffer).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not report hidden locked matches for a search with no matches', async () => {
+    const { stdin, lastFrame } = renderDialog({
+      config: createConfig(lockedSkills),
+      availableTerminalHeight: 12,
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain('5 locked not shown'));
+    act(() => stdin.write('missing'));
     await vi.waitFor(() =>
       expect(lastFrame()).toContain('No skills match the search.'),
     );
-    expect(lastFrame()).toContain('0 / 10 skills');
-    expect(lastFrame()).not.toContain('one skill');
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(8);
+    expect(lastFrame()).toContain('0 / 5 skills');
+    expect(lastFrame()).not.toContain('locked not shown');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
+  });
+
+  it('restores locked search results after full, compact and bare transitions', async () => {
+    const settings = createSettings();
+    const config = createConfig(mixedSkills);
+    const atHeight = (availableTerminalHeight: number) =>
+      dialog({ settings, config, availableTerminalHeight });
+    const { stdin, lastFrame, rerender } = render(atHeight(100));
+    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    act(() => stdin.write('one'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('1 / 10 skills'));
+    rerender(atHeight(6));
+    await vi.waitFor(() => expect(lastFrame()).toContain('1 locked not shown'));
+    rerender(atHeight(5));
+    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    expect(lastFrame()).not.toContain('Search:');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
+    rerender(atHeight(100));
+    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    expect(lastFrame()).toContain('Search: one');
+    expect(lastFrame()).toContain('1 / 10 skills');
+    expect(lastFrame()).not.toContain('eight skill');
+  });
+
+  it('picks the nonfirst highlighted skill and preserves its disabled neighbor', async () => {
+    const config = createConfig(mixedSkills);
+    vi.mocked(config.isSkillEnabled).mockImplementation(
+      (skill) => skill.name !== 'eight',
+    );
+    const setInputBuffer = vi.fn();
+    const onClose = vi.fn();
+    const { stdin, lastFrame } = renderDialog({
+      config,
+      setInputBuffer,
+      onClose,
+      availableTerminalHeight: 18,
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [ ] eight'));
+    act(() => stdin.write('j'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] nine'));
+    act(() => stdin.write('\r'));
+    await vi.waitFor(() =>
+      expect(setInputBuffer).toHaveBeenCalledWith('/nine'),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('shows every locked skill without a height constraint', async () => {
@@ -233,7 +354,7 @@ describe('SkillsManagerDialog', () => {
     expect(lastFrame()).toContain(
       'Locked by settings entries you cannot toggle here:',
     );
-    expect(lastFrame()).not.toContain('(+12 locked)');
+    expect(lastFrame()).not.toContain('12 locked not shown');
   });
 
   it('shows locked-only search results without an empty state', async () => {

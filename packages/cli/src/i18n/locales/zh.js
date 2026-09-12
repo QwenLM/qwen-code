@@ -354,7 +354,7 @@ export default {
   'No skills match the search.': '没有匹配搜索的技能。',
   'Locked by settings entries you cannot toggle here:':
     '被无法在此切换的设置条目锁定：',
-  '(+{{count}} locked)': '（+{{count}} 个已锁定）',
+  '{{count}} locked not shown': '{{count}} 个已锁定技能未显示',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',

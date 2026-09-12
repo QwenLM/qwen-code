@@ -139,7 +139,8 @@ export default {
     'Aucune compétence ne correspond à la recherche.',
   'Locked by settings entries you cannot toggle here:':
     'Verrouillées par des entrées de paramètres (impossible de basculer ici) :',
-  '(+{{count}} locked)': '(+{{count}} verrouillée(s))',
+  '{{count}} locked not shown':
+    '{{count}} compétences verrouillées non affichées',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',

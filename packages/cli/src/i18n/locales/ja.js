@@ -102,7 +102,7 @@ export default {
   'No skills match the search.': '検索に一致するスキルはありません。',
   'Locked by settings entries you cannot toggle here:':
     '設定エントリによってロックされています（ここでは切替不可）：',
-  '(+{{count}} locked)': '（+{{count}} 件ロック中）',
+  '{{count}} locked not shown': 'ロック中の {{count}} 件を非表示',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [ロック中：{{scope}}]',

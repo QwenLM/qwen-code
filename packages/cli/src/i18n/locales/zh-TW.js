@@ -340,7 +340,7 @@ export default {
   'No skills match the search.': '沒有符合搜尋條件的技能。',
   'Locked by settings entries you cannot toggle here:':
     '被無法在此切換的設定條目鎖定：',
-  '(+{{count}} locked)': '（+{{count}} 個已鎖定）',
+  '{{count}} locked not shown': '{{count}} 個已鎖定技能未顯示',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',

@@ -133,7 +133,7 @@ export default {
   'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
   'Locked by settings entries you cannot toggle here:':
     'Bloqueado por entradas de configuração (não é possível alternar aqui):',
-  '(+{{count}} locked)': '(+{{count}} bloqueado(s))',
+  '{{count}} locked not shown': '{{count}} habilidades bloqueadas não exibidas',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloqueado: {{scope}}]',
