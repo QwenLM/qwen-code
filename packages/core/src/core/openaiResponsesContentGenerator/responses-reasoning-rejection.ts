@@ -10,6 +10,34 @@ import type {
   ResponsesApiInputItem,
   ResponsesApiReasoningItem,
 } from './types.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('RESPONSES_REASONING_REJECTION');
+
+/**
+ * The call_ids of the maximal run of `function_call` items immediately
+ * following `index`. The endpoint pairs a replayed reasoning item with the
+ * call group that follows it, so the reasoning and that run stand or fall
+ * as one unit (#11665).
+ */
+export function followingFunctionCallIds(
+  items: ResponsesApiInputItem[],
+  index: number,
+): string[] {
+  const callIds: string[] = [];
+  for (let i = index + 1; i < items.length; i++) {
+    const item = items[i];
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      item.type !== 'function_call'
+    ) {
+      break;
+    }
+    callIds.push((item as ResponsesApiFunctionCallItem).call_id);
+  }
+  return callIds;
+}
 
 /**
  * A 400 in which the endpoint named one replayed `input[N].id` as being over
@@ -191,9 +219,11 @@ export function downgradeRejectedReasoningItems(
 
   const rewritten: ResponsesApiInputItem[] = [];
   let changed = false;
-  // call_ids of function_calls removed together with their dropped reasoning;
-  // their outputs must follow or the retry leaves an orphan output (#11665).
+  // call_ids of function_calls removed together with their dropped or
+  // downgraded reasoning; their outputs must follow or the retry leaves an
+  // orphan output (#11665).
   const droppedCallIds = new Set<string>();
+  let droppedUnits = 0;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (
@@ -212,30 +242,32 @@ export function downgradeRejectedReasoningItems(
     }
     changed = true;
     const summary = readSummaryTexts(item);
+    // The endpoint pairs the reasoning item with the function_call group
+    // that follows it, so removing the reasoning removes the whole group and
+    // its outputs. Keeping any member would retry into function_call without
+    // its required reasoning item, and every later send would repeat the
+    // failure (#11665).
+    const unitCallIds = followingFunctionCallIds(items, i);
+    if (unitCallIds.length > 0) {
+      for (const callId of unitCallIds) {
+        droppedCallIds.add(callId);
+      }
+      i += unitCallIds.length;
+      droppedUnits++;
+    }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
-    if (summary.length === 0) {
-      // The endpoint pairs a replayed reasoning item with the function_call
-      // that follows it, so a dropped reasoning takes its call unit with it;
-      // otherwise the retry fails as function_call without its required
-      // reasoning item and every later send repeats the failure (#11665).
-      const next = items[i + 1];
-      if (
-        typeof next === 'object' &&
-        next !== null &&
-        next.type === 'function_call' &&
-        'call_id' in next
-      ) {
-        droppedCallIds.add((next as ResponsesApiFunctionCallItem).call_id);
-        i++;
-      }
-      continue;
-    }
+    if (summary.length === 0) continue;
     rewritten.push({
       type: 'message',
       role: 'assistant',
       content: summary.join('\n'),
     });
+  }
+  if (droppedUnits > 0) {
+    debugLogger.debug(
+      `Downgrade removed ${droppedUnits} reasoning/call unit(s); their tool calls and results are not part of the retry.`,
+    );
   }
   return changed ? rewritten : items;
 }
