@@ -100,24 +100,23 @@ If your adapter exposes shell-command or BTW side-question behavior, check that 
 
 The normalized message object you build from platform data. The boolean flags drive gate logic, so they must be accurate.
 
-| Field              | Type         | Required | Notes                                                                      |
-| ------------------ | ------------ | -------- | -------------------------------------------------------------------------- |
-| `channelName`      | string       | Yes      | Use `this.name`                                                            |
-| `senderId`         | string       | Yes      | Must be stable across messages (used for session routing + access control) |
-| `senderName`       | string       | Yes      | Display name                                                               |
-| `chatId`           | string       | Yes      | Must distinguish DMs from groups                                           |
-| `chatName`         | string       | No       | Group/conversation name when supplied by the platform                      |
-| `text`             | string       | Yes      | Adapter-normalized message text                                            |
-| `localControlText` | string       | No       | Optional body projection after one leading routing mention                 |
-| `threadId`         | string       | No       | For `sessionScope: "thread"`                                               |
-| `messageId`        | string       | No       | Platform message ID — useful for response correlation                      |
-| `isGroup`          | boolean      | Yes      | GroupGate relies on this                                                   |
-| `isMentioned`      | boolean      | Yes      | GroupGate relies on this                                                   |
-| `isReplyToBot`     | boolean      | Yes      | GroupGate relies on this                                                   |
-| `referencedText`   | string       | No       | Quoted message — prepended as context                                      |
-| `imageBase64`      | string       | No       | Base64-encoded image (legacy — prefer `attachments`)                       |
-| `imageMimeType`    | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
-| `attachments`      | Attachment[] | No       | Structured media attachments (see below)                                   |
+| Field            | Type         | Required | Notes                                                                      |
+| ---------------- | ------------ | -------- | -------------------------------------------------------------------------- |
+| `channelName`    | string       | Yes      | Use `this.name`                                                            |
+| `senderId`       | string       | Yes      | Must be stable across messages (used for session routing + access control) |
+| `senderName`     | string       | Yes      | Display name                                                               |
+| `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
+| `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
+| `text`           | string       | Yes      | Strip bot @mentions                                                        |
+| `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
+| `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
+| `isGroup`        | boolean      | Yes      | GroupGate relies on this                                                   |
+| `isMentioned`    | boolean      | Yes      | GroupGate relies on this                                                   |
+| `isReplyToBot`   | boolean      | Yes      | GroupGate relies on this                                                   |
+| `referencedText` | string       | No       | Quoted message — prepended as context                                      |
+| `imageBase64`    | string       | No       | Base64-encoded image (legacy — prefer `attachments`)                       |
+| `imageMimeType`  | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
+| `attachments`    | Attachment[] | No       | Structured media attachments (see below)                                   |
 
 ### Attachments
 

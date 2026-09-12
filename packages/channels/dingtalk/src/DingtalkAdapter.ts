@@ -864,57 +864,6 @@ function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   return [...mentions];
 }
 
-function extractLeadingMentionFromText(text: string): string | undefined {
-  const separator = /[\s\p{Cf}]/u;
-  let cursor = 0;
-  while (cursor < text.length && separator.test(text[cursor]!)) cursor += 1;
-  if (text[cursor] !== '@') return undefined;
-
-  cursor += 1;
-  const labelStart = cursor;
-  while (
-    cursor < text.length &&
-    !separator.test(text[cursor]!) &&
-    text[cursor] !== '['
-  ) {
-    cursor += 1;
-  }
-  if (cursor === labelStart) return undefined;
-  while (cursor < text.length && separator.test(text[cursor]!)) cursor += 1;
-
-  const bodyText = text.slice(cursor).trim();
-  return bodyText || undefined;
-}
-
-function extractLeadingMentionFromRichText(
-  parts: DingTalkRichTextPart[],
-): string | undefined {
-  let body = '';
-  let sawMention = false;
-  let bodyStarted = false;
-
-  for (const part of parts) {
-    const partType = part.type || 'text';
-    if (sawMention) {
-      if (partType === 'text' && typeof part.text === 'string') {
-        body += part.text;
-      } else if (partType === 'at') {
-        body += renderRichTextAt(part);
-      }
-      if (body.trim().length > 0) bodyStarted = true;
-      continue;
-    }
-    if (partType === 'at') {
-      sawMention = true;
-      continue;
-    }
-    if (partType !== 'text' || typeof part.text !== 'string') continue;
-    if (part.text.trim().length > 0) return undefined;
-  }
-
-  return sawMention && bodyStarted ? body.trim() || undefined : undefined;
-}
-
 interface DingTalkTokenResponse {
   errcode?: number;
   errmsg?: string;
@@ -3081,7 +3030,6 @@ export class DingtalkChannel extends ChannelBase {
     fileName?: string;
     placeholder?: string;
     syntheticText: boolean;
-    localControlText?: string;
   } {
     const msgtype = data.msgtype || 'text';
 
@@ -3109,7 +3057,6 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
         syntheticText: richText.length > 0 && userText.trim().length === 0,
-        localControlText: extractLeadingMentionFromRichText(richText),
       };
     }
 
@@ -3398,11 +3345,6 @@ export class DingtalkChannel extends ChannelBase {
       // Carry non-bot mention targets separately so ChannelBase can render a
       // stable marker after prompt sanitization.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
-      const localControlText =
-        isGroup && isMentioned
-          ? (content.localControlText ??
-            extractLeadingMentionFromText(content.text))
-          : undefined;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -3415,7 +3357,6 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: content.text,
-        ...(localControlText ? { localControlText } : {}),
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,

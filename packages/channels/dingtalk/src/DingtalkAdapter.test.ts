@@ -4484,7 +4484,6 @@ describe('DingtalkChannel chat records', () => {
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '@DingTalkTest can you see this?',
-        localControlText: 'can you see this?',
         referencedText:
           '[Chat record: Group chat history] Alice: first message\nBob: [message]',
       }),
@@ -6942,7 +6941,6 @@ describe('DingtalkChannel sender attribution', () => {
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '@qwen-code 查看记忆\u200b',
-        localControlText: '查看记忆\u200b',
         isGroup: true,
         isMentioned: true,
       }),
@@ -6984,82 +6982,13 @@ describe('DingtalkChannel sender attribution', () => {
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '@qwen-code\u200b查看记忆',
-        localControlText: '查看记忆',
         isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it.each([
-    ['after', '@qwen-code\n/help'],
-    ['before', '\n@qwen-code /help'],
-  ])(
-    'projects control text when a newline appears %s the routing mention',
-    (_position, content) => {
-      const channel = createChannel();
-      const downstream = {
-        data: JSON.stringify({
-          msgId: 'newline-after-mention',
-          conversationType: '2',
-          conversationId: 'cid123',
-          sessionWebhook:
-            'https://oapi.dingtalk.com/robot/send?access_token=token',
-          senderNick: 'Alice',
-          senderStaffId: 'staff-1',
-          senderId: 'sender-1',
-          isInAtList: true,
-          text: { content },
-        }),
-        headers: { messageId: 'newline-after-mention' },
-      } as unknown as DWClientDownStream;
-
-      (
-        channel as unknown as { onMessage(d: DWClientDownStream): void }
-      ).onMessage(downstream);
-
-      expect(channel.handleInbound).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: content.trim(),
-          localControlText: '/help',
-          isMentioned: true,
-        }),
-      );
-    },
-  );
-
-  it('keeps additional leading mentions in the control projection', () => {
-    const channel = createChannel();
-    const downstream = {
-      data: JSON.stringify({
-        msgId: 'multiple-leading-mentions',
-        conversationType: '2',
-        conversationId: 'cid123',
-        sessionWebhook:
-          'https://oapi.dingtalk.com/robot/send?access_token=token',
-        senderNick: 'Alice',
-        senderStaffId: 'staff-1',
-        senderId: 'sender-1',
-        isInAtList: true,
-        text: { content: '@qwen-code @Alice /clear' },
-      }),
-      headers: { messageId: 'multiple-leading-mentions' },
-    } as unknown as DWClientDownStream;
-
-    (
-      channel as unknown as { onMessage(d: DWClientDownStream): void }
-    ).onMessage(downstream);
-
-    expect(channel.handleInbound).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: '@qwen-code @Alice /clear',
-        localControlText: '@Alice /clear',
-        isMentioned: true,
-      }),
-    );
-  });
-
-  it('preserves rich-text mention nodes in message order', () => {
+  it('preserves rich-text mention text in the delivered order', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7075,8 +7004,7 @@ describe('DingtalkChannel sender attribution', () => {
         isInAtList: true,
         content: {
           richText: [
-            { type: 'at', atName: 'qwen-code' },
-            { type: 'at', atName: 'Alice' },
+            { text: '@qwen-code ' },
             { text: '输出1' },
             { type: 'picture' },
             { text: '\n输出2' },
@@ -7092,10 +7020,64 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '@qwen-code @Alice 输出1\n输出2',
-        localControlText: '@Alice 输出1\n输出2',
+        text: '@qwen-code 输出1\n输出2',
         isMentioned: true,
       }),
+    );
+  });
+
+  it('passes a plain-text slash command already normalized by DingTalk', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'plain-slash-command',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '/clear' },
+      }),
+      headers: { messageId: 'plain-slash-command' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).toEqual(expect.objectContaining({ text: '/clear' }));
+  });
+
+  it('keeps a rich-text mention-prefixed slash command as message text', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'rich-text-slash-command',
+        msgtype: 'richText',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        content: { richText: [{ text: '@qwen-code ' }, { text: '/clear' }] },
+      }),
+      headers: { messageId: 'rich-text-slash-command' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).toEqual(
+      expect.objectContaining({ text: '@qwen-code /clear' }),
     );
   });
 
@@ -7136,7 +7118,6 @@ describe('DingtalkChannel sender attribution', () => {
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '@qwen-code 重复： git@example.com:group/repo.git',
-        localControlText: '重复： git@example.com:group/repo.git',
         isMentioned: true,
       }),
     );

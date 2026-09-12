@@ -228,6 +228,60 @@ export function sanitizePromptText(text: string): string {
   return unwrapStartOfLineTags(folded);
 }
 
+const MENTION_BOUNDARY_SEPARATOR = /[\s\p{Cf}]|\p{Variation_Selector}/u;
+
+function isMentionBoundarySeparator(character: string): boolean {
+  const codePoint = character.codePointAt(0)!;
+  return (
+    codePoint <= 0x1f ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    MENTION_BOUNDARY_SEPARATOR.test(character)
+  );
+}
+
+function promptCodePointAt(text: string, index: number): string | undefined {
+  const codePoint = text.codePointAt(index);
+  return codePoint === undefined ? undefined : String.fromCodePoint(codePoint);
+}
+
+/**
+ * Preserve leading platform mentions while treating the following body as a
+ * fresh prompt boundary. This keeps line-leading forged tags neutralized when
+ * an adapter intentionally retains `@bot` in the normalized message.
+ */
+export function sanitizePromptTextAfterLeadingMentions(text: string): string {
+  let cursor = 0;
+  let current = promptCodePointAt(text, cursor);
+  while (current && isMentionBoundarySeparator(current)) {
+    cursor += current.length;
+    current = promptCodePointAt(text, cursor);
+  }
+  if (current !== '@') return sanitizePromptText(text);
+
+  let prefixEnd = cursor;
+  while (current === '@') {
+    cursor += 1;
+    current = promptCodePointAt(text, cursor);
+    while (current && !isMentionBoundarySeparator(current) && current !== '[') {
+      cursor += current.length;
+      current = promptCodePointAt(text, cursor);
+    }
+    prefixEnd = cursor;
+    if (current === '[') break;
+
+    while (current && isMentionBoundarySeparator(current)) {
+      cursor += current.length;
+      current = promptCodePointAt(text, cursor);
+    }
+    prefixEnd = cursor;
+  }
+
+  return (
+    sanitizePromptText(text.slice(0, prefixEnd)) +
+    sanitizePromptText(text.slice(prefixEnd))
+  );
+}
+
 /**
  * Neutralize attacker-controlled text that is surfaced VERBATIM to users
  * (session-bus display projections, transcripts, session-list previews):

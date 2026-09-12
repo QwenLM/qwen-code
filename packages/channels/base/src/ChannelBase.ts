@@ -53,6 +53,7 @@ import {
   sanitizeSenderName,
   sanitizeQuotedText,
   sanitizePromptText,
+  sanitizePromptTextAfterLeadingMentions,
   sanitizePromptPath,
   sanitizeLogText,
   sanitizeDisplayText,
@@ -1916,7 +1917,7 @@ export abstract class ChannelBase {
     target: ChannelMemoryTarget,
     read: ChannelMemoryReadToken,
   ): Promise<ChannelMemoryRecallSelection> {
-    const message = envelope.localControlText?.trim() || envelope.text;
+    const message = envelope.text;
     const channelMemory = this.channelMemory;
     if (!channelMemory) return { entries: [], cache: 'bypass' };
     if (!channelMemory.getChannelMemoryRevision) {
@@ -2025,13 +2026,6 @@ export abstract class ChannelBase {
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
-      localControlText:
-        buffer
-          .map(
-            (entry) =>
-              entry.envelope.localControlText?.trim() || entry.envelope.text,
-          )
-          .join('\n\n') || undefined,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -3740,12 +3734,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
-    const localControlText = envelope.alreadyPrefixed
-      ? envelope.text
-      : envelope.localControlText?.trim() || envelope.text;
-    const parsed = this.parseCommand(localControlText);
+    const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
-    const bangText = localControlText.trimStart();
+    const bangText = envelope.text.trimStart();
     return (
       bangText.startsWith('!') &&
       (envelope.isGroup || this.isSharedSession(envelope))
@@ -5593,7 +5584,6 @@ export abstract class ChannelBase {
 
   private async classifyChannelMemoryIntent(
     envelope: Envelope,
-    text: string,
   ): Promise<ResolvedChannelMemoryIntent | null> {
     if (!this.memoryIntentClassifier || !this.channelMemory) {
       return null;
@@ -5617,7 +5607,7 @@ export abstract class ChannelBase {
     try {
       classified =
         await this.memoryIntentClassifier.classifyChannelMemoryIntent(
-          text,
+          envelope.text,
           entries,
         );
     } catch (error) {
@@ -6511,14 +6501,11 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const localControlText = envelope.alreadyPrefixed
-      ? envelope.text
-      : envelope.localControlText?.trim() || envelope.text;
-    const parsed = this.parseCommand(localControlText);
+    const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
         ? null
-        : parseChannelMemoryIntent(localControlText);
+        : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
@@ -6526,12 +6513,9 @@ export abstract class ChannelBase {
     if (
       !memoryIntent &&
       parsed?.command !== 'btw' &&
-      this.shouldClassifyChannelMemoryIntent(localControlText)
+      this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
-      memoryIntent = await this.classifyChannelMemoryIntent(
-        envelope,
-        localControlText,
-      );
+      memoryIntent = await this.classifyChannelMemoryIntent(envelope);
       memoryIntentFromClassifier = memoryIntent !== null;
     }
     if (memoryIntent) {
@@ -6611,7 +6595,7 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = localControlText.trimStart();
+    const bangText = envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -6738,9 +6722,8 @@ export abstract class ChannelBase {
     // Bang (!) execution — a private 1:1 session has a single operator, so
     // direct shell execution stays allowed. Group/shared contexts were refused
     // above, before the session was resolved.
-    const privateBangText = envelope.text.trimStart();
-    if (privateBangText.startsWith('!')) {
-      const cmd = privateBangText.slice(1).trim();
+    if (bangText.startsWith('!')) {
+      const cmd = bangText.slice(1).trim();
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
         try {
@@ -6779,10 +6762,10 @@ export abstract class ChannelBase {
     }
 
     const recognizedSlashCommand =
-      this.isSlashCommand(localControlText) &&
-      this.isRecognizedCommand(localControlText, sessionId);
+      this.isSlashCommand(envelope.text) &&
+      this.isRecognizedCommand(envelope.text, sessionId);
     // Prepend referenced (quoted) message text for reply context
-    let promptText = recognizedSlashCommand ? localControlText : envelope.text;
+    let promptText = envelope.text;
 
     // Multiplayer attribution: when a session can carry multiple humans, tag each
     // turn with the speaker so the agent can tell members apart. That is any group
@@ -6813,17 +6796,9 @@ export abstract class ChannelBase {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
-      const projectedBody = envelope.localControlText?.trim();
-      const textWithoutTrailingSpace = promptText.trimEnd();
-      const prefixLength =
-        projectedBody && textWithoutTrailingSpace.endsWith(projectedBody)
-          ? textWithoutTrailingSpace.length - projectedBody.length
-          : undefined;
-      const sanitizedPromptText =
-        prefixLength !== undefined && prefixLength >= 0
-          ? sanitizePromptText(promptText.slice(0, prefixLength)) +
-            sanitizePromptText(promptText.slice(prefixLength))
-          : sanitizePromptText(promptText);
+      const sanitizedPromptText = envelope.isMentioned
+        ? sanitizePromptTextAfterLeadingMentions(promptText)
+        : sanitizePromptText(promptText);
       promptText = `[${who}] ${sanitizedPromptText}`;
       // Render the non-bot mention marker AFTER sanitization (like the
       // [Replying to:] wrapper below). Inside `text` it would pass through
