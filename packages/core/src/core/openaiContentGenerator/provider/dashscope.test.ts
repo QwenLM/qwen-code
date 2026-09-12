@@ -29,6 +29,7 @@ import {
 } from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { IMAGE_REATTACHMENT_START } from '../../../services/image-payload-references.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -2547,6 +2548,164 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   });
 
   describe('cache control edge cases', () => {
+    const reattachmentIntroduction = {
+      type: 'text' as const,
+      text: 'Temporary visual context',
+      [IMAGE_REATTACHMENT_START]: true,
+    };
+    const image = {
+      type: 'image_url' as const,
+      image_url: { url: 'data:image/png;base64,fixture' },
+    };
+
+    it.each([false, true])(
+      'marks the message before the image tail, separate message=%s',
+      (separateMessage) => {
+        const stableContent = [
+          { type: 'text' as const, text: 'Stable history' },
+        ];
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] =
+          separateMessage
+            ? [
+                { role: 'user', content: stableContent },
+                { role: 'user', content: [reattachmentIntroduction, image] },
+              ]
+            : [
+                { role: 'assistant', content: stableContent },
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: 'Current user input' },
+                    reattachmentIntroduction,
+                    image,
+                  ],
+                },
+              ];
+        const originalWire = JSON.stringify(messages);
+        const result = provider.buildRequest(
+          { model: 'qwen-plus', stream: true, messages },
+          'test',
+        );
+        expect(result.messages[0].content).toEqual(
+          expect.arrayContaining([
+            {
+              type: 'text',
+              text: 'Stable history',
+              cache_control: { type: 'ephemeral' },
+            },
+          ]),
+        );
+        const wire = JSON.stringify(result.messages);
+        expect(wire.match(/"cache_control"/g)).toHaveLength(1);
+        expect(wire.replace(',"cache_control":{"type":"ephemeral"}', '')).toBe(
+          originalWire,
+        );
+        expect(JSON.stringify(messages)).toBe(originalWire);
+        expect(stableContent[0]).toEqual({
+          type: 'text',
+          text: 'Stable history',
+        });
+      },
+    );
+
+    it('does not mistake user-authored text for reattachment metadata', () => {
+      const result = provider.buildRequest(
+        {
+          model: 'qwen-plus',
+          stream: true,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Recent images reattached for visual context: Image #123456789abc',
+                },
+                image,
+              ],
+            },
+          ],
+        },
+        'test',
+      );
+      expect(result.messages[0].content).toEqual([
+        {
+          type: 'text',
+          text: 'Recent images reattached for visual context: Image #123456789abc',
+        },
+        { ...image, cache_control: { type: 'ephemeral' } },
+      ]);
+    });
+
+    it.each([false, true])(
+      'does not cache the first image-tail message, with text=%s',
+      (withText) => {
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+          {
+            role: 'user',
+            content: [
+              ...(withText
+                ? [{ type: 'text' as const, text: 'Current user input' }]
+                : []),
+              reattachmentIntroduction,
+              image,
+            ],
+          },
+        ];
+        expect(
+          provider.buildRequest(
+            { model: 'qwen-plus', stream: true, messages },
+            'test',
+          ).messages,
+        ).toEqual(messages);
+      },
+    );
+
+    it('skips contentless messages before the temporary tail', () => {
+      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+        { role: 'user', content: 'Stable history' },
+        { role: 'assistant', content: null },
+        { role: 'user', content: [reattachmentIntroduction, image] },
+      ];
+      const result = provider.buildRequest(
+        { model: 'qwen-plus', stream: true, messages },
+        'test',
+      );
+      expect(result.messages[0].content).toEqual([
+        {
+          type: 'text',
+          text: 'Stable history',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      expect(result.messages.slice(1)).toEqual(messages.slice(1));
+    });
+
+    it.each(['disabled', 'non-streaming'] as const)(
+      'keeps %s conversation caching unchanged with a temporary tail',
+      (mode) => {
+        mockCliConfig.getContentGeneratorConfig = vi
+          .fn()
+          .mockReturnValue({ enableCacheControl: mode !== 'disabled' });
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Stable' },
+              reattachmentIntroduction,
+              image,
+            ],
+          },
+        ];
+        expect(
+          provider.buildRequest(
+            { model: 'qwen-plus', stream: mode !== 'non-streaming', messages },
+            'test',
+          ).messages,
+        ).toEqual(messages);
+      },
+    );
+
     it('should handle request with only system message', () => {
       const systemOnlyRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen-max',

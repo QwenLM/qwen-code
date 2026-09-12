@@ -45,6 +45,7 @@ import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { IMAGE_REATTACHMENT_START } from '../../services/image-payload-references.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -674,7 +675,13 @@ function processContent(
     }
 
     if ('text' in part && part.text && !('thought' in part && part.thought)) {
-      contentParts.push({ type: 'text' as const, text: part.text });
+      contentParts.push({
+        type: 'text' as const,
+        text: part.text,
+        ...(IMAGE_REATTACHMENT_START in part
+          ? { [IMAGE_REATTACHMENT_START]: true }
+          : {}),
+      });
     }
 
     const mediaPart = createMediaContentPart(part, requestContext);
