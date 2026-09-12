@@ -780,6 +780,113 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  // #11178: ACP `resource_link` prompt content persists as `fileData`
+  // parts; replay must project them back into `resource_link` user chunks
+  // so SDK transcript rebuilds keep the attachment cards.
+  it('replays user fileData parts as resource_link chunks', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'compare these' },
+            {
+              fileData: {
+                fileUri: '/tmp/a/report.png',
+                mimeData: 'image/png',
+                name: 'report.png',
+              },
+            },
+            {
+              fileData: {
+                fileUri: '/tmp/b/report.png',
+                mimeType: 'image/png',
+                name: 'report.png',
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toEqual([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'compare these' },
+        _meta: {
+          timestamp: 1783987200000,
+          qwenTranscript: {
+            sourceRecordIds: ['user-1'],
+            segmentId: 'user-1:0',
+          },
+        },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource_link',
+          uri: 'file:///tmp/a/report.png',
+          name: 'report.png',
+          mimeType: 'image/png',
+        },
+        _meta: {
+          timestamp: 1783987200000,
+          qwenTranscript: {
+            sourceRecordIds: ['user-1'],
+            segmentId: 'user-1:1',
+          },
+        },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource_link',
+          uri: 'file:///tmp/b/report.png',
+          name: 'report.png',
+          mimeType: 'image/png',
+        },
+        _meta: {
+          timestamp: 1783987200000,
+          qwenTranscript: {
+            sourceRecordIds: ['user-1'],
+            segmentId: 'user-1:1',
+          },
+        },
+      },
+    ]);
+  });
+
+  it('falls back to the URI leaf when a fileData part lacks a name', () => {    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              fileData: {
+                fileUri: '/tmp/leaf-only.png',
+                mimeType: 'image/png',
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource_link',
+          uri: 'file:///tmp/leaf-only.png',
+          name: 'leaf-only.png',
+          mimeType: 'image/png',
+        },
+      },
+    ]);
+  });
+
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

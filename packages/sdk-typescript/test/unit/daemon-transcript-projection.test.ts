@@ -190,6 +190,149 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     ]);
   });
 
+  // #11178: user-attached resource links persist as `fileData` parts; the
+  // offline projection must rebuild them onto the user block's
+  // `resourceLinks` instead of dropping the attachment cards.
+  describe('user resource_link reconstruction', () => {
+    it('preserves links alongside text, deduping repeated URIs', () => {
+      const projection = projectChatRecordsToDaemonTranscript([
+        record('links', null, {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'compare these' },
+              {
+                fileData: {
+                  fileUri: '/tmp/a/report.png',
+                  mimeData: 'image/png',
+                  name: 'report.png',
+                },
+              },
+              {
+                fileData: {
+                  fileUri: '/tmp/b/report.png',
+                  mimeData: 'image/png',
+                  name: 'report.png',
+                },
+              },
+              // A repeated echo of the same URI within one record collapses
+              // to a single entry.
+              {
+                fileData: {
+                  fileUri: '/tmp/a/report.png',
+                  mimeData: 'image/png',
+                  name: 'report.png',
+                },
+              },
+            ],
+          },
+        }),
+      ]);
+
+      expect(projection.complete).toBe(true);
+      const userBlock = projection.blocks.find(
+        (block) => block.kind === 'user',
+      );
+      expect(userBlock).toMatchObject({
+        text: 'compare these',
+        sourceRecordIds: ['links'],
+        resourceLinks: [
+          {
+            uri: 'file:///tmp/a/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+          {
+            uri: 'file:///tmp/b/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+        ],
+      });
+    });
+
+    it('keeps a link-only record as its own user block', () => {
+      const projection = projectChatRecordsToDaemonTranscript([
+        record('link-only', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                fileData: {
+                  fileUri: '/tmp/data.csv',
+                  mimeType: 'text/csv',
+                  name: 'data.csv',
+                },
+              },
+            ],
+          },
+        }),
+      ]);
+
+      expect(projection.blocks).toHaveLength(1);
+      expect(projection.blocks[0]).toMatchObject({
+        kind: 'user',
+        resourceLinks: [{ uri: 'file:///tmp/data.csv', name: 'data.csv' }],
+      });
+    });
+
+    it('keeps the same URI distinct across records', () => {
+      const projection = projectChatRecordsToDaemonTranscript([
+        record('first', null, {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'first' },
+              {
+                fileData: {
+                  fileUri: '/tmp/shared.png',
+                  mimeType: 'image/png',
+                  name: 'shared.png',
+                },
+              },
+            ],
+          },
+        }),
+        record('answer', 'first', {
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'ok' }] },
+        }),
+        record('second', 'answer', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'second' },
+              {
+                fileData: {
+                  fileUri: '/tmp/shared.png',
+                  mimeType: 'image/png',
+                  name: 'shared.png',
+                },
+              },
+            ],
+          },
+        }),
+      ]);
+
+      const userBlocks = projection.blocks.filter(
+        (block) => block.kind === 'user',
+      );
+      expect(userBlocks.map((block) => block.sourceRecordIds)).toEqual([
+        ['first'],
+        ['second'],
+      ]);
+      for (const block of userBlocks) {
+        expect(block.resourceLinks).toEqual([
+          {
+            uri: 'file:///tmp/shared.png',
+            name: 'shared.png',
+            mimeType: 'image/png',
+          },
+        ]);
+      }
+    });
+  });
+
   it('unions tool start and result provenance on one block', () => {
     const projection = projectChatRecordsToDaemonTranscript([
       record('root', null),

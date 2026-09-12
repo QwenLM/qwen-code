@@ -8046,6 +8046,260 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  // Resource-link preservation (#11178): the daemon forwards ACP
+  // `resource_link` user content verbatim; normalization used to drop it to
+  // `[]`, so transcript rebuilds lost the attachment cards. The fix keeps a
+  // reference-only projection through normalize → reduce.
+  describe('user resource_link preservation', () => {
+    function normalizeUserChunk(content: unknown, chunkMeta?: unknown) {
+      return normalizeDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content,
+            ...(chunkMeta !== undefined ? { _meta: chunkMeta } : {}),
+          },
+        },
+      });
+    }
+
+    it('normalizes resource_link content into typed reference events', () => {
+      expect(
+        normalizeUserChunk({
+          type: 'resource_link',
+          uri: 'file:///tmp/image-a.png',
+          name: 'image-a.png',
+          mimeType: 'image/png',
+          size: 1024,
+          description: 'a screenshot',
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'user.resource_link.delta',
+          uri: 'file:///tmp/image-a.png',
+          name: 'image-a.png',
+          mimeType: 'image/png',
+          size: 1024,
+          description: 'a screenshot',
+        }),
+      ]);
+    });
+
+    it('falls back to the URI leaf when the peer omitted name', () => {
+      expect(
+        normalizeUserChunk({
+          type: 'resource_link',
+          uri: 'file:///tmp/my%20file.png',
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'user.resource_link.delta',
+          uri: 'file:///tmp/my%20file.png',
+          name: 'my file.png',
+        }),
+      ]);
+    });
+
+    it('keeps link chunks alongside text and carries replay metadata', () => {
+      const events = [
+        ...normalizeUserChunk(
+          { type: 'text', text: 'compare these' },
+          {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        ),
+        ...normalizeUserChunk(
+          {
+            type: 'resource_link',
+            uri: 'file:///a/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+          {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        ),
+        ...normalizeUserChunk(
+          {
+            type: 'resource_link',
+            uri: 'file:///b/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+          {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        ),
+      ];
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        events,
+      );
+
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'user',
+        text: 'compare these',
+        sourceRecordIds: ['record-1'],
+        // Same filename, distinct URIs: both stay.
+        resourceLinks: [
+          {
+            uri: 'file:///a/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+          {
+            uri: 'file:///b/report.png',
+            name: 'report.png',
+            mimeType: 'image/png',
+          },
+        ],
+      });
+    });
+
+    it('creates a user block for a link-only message', () => {
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        normalizeUserChunk({
+          type: 'resource_link',
+          uri: 'file:///tmp/data.csv',
+          name: 'data.csv',
+          mimeType: 'text/csv',
+        }),
+      );
+
+      expect(state.blocks).toMatchObject([
+        {
+          kind: 'user',
+          text: '',
+          resourceLinks: [
+            { uri: 'file:///tmp/data.csv', name: 'data.csv' },
+          ],
+        },
+      ]);
+    });
+
+    it('deduplicates repeated echoes of one URI within one message', () => {
+      const link = {
+        type: 'user.resource_link.delta',
+        uri: 'file:///tmp/one.png',
+        name: 'one.png',
+      } as const;
+      const echoWithMeta = {
+        ...link,
+        mimeType: 'image/png',
+        meta: { qwenTranscript: { sourceRecordIds: ['record-1'] } },
+      };
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        [link, echoWithMeta, link],
+      );
+
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        resourceLinks: [
+          { uri: 'file:///tmp/one.png', name: 'one.png', mimeType: 'image/png' },
+        ],
+      });
+    });
+
+    it('keeps the same URI distinct across separate messages', () => {
+      const link = {
+        type: 'user.resource_link.delta',
+        uri: 'file:///tmp/shared.png',
+        name: 'shared.png',
+      } as const;
+      // Distinct prompt identities keep the two turns in distinct user
+      // blocks (the reducer refuses to merge across promptId boundaries).
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        [
+          {
+            type: 'user.text.delta',
+            text: 'first',
+            promptId: 'session########1',
+          },
+          { ...link, promptId: 'session########1' },
+          { type: 'assistant.text.delta', text: 'ok' },
+          { type: 'assistant.done' },
+          {
+            type: 'user.text.delta',
+            text: 'second',
+            promptId: 'session########2',
+          },
+          { ...link, promptId: 'session########2' },
+        ],
+        { now: 2 },
+      );
+
+      const userBlocks = state.blocks.filter((block) => block.kind === 'user');
+      expect(userBlocks).toHaveLength(2);
+      expect(userBlocks.map((block) => block.text)).toEqual([
+        'first',
+        'second',
+      ]);
+      for (const block of userBlocks) {
+        expect(block).toMatchObject({
+          resourceLinks: [{ uri: 'file:///tmp/shared.png' }],
+        });
+      }
+    });
+
+    it('drops rewound turns without restoring their links', () => {
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        [
+          {
+            type: 'user.text.delta',
+            text: 'keep this turn',
+            promptId: 'session########1',
+          },
+          {
+            type: 'user.resource_link.delta',
+            uri: 'file:///keep.png',
+            name: 'keep.png',
+            promptId: 'session########1',
+          },
+          { type: 'assistant.text.delta', text: 'ok' },
+          { type: 'assistant.done' },
+          {
+            type: 'user.text.delta',
+            text: 'rewound turn',
+            promptId: 'session########2',
+          },
+          {
+            type: 'user.resource_link.delta',
+            uri: 'file:///gone.png',
+            name: 'gone.png',
+            promptId: 'session########2',
+          },
+          { type: 'assistant.text.delta', text: 'later' },
+          { type: 'assistant.done' },
+          { type: 'session.rewound', promptId: 'session########2', targetTurnIndex: 1 },
+        ],
+        { now: 2 },
+      );
+
+      const userBlocks = state.blocks.filter((block) => block.kind === 'user');
+      expect(userBlocks).toHaveLength(1);
+      expect(userBlocks[0]).toMatchObject({
+        text: 'keep this turn',
+        resourceLinks: [{ uri: 'file:///keep.png' }],
+      });
+      // The erased turn's links are gone with its blocks — nothing in the
+      // retained transcript still references them.
+      const flatLinks = state.blocks.flatMap(
+        (block) =>
+          (block as { resourceLinks?: { uri: string }[] }).resourceLinks ??
+          [],
+      );
+      expect(flatLinks.map((link) => link.uri)).toEqual(['file:///keep.png']);
+    });
+  });
+
   it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
     // Replay producers persist uploaded attachments as media references
     // (`attachmentId`, no inline bytes). Paths that normalize without hydrating
