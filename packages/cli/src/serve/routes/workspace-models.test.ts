@@ -196,7 +196,7 @@ describe('DELETE /workspace/models', () => {
   );
 
   it.each(
-    ['imageOnly', 'voiceOnly'].flatMap(
+    ['imageOnly', 'voiceOnly', 'fastOnly', 'visionOnly'].flatMap(
       (purpose) =>
         [
           [purpose, false],
@@ -204,7 +204,7 @@ describe('DELETE /workspace/models', () => {
         ] as const,
     ),
   )(
-    'clears primary selection when the winning %s alias is service-only (shadowed chat: %s)',
+    'clears primary selection when the winning alias is %s (shadowed chat: %s)',
     async (purpose, shadowedChat) => {
       const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
       writeUserSettings({
@@ -236,6 +236,133 @@ describe('DELETE /workspace/models', () => {
         ...(shadowedChat
           ? { spare: [{ ...model, name: 'shadowed-chat' }] }
           : {}),
+      });
+    },
+  );
+
+  it.each<{
+    flags: Record<string, boolean | string>;
+    keeps: string[];
+  }>([
+    {
+      flags: {},
+      keeps: [
+        'imageModel',
+        'advisorModel',
+        'visionModel',
+        'fastModel',
+        'compactionModel',
+      ],
+    },
+    { flags: { imageOnly: true }, keeps: ['imageModel'] },
+    { flags: { voiceOnly: true }, keeps: [] },
+    { flags: { fastOnly: true }, keeps: ['fastModel'] },
+    { flags: { visionOnly: true }, keeps: ['imageModel', 'visionModel'] },
+    {
+      flags: { supportsImageGeneration: false },
+      keeps: ['advisorModel', 'visionModel', 'fastModel', 'compactionModel'],
+    },
+    {
+      flags: { envKey: '' },
+      keeps: ['advisorModel', 'visionModel', 'fastModel', 'compactionModel'],
+    },
+  ])(
+    'preserves only role-eligible survivors with $flags',
+    async ({ flags, keeps }) => {
+      const model = {
+        id: 'shared',
+        baseUrl: 'https://models.example/v1',
+        envKey: 'MODEL_KEY',
+        supportsImageGeneration: true,
+      };
+      const pins = {
+        imageModel: `openai:${model.id}\0${model.baseUrl}`,
+        advisorModel: `openai:${model.id}\0${model.baseUrl}`,
+        visionModel: `openai:${model.id}\0${model.baseUrl}`,
+        fastModel: `openai:${model.id}`,
+        compactionModel: `openai:${model.id}`,
+      };
+      writeUserSettings({
+        providerProtocol: { alternate: 'openai' },
+        modelProviders: {
+          openai: [model],
+          alternate: [{ ...model, ...flags }],
+        },
+        ...pins,
+        voiceModel: model.id,
+        modelFallbacks: model.id,
+      });
+      const { app, persistSettings } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(listed.body.models[0]);
+      expect(deleted.status).toBe(200);
+      expect(readUserSettings()).toMatchObject({
+        modelProviders: { openai: [], alternate: [{ ...model, ...flags }] },
+        voiceModel: model.id,
+        modelFallbacks: model.id,
+        ...Object.fromEntries(
+          Object.entries(pins).map(([key, value]) => [
+            key,
+            keeps.includes(key) ? value : '',
+          ]),
+        ),
+      });
+      const cleared = persistSettings.mock.calls[0]![1].filter(
+        (write) => write.key !== 'modelProviders',
+      ).map((write) => write.key);
+      expect(cleared).toEqual(
+        Object.keys(pins).filter((key) => !keeps.includes(key)),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'uses the first registered survivor for role cleanup (eligible first: %s)',
+    async (eligibleFirst) => {
+      const model = {
+        id: 'shared',
+        baseUrl: 'https://models.example/v1',
+        envKey: 'MODEL_KEY',
+        supportsImageGeneration: true,
+      };
+      const voice = { ...model, voiceOnly: true };
+      const survivors = eligibleFirst ? [model, voice] : [voice, model];
+      const pins = {
+        imageModel: `openai:${model.id}\0${model.baseUrl}`,
+        advisorModel: `openai:${model.id}\0${model.baseUrl}`,
+        visionModel: `openai:${model.id}\0${model.baseUrl}`,
+        fastModel: `openai:${model.id}`,
+        compactionModel: `openai:${model.id}`,
+      };
+      writeUserSettings({
+        providerProtocol: { first: 'openai', second: 'openai' },
+        modelProviders: {
+          openai: [model],
+          first: [survivors[0]],
+          second: [survivors[1]],
+        },
+        model: { name: model.id, baseUrl: model.baseUrl },
+        ...pins,
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(listed.body.models[0]);
+      expect(deleted.status).toBe(200);
+      expect(deleted.body.clearedActiveModel).toBe(!eligibleFirst);
+      expect(readUserSettings()).toMatchObject({
+        model: eligibleFirst
+          ? { name: model.id, baseUrl: model.baseUrl }
+          : { name: '', baseUrl: '' },
+        ...Object.fromEntries(
+          Object.entries(pins).map(([key, value]) => [
+            key,
+            eligibleFirst ? value : '',
+          ]),
+        ),
       });
     },
   );
@@ -500,7 +627,12 @@ describe('DELETE /workspace/models', () => {
   it.each([undefined, 'invalid-protocol', 'qwen-oauth', 'openai'])(
     'only preserves deleted bare references for a routable provider alias (%s)',
     async (protocol) => {
-      const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
+      const model = {
+        id: 'shared',
+        baseUrl: 'https://models.example/v1',
+        envKey: 'MODEL_KEY',
+        supportsImageGeneration: true,
+      };
       writeUserSettings({
         ...(protocol ? { providerProtocol: { alternate: protocol } } : {}),
         modelProviders: {

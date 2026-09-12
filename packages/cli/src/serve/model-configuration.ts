@@ -110,6 +110,36 @@ export function getModelConfigurationKey(
     : undefined;
 }
 
+export function isConversationModelConfiguration(model: ProviderModelConfig) {
+  return (
+    !model.imageOnly && !model.voiceOnly && !model.fastOnly && !model.visionOnly
+  );
+}
+
+export function isImageModelConfiguration(model: ProviderModelConfig) {
+  if (
+    !isImageGenerationCapable(model) ||
+    model.fastOnly ||
+    model.voiceOnly ||
+    !model.baseUrl ||
+    typeof model.envKey !== 'string' ||
+    !model.envKey.trim()
+  )
+    return false;
+  try {
+    const url = new URL(model.baseUrl);
+    return (
+      url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function listModelConfigurations(loaded: LoadedSettings) {
   const entries = modelEntries(loaded);
   const routeKey = (entry: (typeof entries)[number]) =>
@@ -125,16 +155,9 @@ export function listModelConfigurations(loaded: LoadedSettings) {
     .map((entry) => {
       const { model, authType, key } = entry;
       const uniqueRoute = counts.get(routeKey(entry)) === 1;
-      const imageCapable = isImageGenerationCapable(model);
       let imageModel: string | undefined;
       let advisorModel: string | undefined;
-      if (
-        uniqueRoute &&
-        model.imageOnly !== true &&
-        model.voiceOnly !== true &&
-        model.fastOnly !== true &&
-        model.visionOnly !== true
-      ) {
+      if (uniqueRoute && isConversationModelConfiguration(model)) {
         if (!model.baseUrl) advisorModel = `${authType}:${model.id}\0`;
         else {
           try {
@@ -152,29 +175,8 @@ export function listModelConfigurations(loaded: LoadedSettings) {
           }
         }
       }
-      if (
-        uniqueRoute &&
-        imageCapable &&
-        !model.fastOnly &&
-        !model.voiceOnly &&
-        model.baseUrl &&
-        typeof model.envKey === 'string' &&
-        model.envKey.trim()
-      ) {
-        try {
-          const url = new URL(model.baseUrl);
-          if (
-            url.protocol === 'https:' &&
-            !url.username &&
-            !url.password &&
-            !url.search &&
-            !url.hash
-          ) {
-            imageModel = `${authType}:${model.id}\0${model.baseUrl}`;
-          }
-        } catch {
-          /* Invalid endpoints are not selectable image routes. */
-        }
+      if (uniqueRoute && isImageModelConfiguration(model)) {
+        imageModel = `${authType}:${model.id}\0${model.baseUrl}`;
       }
       return {
         key,

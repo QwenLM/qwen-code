@@ -66,14 +66,16 @@ window, and output-limit controls while retaining unrelated settings. Web submit
 `advancedConfig.replaceExisting: true` for this full-form replacement. Partial
 submissions from other clients preserve omitted controls; explicitly disabling
 thinking or modalities changes only that control.
-A service reconnect with a differently
+A custom service reconnect with a differently
 spelled URL in the same credential bucket is rejected before writing; the user
 must use the saved raw endpoint so exact role selections remain valid. Saving
 only service models does not complete first-time conversation authentication.
 Reject service-only installs that would overwrite an existing conversation model
 through either identity replacement or preset ownership before any settings or
 environment write. Installs containing conversation models also reject implicit
-removal of owned service models omitted from the selection. Append and service-only
+removal of owned service models omitted from the selection. A preset can move
+owned service models to a new endpoint when their IDs and purposes are retained.
+Owned replacements cannot change purpose merely by changing endpoints. Append and service-only
 preset reselection retain their existing behavior. Changing an existing identity
 to another purpose is rejected.
 Image setup describes the existing DashScope/MiniMax-compatible transports.
@@ -88,7 +90,12 @@ fresh read/modify/write preserves credentials and unrelated generation settings.
 PATCH writes the unresolved settings copy so environment placeholders remain
 placeholders on disk. DELETE checks its raw scope snapshots inside the writer
 lock and returns a conflict if another edit committed since its read. Removing a
-model clears role references only when the referenced route no longer exists.
+model clears role references when no eligible route remains for that role.
+Survivors follow the registry's first-entry precedence for each protocol, ID,
+and raw endpoint; shadowed aliases cannot preserve a pin. Fast accepts fast-only
+models, vision accepts vision-only models, and image requires a usable image
+configuration. Main, advisor, and compaction selections exclude all four
+selector-only flags. Voice and fallback references retain their bare-ID behavior.
 The model list attaches a small window-size editor to persisted rows; built-in and
 runtime-only models do not claim to support persistent editing. Window writes refresh
 the model registry for new sessions; existing sessions must restart to adopt the

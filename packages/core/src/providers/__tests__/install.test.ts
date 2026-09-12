@@ -548,6 +548,80 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
+  it.each(['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'])(
+    'reinstalls owned conversation and image models at %s',
+    async (baseUrl) => {
+      const inputs = {
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'test-only',
+        modelIds: ['MiniMax-M2.7', 'image-01'],
+      };
+      const existing = buildInstallPlan(minimaxProvider, inputs)
+        .modelProviders![0]!.models;
+      const foreign = { id: 'foreign', envKey: 'OTHER_KEY' };
+      const adapter = createAdapter({ openai: [...existing, foreign] });
+      const plan = buildInstallPlan(minimaxProvider, { ...inputs, baseUrl });
+      delete plan.env;
+      const reloadModelProviders = vi.fn();
+      const result = await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        reloadModelProviders,
+      });
+      const models = result.updatedModelProviders['openai']!;
+      expect(models).toHaveLength(3);
+      expect(models).toContainEqual(foreign);
+      expect(models).toContainEqual(
+        expect.objectContaining({ id: 'MiniMax-M2.7', baseUrl }),
+      );
+      expect(models).toContainEqual(
+        expect.objectContaining({
+          id: 'image-01',
+          baseUrl,
+          imageOnly: true,
+          envKey: 'MINIMAX_API_KEY',
+        }),
+      );
+      expect(adapter.persist).toHaveBeenCalledOnce();
+      expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith(
+        result.updatedModelProviders,
+      );
+    },
+  );
+
+  it.each(['chat', 'voice'] as const)(
+    'rejects migrating an owned image model to %s at a different endpoint before writing',
+    async (purpose) => {
+      const service = {
+        id: 'image-01',
+        name: '[MiniMax] image-01',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+        imageOnly: true,
+        supportsImageGeneration: true,
+      };
+      const adapter = createAdapter({ openai: [service] });
+      const plan = buildInstallPlan(minimaxProvider, {
+        baseUrl: 'https://api.minimaxi.com/v1',
+        apiKey: 'test-only',
+        modelIds: ['MiniMax-M2.7', service.id],
+      });
+      const replacement = plan.modelProviders![0]!.models[1]!;
+      replacement.imageOnly = false;
+      replacement.voiceOnly = purpose === 'voice';
+      replacement.supportsImageGeneration = false;
+      plan.env = { TEST_API_KEY: 'must-not-write' };
+      process.env['TEST_API_KEY'] = 'unchanged';
+      await expect(
+        applyProviderInstallPlan(plan, { settings: adapter }),
+      ).rejects.toMatchObject({ step: 'modelPurpose' });
+      expect(adapter.getModelProviders()).toEqual({ openai: [service] });
+      expect(adapter.setValue).not.toHaveBeenCalled();
+      expect(adapter.backup).not.toHaveBeenCalled();
+      expect(adapter.persist).not.toHaveBeenCalled();
+      expect(process.env['TEST_API_KEY']).toBe('unchanged');
+    },
+  );
+
   it.each(['image', 'voice'] as const)(
     'isolates %s credentials from a conversation model at the same endpoint',
     async (purpose) => {

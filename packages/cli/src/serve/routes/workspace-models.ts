@@ -7,6 +7,8 @@
 import {
   findModelConfiguration,
   findModelConfigurationForDeletion,
+  isConversationModelConfiguration,
+  isImageModelConfiguration,
   listModelConfigurations,
 } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
@@ -322,6 +324,7 @@ export function registerWorkspaceModelsRoutes(
           configuration.provider
         ]!.filter((_, index) => index !== configuration.index);
         const removedModelId = configuration.model.id;
+        const seenRoutes = new Set<string>();
         const remaining = Object.entries(remainingProviders).flatMap(
           ([provider, models]) => {
             const authType = resolveProviderProtocol(
@@ -336,6 +339,12 @@ export function registerWorkspaceModelsRoutes(
               return [];
             return models
               .filter((model) => model?.id === removedModelId)
+              .filter((model) => {
+                const route = JSON.stringify([authType, model.baseUrl ?? '']);
+                if (seenRoutes.has(route)) return false;
+                seenRoutes.add(route);
+                return true;
+              })
               .map((model) => ({ model, authType }));
           },
         );
@@ -364,8 +373,7 @@ export function registerWorkspaceModelsRoutes(
           const scopeModel = loaded.forScope(activeScope).settings.model;
           if (
             (!remainingRoute ||
-              remainingRoute.imageOnly ||
-              remainingRoute.voiceOnly) &&
+              !isConversationModelConfiguration(remainingRoute)) &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
@@ -430,7 +438,18 @@ export function registerWorkspaceModelsRoutes(
                 ({ model, authType }) =>
                   (!selector.authType || authType === selector.authType) &&
                   (endpoint === undefined ||
-                    endpoint === (model.baseUrl ?? '')),
+                    endpoint === (model.baseUrl ?? '')) &&
+                  (key === 'imageModel'
+                    ? isImageModelConfiguration(model)
+                    : key === 'fastModel'
+                      ? !model.imageOnly &&
+                        !model.voiceOnly &&
+                        !model.visionOnly
+                      : key === 'visionModel'
+                        ? !model.imageOnly &&
+                          !model.voiceOnly &&
+                          !model.fastOnly
+                        : isConversationModelConfiguration(model)),
               )
             ) {
               writes.push({ scope: selectionScope, key, value: '' });

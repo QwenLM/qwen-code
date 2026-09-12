@@ -163,7 +163,10 @@ export async function applyProviderInstallPlan(
     const changesRole = existingModels.some((existing) =>
       patch.models.some(
         (model) =>
-          isSameModelIdentity(existing, model) &&
+          (isSameModelIdentity(existing, model) ||
+            (existing.id === model.id &&
+              patch.ownsModel?.(existing) &&
+              (preserveSelection || patch.mergeStrategy !== 'append'))) &&
           (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
             Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
             (isImageGenerationCapable(existing) &&
@@ -186,7 +189,7 @@ export async function applyProviderInstallPlan(
         (existing) =>
           (existing.imageOnly || existing.voiceOnly) &&
           patch.ownsModel?.(existing) &&
-          !patch.models.some((model) => isSameModelIdentity(existing, model)),
+          !patch.models.some((model) => model.id === existing.id),
       );
     if (changesRole || removesConversation || removesService) {
       throw new ProviderInstallError(
