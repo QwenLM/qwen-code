@@ -477,6 +477,26 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
+  'Focus mode is not supported by this renderer.':
+    'Режим фокусировки не поддерживается этим интерфейсом.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'переключить режим фокуса (скрыть рассуждения и шум вызовов инструментов)',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Режим фокуса включён. Ctrl+O показывает все подробности. Нажмите Ctrl+O ещё раз, чтобы снова применить фокус. Запустите /focus ещё раз для отключения.',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'Режим фокуса управляется настройками рабочей области или системы. Измените настройку с более высоким приоритетом, чтобы переключить режим.',
+  'Memory: {{read}} read, {{written}} written':
+    'Память: {{read}} чтений, {{written}} записей',
+  'Focus mode disabled.': 'Режим фокуса отключён.',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O для подробностей)',
+  '{{tool}} failed (Ctrl+O for details)':
+    'Ошибка {{tool}} (Ctrl+O для подробностей)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} отменён (Ctrl+O для подробностей)',
+  'Tools: {{count}}': 'Инструменты: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'ошибок: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'отменено: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O для подробностей)',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':

@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { transcriptToEvents } from './transcript-adapter.js';
 import { MID_TURN_USER_MESSAGE_PREFIX } from '../../utils/midTurnUserMessage.js';
+import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 
 function userLine(subtype: string, text: string): string {
   return JSON.stringify({
@@ -24,6 +25,106 @@ function userLine(subtype: string, text: string): string {
 }
 
 describe('transcriptToEvents subtyped user records', () => {
+  it.each(['error', 'cancelled'])(
+    'does not count %s memory reads on resume',
+    (status) => {
+      const projectRoot = '/tmp/focus-resume-project';
+      const events = transcriptToEvents(
+        [
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'memory1',
+                    name: 'read_file',
+                    args: {
+                      file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'memory1',
+              status,
+              resultDisplay: 'READ_FAILED',
+            },
+          }),
+        ].join('\n'),
+        { projectRoot },
+      );
+      const result = events.find((event) => event.type === 'tool-result');
+      expect(result).toBeDefined();
+      expect(result).not.toHaveProperty('isMemoryOp');
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'memory1',
+        success: false,
+        summary: status,
+      });
+    },
+  );
+  it.each(['Read 2 lines', ''])(
+    'preserves file arguments and detailed responses when resuming display %j',
+    (resultDisplay) => {
+      const events = transcriptToEvents(
+        [
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'read1',
+                    name: 'read_file',
+                    args: { file_path: 'src/main.ts' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'read1',
+              status: 'success',
+              resultDisplay,
+            },
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'read1',
+                    name: 'read_file',
+                    response: { output: 'FULL_READ_RESULT' },
+                  },
+                },
+              ],
+            },
+          }),
+        ].join('\n'),
+      );
+      expect(events).toContainEqual({
+        type: 'tool-args',
+        id: 'read1',
+        args: '{"file_path":"src/main.ts"}',
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'tool-result',
+          id: 'read1',
+          detailedDisplay: expect.stringContaining('FULL_READ_RESULT'),
+        }),
+      );
+    },
+  );
+
   it('replays a mid_turn_user_message (U-32 steering) as a user event', () => {
     const events = transcriptToEvents(
       [

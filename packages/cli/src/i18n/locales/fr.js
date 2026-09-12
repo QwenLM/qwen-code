@@ -532,6 +532,26 @@ export default {
   'Auto Edit': 'Édition automatique',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activer/désactiver le mode Vim',
+  'Focus mode is not supported by this renderer.':
+    'Le mode focus n’est pas pris en charge par cette interface.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'activer/désactiver le mode focus (masquer le raisonnement et le bruit des appels d’outils)',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Mode focus activé. Ctrl+O affiche tous les détails. Appuyez à nouveau sur Ctrl+O pour réappliquer le focus. Exécutez /focus à nouveau pour le désactiver.',
+  'Focus mode disabled.': 'Mode focus désactivé.',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O pour les détails)',
+  '{{tool}} failed (Ctrl+O for details)':
+    'Échec de {{tool}} (Ctrl+O pour les détails)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} annulé (Ctrl+O pour les détails)',
+  'Tools: {{count}}': 'Outils : {{count}}',
+  'failed: {{failed}} ({{tools}})': 'échecs : {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'annulés : {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O pour les détails)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'Le mode focus est contrôlé par les paramètres de l’espace de travail ou du système. Modifiez le paramètre prioritaire pour changer de mode.',
+  'Memory: {{read}} read, {{written}} written':
+    'Mémoire : {{read}} lectures, {{written}} écritures',
   'Show model-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques au modèle.",
   'Show tool-specific usage statistics.':

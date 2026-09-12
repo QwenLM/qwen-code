@@ -31,12 +31,92 @@ type StreamChunk = {
 
 let server: FakeOpenAIServer | undefined;
 
+async function readThroughContent(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  content: string,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let received = '';
+  // Fetch chunks need not line up with the server's SSE writes.
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error(`Stream ended before ${content}`);
+    received += decoder.decode(value, { stream: true });
+    if (
+      received
+        .split('\n\n')
+        .slice(0, -1)
+        .some((frame) => frame.includes(content))
+    )
+      return received;
+  }
+}
+
 afterEach(async () => {
   await server?.close();
   server = undefined;
 });
 
 describe('fake OpenAI server', () => {
+  it.each([false, true])(
+    'serves optional reasoning (stream: %s)',
+    async (stream) => {
+      server = await startFakeOpenAIServer(() => ({
+        reasoning: 'FAKE_REASONING_TRACE',
+        content: 'FAKE_ANSWER',
+      }));
+      const response = await fetch(`${server.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'fake-model', stream, messages: [] }),
+      });
+      expect(response.status).toBe(200);
+      if (stream) {
+        const frames = (await response.text())
+          .split('\n\n')
+          .filter((frame) => frame.startsWith('data: {'))
+          .map((frame) => JSON.parse(frame.slice(6)));
+        const reasoningIndex = frames.findIndex(
+          (frame) => frame.choices[0]?.delta.reasoning_content !== undefined,
+        );
+        const contentIndex = frames.findIndex(
+          (frame) => frame.choices[0]?.delta.content !== undefined,
+        );
+        expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+        expect(contentIndex).toBeGreaterThan(reasoningIndex);
+        expect(frames).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              choices: [
+                expect.objectContaining({
+                  delta: { reasoning_content: 'FAKE_REASONING_TRACE' },
+                }),
+              ],
+            }),
+            expect.objectContaining({
+              choices: [
+                expect.objectContaining({
+                  delta: { content: 'FAKE_ANSWER' },
+                }),
+              ],
+            }),
+          ]),
+        );
+      } else {
+        await expect(response.json()).resolves.toMatchObject({
+          choices: [
+            {
+              message: {
+                reasoning_content: 'FAKE_REASONING_TRACE',
+                content: 'FAKE_ANSWER',
+              },
+            },
+          ],
+        });
+      }
+    },
+  );
+
   it('serves non-streaming and streaming chat completions', async () => {
     server = await startFakeOpenAIServer(({ requestIndex }) =>
       requestIndex === 0
@@ -148,8 +228,10 @@ describe('fake OpenAI server', () => {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
 
-    const first = decoder.decode((await reader.read()).value);
+    const first = await readThroughContent(reader, 'HELD_FIRST_DELTA');
     expect(first).toContain('HELD_FIRST_DELTA');
+    expect(first).not.toContain('HELD_SECOND_DELTA');
+    expect(first).not.toContain('data: [DONE]');
     // The unresolved read is the assertion — and it has to survive the timeout,
     // since a read the race abandons still consumes the chunk when it lands.
     const pending = reader.read();
@@ -190,10 +272,9 @@ describe('fake OpenAI server', () => {
       }),
     });
     const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    expect(decoder.decode((await reader.read()).value)).toContain(
-      'UNRELEASED_DELTA',
-    );
+    const first = await readThroughContent(reader, 'UNRELEASED_DELTA');
+    expect(first).toContain('UNRELEASED_DELTA');
+    expect(first).not.toContain('data: [DONE]');
 
     // A case that forgets to release must not be able to keep the server (and
     // so the run) open: close() tears the held connection down under it.

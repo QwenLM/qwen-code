@@ -62,6 +62,7 @@ import {
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import { toolResultPresentation } from './tool-result-presentation.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -252,8 +253,29 @@ function atMentionCardEvents(
       tool: display.name,
       title: display.description,
     },
+    {
+      type: 'tool-description',
+      id: display.callId,
+      description: display.description,
+    },
   ];
-  const result = toolResultEvent(display.callId, display.resultDisplay);
+  const result = toolResultEvent(
+    display.callId,
+    display.resultDisplay,
+    undefined,
+    {
+      ...(display.detailedDisplay
+        ? { detailedDisplay: display.detailedDisplay }
+        : {}),
+      ...(display.images?.length
+        ? { imageMimeTypes: display.images.map((image) => image.mimeType) }
+        : {}),
+      ...(display.omittedImageCount
+        ? { omittedImageCount: display.omittedImageCount }
+        : {}),
+      ...(display.isMemoryOp ? { isMemoryOp: display.isMemoryOp } : {}),
+    },
+  );
   if (result) events.push(result);
   const failed = display.status === ToolCallStatus.Error;
   events.push({
@@ -653,6 +675,8 @@ export async function* livePromptEvents(
     inline: options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
+    retainToolRequests: false,
+    projectRoot: config.getTargetDir(),
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
     // hint travels on the error event's `hint` field (ErrorMessage renders
     // it inline in secondary color).
@@ -948,9 +972,21 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
-      const result = toolResultEvent(call.request.callId, resp?.resultDisplay);
-      if (result) yield result;
       const failed = call.status === 'error' || call.status === 'cancelled';
+      const presentation = toolResultPresentation(
+        resp?.resultDisplay,
+        resp?.responseParts,
+        call.request,
+        config.getTargetDir(),
+        failed,
+      );
+      const result = toolResultEvent(
+        call.request.callId,
+        resp?.resultDisplay,
+        undefined,
+        presentation,
+      );
+      if (result) yield result;
       yield {
         type: 'tool-end',
         id: call.request.callId,

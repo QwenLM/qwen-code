@@ -5,13 +5,19 @@
  */
 
 import type React from 'react';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { memo, useMemo, useRef, useCallback, useState } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
+  getCachedStringWidth,
+  truncateToWidth,
 } from '../utils/textUtils.js';
-import { ToolCallStatus, type HistoryItem } from '../types.js';
+import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
+import { formatMemorySummary } from '../utils/memory-summary.js';
+import type { HistoryItem } from '../types.js';
+import { ToolCallStatus } from '../types.js';
 import {
   UserMessage,
   UserShellMessage,
@@ -20,7 +26,11 @@ import {
   ThinkMessage,
   ThinkMessageContent,
 } from './messages/ConversationMessages.js';
-import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
+import {
+  ToolGroupMessage,
+  isSubagentToolEntry,
+  hasInlineImageOutput,
+} from './messages/ToolGroupMessage.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import {
@@ -63,6 +73,7 @@ import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useFocusModeEnabled } from '../contexts/FocusModeContext.js';
 import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
@@ -75,7 +86,7 @@ import {
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import { ICON } from '../constants.js';
+import { ICON, TOOL_STATUS } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -98,6 +109,8 @@ interface HistoryItemDisplayProps {
    * Default false (main view stays at the #5661 partition baseline).
    */
   fullDetail?: boolean;
+  /** Preserve preview rendering without expanding every tool result. */
+  disableFocus?: boolean;
   /**
    * Head id of the thought group this item belongs to (the `gemini_thought`
    * head id for both the head and its `gemini_thought_content` continuations).
@@ -373,6 +386,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
+  disableFocus = false,
   thoughtHeadId,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
@@ -395,10 +409,61 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
+  const focusModeEnabled = useFocusModeEnabled();
+  // Ctrl+O full-detail always pierces focus mode (escape hatch).
+  const focusActive = focusModeEnabled && !fullDetail && !disableFocus;
 
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+
+  if (
+    focusActive &&
+    (item.type === 'gemini_thought' || item.type === 'gemini_thought_content')
+  ) {
+    return null;
+  }
+
+  const memoryLabel =
+    item.type === 'tool_group' &&
+    ((item.memoryReadCount ?? 0) > 0 || (item.memoryWriteCount ?? 0) > 0)
+      ? ` · ${formatMemorySummary(item.memoryReadCount, item.memoryWriteCount)}`
+      : '';
+  const memorySummary =
+    contentWidth - 2 - getCachedStringWidth(memoryLabel) >= 20
+      ? memoryLabel
+      : '';
+  const focusSummary =
+    focusActive && item.type === 'tool_group'
+      ? getFocusToolSummary(
+          item.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            args: tool.args,
+            status:
+              tool.status === ToolCallStatus.Success
+                ? 'success'
+                : tool.status === ToolCallStatus.Error
+                  ? 'error'
+                  : tool.status === ToolCallStatus.Canceled
+                    ? 'cancelled'
+                    : 'pending',
+            isSubagent: isSubagentToolEntry(tool),
+            hasImages: hasInlineImageOutput(tool),
+            hasNotice:
+              Boolean(tool.visionBridgeNotice) ||
+              isVisionBridgeNoticeDisplay(tool.resultDisplay),
+          })),
+          {
+            isPending,
+            isUserInitiated: item.isUserInitiated,
+            maxWidth: Math.max(
+              20,
+              contentWidth - 2 - getCachedStringWidth(memorySummary),
+            ),
+          },
+        )
+      : undefined;
 
   return (
     <Box
@@ -531,23 +596,42 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           width={boxWidth}
         />
       )}
-      {itemForDisplay.type === 'tool_group' && (
-        <CollapsibleToolGroupMessage
-          toolCalls={itemForDisplay.tools}
-          groupId={itemForDisplay.id}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth}
-          isFocused={isFocused}
-          isPending={isPending}
-          activeShellPtyId={activeShellPtyId}
-          embeddedShellFocused={embeddedShellFocused}
-          memoryWriteCount={itemForDisplay.memoryWriteCount}
-          memoryReadCount={itemForDisplay.memoryReadCount}
-          isUserInitiated={itemForDisplay.isUserInitiated}
-          fullDetail={fullDetail}
-          expansionKey={itemForDisplay.batchId}
-        />
-      )}
+      {itemForDisplay.type === 'tool_group' &&
+        (focusSummary ? (
+          <Box flexDirection="row">
+            <Box width={2} flexShrink={0}>
+              <Text dimColor>
+                {focusSummary.status === 'error'
+                  ? TOOL_STATUS.ERROR
+                  : focusSummary.status === 'cancelled'
+                    ? TOOL_STATUS.CANCELED
+                    : TOOL_STATUS.SUCCESS}
+              </Text>
+            </Box>
+            <Text dimColor wrap="truncate-end">
+              {truncateToWidth(
+                `${focusSummary.text}${memorySummary}`,
+                contentWidth - 2,
+              )}
+            </Text>
+          </Box>
+        ) : (
+          <CollapsibleToolGroupMessage
+            toolCalls={itemForDisplay.tools}
+            groupId={itemForDisplay.id}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth}
+            isFocused={isFocused}
+            isPending={isPending}
+            activeShellPtyId={activeShellPtyId}
+            embeddedShellFocused={embeddedShellFocused}
+            memoryWriteCount={itemForDisplay.memoryWriteCount}
+            memoryReadCount={itemForDisplay.memoryReadCount}
+            isUserInitiated={itemForDisplay.isUserInitiated}
+            expansionKey={itemForDisplay.batchId}
+            fullDetail={fullDetail}
+          />
+        ))}
       {itemForDisplay.type === 'tool_use_summary' && (
         <Box flexDirection="row">
           <Box width={2} flexShrink={0}>

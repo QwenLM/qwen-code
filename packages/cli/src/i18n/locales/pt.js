@@ -482,6 +482,26 @@ export default {
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
+  'Focus mode is not supported by this renderer.':
+    'O modo foco não é compatível com esta interface.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'alternar modo foco (ocultar raciocínio e ruído de chamadas de ferramentas)',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Modo foco ativado. Ctrl+O mostra todos os detalhes. Pressione Ctrl+O novamente para reaplicar o foco. Execute /focus novamente para desativar.',
+  'Focus mode disabled.': 'Modo foco desativado.',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O para detalhes)',
+  '{{tool}} failed (Ctrl+O for details)':
+    '{{tool}} falhou (Ctrl+O para detalhes)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} cancelado (Ctrl+O para detalhes)',
+  'Tools: {{count}}': 'Ferramentas: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'falhas: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'canceladas: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O para detalhes)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'O modo foco é controlado pelas configurações do espaço de trabalho ou do sistema. Altere a configuração que tem precedência para alternar o foco.',
+  'Memory: {{read}} read, {{written}} written':
+    'Memória: {{read}} leituras, {{written}} gravações',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':

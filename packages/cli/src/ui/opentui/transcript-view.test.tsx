@@ -14,8 +14,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, fireEvent, act } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -31,7 +32,13 @@ const mocks = vi.hoisted(() => {
     const React = await import('react');
     const jsx = (
       type: unknown,
-      props: { children?: unknown; key?: React.Key } | null,
+      props: {
+        children?: unknown;
+        key?: React.Key;
+        onMouseUp?: React.MouseEventHandler;
+        paddingLeft?: number;
+        attributes?: number;
+      } | null,
       key?: React.Key,
     ) => {
       const config = key === undefined ? props : { ...props, key };
@@ -39,7 +46,12 @@ const mocks = vi.hoisted(() => {
       if (type === 'box' || type === 'text') {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            key,
+            onMouseUp: props?.onMouseUp,
+            'data-padding-left': props?.paddingLeft,
+            'data-attributes': props?.attributes,
+          },
           children,
         );
       }
@@ -51,13 +63,37 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { buildJsxRuntime };
+  return {
+    buildJsxRuntime,
+    keyboard: null as
+      | ((key: {
+          ctrl: boolean;
+          meta: boolean;
+          name: string;
+          preventDefault(): void;
+        }) => void)
+      | null,
+  };
 });
+
+vi.mock('@opentui/react', () => ({
+  useKeyboard: (handler: typeof mocks.keyboard) => {
+    mocks.keyboard = handler;
+  },
+}));
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  MAX_RESULT_DISPLAY_CHARACTERS,
+} from './messages.js';
+import { toolOutputPage } from './paged-tool-output.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { formatMemorySummary } from '../utils/memory-summary.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
@@ -71,6 +107,457 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('keeps cancelled status decoration in compact rows', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        focusMode
+        items={[toolItem({ done: true, success: false, summary: 'cancelled' })]}
+      />,
+    );
+    const glyph = view.container.querySelector('[data-attributes="129"]');
+    expect(glyph).not.toBeNull();
+    expect(view.container.textContent).toContain('cancelled');
+  });
+  it('advances a narrow page without splitting a surrogate pair', () => {
+    expect(toolOutputPage('😀tail', 0, 1, 1)).toEqual({ text: '😀', end: 2 });
+  });
+  it('pins the exact memory label reservation boundary', () => {
+    const label = ` · ${formatMemorySummary(0, 1)}`;
+    const baseWidth = STATUS_INDICATOR_WIDTH + getCachedStringWidth(label);
+    const items = [
+      toolItem({ done: true, success: true, isMemoryOp: 'write' }),
+    ];
+    const view = render(
+      <OpenTuiTranscriptView
+        focusMode
+        availableWidth={baseWidth + 19}
+        items={items}
+      />,
+    );
+    expect(view.container.textContent).not.toContain(formatMemorySummary(0, 1));
+    view.rerender(
+      <OpenTuiTranscriptView
+        focusMode
+        availableWidth={baseWidth + 20}
+        items={items}
+      />,
+    );
+    expect(view.container.textContent).toContain(formatMemorySummary(0, 1));
+  });
+
+  it('navigates pages without mouse and respects the modal/approval gate', () => {
+    const items = [toolItem({ output: `${'line\n'.repeat(110)}TAIL` })];
+    const view = render(<OpenTuiTranscriptView fullDetail items={items} />);
+    const key = {
+      ctrl: true,
+      meta: true,
+      name: 'down',
+      preventDefault: vi.fn(),
+    };
+    act(() => mocks.keyboard?.(key));
+    expect(key.preventDefault).not.toHaveBeenCalled();
+    view.rerender(
+      <OpenTuiTranscriptView fullDetail canNavigateDetails items={items} />,
+    );
+    act(() => mocks.keyboard?.({ ...key, ctrl: false }));
+    expect(key.preventDefault).not.toHaveBeenCalled();
+    act(() => mocks.keyboard?.(key));
+    expect(key.preventDefault).toHaveBeenCalledOnce();
+    expect(view.container.textContent).toContain('TAIL');
+    act(() => mocks.keyboard?.({ ...key, name: 'up' }));
+    expect(view.container.textContent).not.toContain('TAIL');
+  });
+  it('selects independent pagers with the keyboard and pauses navigation behind dialogs', () => {
+    const items = [
+      toolItem({ id: 'first', output: `${'first\n'.repeat(110)}FIRST_TAIL` }),
+      toolItem({
+        id: 'second',
+        output: `${'second\n'.repeat(110)}SECOND_TAIL`,
+      }),
+    ];
+    const view = render(
+      <OpenTuiTranscriptView fullDetail canNavigateDetails items={items} />,
+    );
+    const preventDefault = vi.fn();
+    const press = (name: string) =>
+      act(() =>
+        mocks.keyboard?.({ ctrl: true, meta: true, name, preventDefault }),
+      );
+    press('left');
+    press('down');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).not.toContain('SECOND_TAIL');
+    press('right');
+    press('down');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).toContain('SECOND_TAIL');
+    press('up');
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    expect(view.container.textContent).not.toContain('SECOND_TAIL');
+    view.rerender(
+      <OpenTuiTranscriptView
+        fullDetail
+        canNavigateDetails={false}
+        items={items}
+      />,
+    );
+    preventDefault.mockClear();
+    press('left');
+    press('up');
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(view.container.textContent).toContain('FIRST_TAIL');
+    view.rerender(
+      <OpenTuiTranscriptView fullDetail canNavigateDetails items={items} />,
+    );
+    press('left');
+    press('up');
+    expect(view.container.textContent).not.toContain('FIRST_TAIL');
+  });
+  it('parses resumed focus arguments once and reuses them across renders', () => {
+    const args = '{"file_path":"src/main.ts","content":"BODY"}';
+    const spy = vi.spyOn(JSON, 'parse');
+    try {
+      const items = [
+        toolItem({ args, tool: 'write_file', done: true, success: true }),
+      ];
+      const view = render(<OpenTuiTranscriptView focusMode items={items} />);
+      view.rerender(
+        <OpenTuiTranscriptView focusMode availableWidth={100} items={items} />,
+      );
+      expect(spy.mock.calls.filter(([value]) => value === args)).toHaveLength(
+        1,
+      );
+      expect(view.container.textContent).toContain('main.ts');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it('localizes the Focus memory counter in Portuguese', async () => {
+    await setLanguageAsync('pt');
+    try {
+      const view = render(
+        <OpenTuiTranscriptView
+          focusMode
+          availableWidth={160}
+          items={[toolItem({ done: true, success: true, isMemoryOp: 'write' })]}
+        />,
+      );
+      expect(view.container.textContent).toContain(
+        'Memória: 0 leituras, 1 gravações',
+      );
+      view.unmount();
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+  it('omits the whole memory suffix when the compact row is narrow', () => {
+    const items = [
+      toolItem({ done: true, success: true, isMemoryOp: 'write' }),
+    ];
+    const view = render(
+      <OpenTuiTranscriptView focusMode availableWidth={30} items={items} />,
+    );
+    expect(view.container.textContent).not.toContain(' · ');
+    expect(view.container.textContent).not.toContain('Memory');
+    view.rerender(
+      <OpenTuiTranscriptView focusMode availableWidth={100} items={items} />,
+    );
+    expect(view.container.textContent).toContain('Memory: 0 read, 1 written');
+  });
+  it('does not parse focus-only arguments while focus is off', () => {
+    const args = '{"file_path":"src/main.ts","content":"BODY"}';
+    const spy = vi.spyOn(JSON, 'parse');
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={[toolItem({ args, description: 'src/main.ts' })]}
+        />,
+      );
+      expect(spy).not.toHaveBeenCalledWith(args);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('preserves manual thought expansion through full detail clicks', () => {
+    const items = [
+      {
+        kind: 'thinking' as const,
+        id: 'thought',
+        text: 'PRIVATE_REASONING',
+        done: true,
+      },
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).not.toContain('PRIVATE_REASONING');
+    fireEvent.mouseUp(view.getByText(/Thinking/));
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+    view.rerender(<OpenTuiTranscriptView items={items} fullDetail />);
+    fireEvent.mouseUp(view.getByText(/Thinking/));
+    view.rerender(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+  });
+
+  it('indents image and vision disclosure rows with tool output', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        items={[
+          toolItem({
+            imageMimeTypes: ['image/png'],
+            omittedImageCount: 2,
+            visionBridgeNotice: 'VISION_NOTICE',
+          }),
+        ]}
+      />,
+    );
+    for (const text of [
+      '[inline image: image/png]',
+      'VISION_NOTICE',
+      formatInlineImageOverflow(2),
+    ]) {
+      expect(
+        view
+          .getByText(text)
+          .closest('[data-padding-left]')
+          ?.getAttribute('data-padding-left'),
+      ).toBe(String(STATUS_INDICATOR_WIDTH));
+    }
+  });
+
+  it('keeps ANSI grid columns truncated in full detail', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        fullDetail
+        availableWidth={40}
+        items={[
+          toolItem({
+            ansi: {
+              grid: [
+                [
+                  {
+                    text: 'A'.repeat(40) + 'OVERFLOW_MARKER',
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    dim: false,
+                    inverse: false,
+                    fg: '',
+                    bg: '',
+                  },
+                ],
+              ],
+              totalLines: 1,
+              totalBytes: 55,
+            },
+          }),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).not.toContain('OVERFLOW_MARKER');
+  });
+  it('retroactively summarizes completed tools and hides reasoning without losing history', () => {
+    const items = [
+      {
+        kind: 'thinking' as const,
+        id: 'thought',
+        text: 'PRIVATE_REASONING',
+        done: true,
+      },
+      toolItem({
+        tool: 'read_file',
+        args: '{"file_path":"src/main.ts"}',
+        output: 'FULL_RESULT',
+        done: true,
+        success: true,
+      }),
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('FULL_RESULT');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).toContain('Read');
+    expect(view.container.textContent).toContain('main.ts');
+    expect(view.container.textContent).not.toContain('FULL_RESULT');
+    expect(view.container.textContent).not.toContain('Thinking');
+    expect(view.container.textContent).not.toContain('PRIVATE_REASONING');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode fullDetail />);
+    expect(view.container.textContent).toContain('FULL_RESULT');
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).not.toContain('FULL_RESULT');
+    expect(items[1]).toMatchObject({ output: 'FULL_RESULT' });
+  });
+
+  it.each(['error', 'cancelled', 'interrupted'])(
+    'summarizes %s tools without dumping raw commands or output',
+    (summary) => {
+      const view = render(
+        <OpenTuiTranscriptView
+          focusMode
+          items={[
+            toolItem({
+              done: true,
+              success: false,
+              summary,
+              description: 'RAW_COMMAND',
+              output: 'LONG_ERROR_OUTPUT',
+            }),
+          ]}
+        />,
+      );
+      expect(view.container.textContent).toContain('Shell');
+      expect(view.container.textContent).not.toContain('RAW_COMMAND');
+      expect(view.container.textContent).not.toContain('LONG_ERROR_OUTPUT');
+      expect(view.container.textContent).toContain(
+        summary === 'error' ? 'failed' : 'cancelled',
+      );
+    },
+  );
+
+  it.each([
+    { done: false },
+    { done: false, confirm: 'pending' as const },
+    { isUserInitiated: true },
+    { isSubagent: true },
+    { imageMimeTypes: ['image/png'] },
+    { omittedImageCount: 2 },
+    { visionBridgeNotice: 'VISION_NOTICE' },
+    { hasNotice: true },
+  ])('keeps exceptional tools visible: %j', (override) => {
+    const view = render(
+      <OpenTuiTranscriptView
+        focusMode
+        items={[
+          toolItem({
+            done: true,
+            success: true,
+            output: 'EXCEPTION_OUTPUT',
+            ...override,
+          }),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain('EXCEPTION_OUTPUT');
+  });
+
+  it('pages full details without discarding the original output', () => {
+    const output = `FIRST_RESULT_LINE\n${'x\n'.repeat(150)}${'y'.repeat(35000)}LAST_RESULT_MARKER`;
+    const items = [toolItem({ done: true, success: true, output })];
+    const view = render(<OpenTuiTranscriptView items={items} fullDetail />);
+    expect(view.container.textContent).toContain('FIRST_RESULT_LINE');
+    expect(view.container.textContent).not.toContain('LAST_RESULT_MARKER');
+    for (
+      let page = 0;
+      page < 10 && !view.container.textContent?.includes('LAST_RESULT_MARKER');
+      page++
+    )
+      fireEvent.mouseUp(view.getByText('→'));
+    expect(view.container.textContent).toContain('LAST_RESULT_MARKER');
+    for (
+      let page = 0;
+      page < 10 && !view.container.textContent?.includes('FIRST_RESULT_LINE');
+      page++
+    )
+      fireEvent.mouseUp(view.getByText('←'));
+    expect(view.container.textContent).toContain('FIRST_RESULT_LINE');
+    expect(items[0].output).toBe(output);
+  });
+
+  it('pages a single oversized line without dropping its head or tail', () => {
+    const text = `HEAD${'x'.repeat(MAX_RESULT_DISPLAY_CHARACTERS)}TAIL`;
+    const first = toolOutputPage(text, 0, 100, MAX_RESULT_DISPLAY_CHARACTERS);
+    const second = toolOutputPage(
+      text,
+      first.end,
+      100,
+      MAX_RESULT_DISPLAY_CHARACTERS,
+    );
+    expect(first.text.length).toBeLessThanOrEqual(
+      MAX_RESULT_DISPLAY_CHARACTERS,
+    );
+    expect(first.text).toContain('HEAD');
+    expect(first.text).not.toContain('TAIL');
+    expect(first.text + second.text).toBe(text);
+    const narrowPage = toolOutputPage(text, 0, 100, 80);
+    expect(narrowPage.text.length).toBeLessThanOrEqual(8000);
+    const view = render(
+      <OpenTuiTranscriptView
+        fullDetail
+        items={[toolItem({ output: `HEAD${'x'.repeat(10000)}TAIL` })]}
+      />,
+    );
+    expect(view.container.textContent).not.toContain('TAIL');
+    fireEvent.mouseUp(view.getByText('→'));
+    expect(view.container.textContent).toContain('TAIL');
+  });
+
+  it('pages complete diff and description text', () => {
+    const fileDiff = `@@ -1,1 +1,200 @@\n${'+line\n'.repeat(150)}+DIFF_TAIL`;
+    const view = render(
+      <OpenTuiTranscriptView
+        fullDetail
+        items={[toolItem({ diff: { fileDiff, fileName: 'a.ts' } })]}
+      />,
+    );
+    expect(view.container.textContent).not.toContain('DIFF_TAIL');
+    fireEvent.mouseUp(view.getByText('→'));
+    expect(view.container.textContent).toContain('DIFF_TAIL');
+    view.unmount();
+    const description = `${'x'.repeat(10000)}DESCRIPTION_TAIL`;
+    const descView = render(
+      <OpenTuiTranscriptView fullDetail items={[toolItem({ description })]} />,
+    );
+    expect(descView.container.textContent).not.toContain('DESCRIPTION_TAIL');
+    fireEvent.mouseUp(descView.getByText('→'));
+    expect(descView.container.textContent).toContain('DESCRIPTION_TAIL');
+  });
+
+  it('pages ANSI rows while preserving the normal trailing window', () => {
+    const grid = Array.from({ length: 110 }, (_, index) => [
+      {
+        text: `ROW_${index}_END`,
+        bold: false,
+        italic: false,
+        underline: false,
+        dim: false,
+        inverse: false,
+        fg: '',
+        bg: '',
+      },
+    ]);
+    const items = [toolItem({ ansi: { grid, totalLines: 110 } })];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).not.toContain('ROW_0_END');
+    expect(view.container.textContent).toContain('ROW_109_END');
+    view.rerender(<OpenTuiTranscriptView fullDetail items={items} />);
+    expect(view.container.textContent).toContain('ROW_0_END');
+    expect(view.container.textContent).not.toContain('ROW_109_END');
+    fireEvent.mouseUp(view.getByText('→'));
+    expect(view.container.textContent).toContain('ROW_109_END');
+  });
+
+  it('shows the saved result body only when full details are enabled', () => {
+    const items = [
+      toolItem({
+        tool: 'read_file',
+        done: true,
+        success: true,
+        output: 'SUMMARY_ONLY',
+        detailedDisplay: 'FULL_BODY_ONLY',
+      }),
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('SUMMARY_ONLY');
+    expect(view.container.textContent).not.toContain('FULL_BODY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).not.toContain('SUMMARY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode fullDetail />);
+    expect(view.container.textContent).toContain('FULL_BODY_ONLY');
+    expect(view.container.textContent).not.toContain('SUMMARY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('SUMMARY_ONLY');
+    expect(view.container.textContent).not.toContain('FULL_BODY_ONLY');
+  });
+
   it('keeps a pending MCP-shaped card description visible (R1-10)', () => {
     // An MCP confirmation dialog shows only the server and tool names — no
     // args — so the card is the only surface that carries the arguments.

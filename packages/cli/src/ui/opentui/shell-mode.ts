@@ -46,7 +46,12 @@ export async function executeUserShell(
     tool: 'run_shell_command',
     title: 'run_shell_command',
   });
-  emit({ type: 'tool-description', id: callId, description: rawQuery });
+  emit({
+    type: 'tool-description',
+    id: callId,
+    description: rawQuery,
+    isUserInitiated: true,
+  });
 
   const targetDir = config.getTargetDir();
   let commandToExecute = rawQuery;

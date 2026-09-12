@@ -69,6 +69,7 @@ describe('buildSettingsListItems', () => {
     expect(items.length).toBeGreaterThan(0);
     const keys = items.map((item) => item.key);
     expect(keys).toContain('ui.theme');
+    expect(keys).toContain('ui.focusMode');
     expect(keys.indexOf('tools.codeModeOnly')).toBe(
       keys.indexOf('tools.approvalMode') + 1,
     );

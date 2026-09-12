@@ -235,6 +235,7 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
   extensionRefreshState?: ExtensionRefreshState,
+  toggleFocusMode?: () => Promise<boolean | null>,
 ) => {
   const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
     null,
@@ -549,6 +550,7 @@ export const useSlashCommandProcessor = (
         btwAbortControllerRef,
         isIdleRef,
         toggleVimEnabled,
+        toggleFocusMode,
         setMemoryFileCount,
         reloadCommands,
         setSessionName: setSessionName ?? (() => {}),
@@ -581,6 +583,7 @@ export const useSlashCommandProcessor = (
       setBtwItem,
       cancelBtw,
       toggleVimEnabled,
+      toggleFocusMode,
       sessionShellAllowlist,
       setMemoryFileCount,
       reloadCommands,

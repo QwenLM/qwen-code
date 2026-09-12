@@ -28,6 +28,11 @@ import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { act } from 'react';
+import { Text } from 'ink';
+import {
+  FocusModeProvider,
+  useFocusModeEnabled,
+} from '../contexts/FocusModeContext.js';
 import {
   getDialogSettingKeys,
   getSettingDefinition,
@@ -216,6 +221,59 @@ describe('SettingsDialog', () => {
     // console.log = originalConsoleLog;
     // console.error = originalConsoleError;
   });
+
+  it.each([
+    { initial: false, key: TerminalKeys.ENTER, expected: true },
+    { initial: true, key: '\u000c', expected: false },
+    { initial: true, key: '\u0003', expected: false },
+  ])(
+    'synchronizes focus mode after a dialog change: %j',
+    async ({ initial, key, expected }) => {
+      const settings = createMockSettings({ ui: { focusMode: initial } });
+      function FocusState() {
+        return (
+          <Text>
+            {useFocusModeEnabled() ? 'FOCUS_ACTIVE' : 'FOCUS_INACTIVE'}
+          </Text>
+        );
+      }
+      vi.mocked(saveModifiedSettings).mockImplementationOnce(() => {
+        vi.spyOn(settings, 'merged', 'get').mockReturnValue({
+          ui: { focusMode: expected },
+        });
+      });
+      const { stdin, lastFrame, unmount } = render(
+        <FocusModeProvider settings={settings}>
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <FocusState />
+            <SettingsDialog settings={settings} onSelect={() => {}} />
+          </KeypressProvider>
+        </FocusModeProvider>,
+      );
+      const focusIndex = getDialogSettingKeys().indexOf('ui.focusMode');
+      expect(focusIndex).toBeGreaterThanOrEqual(0);
+      expect(lastFrame()).toContain(
+        initial ? 'FOCUS_ACTIVE' : 'FOCUS_INACTIVE',
+      );
+      for (let i = 0; i < focusIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+      act(() => stdin.write(key));
+      await waitFor(() =>
+        expect(lastFrame()).toContain(
+          expected ? 'FOCUS_ACTIVE' : 'FOCUS_INACTIVE',
+        ),
+      );
+      expect(saveModifiedSettings).toHaveBeenCalledWith(
+        new Set(['ui.focusMode']),
+        { ui: { focusMode: expected } },
+        settings,
+        SettingScope.User,
+      );
+      unmount();
+    },
+  );
 
   describe('Initial Rendering', () => {
     it('should render the settings dialog with default state', () => {

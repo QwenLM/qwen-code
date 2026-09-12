@@ -64,6 +64,7 @@ export const createMockCommandContext = (
       loadHistory: vi.fn(),
       refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
+      toggleFocusMode: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
       reloadCommands: vi.fn(),

@@ -16,6 +16,24 @@ import {
   useReactToolScheduler,
 } from './useReactToolScheduler.js';
 import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
+import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
+
+describe('memory counters for completed calls', () => {
+  it.each(['success', 'error', 'cancelled'] as const)('%s write', (status) => {
+    const root = '/tmp/focus-memory-counter';
+    const call = makeCompleted(status, 'WriteFile');
+    call.request = {
+      ...call.request,
+      name: 'write_file',
+      args: { file_path: `${getAutoMemoryRoot(root)}/MEMORY.md` },
+    };
+    const group = mapToDisplay(call, root);
+    expect(group.tools[0].isMemoryOp).toBe(
+      status === 'success' ? 'write' : undefined,
+    );
+    expect(group.memoryWriteCount).toBe(status === 'success' ? 1 : undefined);
+  });
+});
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
 // success branch reads. `displayName` drives the collapsible gate.

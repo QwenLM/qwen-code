@@ -21,10 +21,18 @@ import { ThoughtExpandedProvider } from '../../contexts/ThoughtExpandedContext.j
 import type { AgentCore } from '@qwen-code/qwen-code-core';
 
 const receivedFullDetail: Array<boolean | undefined> = [];
+const receivedDisableFocus: Array<boolean | undefined> = [];
 
 vi.mock('../HistoryItemDisplay.js', () => ({
-  HistoryItemDisplay: ({ fullDetail }: { fullDetail?: boolean }) => {
+  HistoryItemDisplay: ({
+    fullDetail,
+    disableFocus,
+  }: {
+    fullDetail?: boolean;
+    disableFocus?: boolean;
+  }) => {
     receivedFullDetail.push(fullDetail);
+    receivedDisableFocus.push(disableFocus);
     return <Text>item</Text>;
   },
 }));
@@ -86,6 +94,7 @@ function makeCore(): AgentCore {
 
 const renderAt = (allExpanded: boolean) => {
   receivedFullDetail.length = 0;
+  receivedDisableFocus.length = 0;
   render(
     <ThoughtExpandedProvider
       value={{
@@ -106,6 +115,17 @@ describe('AgentChatContent — Ctrl+O full detail', () => {
   // former let a mutation dropping the live-area prop survive, which would
   // leave a running tool group advertising `(ctrl+o)` for a dead key.
   const COMMITTED_AND_LIVE = 2;
+
+  it.each([false, true])(
+    'inherits global Focus for committed and live items (expanded: %s)',
+    (expanded) => {
+      renderAt(expanded);
+      expect(receivedDisableFocus).toHaveLength(COMMITTED_AND_LIVE);
+      expect(receivedDisableFocus.every((disabled) => disabled !== true)).toBe(
+        true,
+      );
+    },
+  );
 
   it('forwards the expanded state to both committed and live items', () => {
     const seen = renderAt(true);

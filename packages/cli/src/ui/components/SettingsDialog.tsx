@@ -40,6 +40,7 @@ import {
 } from '../contexts/VimModeContext.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { useFocusModeActions } from '../contexts/FocusModeContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
   isDeletionKey,
@@ -141,6 +142,7 @@ export function SettingsDialog({
   // Get vim mode context to sync vim mode changes
   const { vimEnabled } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
+  const { syncFocusMode } = useFocusModeActions();
 
   // Mode state: 'settings' or 'scope' (view switching like ThemeDialog)
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
@@ -290,6 +292,10 @@ export function SettingsDialog({
               settings,
               selectedScope,
             );
+
+            if (key === 'ui.focusMode') {
+              syncFocusMode();
+            }
 
             // Special handling for vim mode to sync with VimModeContext
             if (key === 'general.vimMode' && newValue !== vimEnabled) {
@@ -1059,6 +1065,10 @@ export function SettingsDialog({
                 settings,
                 selectedScope,
               );
+
+              if (currentSetting.value === 'ui.focusMode') {
+                syncFocusMode();
+              }
 
               // Special handling for approval mode to apply to current session
               if (
