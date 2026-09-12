@@ -8,6 +8,7 @@ import type { Content, Part, Schema } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { reportError } from '../utils/errorReporting.js';
+import { stripMarkdownFence } from './goal-checkpoint-verifier.js';
 
 const debugLogger = createDebugLogger('GOAL_JUDGE');
 
@@ -435,7 +436,7 @@ function extractText(response: unknown): string {
 }
 
 function parseJudgeReply(text: string): JudgeWireResult | null {
-  const cleaned = stripCodeFence(text).trim();
+  const cleaned = stripMarkdownFence(text).trim();
   // Accept the JSON anywhere in the reply: tolerant to chatty preambles when
   // the model ignores structured-output mode.
   const start = cleaned.indexOf('{');
@@ -556,9 +557,4 @@ function toJudgeResult(
     };
   }
   return { kind: 'not_met', ok: false, reason: result.reason };
-}
-
-function stripCodeFence(s: string): string {
-  const m = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return m ? m[1] : s;
 }

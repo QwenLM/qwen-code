@@ -274,7 +274,7 @@ function verifierContents(
  * model output of unbounded length, and a backtracking pattern over it runs
  * synchronously, past the verifier's own timeout.
  */
-function stripMarkdownFence(text: string): string {
+export function stripMarkdownFence(text: string): string {
   const body = text.trim();
   const fenceChar = body[0];
   if (fenceChar !== '`' && fenceChar !== '~') return text;

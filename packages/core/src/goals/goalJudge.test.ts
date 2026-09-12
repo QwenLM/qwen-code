@@ -718,6 +718,27 @@ describe('judgeGoal', () => {
     expect(verdict.kind).toBe('met');
   });
 
+  it('returns an error for an opening fence that never closes', async () => {
+    // A degenerate reply — an opening fence followed by a long whitespace run
+    // and no closing fence. The old fence regex backtracked super-linearly on
+    // this shape (~49 s for 5 000 spaces, measured locally); the index-scan
+    // unwrap must return it unchanged so the judge fails fast instead of
+    // freezing the event loop. The trailing `{` keeps the whitespace run
+    // internal, so `extractText`'s `.trim()` cannot collapse it away before
+    // `parseJudgeReply` sees it. The assertion is on the value, not the
+    // elapsed time.
+    const client = makeMockClient({
+      reply: '```json\n' + ' '.repeat(5_000) + '{',
+    });
+    const config = makeConfig({ client });
+    const verdict = await judgeGoal(config, {
+      condition: 'x',
+      lastAssistantText: 'y',
+      signal: new AbortController().signal,
+    });
+    expect(verdict.kind).toBe('error');
+  });
+
   it('returns an error when reply is not JSON', async () => {
     const client = makeMockClient({ reply: 'I have no idea sorry' });
     const config = makeConfig({ client });
