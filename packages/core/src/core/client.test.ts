@@ -13491,6 +13491,319 @@ Other open files:
         ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
       });
 
+      it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-active',
+          ),
+        );
+
+        const stopInputs = mockMessageBus.request.mock.calls
+          .filter(([request]) => request.eventName === 'Stop')
+          .map(([request]) => request.input);
+        expect(stopInputs).toHaveLength(2);
+        expect(stopInputs[0]).toMatchObject({ stop_hook_active: false });
+        expect(stopInputs[1]).toMatchObject({ stop_hook_active: true });
+      });
+
+      describe('stop_hook_active across top-level sends', () => {
+        const blockOnceThenAllow = () => {
+          const mockMessageBus = {
+            request: vi
+              .fn()
+              .mockResolvedValueOnce({
+                output: { decision: 'block', reason: 'Keep working' },
+                stopHookCount: 1,
+              })
+              .mockResolvedValue({ output: undefined }),
+            response: vi.fn(),
+          };
+          vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+          vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+            mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+            (event: string) => event === 'Stop',
+          );
+          client['chat'] = {
+            addHistory: vi.fn(),
+            getHistory: vi
+              .fn()
+              .mockReturnValue([
+                { role: 'model', parts: [{ text: 'not done' }] },
+              ]),
+          } as unknown as LlmChat;
+          return mockMessageBus;
+        };
+        const stopFlags = (mockMessageBus: {
+          request: ReturnType<typeof vi.fn>;
+        }) =>
+          mockMessageBus.request.mock.calls
+            .filter(([request]) => request.eventName === 'Stop')
+            .map(([request]) => request.input.stop_hook_active);
+        // Run `toolRun` of the model returns a tool call; every run yields
+        // plain content.
+        const mockRunsWithToolCallOn = (toolRun: number) => {
+          let runs = 0;
+          mockTurnRunFn.mockImplementation(function (this: {
+            pendingToolCalls: unknown[];
+          }) {
+            runs++;
+            if (runs === toolRun) {
+              this.pendingToolCalls.push({
+                callId: 'tool-1',
+                name: 'read_file',
+                args: {},
+              });
+            }
+            return (async function* () {
+              yield { type: LlmEventType.Content, value: 'not done' };
+            })();
+          });
+          return () => runs;
+        };
+        const toolResult = [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'read_file',
+              response: {},
+            },
+          },
+        ];
+
+        it('keeps stop_hook_active across a tool round trip', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          // Run 2 is the hook-forced continuation; it calls a tool, so the
+          // caller runs it and re-enters with the result.
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'Hi' }],
+              signal,
+              'prompt-stop-tool-round-trip',
+            ),
+          );
+          await fromAsync(
+            client.sendMessageStream(
+              toolResult,
+              signal,
+              'prompt-stop-tool-round-trip',
+              { type: SendMessageType.ToolResult },
+            ),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, true]);
+        });
+
+        it('keys stop_hook_active by prompt id when another prompt stops on the same client', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-a'),
+          );
+          // A second prompt (e.g. a concurrent side question) runs to an
+          // allowed stop while prompt-a is waiting on its tool result.
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'side question' }],
+              signal,
+              'prompt-b',
+            ),
+          );
+          await fromAsync(
+            client.sendMessageStream(toolResult, signal, 'prompt-a', {
+              type: SendMessageType.ToolResult,
+            }),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, false, true]);
+        });
+
+        it('reports stop_hook_active false when a retry reuses a hook-forced prompt id', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          Object.assign(client['chat'] as object, {
+            getHistoryLength: vi.fn(() => 1),
+            stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
+          });
+          mockRunsWithToolCallOn(2);
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-retry'),
+          );
+          // The tool result never comes back; the user retries instead,
+          // which reuses the prompt id.
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-retry', {
+              type: SendMessageType.Retry,
+            }),
+          );
+
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+
+        it('reports stop_hook_active false after a hook-forced continuation ends in an error', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          let runs = 0;
+          mockTurnRunFn.mockImplementation(() => {
+            runs++;
+            if (runs === 2) {
+              // The hook-forced continuation fails with a provider error.
+              return (async function* () {
+                yield {
+                  type: LlmEventType.Error,
+                  value: { error: { message: 'provider failed' } },
+                };
+              })();
+            }
+            return (async function* () {
+              yield { type: LlmEventType.Content, value: 'not done' };
+            })();
+          });
+          const signal = new AbortController().signal;
+
+          await fromAsync(
+            client.sendMessageStream([{ text: 'Hi' }], signal, 'prompt-error'),
+          );
+          // A later send on the same prompt id that does not start a new
+          // interaction must not inherit the failed chain.
+          await fromAsync(
+            client.sendMessageStream(toolResult, signal, 'prompt-error', {
+              type: SendMessageType.ToolResult,
+            }),
+          );
+
+          expect(runs).toBe(3);
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+
+        it('reports stop_hook_active false after steer input replaces a hook-forced continuation', async () => {
+          const mockMessageBus = blockOnceThenAllow();
+          const runs = mockRunsWithToolCallOn(0);
+          let steerDelivered = false;
+          // Steer input arrives while the hook-forced continuation (run 2)
+          // is ending, so it replaces that turn before its Stop check.
+          const getSteerInput = vi.fn(
+            async (): Promise<SteerInput | undefined> => {
+              if (runs() !== 2 || steerDelivered) return undefined;
+              steerDelivered = true;
+              return {
+                parts: [{ text: 'focus on error handling' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              };
+            },
+          );
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'Hi' }],
+              new AbortController().signal,
+              'prompt-stop-steer',
+              { type: SendMessageType.UserQuery, getSteerInput },
+            ),
+          );
+
+          expect(steerDelivered).toBe(true);
+          expect(runs()).toBe(3);
+          expect(stopFlags(mockMessageBus)).toEqual([false, false]);
+        });
+      });
+
+      it('reports stop_hook_active false on a next-speaker continuation after an allowed stop', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(false);
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({
+            reasoning: 'more to do',
+            next_speaker: 'model',
+          })
+          .mockResolvedValue(null);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-next-speaker',
+          ),
+        );
+
+        const stopFlags = mockMessageBus.request.mock.calls
+          .filter(([request]) => request.eventName === 'Stop')
+          .map(([request]) => request.input.stop_hook_active);
+        expect(stopFlags).toEqual([false, true, false]);
+      });
+
       it('should not skip hooks when hasHooksForEvent returns true', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),

@@ -4168,6 +4168,7 @@ describe('LlmChat', async () => {
             text: expect.stringContaining(
               'Images read earlier in this session',
             ),
+            partMetadata: { 'qwen-code:reattach-boundary': true },
           },
           {
             inlineData: {
