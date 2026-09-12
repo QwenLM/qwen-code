@@ -6626,6 +6626,10 @@ export class Session implements SessionContext {
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
+    // Whether the turn reaching the next Stop check was forced by a blocking
+    // Stop hook. Kept apart from the iteration count, which also drives the
+    // consecutive-block cap and continuation prompt ids.
+    let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
@@ -6684,6 +6688,12 @@ export class Session implements SessionContext {
               this.todoStopGuard.blockUntilOrdinaryPromptStarts();
             }
           }
+          // User input replaces the turn: it is not hook-forced, and the
+          // consecutive-block count restarts (an intervening allow may have
+          // been discarded by the post-hook drain).
+          stopHookForcedTurn = false;
+          stopHookIterationCount = 0;
+          stopHookReasons = [];
           this.todoStopGuard.acceptMidTurnUserInput();
           blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
@@ -6749,7 +6759,7 @@ export class Session implements SessionContext {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'Stop',
               input: {
-                stop_hook_active: true,
+                stop_hook_active: stopHookForcedTurn,
                 last_assistant_message: responseText,
                 ...contextUsage,
               },
@@ -6789,6 +6799,12 @@ export class Session implements SessionContext {
                 this.todoStopGuard.blockUntilOrdinaryPromptStarts();
               }
             }
+            // User input replaces the turn before this Stop decision is
+            // applied: not hook-forced, and the consecutive-block count
+            // restarts. Each such reset needs real queued user input.
+            stopHookForcedTurn = false;
+            stopHookIterationCount = 0;
+            stopHookReasons = [];
             this.todoStopGuard.acceptMidTurnUserInput();
             blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
@@ -6919,6 +6935,8 @@ export class Session implements SessionContext {
           stopHookCount,
         );
       }
+      // Only a continuation carrying a Stop hook's reason is hook-forced.
+      stopHookForcedTurn = Boolean(externalReason);
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -6948,6 +6966,10 @@ export class Session implements SessionContext {
           ...(channelTurn ? { channelTurn: true } : {}),
         },
       );
+      if (continuation.supersededAutomaticContinuation) {
+        // Queued user input replaced the continuation.
+        stopHookForcedTurn = false;
+      }
       if (continuation.supersededAutomaticContinuation && externalReason) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
@@ -14734,7 +14756,11 @@ export class Session implements SessionContext {
               },
             };
           } else {
-            return { text: `@${part.uri}` };
+            return {
+              text: part.name
+                ? `@${part.uri} (original filename: ${JSON.stringify(part.name)})`
+                : `@${part.uri}`,
+            };
           }
         }
         case 'resource': {
