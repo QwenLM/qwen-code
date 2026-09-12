@@ -311,6 +311,46 @@ const CASES: Case[] = [
     },
   },
   {
+    name: '--deadline=<PR URL>: the value is not a deadline, so the disposal pool rescues it',
+    raw: '--deadline=https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline=<typo>: reported, never a target — the sibling flags’ `=` rule',
+    raw: '--deadline=90m',
+    expect: {
+      targetType: 'local',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline <typo> alone: disposed like an invalid --effort value (a sole file-shaped token survives)',
+    raw: '--deadline 90m',
+    expect: {
+      targetType: 'file',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--deadline <typo> beside a real target: the typo is discarded, the target stands',
+    raw: '6711 --deadline 90m',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: false, effective: false },
+      unknownFlags: ['--deadline'],
+      warningCount: 1,
+    },
+  },
+  {
     name: '--deadline=none is consumed whole; a following flag is not its value',
     raw: '--deadline=none --deadline --comment 6711',
     expect: {
@@ -467,6 +507,38 @@ describe('parseReviewArgs', () => {
     );
     expect(got.target).toEqual({ type: 'local' });
     expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('--deadline warnings say what happened to the value', () => {
+    // Consumed: the value is named, so a caller sees what was dropped.
+    const consumed = parseReviewArgs('--deadline 90');
+    expect(consumed.target).toEqual({ type: 'local' });
+    expect(consumed.warnings[0]).toContain(
+      'not of /review; ignored together with its value "90"',
+    );
+    // Missing: no value to name.
+    const bare = parseReviewArgs('6711 --deadline');
+    expect(bare.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(bare.warnings[0]).toContain('(it had no value)');
+    // Not a deadline, rescued: the sibling flags' wording.
+    const rescued = parseReviewArgs(
+      '--deadline https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(rescued.target.type).toBe('pr-url');
+    expect(rescued.warnings[0]).toContain(
+      'is not a deadline — treating it as the review target',
+    );
+    // Not a deadline, discarded beside a real target.
+    const discarded = parseReviewArgs('6711 --deadline 90m');
+    expect(discarded.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(discarded.warnings[0]).toContain(
+      '"90m" is not a deadline and was discarded',
+    );
+    expect(discarded.extraTokens).toEqual([]);
+    // The `=` form with a non-PR value: reported, not pooled.
+    const eq = parseReviewArgs('--deadline=90m');
+    expect(eq.target).toEqual({ type: 'local' });
+    expect(eq.warnings[0]).toContain('its value "90m" is not a deadline.');
   });
 
   it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {

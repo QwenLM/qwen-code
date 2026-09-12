@@ -42,7 +42,7 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { captureDeadline, parseDeadlineOption } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 
 interface PlanDiffArgs {
   diff_path: string;
@@ -76,11 +76,12 @@ type PlanDiffResult = PlanReport & {
 
 function runPlanDiff(args: PlanDiffArgs): void {
   const { diff_path: diffPath, out } = args;
-  // A malformed --deadline is a usage error (exit 2, like --host below), and
-  // it must fail here, before the diff is read and planned, not at the plan
-  // write after that work is done. The same parse runs again inside
-  // `captureDeadline`; it is pure.
-  parseDeadlineOption(args.deadline);
+  // A malformed or too-short --deadline is a usage error (exit 2, like
+  // --host below), and it must fail here, before the diff is read and
+  // planned, not at the plan write after that work is done — both bars, the
+  // env-free floor and this shell's pricing. The same validation runs again
+  // inside `captureDeadline`; it is pure given the environment.
+  validateDeadlineFlag(process.env, args.deadline);
 
   let diffText: string;
   try {

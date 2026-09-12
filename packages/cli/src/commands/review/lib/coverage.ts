@@ -82,7 +82,7 @@ import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
 import {
-  DEFAULT_ROUND_SECONDS,
+  expectedAdmissionSeconds,
   readBudgetStop,
   reverseAuditBudgetExhausted,
 } from './deadline.js';
@@ -1717,17 +1717,24 @@ export function verificationGaps(
   // every healthy local run — has nothing to refuse it either: the
   // monotone-refusal premise fails twice. So a round-cap marker leaves the
   // not-built gap and its rebuild remediation owed, exactly as if no marker
-  // were present — UNLESS the wall has since closed: then the rebuild the
-  // remediation names is refused as deterministically as a budget stop's,
-  // and a FIX that cannot run is not owed. The wall is asked directly, at
-  // the round-1 estimate the rebuild would be priced at.
+  // were present — UNLESS the wall can no longer admit that rebuild: then
+  // it is refused as deterministically as a budget stop's, and a FIX that
+  // cannot run is not owed. The wall is asked directly, at the price the
+  // gate itself would put on the rebuild the remediation names — a plain
+  // `--round 1` build, one auditor, priced by `expectedAdmissionSeconds`
+  // over the same stamps — not at a flat constant, which would answer for a
+  // different round than the one named. (On a 3B plan the orchestrator
+  // rebuilds with `--all-chunks`, which the gate prices one auditor per
+  // chunk; that is wider only inside the in-flight window, so this errs
+  // toward keeping the remediation.) Asked at compose time; the wall only
+  // closes further afterwards.
   const stop = readBudgetStop(planPath);
   const wallRefuses =
     stop !== null &&
     stop.cause === 'round-cap' &&
     reverseAuditBudgetExhausted(
       env,
-      DEFAULT_ROUND_SECONDS,
+      expectedAdmissionSeconds(planPath, 1, 1, env),
       Date.now(),
       planPath,
       plan,

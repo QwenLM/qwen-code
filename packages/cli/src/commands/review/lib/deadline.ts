@@ -504,7 +504,10 @@ export type DeadlineOption = { seconds: number } | 'none' | 'default';
  * — a wall that silently became the default because a value did not parse
  * is a wall the operator does not know they have.
  */
-export function parseDeadlineOption(raw: unknown): DeadlineOption {
+export function parseDeadlineOption(
+  raw: unknown,
+  env: NodeJS.ProcessEnv = {},
+): DeadlineOption {
   if (raw === undefined) return 'default';
   const usage = () =>
     new TypeError(
@@ -528,58 +531,128 @@ export function parseDeadlineOption(raw: unknown): DeadlineOption {
   // finish is two consecutive dry rounds, and the gate admits a round only
   // while the round's estimate plus the reserve still remain — STRICTLY
   // more than the sum, since the wall is spent from the moment of capture.
-  // Priced from the default reserve rule, not the shell's overrides, so the
-  // ruling is the same in every environment.
+  // The RULING is priced from the default reserve rule, so it is the same
+  // in every shell; `env` reaches only the message, whose "shortest wall"
+  // figure must be one `validateDeadlineFlag` accepts under THIS shell.
   const floor = minimumDeadlineSeconds(seconds);
   if (seconds <= floor) {
-    throw new TypeError(deadlineTooShort(minutes, floor, {}));
+    throw new TypeError(deadlineTooShort(minutes, floor, 'default', env));
   }
   return { seconds };
 }
 
 /**
- * The refusal for a wall that cannot hold a convergence. Two numbers, both
- * true: what THIS wall would need (its own reserve grows with it, so that
- * figure is not an instruction) and the shortest wall the rule admits under
- * the pricing in `env` — the number to reach for.
+ * The capture-time validation of `--deadline`, both bars in one place: the
+ * grammar and the env-free convergence floor (`parseDeadlineOption`), then
+ * — unless `shellPriced` is false — the same floor priced the way the GATE
+ * will price this wall in the shell at hand: the `RESERVE_ENV` override
+ * when set, else the plan's reserve floored at the effective compose floor
+ * (`effectiveMinimumDeadlineSeconds`, the expression
+ * `reverseAuditBudgetExhausted` evaluates). The shell bar is skipped when
+ * the environment exports an epoch: the flag is inert at every gate while
+ * that epoch stands, and the shell a later env-less continuation runs in is
+ * not this one — a wall recorded that way can be refused at round 1 there
+ * if THAT shell raises the reserve or the floor. Pure given `env`, so the
+ * capture commands run it up front, before any fetch, lease or planning
+ * work, and `captureDeadline` runs it again at the plan write. A
+ * `fetch-pr --resume` passes `shellPriced: false` up front: the flag is
+ * ignored on a resumed plan, so only the grammar and the default rule are
+ * owed there; a resume that falls through to a fresh capture meets the
+ * shell bar the moment the fallthrough is ruled, before the stale worktree
+ * is destroyed.
+ */
+export function validateDeadlineFlag(
+  env: NodeJS.ProcessEnv,
+  raw: unknown,
+  opts: { shellPriced?: boolean } = {},
+): DeadlineOption {
+  // With the shell bar off, the message's "shortest wall" figure must be
+  // the default rule's too — the bars the caller is actually held to.
+  const option = parseDeadlineOption(
+    raw,
+    opts.shellPriced === false ? {} : env,
+  );
+  if (option === 'none' || option === 'default') return option;
+  if (opts.shellPriced === false) return option;
+  if (readEnvDeadlineSeconds(env) !== null) return option;
+  const floor = effectiveMinimumDeadlineSeconds(env, option.seconds);
+  if (option.seconds <= floor) {
+    throw new TypeError(
+      deadlineTooShort(option.seconds / 60, floor, 'shell', env),
+    );
+  }
+  return option;
+}
+
+/** Minutes for a message, floored to one decimal so sums never overshoot. */
+function minutesText(seconds: number): string {
+  const tenths = Math.floor(seconds / 6);
+  return tenths % 10 === 0 ? String(tenths / 10) : (tenths / 10).toFixed(1);
+}
+
+/**
+ * The refusal for a wall that cannot hold a convergence, from whichever bar
+ * refused it: the default rule, or this shell's pricing. Two numbers, both
+ * true: what THIS wall would need under that bar (its own reserve grows
+ * with it, so that figure is not an instruction) and the shortest wall
+ * `validateDeadlineFlag` admits under BOTH bars in `env` — the number to
+ * reach for, or the statement that no wall under a day can, when an
+ * override has put every wall out of reach.
  */
 function deadlineTooShort(
   minutes: number,
   floor: number,
+  bar: 'default' | 'shell',
   env: NodeJS.ProcessEnv,
 ): string {
   const reserve = floor - 2 * DEFAULT_ROUND_SECONDS;
+  const shortest = shortestDeadlineMinutes(env);
   return (
     `--deadline ${minutes} cannot hold a convergence: two rounds at the ` +
     `${DEFAULT_ROUND_SECONDS / 60}-minute estimate plus the ` +
-    `${Math.ceil(reserve / 60)}-minute reserve this wall would keep need ` +
-    `more than ${Math.floor(floor / 60)} minutes; the shortest wall that ` +
-    `can hold one is ${shortestDeadlineMinutes(env)} minutes` +
+    `${minutesText(reserve)}-minute reserve this wall would keep ` +
+    (bar === 'default'
+      ? 'under the default rule '
+      : "under this shell's reserve / compose-floor overrides ") +
+    `need more than ${Math.floor(floor / 60)} minutes; ` +
+    (shortest === null
+      ? "no wall under 24 hours can hold one under this shell's reserve / " +
+        'compose-floor overrides'
+      : `the shortest wall that can hold one here is ${shortest} minutes`) +
     ` — and the fan-out before round 1 spends any wall too`
   );
 }
 
 /**
- * The shortest `--deadline` the rule admits, in whole minutes: the reserve
- * a wall implies grows with the wall, so this is a fixed point, found by
- * scanning rather than solved, so it follows the pricing (`env` overrides
- * included) instead of a constant that can drift. 91 under the default
- * rule.
+ * The shortest `--deadline` that `validateDeadlineFlag` admits under `env`,
+ * in whole minutes — BOTH bars: the default rule always, and the shell's
+ * pricing unless an epoch makes the flag inert. The reserve a wall implies
+ * grows with the wall, so this is a fixed point, found by scanning rather
+ * than solved, so it follows the pricing instead of a constant that can
+ * drift. 91 under the default rule; `null` when no wall under a day
+ * qualifies (a reserve override near or past the scan's end).
  */
-export function shortestDeadlineMinutes(env: NodeJS.ProcessEnv = {}): number {
-  for (let m = 1; m < 24 * 60; m++) {
+export function shortestDeadlineMinutes(
+  env: NodeJS.ProcessEnv = {},
+): number | null {
+  const shellBar = readEnvDeadlineSeconds(env) === null;
+  for (let m = 1; m <= 24 * 60; m++) {
     const s = m * 60;
-    if (s > effectiveMinimumDeadlineSeconds(env, s)) return m;
+    if (s <= minimumDeadlineSeconds(s)) continue;
+    if (shellBar && s <= effectiveMinimumDeadlineSeconds(env, s)) continue;
+    return m;
   }
-  return 24 * 60;
+  return null;
 }
 
 /**
  * `minimumDeadlineSeconds` priced the way the GATE will price this wall in
  * the shell at hand: the `RESERVE_ENV` override when set, else the plan's
  * reserve floored at the effective compose floor — the same expression
- * `reverseAuditBudgetExhausted` evaluates. What `captureDeadline` refuses
- * on, so a wall this shell would refuse at zero elapsed is not recorded.
+ * `reverseAuditBudgetExhausted` evaluates for its reserve. What
+ * `validateDeadlineFlag` refuses on, so a wall this shell's pricing cannot
+ * hold a convergence under is not recorded. (Not "the gate refuses at zero
+ * elapsed": the gate needs one round plus the reserve; the bar is two.)
  */
 export function effectiveMinimumDeadlineSeconds(
   env: NodeJS.ProcessEnv,
@@ -596,10 +669,10 @@ export function effectiveMinimumDeadlineSeconds(
 }
 
 /**
- * The wall a `--deadline` must strictly exceed: two rounds at the round
- * estimate (a convergence needs two consecutive dry rounds, and the
- * convergence pair's second member can be priced at both) plus the reserve
- * the wall implies under the default rule. Deliberately env-free — see
+ * The wall a `--deadline` must strictly exceed under the DEFAULT pricing:
+ * two rounds at the round estimate (a convergence needs two consecutive dry
+ * rounds, and the convergence pair's second member can be priced at both)
+ * plus the reserve the wall implies. Deliberately env-free — see
  * `parseDeadlineOption`. Not a promise of admission: the fan-out and
  * verification before round 1 spend the wall as well, and the gate prices
  * rounds from what it measures.
@@ -630,7 +703,7 @@ export function captureDeadline(
   raw: string | undefined,
   size: DiffSize,
 ): { fields: PlanDeadlineFields; explicit: boolean } {
-  const option = parseDeadlineOption(raw);
+  const option = validateDeadlineFlag(env, raw);
   const envExplicit = readEnvDeadlineSeconds(env) !== null;
   if (option === 'none') return { fields: {}, explicit: envExplicit };
   if (option === 'default') {
@@ -642,22 +715,7 @@ export function captureDeadline(
       explicit: envExplicit,
     };
   }
-  // The env-priced leg: `parseDeadlineOption` ruled under the default
-  // pricing so its answer is the same in every shell; THIS shell's reserve
-  // and compose-floor overrides are what the gate will read, so a wall they
-  // would refuse at zero elapsed is refused here too. Skipped when the
-  // environment exports an epoch: the flag is inert at every gate while
-  // that epoch stands, and the shell a later env-less continuation runs in
-  // is not this one.
-  if (!envExplicit) {
-    const floor = effectiveMinimumDeadlineSeconds(env, option.seconds);
-    if (option.seconds <= floor) {
-      throw new TypeError(
-        deadlineTooShort(option.seconds / 60, floor, env) +
-          " (priced with this shell's reserve / compose-floor overrides)",
-      );
-    }
-  }
+  // Both bars already ruled inside `validateDeadlineFlag`.
   return {
     fields: { deadlineSeconds: option.seconds, deadlineSource: 'flag' },
     explicit: true,

@@ -472,6 +472,13 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--deadline` is not a `/review` flag at all (it belongs to the capture
+  // commands), but it takes a value, so its leftovers ride the same
+  // disposal pool as the three value flags above: a deadline-shaped value
+  // is consumed with the flag, anything else is an invalid value of it and
+  // is rescued or discarded exactly as `--effort`'s would be.
+  const deadlineIssues: EffortIssue[] = [];
+  const consumedDeadlineValues: string[] = [];
   // `--severity-floor` shares the value-token grammar and therefore the same
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
@@ -486,7 +493,11 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
+    invalidValueOf?:
+      | '--effort'
+      | '--severity-floor'
+      | '--topology'
+      | '--deadline';
   }
   const kept: Kept[] = [];
 
@@ -645,21 +656,38 @@ export function parseReviewArgs(
     // which wall the run gets instead.
     if (token === '--deadline' || token.startsWith('--deadline=')) {
       unknownFlags.push('--deadline');
-      // Consume the next token only when it can BE a deadline (minutes, or
-      // `none`): a pure number after `--deadline` is minutes far more often
-      // than a PR, so it is swallowed rather than reviewed; anything else —
-      // a PR URL, a path — stays on the line for the ordinary target rules.
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value === '') {
+          deadlineIssues.push({ kind: 'missing' });
+        } else if (isDeadlineValue(value)) {
+          consumedDeadlineValues.push(value);
+        } else if (isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--deadline' });
+        } else {
+          deadlineIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
       const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
-      const consumed =
-        !token.includes('=') && next !== undefined && isDeadlineValue(next);
-      warnings.push(
-        '`--deadline` is an option of the capture commands, not of ' +
-          '/review; ignored' +
-          (consumed ? ` together with its value ${JSON.stringify(next)}` : '') +
-          ' — pass it to `fetch-pr`, `capture-local` or `plan-diff` to set ' +
-          'the wall.',
-      );
-      if (consumed) i++;
+      if (next === undefined || isFlag(next)) {
+        deadlineIssues.push({ kind: 'missing' });
+        continue;
+      }
+      if (next === '') {
+        deadlineIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (isDeadlineValue(next)) {
+        consumedDeadlineValues.push(next);
+        i++;
+        continue;
+      }
+      // Not a deadline: the ordinary invalid-value disposal decides whether
+      // it is the target the caller meant (a PR number or URL) or a typo.
+      kept.push({ token: next, invalidValueOf: '--deadline' });
+      i++;
       continue;
     }
 
@@ -810,6 +838,7 @@ export function parseReviewArgs(
     '--effort': effortIssues,
     '--severity-floor': floorIssues,
     '--topology': topologyIssues,
+    '--deadline': deadlineIssues,
   };
   let rescuedPr = false;
   for (const k of kept) {
@@ -1049,6 +1078,38 @@ export function parseReviewArgs(
     warnings.push(
       `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
     );
+  }
+  const deadlinePrefix =
+    '`--deadline` is an option of the capture commands (`fetch-pr`, ' +
+    '`capture-local`, `plan-diff`), not of /review; ignored';
+  for (const value of consumedDeadlineValues) {
+    warnings.push(
+      `${deadlinePrefix} together with its value ${JSON.stringify(value)}.`,
+    );
+  }
+  for (const issue of deadlineIssues) {
+    switch (issue.kind) {
+      case 'missing':
+        warnings.push(`${deadlinePrefix} (it had no value).`);
+        break;
+      case 'invalid-eq':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline.`,
+        );
+        break;
+      case 'discarded':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline and was discarded.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline — treating it as the review target.`,
+        );
+        break;
+      default:
+        break;
+    }
   }
 
   // The floor resolves like the effort — explicit flag over configured

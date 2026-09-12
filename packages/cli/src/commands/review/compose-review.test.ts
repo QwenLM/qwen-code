@@ -24,6 +24,7 @@ import {
   roundCapStopEntry,
   roundCapStopEntryZh,
   writeBudgetStop,
+  stampRound,
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
@@ -1920,6 +1921,37 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // plan keeps every record and the marker below newer than it.
     const captured = new Date(Date.now() - 2 * 3600 * 1000);
     utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a round-cap stop is priced like the gate would price the rebuild — from the round stamps, not a flat constant', () => {
+    // ~4,210s remain on a 7,200s flag wall (reserve 2,400). A flat 1,800s
+    // round price would say the rebuild fits (4,210 ≥ 4,200) and keep the
+    // remediation; the gate itself prices round 1 from the costliest closed
+    // stamped span — 2,250s here, rounds 2→3, with round 3 long enough ago
+    // that no predecessor counts as in flight — and refuses (4,210 <
+    // 4,650). The exemption must agree with the gate, or it names a FIX
+    // that cannot run. (The ten seconds of slack keep the flat price on the
+    // admitting side of its boundary whatever the test's own runtime.)
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    const now = Date.now();
+    const captured = new Date(now - 2990 * 1000);
+    utimesSync(plan, captured, captured);
+    stampRound(plan, 2, now - 2940 * 1000);
+    stampRound(plan, 3, now - 690 * 1000);
     writeRoundCapStop(plan, 3, 4);
     const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
     expect(r.event).toBe('COMMENT');

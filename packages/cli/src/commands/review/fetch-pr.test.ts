@@ -31,6 +31,7 @@ import {
   DEADLINE_ENV,
   hasReviewDeadline,
   DEFAULT_DEADLINE_SECONDS,
+  RESERVE_ENV,
 } from './lib/deadline.js';
 import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
@@ -924,6 +925,32 @@ describe('fetch-pr report assembly', () => {
     expect(producerMocks.gh).not.toHaveBeenCalled();
     expect(producerMocks.git).not.toHaveBeenCalled();
     expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+  });
+  it('refuses a --deadline this shell cannot hold a convergence under before any side effect, too', async () => {
+    // The shell-priced bar is the second half of the same early check: a
+    // wall the env-free rule admits (120 > 90) that this shell's reserve
+    // override puts out of reach must fail here, not at the plan write
+    // after detection, auth, the lease and the fetch have run.
+    // The shell bar is skipped under an env epoch, and this repository's
+    // own review job exports one — isolate it, or the case passes vacuously
+    // there and fails here.
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      await expect(reportFor({ deadline: '120' })).rejects.toThrow(
+        /shortest wall that can hold one here is 141 minutes/,
+      );
+      expect(producerMocks.gh).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
@@ -4374,6 +4401,77 @@ describe('fetch-pr --resume', () => {
     expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
   });
 
+  it('a --resume is not refused by a --deadline this shell would refuse at capture — the flag is ignored on the resumed plan', async () => {
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeStderrLine.mockClear();
+      await run({ deadline: '120' });
+      expect(reportWritten()).toBe(false);
+      expect(
+        producerMocks.writeStderrLine.mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ).toContain('--deadline is ignored on a resumed run');
+      // The grammar and the default rule still rule on a resume — and the
+      // message's figure is the default rule's, the only bar applied here.
+      await expect(run({ deadline: '90' })).rejects.toThrow(
+        /under the default rule need more than 90 minutes; the shortest wall that can hold one here is 91 minutes/,
+      );
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+  });
+
+  it('a --resume that falls through to a fresh review meets the shell bar BEFORE the stale worktree is destroyed', async () => {
+    // Head moved → fresh review → the flag WILL be recorded, so the bar the
+    // resume check skipped is owed before cleanStale / fetch — a refusal
+    // after them would leave a half-built worktree behind a crash.
+    producerMocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('headRefOid') && !args.includes('headRefName')) {
+        return JSON.stringify({ headRefOid: 'aaaa1111bbbb' });
+      }
+      return JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'aaaa1111bbbb',
+        baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      });
+    });
+    const before = process.env[RESERVE_ENV];
+    const beforeEpoch = process.env[DEADLINE_ENV];
+    try {
+      process.env[RESERVE_ENV] = '4800';
+      delete process.env[DEADLINE_ENV];
+      await expect(run({ deadline: '120' })).rejects.toThrow(
+        /Cannot resume PR #42 \(head-moved\); the fresh review it falls through to refuses --deadline: .*shortest wall that can hold one here is 141 minutes/,
+      );
+      expect(reportWritten()).toBe(false);
+      const gitCalls = producerMocks.git.mock.calls.map((c) => String(c[0]));
+      expect(gitCalls).not.toContain('fetch');
+      expect(gitCalls).not.toContain('worktree');
+      // Refused BEFORE the fallthrough is announced: the stdout line is a
+      // machine contract ("the report at --out is new"), and no fresh
+      // review happened.
+      expect(await stdoutJsonLines()).toEqual([]);
+    } finally {
+      if (before === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = before;
+      if (beforeEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = beforeEpoch;
+    }
+  });
+
   it('says so when a --deadline rides a resume — the plan is not rewritten, so the flag cannot land', async () => {
     // The fixture plan records no wall (it predates the field, or was
     // captured with `--deadline none`): the note must say so, not assert a
@@ -4406,7 +4504,9 @@ describe('fetch-pr --resume', () => {
       producerMocks.writeStderrLine.mock.calls
         .map((c) => String(c[0]))
         .join('\n'),
-    ).toContain('the plan keeps the 480-minute wall it recorded at capture');
+    ).toContain(
+      'the plan keeps the 480-minute default wall it recorded at capture',
+    );
 
     // The default carries no such note: there is nothing being dropped.
     producerMocks.writeStderrLine.mockClear();

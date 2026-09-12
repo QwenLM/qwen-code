@@ -107,8 +107,10 @@ import {
 } from './lib/resume.js';
 import {
   captureDeadline,
+  DEADLINE_ENV,
   parseDeadlineOption,
   recordedPlanDeadline,
+  validateDeadlineFlag,
   readBudgetStop,
   clearBudgetStop,
   clearRoundStamps,
@@ -682,6 +684,12 @@ type ResumeOutcome =
  * run epoch that keeps the first attempt's records, stamps and transcripts
  * inside every reader's fence.
  */
+/** Minutes for a note: whole when whole, else one decimal. */
+function formatMinutes(seconds: number): string {
+  const m = seconds / 60;
+  return Number.isInteger(m) ? String(m) : m.toFixed(1);
+}
+
 function tryResume(
   args: FetchPrArgs,
   wt: string,
@@ -798,13 +806,21 @@ function tryResume(
   // plan alone, rather than assert a wall it may never have recorded.
   if (parseDeadlineOption(args.deadline) !== 'default') {
     const recorded = recordedPlanDeadline(out);
+    const minutes = recorded === null ? '' : formatMinutes(recorded.seconds);
+    const epoch = process.env[DEADLINE_ENV];
     writeStderrLine(
       'fetch-pr: --deadline is ignored on a resumed run — ' +
         (recorded === null
           ? 'the plan recorded no wall, so this continuation is bounded by ' +
             'the round cap alone unless the environment exports a deadline.'
-          : `the plan keeps the ${Math.round(recorded.seconds / 60)}-minute ` +
-            'wall it recorded at capture.'),
+          : recorded.source === 'flag'
+            ? `the plan keeps the ${minutes}-minute wall its own --deadline ` +
+              'recorded at capture.'
+            : `the plan keeps the ${minutes}-minute default wall it recorded ` +
+              'at capture.') +
+        (epoch !== undefined && epoch.trim() !== ''
+          ? ' The environment exports an epoch, which takes precedence while it stands.'
+          : ''),
     );
   }
   // Read the marker back: `recordResume` deduplicates by session, so a
@@ -859,11 +875,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
-  // A malformed --deadline is a usage error, and it must fail here with the
-  // other argument checks — before detection, auth, and the worktree lease —
-  // not at the plan write after all of that. The same parse runs again inside
-  // `captureDeadline`; it is pure.
-  parseDeadlineOption(args.deadline);
+  // A malformed or too-short --deadline is a usage error, and it must fail
+  // here with the other argument checks — before detection, auth, and the
+  // worktree lease — not at the plan write after all of that: both bars,
+  // the env-free floor and this shell's pricing. The same validation runs
+  // again inside `captureDeadline`; it is pure given the environment. A
+  // `--resume` skips the shell bar here: the flag is ignored on a resumed
+  // plan, and a resume that falls through to a fresh capture meets that bar
+  // right after the fallthrough is ruled, before anything is destroyed.
+  validateDeadlineFlag(process.env, args.deadline, {
+    shellPriced: !args.resume,
+  });
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
   // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
@@ -1006,6 +1028,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
       if (outcome.resumed) return;
+      // The fresh review that follows WILL record the flag, so the shell bar
+      // the resume check skipped is owed now — before the stale worktree is
+      // destroyed and the head fetched, not at the plan write after them —
+      // and before the two lines below, which promise a fresh review (the
+      // stdout one is a machine contract: "the report at --out is new").
+      try {
+        validateDeadlineFlag(process.env, args.deadline);
+      } catch (err) {
+        throw new TypeError(
+          `Cannot resume PR #${prNumber} (${outcome.reason}); the fresh ` +
+            `review it falls through to refuses --deadline: ${(err as Error).message}`,
+        );
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(

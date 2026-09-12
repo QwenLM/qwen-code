@@ -53,6 +53,7 @@ import {
   hasReviewDeadline,
   effectiveMinimumDeadlineSeconds,
   minimumDeadlineSeconds,
+  validateDeadlineFlag,
   parseDeadlineOption,
   planReserveSeconds,
   shortestDeadlineMinutes,
@@ -1126,10 +1127,10 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // own reserve, which grows with it — so not an instruction) and the
     // shortest wall the rule admits, which is the number to reach for.
     expect(() => parseDeadlineOption('90')).toThrow(
-      /--deadline 90 cannot hold a convergence: two rounds at the 30-minute estimate plus the 30-minute reserve this wall would keep need more than 90 minutes; the shortest wall that can hold one is 91 minutes/,
+      /--deadline 90 cannot hold a convergence: two rounds at the 30-minute estimate plus the 30-minute reserve this wall would keep under the default rule need more than 90 minutes; the shortest wall that can hold one here is 91 minutes/,
     );
     expect(() => parseDeadlineOption('60')).toThrow(
-      /plus the 20-minute reserve this wall would keep need more than 80 minutes; the shortest wall that can hold one is 91 minutes/,
+      /plus the 20-minute reserve this wall would keep under the default rule need more than 80 minutes; the shortest wall that can hold one here is 91 minutes/,
     );
     expect(parseDeadlineOption('91')).toEqual({ seconds: 5460 });
     expect(() => parseDeadlineOption('50')).toThrow(TypeError);
@@ -1137,6 +1138,64 @@ describe('parseDeadlineOption — the flag grammar', () => {
     // `none` and the default are never too short: there is nothing to check.
     expect(parseDeadlineOption('none')).toBe('none');
     expect(parseDeadlineOption(undefined)).toBe('default');
+    // The env reaches only the message's "shortest wall" figure — the one
+    // THIS shell will accept under BOTH bars — never the ruling: 90 is
+    // refused everywhere.
+    expect(() => parseDeadlineOption('90', { [RESERVE_ENV]: '3000' })).toThrow(
+      /under the default rule need more than 90 minutes; the shortest wall that can hold one here is 111 minutes/,
+    );
+    // A LOWERED reserve does not lower the figure below the default rule's
+    // 91: the first bar still refuses 61..90, so 91 is what this shell
+    // accepts, and the message must not send the caller to 61.
+    expect(() => parseDeadlineOption('90', { [RESERVE_ENV]: '0' })).toThrow(
+      /shortest wall that can hold one here is 91 minutes/,
+    );
+    expect(shortestDeadlineMinutes({ [RESERVE_ENV]: '0' })).toBe(91);
+    expect(shortestDeadlineMinutes({ [RESERVE_ENV]: '1200' })).toBe(91);
+    // Under an env epoch the shell bar is skipped, and the figure says so
+    // by being the default rule's: 91, not the override's 141.
+    expect(
+      shortestDeadlineMinutes({
+        [RESERVE_ENV]: '4800',
+        [DEADLINE_ENV]: String(NOW_S + 7200),
+      }),
+    ).toBe(91);
+    expect(() =>
+      parseDeadlineOption('90', {
+        [RESERVE_ENV]: '4800',
+        [DEADLINE_ENV]: String(NOW_S + 7200),
+      }),
+    ).toThrow(/shortest wall that can hold one here is 91 minutes/);
+    expect(parseDeadlineOption('100', { [RESERVE_ENV]: '3000' })).toEqual({
+      seconds: 6000,
+    });
+    // The message's arithmetic adds up in minutes even off the whole-minute
+    // grid: a 1861s reserve is 31.0 minutes, and 30 + 30 + 31.0 → "more
+    // than 91".
+    expect(() =>
+      parseDeadlineOption('91', { [RESERVE_ENV]: '1861' }),
+    ).not.toThrow();
+    expect(() => validateDeadlineFlag({ [RESERVE_ENV]: '1861' }, '91')).toThrow(
+      /plus the 31-minute reserve this wall would keep under this shell's reserve \/ compose-floor overrides need more than 91 minutes; the shortest wall that can hold one here is 92 minutes/,
+    );
+    // Floored to a tenth, the sum never overshoots the "more than" figure:
+    // an 82,799s reserve is 1379.9 minutes, and 30 + 30 + 1379.9 → 1439.
+    expect(() =>
+      validateDeadlineFlag({ [RESERVE_ENV]: '82799' }, '1439'),
+    ).toThrow(/plus the 1379\.9-minute reserve .* need more than 1439 minutes/);
+  });
+
+  it('shortestDeadlineMinutes is null, not a sentinel, when an override puts every wall out of reach', () => {
+    expect(shortestDeadlineMinutes()).toBe(91);
+    expect(shortestDeadlineMinutes({ [RESERVE_ENV]: '82800' })).toBeNull();
+    expect(
+      shortestDeadlineMinutes({ [COMPOSE_FLOOR_ENV]: '82800' }),
+    ).toBeNull();
+    // The 24-hour scan end itself is a valid answer when it just fits.
+    expect(shortestDeadlineMinutes({ [RESERVE_ENV]: '82799' })).toBe(1440);
+    expect(() =>
+      validateDeadlineFlag({ [RESERVE_ENV]: '82800' }, '1440'),
+    ).toThrow(/no wall under 24 hours can hold one under this shell/);
   });
 });
 
@@ -1238,16 +1297,24 @@ describe('captureDeadline — what a capture records, and whether the clock is e
   });
 
   it("prices the flag a second time with THIS shell's overrides — what the gate will read — unless an env epoch makes it inert", () => {
+    // `validateDeadlineFlag` is the one function both the writers' early
+    // check and the capture run: whatever it refuses, the capture refuses.
+    expect(() =>
+      validateDeadlineFlag({ [RESERVE_ENV]: '4800' }, '100'),
+    ).toThrow(/shortest wall that can hold one here is 141 minutes/);
+    expect(validateDeadlineFlag({ [RESERVE_ENV]: '4800' }, '141')).toEqual({
+      seconds: 8460,
+    });
     // `parseDeadlineOption` rules under the default pricing (the same in
-    // every shell); the capture then asks whether the shell's reserve or
-    // compose-floor override would refuse the wall at zero elapsed, which
-    // is the expression the gate evaluates, and refuses it now instead.
+    // every shell); the capture then asks whether the wall can still hold a
+    // convergence under the shell's reserve or compose-floor override — the
+    // gate's own expression — and refuses it now instead.
     const reserve = { [RESERVE_ENV]: '4800' };
     expect(effectiveMinimumDeadlineSeconds(reserve, 6000)).toBe(8400);
     expect(shortestDeadlineMinutes(reserve)).toBe(141);
     for (const minutes of ['91', '100', '109', '140']) {
       expect(() => captureDeadline(reserve, minutes, HUGE)).toThrow(
-        /cannot hold a convergence.*shortest wall that can hold one is 141 minutes.*priced with this shell/,
+        /cannot hold a convergence.*shortest wall that can hold one here is 141 minutes/,
       );
     }
     expect(captureDeadline(reserve, '141', HUGE).fields).toEqual({
@@ -1274,7 +1341,20 @@ describe('captureDeadline — what a capture records, and whether the clock is e
     expect(captureDeadline(clocked, '100', HUGE).fields.deadlineSeconds).toBe(
       6000,
     );
-    expect(() => captureDeadline(clocked, '90', HUGE)).toThrow(TypeError);
+    expect(() => captureDeadline(clocked, '90', HUGE)).toThrow(
+      // …and the message's figure is the default rule's, since the shell
+      // bar is not applied under the epoch.
+      /shortest wall that can hold one here is 91 minutes/,
+    );
+    // `validateDeadlineFlag` can be told to skip the shell bar (a resume,
+    // where the flag is ignored on the resumed plan): the default rule
+    // still rules, the override does not.
+    expect(
+      validateDeadlineFlag(reserve, '100', { shellPriced: false }),
+    ).toEqual({ seconds: 6000 });
+    expect(() =>
+      validateDeadlineFlag(reserve, '90', { shellPriced: false }),
+    ).toThrow(TypeError);
   });
 });
 

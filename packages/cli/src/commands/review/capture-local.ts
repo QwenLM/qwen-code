@@ -56,7 +56,7 @@ import {
   type PlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { captureDeadline, parseDeadlineOption } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
@@ -494,10 +494,12 @@ function cachePathFor(target: string, source: string | undefined): string {
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
   const { out, file } = args;
-  // A malformed --deadline is a usage error, and it must fail here, before
-  // the tree is captured and planned, not at the plan write after that work
-  // is done. The same parse runs again inside `captureDeadline`; it is pure.
-  parseDeadlineOption(args.deadline);
+  // A malformed or too-short --deadline is a usage error, and it must fail
+  // here, before the tree is captured and planned, not at the plan write
+  // after that work is done — both bars, the env-free floor and this
+  // shell's pricing. The same validation runs again inside
+  // `captureDeadline`; it is pure given the environment.
+  validateDeadlineFlag(process.env, args.deadline);
   // DERIVED here when a file review does not name one, rather than recomputed
   // by whoever calls this. `qwen review run` pins the artifact name it polls
   // for from the same repo-relative path put through the same `safeTarget`,
