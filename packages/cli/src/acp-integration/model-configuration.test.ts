@@ -8,6 +8,7 @@ import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
 import {
   buildInstallPlan,
   findProviderById,
+  REASONING_EFFORT_TIERS,
   resolveBaseUrl,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -21,6 +22,7 @@ import {
   getDefaultReasoningConfig,
   getModelConfiguration,
   getGptReasoningOverrideState,
+  getReasoningEffortsForConfig,
   type ModelReasoningConfiguration,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
@@ -718,5 +720,51 @@ describe('GPT raw reasoning reporting', () => {
         } as ModelReasoningConfiguration,
       ),
     ).toBeUndefined();
+  });
+});
+
+// `/effort` and a workflow agent's per-call effort share one tier rule (core's
+// reasoningEffortsForCapability); these pin it at the `/effort` read site.
+describe('getReasoningEffortsForConfig', () => {
+  const configWith = (reasoning: unknown) =>
+    ({
+      getModel: () => 'custom-model',
+      getAuthType: () => 'openai',
+      getContentGeneratorConfig: () => ({
+        model: 'custom-model',
+        authType: 'openai',
+        baseUrl: 'https://example.com',
+      }),
+      getResolvedModelConfig: () => ({ capabilities: { reasoning } }),
+    }) as unknown as Config;
+
+  it('offers nothing for a toggle-only model', () => {
+    expect(
+      getReasoningEffortsForConfig(
+        configWith({
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('offers exactly the declared tiers', () => {
+    expect(
+      getReasoningEffortsForConfig(
+        configWith({
+          thinking: true,
+          disableField: 'reasoning_effort',
+          efforts: ['low', 'high'],
+        }),
+      ),
+    ).toEqual(['low', 'high']);
+  });
+
+  it('offers every tier for a model that declares none', () => {
+    expect(getReasoningEffortsForConfig(configWith(undefined))).toEqual(
+      REASONING_EFFORT_TIERS,
+    );
   });
 });

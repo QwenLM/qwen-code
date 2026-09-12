@@ -6,7 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
-import type { GoalRecoveryRecord } from './goal-persistence.js';
+import {
+  recoverGoalFromRecords,
+  type GoalRecoveryRecord,
+} from './goal-persistence.js';
 import {
   GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
@@ -38,6 +41,7 @@ import {
 } from './goal-runtime.js';
 import { GoalConflictError } from './goal-reducer.js';
 import {
+  GOAL_CHECKPOINT_BATCH_RECORD_LIMIT,
   InvalidGoalCheckpointError,
   type GoalCheckpointVerificationResult,
   type GoalCheckpointVerifier,
@@ -2003,6 +2007,18 @@ describe('goal runtime', () => {
     })),
   });
 
+  // How many window records each checkpoint verifier call was given, in call
+  // order. A 101-record turn leaves a 100-record window before any checkpoint
+  // and a 68-record one beside a full 32-claim checkpoint; a check sends it
+  // whole until one stalls, then in batches of 24, then of 12.
+  const batchSizes = (verifier: {
+    mock: {
+      calls: ReadonlyArray<
+        readonly [GoalCheckpointVerifierInput, ...unknown[]]
+      >;
+    };
+  }) => verifier.mock.calls.map(([input]) => input.evidence.length);
+
   function stallHarness() {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -2064,9 +2080,13 @@ describe('goal runtime', () => {
       'window-final',
     );
 
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
+    // Every check stalled, so each one after the first sent the window in
+    // smaller batches: the whole 100 records, then the 68 beside the full
+    // claim list in batches of 24, then of 12. None of the three was the
+    // same request.
+    expect(batchSizes(checkpointVerifier)).toEqual([
+      100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+    ]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
@@ -2114,7 +2134,9 @@ describe('goal runtime', () => {
       60,
       'c',
     );
-    expect(checkpointVerifier).toHaveBeenCalledTimes(3);
+    // The third check ran after two stalls, but on a window with room, which
+    // cannot spend a stall, so it went out whole.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 60]);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     // A check that succeeded is the only thing that retires the diagnostic.
@@ -2154,7 +2176,8 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
 
     await runCheckpointTurn(runtime, host, setRecords, records, 10, 'quiet');
-    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    // The quiet turn needs no checkpoint, so it calls nothing.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20]);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     // The check that found room is the one that proved the window healthy,
@@ -2195,9 +2218,8 @@ describe('goal runtime', () => {
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
     await runCheckpointTurn(runtime, host, setRecords, records, 101, 'c');
 
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
+    // The third check ran in batches of 12 and ended at the first one.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 12]);
     // The stop follows the check that spent the last stall. The first two
     // came back full, but the last never answered, so the advice is not to
     // narrow the objective -- and the record says what the failure was.
@@ -2208,7 +2230,7 @@ describe('goal runtime', () => {
         limitKind: 'evidence_catalog',
         lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: 'Error: provider failed',
+        lastCheckpointFailure: 'batch 1/6: Error: provider failed',
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2221,6 +2243,7 @@ describe('goal runtime', () => {
     // The reported loop: one long turn overflowed the window, and every
     // checkpoint after it timed out. Nothing was ever folded into claims,
     // the cursor never moved, and each new turn was told to retry.
+    const timeout = 'Error: Goal checkpoint verifier timed out after 30000ms';
     checkpointVerifier.mockRejectedValue(
       new Error('Goal checkpoint verifier timed out after 30000ms'),
     );
@@ -2243,8 +2266,9 @@ describe('goal runtime', () => {
       expect(runtime.getSnapshot().goal).toMatchObject({
         status: 'active',
         checkpointStalls: turn,
-        lastCheckpointFailure:
-          'Error: Goal checkpoint verifier timed out after 30000ms',
+        // The check after the first stall split the window and timed out
+        // on its first batch, so the record names that batch.
+        lastCheckpointFailure: turn === 1 ? timeout : `batch 1/5: ${timeout}`,
         evidenceCursor: { recordId: cursor },
       });
       expect(runtime.getSnapshot().goal).not.toHaveProperty(
@@ -2270,8 +2294,7 @@ describe('goal runtime', () => {
         limitKind: 'evidence_catalog',
         lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure:
-          'Error: Goal checkpoint verifier timed out after 30000ms',
+        lastCheckpointFailure: `batch 1/9: ${timeout}`,
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2316,7 +2339,9 @@ describe('goal runtime', () => {
           status: 'active',
           checkpointStalls: turn,
           lastCheckpointFailure: expect.stringMatching(
-            /^InvalidGoalCheckpointError: /,
+            turn === 1
+              ? /^InvalidGoalCheckpointError: /
+              : /^batch 1\/5: InvalidGoalCheckpointError: /,
           ),
         });
       }
@@ -2335,7 +2360,7 @@ describe('goal runtime', () => {
         lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
         lastCheckpointFailure: expect.stringMatching(
-          /^InvalidGoalCheckpointError: /,
+          /^batch 1\/9: InvalidGoalCheckpointError: /,
         ),
       },
     });
@@ -2376,7 +2401,8 @@ describe('goal runtime', () => {
         limitKind: 'evidence_catalog',
         lastReason: GOAL_CHECKPOINT_STALLED_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: `${overrun.name}: ${overrun.message}`,
+        // The third check ran in batches of 12 and ended at the first.
+        lastCheckpointFailure: `batch 1/9: ${overrun.name}: ${overrun.message}`,
       });
     },
   );
@@ -2460,9 +2486,10 @@ describe('goal runtime', () => {
       limitKind: 'checkpoint_request',
       lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
       checkpointStalls: 1,
-      // The measured size, so a reader can tell how far over the limit it is.
+      // The measured size, so a reader can tell how far over the limit it is,
+      // and the batch it was measured on: the check after a stall splits.
       lastCheckpointFailure: expect.stringMatching(
-        /^GoalCheckpointVerifierInputTooLargeError: .*\b300000 bytes\b/,
+        /^batch 1\/5: GoalCheckpointVerifierInputTooLargeError: .*\b300000 bytes\b/,
       ),
     });
   });
@@ -2509,7 +2536,7 @@ describe('goal runtime', () => {
     }
     expect(runtime.getSnapshot().goal).toMatchObject({
       checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-      lastCheckpointFailure: 'Error: provider failed',
+      lastCheckpointFailure: 'batch 1/5: Error: provider failed',
     });
 
     evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(
@@ -2524,6 +2551,247 @@ describe('goal runtime', () => {
       checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
     });
     expect(goal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
+  it('reruns a checkpoint that stalled on the whole window in batches that carry claims forward', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    // A verifier that cannot answer for the whole window but can for a
+    // batch: the case a batched rerun is for. Each answer carries the first
+    // claim it was given forward and folds the first record of its batch.
+    checkpointVerifier.mockImplementation(
+      async (input: GoalCheckpointVerifierInput) => {
+        if (input.evidence.length > GOAL_CHECKPOINT_BATCH_RECORD_LIMIT) {
+          throw new Error('Goal checkpoint verifier timed out after 30000ms');
+        }
+        const carried = input.previousClaims[0];
+        return {
+          claims: [
+            ...(carried
+              ? [
+                  {
+                    proofKind: 'delivered_output' as const,
+                    claim: 'Carried forward.',
+                    sourceRefs: [carried.id],
+                  },
+                ]
+              : []),
+            {
+              proofKind: 'delivered_output' as const,
+              claim: `Folded ${input.evidence[0]!.uuid}.`,
+              sourceRefs: [input.evidence[0]!.uuid],
+            },
+          ],
+        };
+      },
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    // The first check sends the whole window, as it always has, and stalls.
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(batchSizes(checkpointVerifier)).toEqual([100]);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 1,
+      lastCheckpointFailure:
+        'Error: Goal checkpoint verifier timed out after 30000ms',
+      evidenceCursor: { recordId: cursor },
+    });
+
+    // The check after it splits the window instead of resending it whole,
+    // covering every record once, oldest first.
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+    const reruns = checkpointVerifier.mock.calls
+      .slice(1)
+      .map(([input]) => input);
+    expect(reruns.map(({ evidence }) => evidence.length)).toEqual([
+      24, 24, 24, 24, 4,
+    ]);
+    expect(
+      reruns.flatMap(({ evidence }) => evidence.map(({ uuid }) => uuid)),
+    ).toEqual(Array.from({ length: 100 }, (_, index) => `second-${index + 1}`));
+
+    const goal = runtime.getSnapshot().goal!;
+    const checkpointId = goal.evidenceCheckpoint!.checkpointId;
+    // Each batch is given the claims the one before it folded, under an id
+    // segment of its own, so none collides with the kept checkpoint's ids.
+    expect(reruns[0]!.previousClaims).toEqual([]);
+    expect(reruns[1]!.previousClaims.map(({ id }) => id)).toEqual([
+      `${checkpointId}:b1:1`,
+    ]);
+    for (let index = 2; index < reruns.length; index++) {
+      expect(reruns[index]!.previousClaims.map(({ id }) => id)).toEqual([
+        `${checkpointId}:b${index}:1`,
+        `${checkpointId}:b${index}:2`,
+      ]);
+    }
+    // Only the last batch's claims are kept, and the check that relieved
+    // the window ends the streak and retires the diagnostic.
+    expect(goal).toMatchObject({
+      status: 'active',
+      evidenceCursor: { recordId: checkpointId },
+      evidenceCheckpoint: {
+        claims: [
+          { id: `${checkpointId}:1`, sourceRefs: [`${checkpointId}:b4:1`] },
+          { id: `${checkpointId}:2`, sourceRefs: ['second-97'] },
+        ],
+      },
+    });
+    expect(goal).not.toHaveProperty('checkpointStalls');
+    expect(goal).not.toHaveProperty('lastCheckpointFailure');
+    // A kept claim citing an intermediate batch's id still passes the
+    // record validator recovery applies.
+    expect(recoverGoalFromRecords(journal.records)).toMatchObject({
+      kind: 'v2',
+      payload: {
+        cause: 'checkpoint',
+        snapshot: { goal: { evidenceCheckpoint: { checkpointId } } },
+      },
+    });
+  });
+
+  it('ends a batched rerun at the batch that fails, leaving the cursor where it was', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
+
+    checkpointVerifier
+      .mockImplementationOnce(async (input: GoalCheckpointVerifierInput) =>
+        fullClaims(input),
+      )
+      .mockRejectedValueOnce(new Error('provider failed'));
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    // The first batch folded, the second failed, and no batch after it ran.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24]);
+    const goal = runtime.getSnapshot().goal!;
+    expect(goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'batch 2/5: Error: provider failed',
+      evidenceCursor: { recordId: cursor },
+    });
+    // The first batch's claims are not kept: the cursor cannot move past
+    // records a later batch failed to fold.
+    expect(goal).not.toHaveProperty('evidenceCheckpoint');
+    expect(failedCheckpointChecks().at(-1)![4]).toBe('batch=2/5');
+  });
+
+  it('keeps the failed batch in a diagnostic cut to the record bound', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      [],
+      101,
+      'first',
+    );
+
+    checkpointVerifier.mockRejectedValueOnce(
+      new Error('x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)),
+    );
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
+
+    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
+    expect(value.startsWith('batch 1/5: Error: xxx')).toBe(true);
+    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+  });
+
+  it('sends a checkpoint replay whole, whatever streak it restored', async () => {
+    // Session activation waits for the replay, and a replay cannot spend a
+    // stall, so splitting it would only hold the session up for more calls.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const checkpointVerifier = vi.fn(
+      async (_input: GoalCheckpointVerifierInput): Promise<never> => {
+        throw new Error('provider failed');
+      },
+    );
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => []),
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 1,
+        },
+      },
+      'turn_finished',
+    );
+    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
+      permit: { goalId: 'g-restored', revision: 1, turnId: 'turn-restored' },
+      recordUuid: 'pending-checkpoint-record',
+    };
+    const preparedWindow = {
+      previousClaims: [],
+      evidence: Array.from({ length: 30 }, (_, index) => ({
+        uuid: `restored-evidence-${index}`,
+        provenance: 'assistant_output' as const,
+        turnId: 'turn-restored',
+        preview: `Delivered result ${index}`,
+        proofKind: 'delivered_output' as const,
+        content: `Delivered result ${index}`,
+      })),
+      truncated: true,
+      shouldCheckpoint: true,
+    };
+
+    await runtime.prepareRestore([record], preparedWindow);
+    await runtime.activateRestoredWork();
+
+    expect(batchSizes(checkpointVerifier)).toEqual([30]);
+    // Still exempt: the failed replay keeps the streak it restored.
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        checkpointStalls: 1,
+        lastCheckpointFailure: 'Error: provider failed',
+      },
+    });
+    expect(failedCheckpointChecks()).toHaveLength(1);
+    expect(failedCheckpointChecks()[0]!.slice(3)).toEqual([
+      'replay=true',
+      'batch=1/1',
+    ]);
   });
 
   it('does not count an unusable result while the window has room', async () => {
@@ -2577,7 +2845,10 @@ describe('goal runtime', () => {
     await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
 
     // The failure spends no stall, but it is still a failure the surfaces
-    // should show: the record carries it beside the unchanged streak.
+    // should show: the record carries it beside the unchanged streak. The
+    // check followed a stall, but a window with room cannot spend one, so it
+    // went out whole rather than in batches.
+    expect(batchSizes(checkpointVerifier)).toEqual([100, 60]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
       goal: {
@@ -5308,7 +5579,8 @@ describe('goal runtime', () => {
         limitKind: 'evidence_catalog',
         lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: 'Error: provider failed',
+        // Two stalls restored, so the live check split into batches of 12.
+        lastCheckpointFailure: 'batch 1/9: Error: provider failed',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -6720,9 +6992,10 @@ describe('goal runtime', () => {
         }
       }
 
-      expect(checkpointVerifier).toHaveBeenCalledTimes(
-        GOAL_CHECKPOINT_STALL_LIMIT,
-      );
+      // Three stalled checks, each after the first in smaller batches.
+      expect(batchSizes(checkpointVerifier)).toEqual([
+        100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+      ]);
       expect(runtime.getSnapshot()).toMatchObject({
         activity: 'idle',
         goal: {

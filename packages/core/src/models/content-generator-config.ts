@@ -24,11 +24,43 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ResolvedModelConfig } from './types.js';
+import {
+  clampReasoningEffort,
+  getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
+  REASONING_EFFORT_TIERS,
+  reasoningEffortsForCapability,
+  setGeneratorReasoningEffort,
+  type ReasoningEffort,
+} from '../core/reasoning-effort.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
 export interface AuthOverrides {
   authType: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+export interface AgentContentGeneratorOptions {
+  /**
+   * Reasoning effort for this agent alone, written onto the agent's own copy of
+   * the config and never onto the session's; {@link resolveAgentReasoningTier}
+   * decides which tier lands. An explicit tier also drops a thinking budget the
+   * copy inherited, because Anthropic honours an explicit budget before the
+   * tier. A thinking knob fixed in the provider settings (`extra_body`,
+   * `samplingParams`) is left alone and still outranks the tier on the wire,
+   * exactly as it outranks the session tier set by `/effort`.
+   */
+  reasoningEffort?: ReasoningEffort;
+  /**
+   * Refuse to start an interactive login while building this generator. A
+   * derived per-agent generator runs headless, so missing credentials must
+   * fail fast instead of opening a device-authorization flow; a refresh of
+   * cached credentials still happens.
+   */
+  requireCachedCredentials?: boolean;
 }
 
 /**
@@ -42,6 +74,120 @@ export interface AuthOverrides {
  * what a PTY subprocess does during its own initialization.
  */
 export function buildAgentContentGeneratorConfig(
+  base: Config,
+  modelId: string | undefined,
+  authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
+): ContentGeneratorConfig {
+  const nextConfig = buildInheritedAgentContentGeneratorConfig(
+    base,
+    modelId,
+    authOverrides,
+  );
+  if (options.reasoningEffort !== undefined) {
+    applyAgentReasoningEffort(base, nextConfig, options.reasoningEffort);
+  }
+  return nextConfig;
+}
+
+/**
+ * The tier a per-agent `reasoningEffort` request lands as on a config shaped
+ * like `target`, or `undefined` when it cannot land and the agent keeps the
+ * effort it would otherwise have.
+ *
+ * The tier is limited to the tiers `/effort` offers for the target model
+ * ({@link reasoningEffortsForCapability}). A model whose settings declare no
+ * tiers falls back to its provider's built-in table, because the Responses
+ * wire forwards a tier verbatim with no provider-side clamp. `/effort` refuses a
+ * tier outside the set; an agent gets the closest tier the model does offer
+ * instead (the next stronger one, else the strongest), so a script written for
+ * one model still runs on another. Nothing lands when the model offers no
+ * tiers, or when thinking is turned off for the session or on the target
+ * config: a per-agent tier never re-enables thinking that was switched off,
+ * including across a provider switch that cleared the session's
+ * `reasoning: false` from the copy.
+ */
+export function resolveAgentReasoningTier(
+  base: Config,
+  target: Pick<
+    ContentGeneratorConfig,
+    'authType' | 'model' | 'baseUrl' | 'reasoning'
+  >,
+  requested: ReasoningEffort,
+): ReasoningEffort | undefined {
+  if (
+    target.reasoning === false ||
+    base.getContentGeneratorConfig().reasoning === false
+  ) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: thinking is turned off.`,
+    );
+    return undefined;
+  }
+  const offered = offeredReasoningEfforts(base, target);
+  if (offered.length === 0) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: model '${target.model}' offers no reasoning effort tiers.`,
+    );
+    return undefined;
+  }
+  const tier = clampReasoningEffort(requested, offered);
+  if (tier !== requested) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' is not offered by model '${target.model}'; using '${tier}'.`,
+    );
+  }
+  return tier;
+}
+
+function offeredReasoningEfforts(
+  base: Config,
+  target: Pick<ContentGeneratorConfig, 'authType' | 'model' | 'baseUrl'>,
+): readonly ReasoningEffort[] {
+  if (target.authType && target.model) {
+    const models = base.getModelsConfig();
+    // Exact id + baseUrl first, then any entry with the same id: a gateway or
+    // proxy base URL must not hide the tiers the registry declares (the same
+    // fallback modelsConfig applies to this miss).
+    const resolved =
+      (target.baseUrl !== undefined
+        ? models.getResolvedModel(target.authType, target.model, target.baseUrl)
+        : undefined) ?? models.getResolvedModel(target.authType, target.model);
+    const declared = parseModelReasoningCapabilities(
+      resolved?.capabilities?.reasoning,
+    );
+    if (declared) return reasoningEffortsForCapability(declared);
+  }
+  return (
+    getGptReasoningCapabilities(target.model)?.efforts ?? REASONING_EFFORT_TIERS
+  );
+}
+
+/**
+ * Put the landed tier on `target` with the session setter's rule, then make it
+ * authoritative on this copy: an inherited `budget_tokens` would otherwise
+ * outrank it, because Anthropic honours an explicit budget before the tier, so
+ * the copy drops it. The session's own block is never touched.
+ */
+function applyAgentReasoningEffort(
+  base: Config,
+  target: ContentGeneratorConfig,
+  requested: ReasoningEffort,
+): void {
+  const tier = resolveAgentReasoningTier(base, target, requested);
+  if (tier === undefined || !setGeneratorReasoningEffort(target, tier)) {
+    return;
+  }
+  if (target.reasoning && target.reasoning.budget_tokens !== undefined) {
+    const { budget_tokens: inheritedBudget, ...rest } = target.reasoning;
+    target.reasoning = rest;
+    debugLogger.debug(
+      `Per-agent reasoning effort '${tier}' replaces an inherited thinking budget of ${inheritedBudget} tokens.`,
+    );
+  }
+}
+
+function buildInheritedAgentContentGeneratorConfig(
   base: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
@@ -127,16 +273,25 @@ export async function createRuntimeContentGeneratorView(
   contentGeneratorOwner: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
 ): Promise<RuntimeContentGeneratorView> {
   const contentGeneratorConfig = buildAgentContentGeneratorConfig(
     base,
     modelId,
     authOverrides,
+    options,
   );
-  const contentGenerator = await createContentGenerator(
-    contentGeneratorConfig,
-    contentGeneratorOwner,
-  );
+  const contentGenerator = options.requireCachedCredentials
+    ? await createContentGenerator(
+        contentGeneratorConfig,
+        contentGeneratorOwner,
+        // isInitialAuth: refuse an interactive login for a derived generator.
+        true,
+      )
+    : await createContentGenerator(
+        contentGeneratorConfig,
+        contentGeneratorOwner,
+      );
   return { contentGenerator, contentGeneratorConfig };
 }
 
