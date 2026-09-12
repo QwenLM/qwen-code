@@ -83,7 +83,7 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
+`agent(prompt, { label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
 
 - `label` (string) — the name shown in the run views and the failures list.
   Make it unique per dispatch: a failure line carries only the label and the
@@ -104,6 +104,24 @@ say explicitly what each one should read and whether it may edit files.
   agent type 'X' not found"; check for null.
 - `model` (string) — per-call model override; routes provider correctly via the
   subagent runtime view.
+- `effort` (`'low'` | `'medium'` | `'high'` | `'xhigh'` | `'max'`) — the
+  reasoning effort for this one agent. It is limited to the tiers `/effort`
+  offers for the agent's model or, for a model whose settings declare none, to
+  the tiers its provider's built-in table accepts: a tier the model does not
+  offer becomes the next stronger tier it does offer, or its strongest tier
+  when none is stronger. A model that offers no tiers, or thinking turned off
+  for the session or the model, leaves the agent with the effort it would have
+  had without the option. The session's own effort is never changed, and an
+  explicit tier replaces any thinking budget the agent would otherwise inherit;
+  a thinking setting fixed in the provider settings (such as `extra_body` or
+  `samplingParams`) still takes precedence over the tier, as it does over
+  `/effort`. Omitting `effort` inherits the session's effort only while the
+  agent stays on the session's provider: a `model` override that switches
+  provider starts from that model's own reasoning settings, so pass `effort`
+  there. Aliases such as `'med'` and `'x-high'` are accepted; any other value
+  rejects the call. Use `'low'` for cheap mechanical stages and the higher tiers
+  only for the hardest verify or judge stages. A different effort is a
+  different resume cache key.
 - `isolation` — `'worktree'` provisions a fresh git worktree under
   `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
@@ -131,6 +149,20 @@ say explicitly what each one should read and whether it may edit files.
   a legitimately slow tool is not a stall. Default 180000 (override via
   `QWEN_CODE_WORKFLOW_STALL_SECONDS`, whole seconds); `0` disables the
   watchdog. Wall time per attempt is bounded separately.
+- `disallowedTools` (string[]) — tools this agent may not call, on top of the
+  floor below; it can only narrow the agent's tools, never re-enable one. Name a
+  tool by its tool name (`run_shell_command`, `write_file`, `edit`) or its
+  display name (`Shell`, `WriteFile`, `Edit`), or deny MCP tools with
+  `mcp__<server>` (every tool of that server), `mcp__<server>__*`, or
+  `mcp__<server>__<tool>`. An entry that names no built-in or registered tool
+  and is not an `mcp__` pattern, such as `'Bash'`, resolves the call to null
+  with the reason recorded rather than silently denying nothing. Entries must
+  be non-empty strings without surrounding whitespace, or the call is rejected.
+  A `schema` agent whose denies, from this call or from its `agentType`,
+  include `structured_output` resolves to null with the reason recorded,
+  because it would have no way to return its result. The resume cache key
+  depends on which tools are denied, not on their order or duplicates, and not
+  on whether a built-in tool is named by its tool name or its display name.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
 EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
