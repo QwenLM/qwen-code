@@ -3623,6 +3623,114 @@ describe('CoreToolScheduler', () => {
     expect(output).toBe(content);
   });
 
+  describe('producer-applied output budgets', () => {
+    // These exercise the window between the generic spill gate
+    // (DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD 25k + GATE_HEADROOM 3k ≈ 28k) and
+    // a HIGHER per-tool budget — Shell's default is 30k. A producer that
+    // already sized its body against its own budget reports
+    // `outputBudgetApplied`, and the gate must stand down so one output is not
+    // bounded twice under two different policies.
+    const BODY = 'a'.repeat(29_000);
+
+    function errorOfFirstCall(
+      onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    ): string {
+      const completionCalls = onAllToolCallsComplete.mock
+        .calls as unknown as Array<[ToolCall[]]>;
+      const call = completionCalls[0]?.[0]?.[0];
+      return call && 'response' in call
+        ? ((call.response.responseParts[0]?.functionResponse?.response?.[
+            'error'
+          ] as string) ?? '')
+        : '';
+    }
+
+    async function runBudgetedTool(result: Partial<ToolResult>) {
+      const execute = vi.fn().mockResolvedValue({
+        returnDisplay: 'x',
+        ...result,
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'budgetedTool',
+          new MockTool({
+            name: 'budgetedTool',
+            execute,
+            maxOutputChars: 30_000,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'c',
+            name: 'budgetedTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'p',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      return onAllToolCallsComplete;
+    }
+
+    it('skips the spill gate for a body the producer already sized', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        outputBudgetApplied: true,
+      });
+
+      expect(outputOfFirstCall(onAllToolCallsComplete)).toBe(BODY);
+    });
+
+    // The control for the case above: without the marker the SAME body is still
+    // spilled, so that assertion cannot pass just because 29k slipped under
+    // some other limit.
+    it('still applies the spill gate when the producer reports nothing', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+      });
+
+      const output = outputOfFirstCall(onAllToolCallsComplete);
+      expect(output).not.toBe(BODY);
+      expect(output.length).toBeLessThan(BODY.length);
+    });
+
+    it('skips the error gate while error.message is still the sized body', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: { message: BODY },
+        outputBudgetApplied: true,
+      });
+
+      expect(errorOfFirstCall(onAllToolCallsComplete)).toBe(BODY);
+    });
+
+    // Spawn/setup failures build `error.message` separately, so the marker on
+    // `llmContent` says nothing about that string and the gate has to hold.
+    it('keeps the error gate for a separately built error message', async () => {
+      const separateMessage = `spawn failed\n${BODY}`;
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: { message: separateMessage },
+        outputBudgetApplied: true,
+      });
+
+      const error = errorOfFirstCall(onAllToolCallsComplete);
+      expect(error).not.toBe(separateMessage);
+      expect(error.length).toBeLessThan(separateMessage.length);
+    });
+  });
+
   it('schedules a memory pressure check after tool execution', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',

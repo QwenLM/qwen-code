@@ -3905,6 +3905,73 @@ describe('ShellTool', () => {
           spy.mockRestore();
         }
       });
+
+      describe('outputBudgetApplied', () => {
+        // The scheduler's generic spill gate sits at the GLOBAL threshold
+        // (25k default) + 3k headroom ≈ 28k, below this tool's own 30k budget.
+        // Output in that window is inside Shell's budget, so the marker has to
+        // be set even when nothing was cut — otherwise the gate re-bounds the
+        // body under a stricter head-only policy and the surviving preview
+        // collapses from the whole output to a short head.
+        it('marks a body that fits the threshold, leaving it untouched', async () => {
+          const output = 'x'.repeat(29_000);
+          const invocation = shellTool.build({
+            command: 'mid-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output, exitCode: 0 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.llmContent).toContain(output);
+          expect(result.persistedOutputFiles).toBeUndefined();
+        });
+
+        it('marks a body that exceeded the threshold', async () => {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+        });
+
+        // The scheduler skips its error gate only when `error.message` is still
+        // byte-for-byte the marked body, so this identity is load-bearing.
+        it('marks a non-zero exit and reports the same text as error.message', async () => {
+          const invocation = shellTool.build({
+            command: 'failing-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'y'.repeat(29_000), exitCode: 1 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.error?.message).toBe(result.llmContent);
+        });
+
+        it('leaves an explicit background launch unmarked', async () => {
+          const invocation = shellTool.build({
+            command: 'sleep 100',
+            is_background: true,
+          });
+
+          const result = await invocation.execute(mockAbortSignal);
+
+          // Assert the background receipt first: `toBeUndefined` alone would
+          // also pass for a result that never reached this path.
+          expect(result.llmContent).toContain('Background shell started.');
+          expect(result.outputBudgetApplied).toBeUndefined();
+        });
+      });
     });
 
     it('retains shell truncation without an artifact and records the persistence decision', async () => {

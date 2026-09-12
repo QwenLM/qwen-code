@@ -2965,6 +2965,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     let persistedOutputFiles: string[] | undefined;
+    let outputBudgetApplied = false;
 
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
@@ -3000,6 +3001,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         persistedOutputFiles = [];
         llmContent = truncatedResult.content;
       }
+
+      // Set even when nothing was cut: the scheduler's generic gate sits BELOW
+      // this budget by default, so an unmarked body inside it gets re-bounded
+      // there under a stricter head-only policy.
+      outputBudgetApplied = true;
     }
 
     // Append the long-run advisory AFTER truncation so the hint isn't
@@ -3108,6 +3114,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: returnDisplayMessage,
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
     };
   }
@@ -4462,7 +4469,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
       warning =
-        `AI attribution note skipped: ${getErrorMessage(err)}. ` +
+        `AI attribution note skipped: ${getErrorMessage(err).slice(0, 120)}. ` +
         'Co-authored-by trailer is unaffected.';
     } finally {
       // Partial clear: only drop tracking for files that landed in
