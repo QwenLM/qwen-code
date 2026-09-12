@@ -461,6 +461,7 @@ describe('post-merge push lane', () => {
     // the one most likely to breach the 500 KB workflow limit), and the
     // helper-checks step IS the github_ci_only fast path.
     const FULL_PAYLOAD = [
+      'Build core for schema checks',
       'Audit critical runtime dependencies',
       'Check lockfile',
       'Check desktop workspace isolation',
@@ -744,5 +745,13 @@ describe('platform lanes — a failing nightly is visible', () => {
     expect(cond).toContain("workflow_run.event == 'schedule'");
     expect(cond).toContain("workflow_run.head_branch == 'main'");
     expect(cond).toContain("workflow_run.conclusion == 'failure'");
+  });
+
+  it('test build step produces esbuild metafile for chrome scan', () => {
+    const step = (ci.jobs.test.steps ?? []).find((x) => x.name === 'Build packages and bundle');
+    expect(step, 'Build packages and bundle step missing').toBeDefined();
+    // DEV=true writes dist/esbuild.json for artifact-scan (chrome-extension)
+    expect(String(step.run)).toContain('DEV=true');
+    expect(String(step.run)).toContain('npm run bundle');
   });
 });

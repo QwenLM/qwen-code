@@ -743,6 +743,7 @@ describe('no-AK integration CI wiring', () => {
       'Configure persistent npm cache (self-hosted)',
       'Configure npm for rate limiting',
       'Install dependencies',
+      'Build packages',
       'Run tests and generate reports',
     ]) {
       expect(getWorkflowStep(smokeJob, stepName)).toContain("shell: 'bash'");

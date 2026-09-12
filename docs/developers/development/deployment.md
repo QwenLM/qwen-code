@@ -102,7 +102,7 @@ There are two distinct build processes used, depending on the distribution chann
 
 - **NPM publication:** For publishing to the NPM registry, the TypeScript source code in `@qwen-code/qwen-code-core` and `@qwen-code/qwen-code` is transpiled into standard JavaScript using the TypeScript Compiler (`tsc`). The resulting `dist/` directory is what gets published in the NPM package. This is a standard approach for TypeScript libraries.
 
-- **GitHub `npx` execution:** When running the latest version of Qwen Code directly from GitHub, a different process is triggered by the `prepare` script in `package.json`. This script uses `esbuild` to bundle the entire application and its dependencies into a single, self-contained JavaScript file. This bundle is created on-the-fly on the user's machine and is not checked into the repository.
+- **GitHub `npx` execution:** When running the latest version of Qwen Code directly from GitHub (`npx https://github.com/QwenLM/qwen-code`), npm clones the repository and runs the `prepare` script. `prepare` installs husky and generates `git-commit.ts`; if `dist/cli.js` is absent (gitignored), it builds workspaces and bundles the CLI with `esbuild` on the fly. Registry installs ship prebuilt `dist/` and do not build.
 
 **Docker sandbox image**
 

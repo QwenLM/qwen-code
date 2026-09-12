@@ -100,6 +100,9 @@ jobs:
         run: |-
           npm ci
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Verify published export renderer'
         run: |-
           renderer_version=$(node -p "require('./package.json').version")
@@ -238,6 +241,9 @@ jobs:
           # Keep the verified, prebuilt export renderer reference pinned to the
           # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
+
+      - name: 'Build packages'
+        run: 'npm run build'
 
       - name: 'Prepare VSCode Extension'
         env:

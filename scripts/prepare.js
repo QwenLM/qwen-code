@@ -5,29 +5,38 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
-// Release workflow jobs set this when they run explicit build/bundle steps after
-// npm ci. Workflows that rely on prepare-during-install should leave it unset.
+// QWEN_SKIP_PREPARE=1 skips husky (prepare otherwise only runs husky + generate).
+// Set it when the job does an explicit build/bundle after npm ci; otherwise leave unset.
 const skipPrepare = ['1', 'true'].includes(
   (process.env.QWEN_SKIP_PREPARE ?? '').toLowerCase(),
 );
 
 if (skipPrepare) {
-  // The heavy build/bundle/husky are skipped, but git-commit.ts (gitignored,
-  // imported by e.g. cli's systemInfo) is still required to build or typecheck
-  // the packages that import it. Generate it here so a later per-workspace
-  // build/typecheck — such as the review tooling's — doesn't fail on the
-  // missing module. The non-skip path generates it via `npm run build`.
+  // Husky is skipped, but git-commit.ts (gitignored, imported by e.g.
+  // cli's systemInfo) is still required to build or typecheck the packages
+  // that import it. Generate it here so a later per-workspace build/typecheck
+  // — such as the review tooling's — doesn't fail on the missing module. The
+  // non-skip path also generates it via `npm run generate`.
   run('npm', ['run', 'generate']);
   console.log(
-    'Skipping prepare build/bundle/husky because QWEN_SKIP_PREPARE is set.',
+    'Skipping prepare husky because QWEN_SKIP_PREPARE is set (generate still runs).',
   );
   process.exit(0);
 }
 
 run('husky');
-run('npm', ['run', 'build']);
-run('npm', ['run', 'bundle']);
+run('npm', ['run', 'generate']);
+
+// For `npx https://github.com/QwenLM/qwen-code` (git install) the package is
+// cloned and `prepare` runs before packing; dist/ is gitignored so it is
+// absent there, while a registry install ships prebuilt dist/. Build on the
+// fly only when dist is missing.
+if (!existsSync('dist/cli.js')) {
+  run('npm', ['run', 'build']);
+  run('npm', ['run', 'bundle']);
+}
 
 function run(command, args = []) {
   const result = spawnSync(command, args, {

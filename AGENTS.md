@@ -78,10 +78,7 @@ packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
 `packages/channels/*`, ...) through their built `dist/` output, and
 `packages/core` tests import the package's own entry
 (`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
-`npm ci` already builds them via the `prepare` script, but a worktree that
-shares the main checkout's `node_modules` (or a deep-cleaned copy) does not
-have them. If any prerequisite is missing, a vitest `globalSetup` guard stops
-the run and names the fix; build once from the repository root:
+`npm ci` no longer builds them (prepare only generates `git-commit.ts`); run `npm run build` once from the repository root after install. A worktree that shares the main checkout's `node_modules` (or a deep-cleaned copy) does not have them either. If any prerequisite is missing, a vitest `globalSetup` guard stops the run and names the fix; build once from the repository root:
 
 ```bash
 npm run build
