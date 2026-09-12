@@ -13542,6 +13542,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       'User intentionally cancelled this tool call.',
     );
     expect(responseText).not.toContain('had already completed');
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('tells the model a post-completion cancellation discarded finished work', async () => {
@@ -13562,6 +13565,72 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain(
       'User intentionally cancelled this tool call. Stop',
     );
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
+  });
+
+  it('tells the model a queued sibling was cancelled before execution', async () => {
+    const abortController = new AbortController();
+    const siblingExecute = vi.fn().mockResolvedValue({
+      llmContent: 'unexpected',
+      returnDisplay: 'unexpected',
+    });
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      tools: [
+        new MockTool({
+          name: 'mockTool',
+          execute: vi.fn().mockImplementation(() => {
+            abortController.abort();
+            return Promise.reject(
+              Object.assign(new Error('Tool call aborted'), {
+                name: 'AbortError',
+              }),
+            );
+          }),
+        }),
+        new MockTool({ name: 'mockTool2', execute: siblingExecute }),
+      ],
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'running-call',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-telemetry',
+        },
+        {
+          callId: 'queued-sibling',
+          name: 'mockTool2',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-telemetry',
+        },
+      ],
+      abortController.signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as CompletedToolCall[];
+    const queuedSibling = completedCalls.find(
+      (call) => call.request.callId === 'queued-sibling',
+    );
+    expect(queuedSibling?.status).toBe('cancelled');
+    expect(queuedSibling?.response.executionStatus).toBe('not_started');
+    expect(siblingExecute).not.toHaveBeenCalled();
+    const responseText = JSON.stringify(queuedSibling?.response.responseParts);
+    expect(responseText).toContain(
+      'This tool call was cancelled before it ran.',
+    );
+    expect(responseText).not.toContain('User intentionally cancelled');
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
+    expect(responseText).not.toContain('had already completed');
   });
 
   // A post-execution cancellation drops the model-visible output, but the
@@ -16371,6 +16440,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     // assertions.
     abortController.abort();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const cancelledCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'cancelled',
+    )) as CompletedToolCall;
 
     expect(
       (scheduler as unknown as { toolSpans: Map<string, unknown> }).toolSpans
@@ -16392,6 +16465,14 @@ describe('CoreToolScheduler telemetry spans', () => {
       (r) => r.name === 'tool.mockEditTool',
     );
     expect(toolSpan?.ended).toBe(true);
+    const responseText = JSON.stringify(cancelledCall.response.responseParts);
+    expect(responseText).toContain(
+      'This tool call was cancelled before it ran.',
+    );
+    expect(responseText).not.toContain('User intentionally cancelled');
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('plan-mode block emits failure_kind=plan_mode_blocked (#4321)', async () => {
@@ -16513,7 +16594,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   it('validated pre-execution cancellation keeps the parent span UNSET', async () => {
     const abortController = new AbortController();
-    const { spanRecord } = await runSingleTool({
+    const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
       tools: [
         new MockTool({
@@ -16531,6 +16612,15 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       toolSpanRecords.find((record) => record.name === 'tool.execution'),
     ).toBeUndefined();
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'This tool call was cancelled before it ran.',
+    );
+    expect(responseText).not.toContain('User intentionally cancelled');
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('signal.abort during awaiting_approval: blocked span ends with aborted/system (#4321)', async () => {
