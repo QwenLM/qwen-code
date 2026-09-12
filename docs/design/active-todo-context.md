@@ -17,7 +17,9 @@ move or overwrite the foreground reminder. Background tasks and loop wakeups
 capture the owner when they are created and carry it back with their automatic
 turn; unrelated cron and notification turns use an isolated owner that is
 removed when the turn ends. Inject the reminder on the first request of a retry
-or related automatic turn and after function responses on later tool turns.
+or related automatic turn and after function responses on later tool turns; an
+ordinary user turn carries the chain to that point without a turn-start
+injection of its own.
 Clear it when all todos complete, when an ordinary turn starts with no reminder
 registered, when the conversation timeline is discarded (a rewind, a history
 restore, or a wholesale `setHistory` / `truncateHistory`) so a reminder
@@ -27,10 +29,13 @@ changes.
 A registered reminder is the signal that the plan still has unfinished items,
 because `todo_write` deletes it once the list completes. An ordinary user turn
 therefore continues the chain instead of discarding the context of work that is
-still running: the turn that asks how the work is going is the turn that needs
-the plan. The accepted cost is that an abandoned plan keeps resurfacing until a
-later `todo_write` completes or clears it, while a genuinely new task replaces
-the plan on its first write. Both frontends apply this, and in ACP the
+still running: the turn that asks how the work is going keeps the plan
+registered, so the reminder is re-issued after that turn's function responses
+(or forced as soon as a delegated Agent result returns) rather than spliced
+ahead of the user's own text — turn-start injection stays reserved for machine
+continuations. The accepted cost is that an abandoned plan keeps resurfacing
+until a later `todo_write` completes or clears it, while a genuinely new task
+replaces the plan on its first write. Both frontends apply this, and in ACP the
 todo-stop-guard lineage reset stays keyed to the retry/continue flag alone, so
 carrying a plan never widens the guard's trust (#10953).
 
@@ -64,9 +69,10 @@ change instead preserves task context before that decision.
 - A completed list clears it.
 - Core and ACP tool-result messages append the reminder after function results.
 - ACP mid-turn user input remains last and therefore keeps precedence.
-- An ordinary new prompt retains the reminder while items are unfinished and
-  clears stale state when none is registered; retry/continue always retains it.
-  Both frontends behave the same.
+- An ordinary new prompt retains the reminder while items are unfinished
+  without injecting it at turn start, and clears stale state when none is
+  registered; retry/continue always retains it and injects it on the first
+  request. Both frontends behave the same.
 - A tool-result batch carrying a top-level Agent result forces the reminder due
   even though the turn budget is not filled; a batch without one stays budgeted.
 - A rewind or history restore clears the reminder, its work-chain owners and the

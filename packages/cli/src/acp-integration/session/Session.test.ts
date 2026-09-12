@@ -2989,8 +2989,13 @@ describe('Session', () => {
       .mockImplementation(async () => createEmptyStream());
     // A registered reminder means the plan still has unfinished items
     // (todo_write deletes it on completion).
-    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
-      '<system-reminder>unfinished todo: delegated node</system-reminder>',
+    const reminder =
+      '<system-reminder>unfinished todo: delegated node</system-reminder>';
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    // The reminder comes back only when the caller forces it, so the absence
+    // assertion below is what discriminates the turn-start gate.
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+      (_promptId, force = false) => (force ? reminder : undefined),
     );
     // The foreground head still owns the session plan file, so the
     // continuation guard's owner-equality conjunct holds.
@@ -3020,6 +3025,14 @@ describe('Session', () => {
       'test-session-id########2',
       'test-session-id########1',
     );
+
+    // Carrying the chain must not splice the plan ahead of the user's own
+    // text: turn-start injection stays reserved for machine continuations
+    // (core parity), and the follow-up turn is an ordinary prompt.
+    const followUpCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as { message: Part[] };
+    expect(textParts(followUpCall.message)).not.toContain(reminder);
 
     // Once the plan completes (todo_write deleted the reminder), the next
     // ordinary prompt must start a fresh chain — the cleared-reminder branch
@@ -3133,7 +3146,11 @@ describe('Session', () => {
   it('includes active Todo context on the first retry request', async () => {
     const reminder =
       '<system-reminder>unfinished todo: run tests</system-reminder>';
-    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+    // Return the reminder only when the caller forces it, so this case proves
+    // the retry turn's turn-start force rather than the mock's blanket value.
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+      (_promptId, force = false) => (force ? reminder : undefined),
+    );
     mockChat.sendMessageStream = vi
       .fn()
       .mockImplementation(async () => createEmptyStream());

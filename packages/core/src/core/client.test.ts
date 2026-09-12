@@ -2321,8 +2321,13 @@ describe('Gemini Client (client.ts)', () => {
       await runTurn(SendMessageType.UserQuery);
       // A registered reminder means the plan still has unfinished items
       // (todo_write deletes it on completion).
-      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
-        '<system-reminder>unfinished todo: delegated node</system-reminder>',
+      const reminder =
+        '<system-reminder>unfinished todo: delegated node</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      // The reminder comes back only when the caller forces it, so the
+      // absence assertion below is what discriminates the turn-start gate.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+        (_promptId, force = false) => (force ? reminder : undefined),
       );
       // The foreground head still owns the session plan file, so the
       // continuation guard's owner-equality conjunct holds.
@@ -2346,6 +2351,13 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-user-followup',
         'prompt-userQuery',
       );
+
+      // Carrying the chain must not splice the plan ahead of the user's own
+      // text: turn-start injection stays reserved for machine continuations
+      // (the Retry | Cron | Notification | Teammate gate), so an ordinary
+      // UserQuery turn's request must not carry it.
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(request).not.toContain(reminder);
 
       // Once the plan completes (todo_write deleted the reminder), the next
       // ordinary turn must start a fresh chain — the cleared-reminder branch
