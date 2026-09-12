@@ -192,14 +192,9 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 
-  it('does not claim a persisted foreign session after re-bootstrap', async () => {
-    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
-      sessions: [],
-      nextCursor: undefined,
-    });
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-
+  it('restores an existing session without setting its source', async () => {
+    const props = await renderApp();
+    expect(props.sessionSourceType).toBeUndefined();
     await act(async () => {
       window.dispatchEvent(
         new MessageEvent('message', {
@@ -209,69 +204,14 @@ describe('EmbeddedApp host wiring', () => {
               baseUrl: 'http://localhost:4141',
               workspaceCwd: '/workspace',
               sessionId: 'cli-1',
-              sessionHistorySource: 'default',
               hostKind: 'view',
             },
           },
         }),
       );
-      await Promise.resolve();
     });
-
-    expect(
-      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
-    ).toBeUndefined();
-
-    await act(async () => {
-      (
-        container.querySelector(
-          'button[aria-haspopup="dialog"]',
-        ) as HTMLButtonElement
-      ).click();
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledWith(
-        expect.objectContaining({ sourceType: 'vscode' }),
-      );
-    });
-    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
-
-    await act(async () => {
-      (
-        document.querySelector(
-          '[data-session-source="default"]',
-        ) as HTMLButtonElement
-      ).click();
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
-
-    await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'webShellBootstrap',
-            data: {
-              baseUrl: 'http://localhost:4141',
-              workspaceCwd: '/workspace',
-              sessionId: 'legacy-1',
-              hostKind: 'view',
-              legacyConversationIds: ['legacy-1'],
-            },
-          },
-        }),
-      );
-      await Promise.resolve();
-    });
-
-    expect(
-      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
-    ).toBe('vscode');
+    expect(mocks.embeddedProps.current?.sessionId).toBe('cli-1');
+    expect(mocks.embeddedProps.current?.sessionSourceType).toBeUndefined();
   });
 
   it('keeps a persisted VS Code current session visible outside the first page', async () => {
@@ -291,7 +231,6 @@ describe('EmbeddedApp host wiring', () => {
               baseUrl: 'http://localhost:4141',
               workspaceCwd: '/workspace',
               sessionId: 'vscode-current',
-              sessionHistorySource: 'vscode',
               hostKind: 'view',
             },
           },
@@ -302,7 +241,7 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(
       (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
-    ).toBe('vscode');
+    ).toBeUndefined();
     await act(async () => {
       (
         container.querySelector(
@@ -330,7 +269,6 @@ describe('EmbeddedApp host wiring', () => {
               baseUrl: 'http://localhost:4141',
               workspaceCwd: '/workspace',
               sessionId: 'cli-1',
-              sessionHistorySource: 'default',
               hostKind: 'view',
             },
           },
@@ -888,7 +826,6 @@ describe('EmbeddedApp host wiring', () => {
       data: {
         sessionId: 'session-2',
         workspaceCwd: '/workspace',
-        historySource: 'vscode',
       },
     });
     expect(postMessagesOfType('updatePanelTitle').at(-1)).toEqual({
@@ -942,22 +879,15 @@ describe('EmbeddedApp host wiring', () => {
   });
 
   it('releases the panel when a session switch times out', async () => {
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      (options?: { sourceType?: string }) =>
-        Promise.resolve({
-          sessions:
-            options?.sourceType === 'default'
-              ? [
-                  {
-                    sessionId: 'session-2',
-                    workspaceCwd: '/workspace',
-                    displayName: 'Other session',
-                  },
-                ]
-              : [],
-          nextCursor: undefined,
-        }),
-    );
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-2',
+          workspaceCwd: '/workspace',
+          displayName: 'Other session',
+        },
+      ],
+    });
     vi.useFakeTimers();
     try {
       await renderApp();
@@ -969,14 +899,6 @@ describe('EmbeddedApp host wiring', () => {
       expect(historyButton).not.toBeNull();
       await act(async () => {
         historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await Promise.resolve();
-      });
-      await act(async () => {
-        (
-          document.querySelector(
-            '[data-session-source="default"]',
-          ) as HTMLButtonElement
-        ).click();
         await Promise.resolve();
       });
 
@@ -1034,7 +956,6 @@ describe('EmbeddedApp host wiring', () => {
         data: {
           sessionId: 'session-2',
           workspaceCwd: '/workspace',
-          historySource: 'default',
         },
       });
       expect((mocks.embeddedProps.current as CapturedProps).sessionId).toBe(
@@ -1045,265 +966,25 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 
-  it('merges allowlisted pre-cutover sessions into the history list', async () => {
-    // v0.21-era conversations were recorded without source attribution, so
-    // the vscode-scoped catalog query cannot return them. The host ships the
-    // legacy ids it still has in globalState; the panel then claims exactly
-    // those sessions back from the daemon's default catalog — without
-    // surfacing unattributed CLI sessions or browser-stamped ones.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      (options?: { sourceType?: string }) => {
-        if (options?.sourceType === 'vscode') {
-          return Promise.resolve({
-            sessions: [
-              {
-                sessionId: 'vscode-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Current chat',
-                sourceType: 'vscode',
-                updatedAt: '2026-09-09T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          });
-        }
-        if (options?.sourceType === 'default') {
-          return Promise.resolve({
-            sessions: [
-              {
-                sessionId: 'legacy-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Pre-upgrade chat',
-                updatedAt: '2026-08-01T12:00:00.000Z',
-              },
-              {
-                sessionId: 'cli-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Terminal chat',
-                updatedAt: '2026-08-02T12:00:00.000Z',
-              },
-              {
-                sessionId: 'web-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Browser chat',
-                sourceType: 'default',
-                updatedAt: '2026-08-03T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          });
-        }
-        return Promise.resolve({ sessions: [], nextCursor: undefined });
-      },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-
-    await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'webShellBootstrap',
-            data: {
-              baseUrl: 'http://localhost:4141',
-              clientId: 'client-1',
-              workspaceCwd: '/workspace',
-              sessionId: 'session-1',
-              hostKind: 'panel',
-              legacyConversationIds: ['legacy-1', 'never-recorded'],
-            },
-          },
-        }),
-      );
-      // The remount effect refetches the vscode page, then pages the default
-      // catalog for allowlisted ids — both are sequential awaits.
-      for (let i = 0; i < 6; i++) await Promise.resolve();
+  it('lists and opens workspace conversations together without a source switch', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'vscode-1',
+          sourceType: 'vscode',
+          displayName: 'VS Code chat',
+        },
+        { sessionId: 'cli-1', displayName: 'Terminal chat' },
+        {
+          sessionId: 'web-1',
+          sourceType: 'default',
+          displayName: 'Browser chat',
+        },
+        { sessionId: 'legacy-1', displayName: 'Pre-upgrade chat' },
+        { sessionId: 'child-1', parentSessionId: 'cli-1' },
+        { sessionId: 'scheduled-1', sourceType: 'scheduled_task' },
+      ].map((session) => ({ ...session, workspaceCwd: '/workspace' })),
     });
-
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    expect(historyButton).not.toBeNull();
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    // Opening the dropdown triggers the first-page load, which now includes
-    // the legacy-catalog scan; wait for its rows instead of fixed flushes.
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="legacy-1"]'),
-      ).not.toBeNull();
-    });
-
-    expect(
-      document.querySelector('[data-session-id="vscode-1"]'),
-    ).not.toBeNull();
-    // Neither the unattributed CLI session nor the browser-stamped one is
-    // allowlisted, so the panel must not claim them.
-    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
-    expect(document.querySelector('[data-session-id="web-1"]')).toBeNull();
-
-    const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
-      .map(([options]) => options)
-      .filter(
-        (options) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      );
-    expect(defaultCatalogCalls.length).toBeGreaterThan(0);
-    expect(defaultCatalogCalls[0]).toMatchObject({
-      archiveState: 'active',
-    });
-
-    // The scan converges after its first successful run: ids that never
-    // match (other workspaces, deleted transcripts, since-stamped sessions)
-    // must not re-page the default catalog on every dropdown open.
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      const vscodeCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'vscode',
-      );
-      expect(vscodeCalls.length).toBeGreaterThanOrEqual(2);
-    });
-    expect(
-      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      ),
-    ).toHaveLength(1);
-    expect(
-      document.querySelector('[data-session-id="legacy-1"]'),
-    ).not.toBeNull();
-
-    const terminalSource = document.querySelector(
-      '[data-session-source="default"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      terminalSource.click();
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-      expect(
-        document.querySelector('[data-session-id="web-1"]'),
-      ).not.toBeNull();
-    });
-    expect(document.querySelector('[data-session-id="legacy-1"]')).toBeNull();
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ pageSize: 20, sourceType: 'default' }),
-    );
-
-    const defaultCallsAfterSwitch =
-      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      ).length;
-    await act(async () => {
-      (
-        document.querySelector(
-          '[data-session-source="vscode"]',
-        ) as HTMLButtonElement
-      ).click();
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="legacy-1"]'),
-      ).not.toBeNull();
-    });
-    expect(
-      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      ),
-    ).toHaveLength(defaultCallsAfterSwitch);
-
-    await act(async () => {
-      (
-        document.querySelector(
-          '[data-session-source="default"]',
-        ) as HTMLButtonElement
-      ).click();
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
-
-    await act(async () => {
-      (
-        document.querySelector('[data-session-id="cli-1"]') as HTMLDivElement
-      ).click();
-      await Promise.resolve();
-    });
-    expect(
-      (mocks.embeddedProps.current as CapturedProps).sessionSourceType,
-    ).toBeUndefined();
-    callback<(sessionId: string | undefined) => void>(
-      mocks.embeddedProps.current as CapturedProps,
-      'onSessionIdChange',
-    )('cli-1');
-    expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
-      type: 'webShellSessionChanged',
-      data: {
-        sessionId: 'cli-1',
-        workspaceCwd: '/workspace',
-        historySource: 'default',
-      },
-    });
-  });
-
-  it('ignores a stale page after switching session sources', async () => {
-    let resolveVsCodePage!: (value: {
-      sessions: Array<{
-        sessionId: string;
-        workspaceCwd: string;
-        displayName: string;
-        sourceType: string;
-      }>;
-      nextCursor: undefined;
-    }) => void;
-    const vsCodePage = new Promise<{
-      sessions: Array<{
-        sessionId: string;
-        workspaceCwd: string;
-        displayName: string;
-        sourceType: string;
-      }>;
-      nextCursor: undefined;
-    }>((resolve) => {
-      resolveVsCodePage = resolve;
-    });
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      (options?: { sourceType?: string }) =>
-        options?.sourceType === 'vscode'
-          ? vsCodePage
-          : Promise.resolve({
-              sessions: [
-                {
-                  sessionId: 'cli-1',
-                  workspaceCwd: '/workspace',
-                  displayName: 'Terminal chat',
-                  sourceType: 'default',
-                },
-              ],
-              nextCursor: undefined,
-            }),
-    );
-
     await renderApp();
     const { container } = mounted[mounted.length - 1];
     await act(async () => {
@@ -1312,39 +993,105 @@ describe('EmbeddedApp host wiring', () => {
           'button[aria-haspopup="dialog"]',
         ) as HTMLButtonElement
       ).click();
-      await Promise.resolve();
     });
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledExactlyOnceWith({
+      pageSize: 20,
+      cursor: undefined,
+      archiveState: 'active',
+      view: 'organized',
+      group: 'all',
+    });
+    expect(container.querySelector('[data-session-source]')).toBeNull();
+    for (const id of ['vscode-1', 'cli-1', 'web-1', 'legacy-1']) {
+      const row = container.querySelector('[data-session-id="' + id + '"]');
+      expect(row).not.toBeNull();
+      expect(
+        row?.querySelectorAll('.qwen-session-row-actions button'),
+      ).toHaveLength(2);
+    }
+    expect(container.querySelector('[data-session-id="child-1"]')).toBeNull();
+    expect(
+      container.querySelector('[data-session-id="scheduled-1"]'),
+    ).toBeNull();
     await act(async () => {
       (
-        document.querySelector(
-          '[data-session-source="default"]',
-        ) as HTMLButtonElement
+        container.querySelector('[data-session-id="cli-1"]') as HTMLElement
       ).click();
-      await Promise.resolve();
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
     });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
-
+    expect(mocks.embeddedProps.current?.sessionId).toBe('cli-1');
+    expect(mocks.embeddedProps.current?.sessionSourceType).toBeUndefined();
     await act(async () => {
-      resolveVsCodePage({
+      callback<(sessionId: string | undefined) => void>(
+        mocks.embeddedProps.current as CapturedProps,
+        'onSessionIdChange',
+      )('cli-1');
+    });
+    expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'cli-1', workspaceCwd: '/workspace' },
+    });
+  });
+
+  it('loads past a filtered page and retains the cursor after a failed request', async () => {
+    sdkMocks.listWorkspaceSessionsPage
+      .mockResolvedValueOnce({
         sessions: [
           {
-            sessionId: 'vscode-1',
+            sessionId: 'child-1',
+            parentSessionId: 'parent-1',
             workspaceCwd: '/workspace',
-            displayName: 'VS Code chat',
-            sourceType: 'vscode',
           },
         ],
-        nextCursor: undefined,
+        nextCursor: 'opaque-page-2',
+      })
+      .mockRejectedValueOnce(new Error('Temporary catalog failure'))
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'cli-2',
+            workspaceCwd: '/workspace',
+            displayName: 'Older terminal chat',
+          },
+        ],
+        truncated: true,
       });
-      await vsCodePage;
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    await act(async () => {
+      (
+        container.querySelector(
+          'button[aria-haspopup="dialog"]',
+        ) as HTMLButtonElement
+      ).click();
     });
-
-    expect(document.querySelector('[data-session-id="cli-1"]')).not.toBeNull();
-    expect(document.querySelector('[data-session-id="vscode-1"]')).toBeNull();
+    const loadMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Load more',
+      );
+    expect(loadMore()).toBeDefined();
+    expect(container.querySelector('[data-session-id="child-1"]')).toBeNull();
+    await act(async () => loadMore()!.click());
+    expect(container.textContent).toContain('Temporary catalog failure');
+    expect(
+      container.querySelector('[data-session-id="session-1"]'),
+    ).not.toBeNull();
+    expect(loadMore()).toBeDefined();
+    await act(async () => loadMore()!.click());
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenLastCalledWith({
+      pageSize: 20,
+      cursor: 'opaque-page-2',
+      archiveState: 'active',
+      view: 'organized',
+      group: 'all',
+    });
+    expect(container.querySelector('[data-session-id="cli-2"]')).not.toBeNull();
+    expect(container.textContent).toContain(
+      'Some conversations could not be loaded.',
+    );
+    expect(loadMore()).toBeUndefined();
   });
 });
 
