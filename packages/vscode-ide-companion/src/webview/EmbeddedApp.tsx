@@ -416,6 +416,11 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  // The request whose host-owned diff the user closed without voting. While it
+  // is set, the host does not reopen that diff and hands the edit preview back
+  // to the web shell, which renders it inline (#10557).
+  const dismissedPermissionDiffIdRef = useRef<string | undefined>(undefined);
+  const [hostOwnsEditDiffPreview, setHostOwnsEditDiffPreview] = useState(true);
   const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
@@ -608,6 +613,8 @@ export function EmbeddedApp() {
       vscode.postMessage({ type: 'closeDiff', data: { path, requestId } });
     }
     openPermissionDiffsRef.current.clear();
+    dismissedPermissionDiffIdRef.current = undefined;
+    setHostOwnsEditDiffPreview(true);
     if (webShellPermissionRequestIdRef.current) {
       webShellPermissionRequestIdRef.current = undefined;
       vscode.postMessage({
@@ -634,7 +641,8 @@ export function EmbeddedApp() {
           const { path, oldText, newText } = diff;
           pendingIds.add(pendingPermission.requestId);
           if (
-            !openPermissionDiffsRef.current.has(pendingPermission.requestId)
+            !openPermissionDiffsRef.current.has(pendingPermission.requestId) &&
+            dismissedPermissionDiffIdRef.current !== pendingPermission.requestId
           ) {
             openPermissionDiffsRef.current.set(
               pendingPermission.requestId,
@@ -660,6 +668,13 @@ export function EmbeddedApp() {
           type: 'closeDiff',
           data: { path, requestId },
         });
+      }
+      if (
+        dismissedPermissionDiffIdRef.current !== undefined &&
+        dismissedPermissionDiffIdRef.current !== permissionToFocus
+      ) {
+        dismissedPermissionDiffIdRef.current = undefined;
+        setHostOwnsEditDiffPreview(true);
       }
       const pendingDiffRequestId = pendingIds.values().next().value as
         | string
@@ -792,6 +807,20 @@ export function EmbeddedApp() {
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'permissionDiffClosed') {
+        const requestId = (message.data as { requestId?: unknown } | null)
+          ?.requestId;
+        // Same source gate as the decision handler below: MCP apps and artifact
+        // previews run in scriptable sandboxed iframes inside this webview and
+        // can postMessage here. This is not a vote, but it does flip who owns
+        // the edit preview, so only the preload parent frame may send it.
+        if (typeof requestId === 'string' && event.source === window.parent) {
+          openPermissionDiffsRef.current.delete(requestId);
+          if (webShellPermissionRequestIdRef.current === requestId) {
+            dismissedPermissionDiffIdRef.current = requestId;
+            setHostOwnsEditDiffPreview(false);
+          }
+        }
       } else if (message.type === 'webShellPermissionDecision') {
         const decisionData = message.data as {
           decision?: unknown;
@@ -1526,7 +1555,7 @@ export function EmbeddedApp() {
           sidebar={false}
           compactThinking
           collapseCompletedTurns
-          hostOwnsEditDiffPreview
+          hostOwnsEditDiffPreview={hostOwnsEditDiffPreview}
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
@@ -1608,8 +1637,15 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               const snapshot =
                 editingMessage.turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
@@ -1625,10 +1661,14 @@ export function EmbeddedApp() {
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
+              try {
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  clientId: runtime.clientId,
+                  rewindFiles: false,
+                });
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               setEditingMessage(undefined);
               clearInsight();
             }
