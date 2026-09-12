@@ -11,7 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '..');
+// Tests point the gate at a fixture root; the default stays the repository.
+// Truthiness, not `??`: an exported-but-empty variable would otherwise make
+// every path below cwd-relative, and the gate would report on whatever
+// lockfiles happen to sit in that directory as if they were the repository's.
+const envRoot = process.env.CHECK_LOCKFILE_ROOT?.trim();
+const root = envRoot ? envRoot : join(__dirname, '..');
 const lockfilePath = join(root, 'package-lock.json');
 
 function readJsonFile(filePath) {
@@ -139,7 +144,12 @@ console.log('Checking Playwright parity...');
 //     the invariant takes three steps, not one: pin it exact, list the directory
 //     in BOTH the root `workspaces` and `pnpm-workspace.yaml`'s `packages:`
 //     (scripts/tests/package-scripts.test.js asserts the two lists are equal),
-//     then append it below and regenerate both lockfiles.
+//     then append it below and regenerate both lockfiles. Two test-side edits
+//     ride with the append: `scripts/tests/check-lockfile.test.js` copies only
+//     the manifests its fixtures perturb, so the new one joins its `FILES`, and
+//     its third-manifest arm builds a third entry by rewriting a literal copy
+//     of the list below — with a real third entry present that arm asserts on a
+//     list the file no longer has, so retire it or repoint it at a fourth.
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[\w.-]+)?$/;
 const playwrightManifests = [
   { manifest: 'package.json', name: 'playwright' },
@@ -194,17 +204,29 @@ if (pinEntry.exact) {
       );
     } else if (actual !== pinned) {
       parityErrors.push(
-        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it then a manifest range is resolving above the pin — packages/mobile-mcp's @playwright/test is the only in-workspace one`,
+        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it then something is rewriting the resolved version — a manifest range resolving above the pin (packages/mobile-mcp's @playwright/test is the only in-workspace one) or the root package.json \`overrides:\` block, which carries no Playwright entry today`,
       );
     }
   }
   // A nested copy at the pinned version is a redundant install, not a split
-  // revision, so only a differing one is an error.
-  const nested = 'node_modules/@playwright/test/node_modules/playwright';
-  if (packages[nested] && packages[nested].version !== pinned) {
-    parityErrors.push(
-      `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate the lockfile`,
-    );
+  // revision, so only a differing one is an error. Derived from the manifest
+  // list in both directions, so an entry appended above is covered by this
+  // check as well as by the two over it — a split revision is the failure this
+  // whole block exists to own, and it is the one check a hardcoded path would
+  // silently stop applying to a third manifest.
+  const pinnedNames = playwrightSpecs.map(({ name }) => name);
+  for (const outer of pinnedNames) {
+    for (const inner of pinnedNames) {
+      if (outer === inner) {
+        continue;
+      }
+      const nested = `node_modules/${outer}/node_modules/${inner}`;
+      if (packages[nested] && packages[nested].version !== pinned) {
+        parityErrors.push(
+          `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate the lockfile`,
+        );
+      }
+    }
   }
 }
 
@@ -219,6 +241,14 @@ if (pinEntry.exact) {
 // a no-op when one of them is what decides the value.
 const pnpmImporters = pnpmLockfile?.importers ?? {};
 for (const { manifest, name, spec, exact } of playwrightSpecs) {
+  // A declaration that is simply gone is already an error above, and every
+  // remedy this block offers — regenerate, check the importer is listed, an
+  // overrides entry decides the value — presupposes the manifest still
+  // declares the package. Running them anyway diagnoses one absence three
+  // times and interpolates the missing spec as the string "null".
+  if (spec === null) {
+    continue;
+  }
   const importer = dirname(manifest);
   const entry =
     pnpmImporters[importer]?.devDependencies?.[name] ??
@@ -248,4 +278,134 @@ if (parityErrors.length > 0) {
   process.exitCode = 1;
 } else {
   console.log('Playwright parity check passed.');
+}
+
+// The dependency name behind a package-lock.json location. An aliased install
+// (`"string-width-cjs": "npm:string-width@…"`) sits under the alias and
+// records the real name in `name`.
+function npmPackageName(location, details) {
+  if (details.name) return details.name;
+  const marker = 'node_modules/';
+  return location.slice(location.lastIndexOf(marker) + marker.length);
+}
+
+// pnpm keys are `name@version` (allowBuilds also accepts `name@spec`); a
+// scoped name starts with its own `@`.
+function pnpmPackageName(key) {
+  const at = key.indexOf('@', 1);
+  return at === -1 ? key : key.slice(0, at);
+}
+
+console.log('Checking pnpm lockfile against package-lock.json...');
+
+const npmLockedVersions = new Set();
+const npmLockedSources = new Set();
+for (const [location, details] of Object.entries(packages)) {
+  if (details.link === true || !location.includes('node_modules/')) {
+    continue;
+  }
+  npmLockedVersions.add(
+    `${npmPackageName(location, details)}@${details.version}`,
+  );
+  // pnpm keys a git or file: dependency by its source instead of a version
+  // (`name@git+https://…#hash`), so those keys can only ever match npm's
+  // `resolved`.
+  if (
+    details.resolved?.startsWith('git') ||
+    details.resolved?.startsWith('file:')
+  ) {
+    npmLockedSources.add(
+      `${npmPackageName(location, details)}@${details.resolved}`,
+    );
+  }
+}
+
+// form-data nests mime-types@2.1.35, which requires exactly mime-db 1.52.0,
+// but package-lock.json locks no nested mime-db there, so npm serves it the
+// hoisted 1.54.0 while pnpm honours the pin. Drop the entry once npm locks
+// 1.52.0 or form-data moves off mime-types@2.
+const knownNpmLockGaps = new Set(['mime-db@1.52.0']);
+
+// pnpm dedupes where npm keeps nested copies (npm locks esbuild 0.25.6 at the
+// root and 0.25.12 nested; pnpm uses 0.25.12 for both), so the two graphs are
+// never equal. The direction that matters is this one: a pnpm worktree must
+// not run a dependency version that CI's npm install has not locked.
+const pnpmVersions = Object.keys(pnpmLockfile?.packages ?? {});
+if (pnpmVersions.length === 0) {
+  console.error(
+    'Error: pnpm-lock.yaml has no packages section; the version agreement gate read nothing.',
+  );
+  process.exit(1);
+}
+const unlockedPnpmVersions = pnpmVersions.filter(
+  (key) =>
+    !npmLockedVersions.has(key) &&
+    !npmLockedSources.has(key) &&
+    !knownNpmLockGaps.has(key),
+);
+const staleNpmLockGaps = [...knownNpmLockGaps].filter(
+  (key) => !pnpmVersions.includes(key) || npmLockedVersions.has(key),
+);
+
+if (unlockedPnpmVersions.length > 0) {
+  console.error(
+    '\nError: pnpm-lock.yaml resolves versions that package-lock.json does not lock. Regenerate it from package-lock.json with `corepack pnpm import`. If the divergence survives that, a pnpm-workspace.yaml `overrides:` entry is deciding the version (three pin typescript today) and no npm-side regeneration can match it:',
+  );
+  unlockedPnpmVersions.forEach((key) => console.error(`- ${key}`));
+  process.exitCode = 1;
+}
+if (staleNpmLockGaps.length > 0) {
+  console.error(
+    '\nError: remove these entries from knownNpmLockGaps in scripts/check-lockfile.js; they no longer describe a gap:',
+  );
+  staleNpmLockGaps.forEach((key) => console.error(`- ${key}`));
+  process.exitCode = 1;
+}
+if (unlockedPnpmVersions.length === 0 && staleNpmLockGaps.length === 0) {
+  console.log('pnpm lockfile matches package-lock.json.');
+}
+
+console.log('Checking pnpm build approvals...');
+
+const pnpmWorkspacePath = join(root, 'pnpm-workspace.yaml');
+let pnpmWorkspace;
+try {
+  pnpmWorkspace = parseYaml(fs.readFileSync(pnpmWorkspacePath, 'utf-8'));
+} catch (error) {
+  console.error(`Error reading or parsing ${pnpmWorkspacePath}:`, error);
+  process.exit(1);
+}
+
+// npm runs every dependency install script; pnpm runs one only when
+// allowBuilds approves it. Requiring an entry for each script npm runs keeps
+// that difference a reviewed decision instead of a silent one.
+const decidedBuilds = new Set(
+  Object.entries(pnpmWorkspace?.allowBuilds ?? {})
+    // pnpm itself records an undecided entry as the string 'set this to true
+    // or false'; only a boolean runs or skips a build.
+    .filter(([, decision]) => typeof decision === 'boolean')
+    .map(([key]) => pnpmPackageName(key)),
+);
+const undecidedBuilds = new Set();
+for (const [location, details] of Object.entries(packages)) {
+  if (
+    details.hasInstallScript !== true ||
+    !location.includes('node_modules/')
+  ) {
+    continue;
+  }
+  const name = npmPackageName(location, details);
+  if (!decidedBuilds.has(name)) {
+    undecidedBuilds.add(name);
+  }
+}
+
+if (undecidedBuilds.size > 0) {
+  console.error(
+    '\nError: these dependencies have install scripts but no allowBuilds entry in pnpm-workspace.yaml; add each with true (run it) or false (skip it):',
+  );
+  [...undecidedBuilds].sort().forEach((name) => console.error(`- ${name}`));
+  process.exitCode = 1;
+} else {
+  console.log('pnpm build approvals cover every install script.');
 }
