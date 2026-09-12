@@ -6108,8 +6108,8 @@ export class LlmChat {
     // the recovered functionCall. Intentionally looser than
     // isValidNonThoughtTextPart: hasAnyContent below must keep treating such
     // a part as visible text, not silently empty.
-    const isVisibleTextPart = (part: Part): boolean =>
-      Boolean(part.text) && !part.thought;
+    const isVisibleTextPart = (part: Part): part is Part & { text: string } =>
+      typeof part.text === 'string' && part.text.length > 0 && !part.thought;
 
     const thoughtText = consolidatedHistoryParts
       .filter((part) => part.thought)
