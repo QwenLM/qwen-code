@@ -91,7 +91,7 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
@@ -210,6 +210,9 @@ export enum SendMessageType {
   /** Runtime-owned continuation for an active Goal. */
   Goal = 'goal',
 }
+
+/** Upper bound on prompt ids remembered as Stop-hook-forced. */
+const MAX_STOP_HOOK_FORCED_PROMPT_IDS = 32;
 
 export interface SendMessageOptions {
   type: SendMessageType;
@@ -431,6 +434,25 @@ export class LlmClient {
     undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
   };
   private sessionTurnCount = 0;
+  /**
+   * Prompt ids whose previous Stop check was blocked by a Stop hook, so the
+   * turn now running is that hook's continuation. Drives `stop_hook_active`.
+   *
+   * Kept on the client, keyed by prompt id, because a hook-forced
+   * continuation that calls a tool comes back through a fresh top-level
+   * sendMessageStream call from the caller. That re-entry must reuse the
+   * same `prompt_id` to be recognised. Any send that starts an interaction
+   * (user query, retry, cron, notification, teammate, goal turn) clears its
+   * own id: new input arrived, so the next Stop is not hook-forced. A caller
+   * that re-mints the prompt id for the re-entry (the teammate turn in
+   * headless mode) therefore starts fresh by design. Entries are also
+   * cleared when the stop is allowed, the blocking cap is hit, steer input
+   * replaces the turn, or the send exits abnormally.
+   *
+   * Only the flag lives here; the consecutive-block count still rides the
+   * per-call `stopHookState`.
+   */
+  private readonly stopHookForcedPromptIds = new Set<string>();
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
@@ -1119,6 +1141,10 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    // The active-todo reminder describes the discarded timeline: clear it and
+    // its chain so the next turn cannot continue work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
+    this.config.clearActiveTodoReminders();
     this.forceFullIdeContext = true;
   }
 
@@ -1140,6 +1166,11 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      // A rewind discards the timeline the active-todo reminder described:
+      // clear it and its chain so the next turn starts fresh instead of
+      // continuing work that was rewound away.
+      this.activeTodoWorkChainPromptId = undefined;
+      this.config.clearActiveTodoReminders();
     }
     this.forceFullIdeContext = true;
   }
@@ -2822,6 +2853,24 @@ export class LlmClient {
     }
   }
 
+  private markStopHookForced(promptId: string): void {
+    this.stopHookForcedPromptIds.delete(promptId);
+    this.stopHookForcedPromptIds.add(promptId);
+    // Bounded: a continuation that ends with tool calls the caller never
+    // re-enters leaves its id behind until that id starts a new interaction.
+    while (
+      this.stopHookForcedPromptIds.size > MAX_STOP_HOOK_FORCED_PROMPT_IDS
+    ) {
+      const oldest = this.stopHookForcedPromptIds.values().next().value;
+      if (oldest === undefined) break;
+      this.stopHookForcedPromptIds.delete(oldest);
+    }
+  }
+
+  private clearStopHookForced(promptId: string): void {
+    this.stopHookForcedPromptIds.delete(promptId);
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3184,6 +3233,9 @@ export class LlmClient {
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      // New input starts this interaction, so its first Stop is not
+      // hook-forced even when a retry or goal turn reuses the prompt id.
+      this.clearStopHookForced(prompt_id);
       startInteractionSpan(this.config, {
         promptId: prompt_id,
         model: options?.modelOverride ?? this.config.getModel(),
@@ -3469,7 +3521,20 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      this.config.startActiveTodoWorkChain(prompt_id);
+      // A registered reminder means the previous chain's plan still has
+      // unfinished items (todo_write deletes it on completion): continue
+      // that chain instead of discarding its context with the very turn
+      // that may be asking about it (#10953).
+      const continuedFrom =
+        this.activeTodoWorkChainPromptId !== undefined &&
+        this.config.getActiveTodoReminder(this.activeTodoWorkChainPromptId) !==
+          undefined &&
+        this.config.getActiveTodoWorkChainOwner(
+          this.activeTodoWorkChainPromptId,
+        ) === this.config.getActiveTodoPlanWriterOwner()
+          ? this.activeTodoWorkChainPromptId
+          : undefined;
+      this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
       this.config.startActiveTodoWorkChain(
@@ -3997,8 +4062,20 @@ export class LlmClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
-        const activeTodoReminder =
-          this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        const carriesAgentToolResult = requestToSend.some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            canonicalToolName(part.functionResponse?.name ?? '') ===
+              ToolNames.AGENT,
+        );
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4310,6 +4387,8 @@ export class LlmClient {
         const steerTurnBudget = boundedTurns - 1;
         const steerInput = await takeSteerInput(steerTurnBudget);
         if (steerInput) {
+          // A steered turn is user-driven, not forced by a Stop hook.
+          this.clearStopHookForced(prompt_id);
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
@@ -4364,7 +4443,10 @@ export class LlmClient {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
             eventName: 'Stop',
             input: {
-              stop_hook_active: true,
+              // True while this prompt is continuing because a Stop hook
+              // blocked, including after tool calls made along the way, so a
+              // hook can tell its own continuation apart and stop re-blocking.
+              stop_hook_active: this.stopHookForcedPromptIds.has(prompt_id),
               last_assistant_message: responseText,
               ...contextUsage,
             },
@@ -4414,6 +4496,7 @@ export class LlmClient {
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
 
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.clearStopHookForced(prompt_id);
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
@@ -4463,6 +4546,7 @@ export class LlmClient {
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
             const pushCountBefore = currentPushCount();
+            this.markStopHookForced(prompt_id);
             let hookTurn: Turn;
             try {
               hookTurn = yield* this.sendMessageStream(
@@ -4521,6 +4605,7 @@ export class LlmClient {
           // yield because a cap of 1 means no follow-up turn should run.
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.clearStopHookForced(prompt_id);
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
@@ -4571,6 +4656,7 @@ export class LlmClient {
             continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
           }
           const pushCountBefore = currentPushCount();
+          this.markStopHookForced(prompt_id);
           let hookTurn: Turn;
           try {
             hookTurn = yield* this.sendMessageStream(
@@ -4613,6 +4699,8 @@ export class LlmClient {
           return hookTurn;
         }
 
+        // The stop was allowed, so this prompt is no longer hook-forced.
+        this.clearStopHookForced(prompt_id);
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
@@ -4846,6 +4934,9 @@ export class LlmClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        // Only a natural end can hand a hook-forced turn's tool calls back to
+        // the caller for a ToolResult re-entry; any other exit ends it.
+        this.clearStopHookForced(prompt_id);
         this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
