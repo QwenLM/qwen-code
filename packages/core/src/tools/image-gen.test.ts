@@ -70,15 +70,28 @@ describe('ImageGenTool', () => {
     );
 
     const result = await tool.buildAndExecute(
-      { prompt: 'A Qwen Code poster', size: '1536*864' },
+      {
+        prompt: 'A Qwen Code poster',
+        size: '1536*864',
+        referenceImage: 'https://reference.example.com/portrait.png',
+      },
       new AbortController().signal,
     );
 
+    expect(
+      tool
+        .build({
+          prompt: 'A Qwen Code poster',
+          referenceImage: 'https://reference.example.com/portrait.png',
+        })
+        .getDescription(),
+    ).toContain('using a reference image');
     expect(generateImage).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'qwen-image-2.0',
         prompt: 'A Qwen Code poster',
         size: '1536*864',
+        referenceImage: 'https://reference.example.com/portrait.png',
         apiKey: 'secret',
       }),
     );

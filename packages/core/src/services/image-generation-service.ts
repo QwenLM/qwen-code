@@ -21,6 +21,8 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 const MINIMAX_IMAGE_GENERATION_PATH = '/v1/image_generation';
 const MINIMAX_IMAGE_GENERATION_SUFFIX = '/image_generation';
 
@@ -32,6 +34,7 @@ export interface ImageGenerationRequest {
   model: string;
   prompt: string;
   size?: string;
+  referenceImage?: string;
   signal: AbortSignal;
   fetchFn?: typeof fetch;
 }
@@ -81,6 +84,11 @@ export async function generateImage(
   }
   if (isMiniMaxImageGenerationBaseUrl(baseUrl)) {
     return generateMiniMaxImage({ ...request, baseUrl, fetchFn });
+  }
+  if (request.referenceImage) {
+    throw new Error(
+      'Reference images are not supported by the configured image endpoint.',
+    );
   }
   const generationUrl = baseUrl.endsWith(
     '/services/aigc/multimodal-generation/generation',
@@ -169,7 +177,14 @@ async function generateMiniMaxImage(
     body['width'] = dimensions.width;
     body['height'] = dimensions.height;
   }
-
+  if (request.referenceImage) {
+    body['subject_reference'] = [
+      {
+        type: 'character',
+        image_file: normalizeReferenceImage(request.referenceImage),
+      },
+    ];
+  }
   let response: Response;
   try {
     response = await request.fetchFn(generationUrl, {
@@ -210,11 +225,8 @@ async function generateMiniMaxImage(
   }
 
   const requestId =
-    readString(payload, 'request_id', 'requestId') ??
-    readString(
-      isRecord(payload) ? payload['base_resp'] : undefined,
-      'request_id',
-    );
+    readString(payload, 'id', 'request_id', 'requestId') ??
+    readString(baseResponse, 'request_id');
   if (image.kind === 'base64') {
     return {
       bytes: decodePngBase64Image(image.value),
@@ -361,6 +373,53 @@ function parseImageSize(
   return { width, height };
 }
 
+function normalizeReferenceImage(value: string): string {
+  const referenceImage = value.trim();
+  if (/^data:/i.test(referenceImage)) {
+    const match = /^data:image\/(?:png|jpe?g);base64,([a-z0-9+/=\s]+)$/i.exec(
+      referenceImage,
+    );
+    if (!match) {
+      throw new Error(
+        'Reference image data must be a base64-encoded PNG or JPEG data URL.',
+      );
+    }
+    const bytes = Buffer.from(match[1].replace(/\s/g, ''), 'base64');
+    const validSignature =
+      bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE) ||
+      bytes.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE);
+    if (
+      !validSignature ||
+      bytes.length === 0 ||
+      bytes.length >= MAX_REFERENCE_IMAGE_BYTES
+    ) {
+      throw new Error(
+        'Reference image data must be a valid PNG or JPEG smaller than 10 MB.',
+      );
+    }
+    return referenceImage;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(referenceImage);
+  } catch {
+    throw new Error(
+      'Reference image must be a public HTTPS URL or PNG/JPEG data URL.',
+    );
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    isPrivateHost(parsed.toString())
+  ) {
+    throw new Error(
+      'Reference image must be a public HTTPS URL or PNG/JPEG data URL.',
+    );
+  }
+  return parsed.toString();
+}
 function findMiniMaxGeneratedImage(
   payload: unknown,
 ): { kind: 'url' | 'base64'; value: string } | undefined {
