@@ -946,6 +946,7 @@ describe('Session', () => {
       startAutomaticActiveTodoWorkChain: vi.fn(),
       endAutomaticActiveTodoWorkChain: vi.fn(),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
@@ -2991,6 +2992,11 @@ describe('Session', () => {
     vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
       '<system-reminder>unfinished todo: delegated node</system-reminder>',
     );
+    // The foreground head still owns the session plan file, so the
+    // continuation guard's owner-equality conjunct holds.
+    vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+      'test-session-id########1',
+    );
 
     await session.prompt({
       sessionId: 'test-session-id',
@@ -3025,6 +3031,37 @@ describe('Session', () => {
     });
     expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
       'test-session-id########3',
+      undefined,
+    );
+  });
+
+  it('does not continue the todo work chain when the plan was last written by a foreign owner', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    // A reminder is registered, but an isolated cron/notification turn last
+    // wrote the session plan under its own owner — the foreground head no
+    // longer owns the authoritative plan, so the continuation guard must
+    // not carry (and must not re-deliver the stale foreground snapshot).
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+      '<system-reminder>unfinished todo: delegated node</system-reminder>',
+    );
+    vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+      'prompt-cron',
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'how is progress going?' }],
+    });
+
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
       undefined,
     );
   });

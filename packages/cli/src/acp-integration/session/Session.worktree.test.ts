@@ -120,6 +120,7 @@ describe('Session.pendingWorktreeNotice', () => {
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),

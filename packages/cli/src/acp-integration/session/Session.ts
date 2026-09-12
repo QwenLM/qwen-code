@@ -5928,7 +5928,10 @@ export class Session implements SessionContext {
               (this.activeTodoWorkChainPromptId !== undefined &&
                 this.config.getActiveTodoReminder(
                   this.activeTodoWorkChainPromptId,
-                ) !== undefined);
+                ) !== undefined &&
+                this.config.getActiveTodoWorkChainOwner(
+                  this.activeTodoWorkChainPromptId,
+                ) === this.config.getActiveTodoPlanWriterOwner());
             this.config.startActiveTodoWorkChain(
               promptId,
               continuesTodoWorkChain
