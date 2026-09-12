@@ -16,6 +16,11 @@ import {
   makeSwapSlotClient,
   type SwapSlotClient,
 } from '../../test-utils/mock-swap-slot-client.js';
+import {
+  getPromptCountFloor,
+  mintLivePromptId,
+  resetPromptCountFloorForTesting,
+} from '../utils/prompt-count-floor.js';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -493,6 +498,124 @@ describe('useResumeCommand', () => {
     expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('closes the duplicate-mint window during the swap awaits (R43-1)', async () => {
+    // The composer is live from closeResumeDialog() on while the swap awaits
+    // waitForGoalRuntime / rebuildTurnBoundaries / initialize; the provider
+    // seed runs only after the UI re-key, so a submit in the window mints
+    // incoming########<outgoingCount> — an id the incoming transcript may
+    // already claim. The floor recorded before the core swap must hold the
+    // mint past the claims while initialize() is parked.
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+    resetPromptCountFloorForTesting();
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
+
+    let liveSessionId = 'old-session-id';
+    let resolveInitialize: (() => void) | undefined;
+    const initialize = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInitialize = resolve;
+        }),
+    );
+    const config = {
+      getSessionId: () => liveSessionId,
+      getTargetDir: () => '/tmp',
+      getLlmClient: () => ({ initialize }),
+      startNewSession: vi.fn(() => {
+        liveSessionId = 'session-2';
+      }),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice: vi.fn(),
+      }),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-2');
+    });
+    resumeMocks.resolvePendingLoadSession({
+      conversation: {
+        sessionId: 'session-2',
+        projectHash: 'project-1',
+        startTime: '2026-07-11T00:00:00.000Z',
+        lastUpdated: '2026-07-11T00:00:03.000Z',
+        messages: [0, 1, 2].map((turn) => ({
+          uuid: `m-${turn}`,
+          parentUuid: turn === 0 ? null : `m-${turn - 1}`,
+          sessionId: 'session-2',
+          timestamp: '2026-07-11T00:00:00.000Z',
+          type: 'user',
+          cwd: '/tmp/project',
+          version: 'test',
+          message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+          promptId: `session-2########${turn}`,
+        })),
+      },
+    });
+
+    // Park the swap inside the initialize() replay: core has re-keyed to
+    // session-2, the UI has not, and the provider's promptCount still holds
+    // the outgoing session's count (1).
+    await act(async () => {
+      await vi.waitFor(() => expect(initialize).toHaveBeenCalled());
+    });
+    expect(liveSessionId).toBe('session-2');
+    expect(mintLivePromptId(config, () => 1)).toBe('session-2########3');
+    expect(getPromptCountFloor('session-2')).toBe(3);
+
+    await act(async () => {
+      resolveInitialize!();
+      await resumePromise;
+    });
+    expect(seedPromptCount).toHaveBeenCalledWith(3);
   });
 
   it('seeds a monotonic no-op zero when the transcript has no user turns', async () => {

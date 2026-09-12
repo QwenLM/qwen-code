@@ -26,6 +26,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { recordPromptCountFloor } from '../utils/prompt-count-floor.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -214,6 +215,21 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
+        // Record the incoming session's prompt-count floor BEFORE the core
+        // swap: from here until the UI re-key + seed below, the composer is
+        // live (the dialog closed above), config.getSessionId() answers the
+        // incoming session, and the provider's promptCount still holds the
+        // outgoing session's count — a submit in that window would mint an
+        // id the incoming transcript already claims (R43-1). The
+        // provider-side seed below must still run after the reset, which
+        // would erase an earlier one.
+        recordPromptCountFloor(
+          sessionId,
+          computeResumedPromptCountSeed(
+            sessionData.conversation.messages,
+            sessionId,
+          ),
+        );
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);

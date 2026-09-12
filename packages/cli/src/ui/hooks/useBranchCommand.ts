@@ -19,6 +19,7 @@ import {
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
+import { recordPromptCountFloor } from '../utils/prompt-count-floor.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
@@ -255,7 +256,15 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
-        //    client.ts).
+        //    client.ts). Record the branch's prompt-count floor first for
+        //    the same open-window reason as handleResume (R43-1).
+        recordPromptCountFloor(
+          newSessionId,
+          computeResumedPromptCountSeed(
+            resumed.conversation.messages,
+            newSessionId,
+          ),
+        );
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);

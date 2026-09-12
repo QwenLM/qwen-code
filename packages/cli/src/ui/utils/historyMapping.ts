@@ -15,6 +15,7 @@ import {
   isApiUserPrompt,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
+  stripSystemReminderBlocks,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
@@ -118,11 +119,19 @@ function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
       part.text.length > 0 &&
       !isSystemReminderContent({ role: 'user', parts: [part] }),
   );
-  return (
-    promptPart !== undefined &&
-    'text' in promptPart &&
-    promptPart.text === targetText
-  );
+  if (
+    promptPart === undefined ||
+    !('text' in promptPart) ||
+    typeof promptPart.text !== 'string'
+  ) {
+    return false;
+  }
+  if (promptPart.text === targetText) return true;
+  // IDE mode concatenates the editor-context reminder INTO the prompt's own
+  // text part instead of wrapping it as a separate part (see
+  // isSystemReminderContent's close-tag rule), so the exact match never
+  // fires for those turns. Compare with reminder blocks stripped (R42-1).
+  return stripSystemReminderBlocks(promptPart.text).trim() === targetText;
 }
 
 /**
@@ -333,21 +342,57 @@ export function computeApiTruncationIndex(
     // positions have desynced — an absorbed turn — which is the case
     // identity exists to resolve and which the round-28 tests pin. Those
     // targets carry ordinary text and never reach this branch.
+    // A drained background-agent/cron completion renders one notification
+    // ITEM per drained task but submits one user-role ENTRY per drain batch,
+    // so counting every notification item lets unowned items (batch tails,
+    // dropped-summary notices, envelopes merged into a functionResponse)
+    // cancel unowned entries — the R32-1 cancellation the ordinal proof and
+    // the demotion exist to reject (R42-3). Pair the two sides ordinally
+    // among <task-notification>-shaped units: the k-th item owns the k-th
+    // entry; items past the entry count own nothing.
+    const countOwnedNotificationItems = (
+      uiTo: number,
+      apiTo: number,
+    ): number => {
+      let entries = 0;
+      for (let i = startIndex; i < apiTo; i++) {
+        const entry = apiHistory[i]!;
+        if (entry.role !== 'user' || !entry.parts) continue;
+        const promptPart = entry.parts.find(
+          (part) =>
+            'text' in part &&
+            typeof part.text === 'string' &&
+            part.text.length > 0 &&
+            !isSystemReminderContent({ role: 'user', parts: [part] }),
+        );
+        if (
+          promptPart !== undefined &&
+          'text' in promptPart &&
+          typeof promptPart.text === 'string' &&
+          promptPart.text.startsWith('<task-notification>')
+        ) {
+          entries++;
+        }
+      }
+      let items = 0;
+      for (
+        let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+        i < uiTo;
+        i++
+      ) {
+        if (uiHistory[i]!.type === 'notification') items++;
+      }
+      return Math.min(items, entries);
+    };
     const matchOrdinalAgrees = (matchIndex: number): boolean => {
-      let expected = 0;
+      let expected = countOwnedNotificationItems(targetIndex, matchIndex);
       for (
         let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
         i < targetIndex;
         i++
       ) {
         const item = uiHistory[i]!;
-        // The API side counts a drained notification's entry, so the UI
-        // side counts its item — the same owning population the demotion
-        // census below enumerates (R35-2).
-        if (
-          item.type === 'notification' ||
-          (isRealUserTurn(item) && item.promptHasModelText !== false)
-        ) {
+        if (isRealUserTurn(item) && item.promptHasModelText !== false) {
           expected++;
         }
       }
@@ -365,10 +410,31 @@ export function computeApiTruncationIndex(
         // counting either inflates the backstop with a position no UI turn
         // owns, exactly the unit that admits a re-minted placeholder
         // impostor the aligned counts accept trivially (R35-4).
+        // A microcompaction-cleared attachment-only entry has a text part
+        // (the placeholder), so the text-less clause drops it while its UI
+        // turn stays counted in uiUserTurnCount — the backstop then refuses
+        // a unique ownership-proven match (R43-2). Keep such an entry
+        // counted when a real UI turn before the target claims its mark; a
+        // wholly-structural reminder or an unclaimed cleared entry has no
+        // claimant and stays out (R35-4).
+        const claimedBeforeTarget = (() => {
+          const mark = getApiHistoryPromptId(entry);
+          if (mark === undefined) return false;
+          return uiHistory.some(
+            (item, index) =>
+              index < targetIndex &&
+              (compressionIndex === -1 || index > compressionIndex) &&
+              isRealUserTurn(item) &&
+              !item.promptIdFileKeyOnly &&
+              item.promptId === mark,
+          );
+        })();
         if (
           entry.role === 'user' &&
           !entry.parts?.some((part) => 'functionResponse' in part) &&
-          (ownable || !entry.parts?.some((part) => 'text' in part))
+          (ownable ||
+            !entry.parts?.some((part) => 'text' in part) ||
+            claimedBeforeTarget)
         ) {
           absolute++;
         }
@@ -394,13 +460,13 @@ export function computeApiTruncationIndex(
       // account for: more counted entries precede the match than UI items
       // that own a counted entry — entries of turns the UI deleted, or of
       // a claimant-less re-send. The owning population is real user turns
-      // with a model-facing text plus drained notification items: a
-      // background-agent/cron completion displays as `{type:
-      // 'notification'}` but submits a real user-role entry the walk
-      // counts (R33-1), while a mid-turn steer message owns no counted
-      // entry (its parts merge into a functionResponse entry the walk
-      // excludes) and displays as a `sentToModel: false` user item, so
-      // neither side counts it. No compressed prefix explains an early
+      // with a model-facing text plus notification items PAIRED with a
+      // <task-notification> entry: a background-agent/cron completion
+      // displays as `{type: 'notification'}` but submits a real user-role
+      // entry the walk counts (R33-1), while a mid-turn steer message owns
+      // no counted entry (its parts merge into a functionResponse entry the
+      // walk excludes) and displays as a `sentToModel: false` user item,
+      // so neither side counts it. No compressed prefix explains an early
       // walk (startIndex skips the prefix, and excluded entries desync the
       // walk LATE, never early). The walk's answer is the exact
       // pre-identity boundary, so preferring it can never produce a
@@ -408,36 +474,35 @@ export function computeApiTruncationIndex(
       // A walk that lands late or cannot land leaves identity preferred,
       // which is the absorbed-turn exactness this gate is for.
       //
-      // Known unpaired kinds this census cannot see (R36-2; the structural
-      // fix — one owner pairing both sides derive from — is deferred to a
-      // follow-up carrying the removal condition): UI items owning NO
-      // counted entry inflate the UI side and can suppress the demotion —
-      // a model-fallback notice, items 2..N of a drained batch (one
-      // submitQuery serves the whole batch), a dropped-summary notice, a
+      // Known unpaired kinds this census cannot see (R36-2): UI-side
+      // notification items owning no entry (a model-fallback notice, items
+      // 2..N of a drained batch, a dropped-summary notice, a
       // tool-round-boundary notification whose envelope merged into a
-      // functionResponse entry, a realtime_message (session-api-history
-      // builds it no entry); API entries no UI item owns inflate the API
-      // side and can fire it spuriously — a Goal continuation, a
-      // standalone steer pushed via the history.push fallback, an
-      // attachment-only turn's text-less entry (the absolute backstop
-      // counts it; no census item does).
+      // functionResponse entry) are paired off by countOwnedNotificationItems
+      // above; a realtime_message displays as a `sentToModel: false` user
+      // item, so neither side counts it. What remains unpaired are API
+      // entries no UI item owns, which inflate the API side and can fire
+      // the demotion spuriously — a Goal continuation, a standalone steer
+      // pushed via the history.push fallback, an attachment-only turn's
+      // text-less entry (the absolute backstop counts it; no census item
+      // does).
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         let countedBeforeMatch = 0;
         for (let i = startIndex; i < identifiedIndex; i++) {
           if (isUserTextContent(apiHistory[i]!)) countedBeforeMatch++;
         }
-        let ownedBeforeTarget = 0;
+        let ownedBeforeTarget = countOwnedNotificationItems(
+          targetIndex,
+          identifiedIndex,
+        );
         for (
           let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
           i < targetIndex;
           i++
         ) {
           const item = uiHistory[i]!;
-          if (
-            item.type === 'notification' ||
-            (isRealUserTurn(item) && item.promptHasModelText !== false)
-          ) {
+          if (isRealUserTurn(item) && item.promptHasModelText !== false) {
             ownedBeforeTarget++;
           }
         }

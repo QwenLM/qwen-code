@@ -5333,6 +5333,99 @@ describe('SessionService', () => {
       );
     });
 
+    it('remaps record and chat_compression promptIds into the fork (R42-2)', async () => {
+      // parseSessionPromptTurn keys claims on the exact
+      // `${sessionId}########` prefix, so unremapped record ids are
+      // invisible to the fork's prompt-count seed and the next live mint
+      // collides with an inherited snapshot id. The record side must follow
+      // the snapshot side's rule.
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const userRecord = {
+        ...(lines[0] as Record<string, unknown>),
+        promptId: `${oldId}########0`,
+      };
+      fs.writeFileSync(
+        file,
+        [
+          userRecord,
+          lines[1]!,
+          {
+            uuid: 'compression-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'chat_compression',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 40,
+                compressionStatus: 'compressed',
+              },
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+              ],
+              promptIds: [`${oldId}########0`, null],
+            },
+          },
+          {
+            uuid: 'snapshot-1',
+            parentUuid: 'compression-1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'file_history_snapshot',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `${oldId}########0`,
+                  timestamp: '2026-04-22T00:00:03.000Z',
+                  trackedFileBackups: {},
+                },
+              ],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      const copiedUser = written.find((record) => record.uuid === 'u1');
+      expect(copiedUser.promptId).toBe(`${newId}########0`);
+
+      const copiedCompression = written.find(
+        (record) => record.subtype === 'chat_compression',
+      );
+      expect(copiedCompression.systemPayload.promptIds).toEqual([
+        `${newId}########0`,
+        null,
+      ]);
+
+      const copiedSnapshot = written.find(
+        (record) => record.subtype === 'file_history_snapshot',
+      );
+      const snapshotIds = copiedSnapshot.systemPayload.snapshots.map(
+        (snapshot: { promptId: string }) => snapshot.promptId,
+      );
+      expect(snapshotIds).toContain(`${newId}########0`);
+      // The remapped record id matches the remapped snapshot id, so the
+      // fork's seed sees the claim.
+      expect(copiedUser.promptId).toBe(snapshotIds[0]);
+    });
+
     it('does not copy source turn_result identities into a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
