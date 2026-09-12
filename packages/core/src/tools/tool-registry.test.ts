@@ -386,6 +386,27 @@ describe('ToolRegistry', () => {
   });
 
   describe('deferred tool filtering', () => {
+    it('exposes structured memory tools only in structured recall mode', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'search_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'manage_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      const mode = vi.spyOn(config, 'getMemoryRecallMode');
+
+      mode.mockReturnValue('legacy');
+      expect(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name),
+      ).toEqual(['read_file']);
+
+      mode.mockReturnValue('structured');
+      expect(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name),
+      ).toEqual(['manage_memory', 'read_file', 'search_memory']);
+    });
+
     it('sorts visible function declarations by canonical name', () => {
       toolRegistry.registerTool(new MockTool({ name: 'zeta' }));
       toolRegistry.registerTool(new MockTool({ name: 'alpha' }));

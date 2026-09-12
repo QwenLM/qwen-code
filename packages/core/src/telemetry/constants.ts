@@ -88,6 +88,10 @@ export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
 export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
+export const EVENT_MEMORY_SEARCH = 'qwen-code.memory.search';
+export const EVENT_MEMORY_MIGRATION = 'qwen-code.memory.migration';
+export const EVENT_MEMORY_RECALL_MODE_TRANSITION =
+  'qwen-code.memory.recall_mode_transition';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';

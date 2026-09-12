@@ -304,12 +304,21 @@ import {
   readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import {
+  getProjectMetadataMigrationRoots,
+  scanMemoryMetadataCorpusStatus,
+  type MemoryMetadataCorpusStatus,
+} from '../memory/metadata-migration.js';
+import { buildStructuredAutoMemoryPrompt } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -317,6 +326,17 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+export type MemoryRecallMode = 'legacy' | 'structured';
+
+export interface PreparedMemoryRecallTransition {
+  from: MemoryRecallMode;
+  to: MemoryRecallMode;
+  revision: string;
+  autoMemoryPrompt: string;
+  previousRevision: string;
+  previousAutoMemoryPrompt: string;
+}
 
 /** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
@@ -2667,6 +2687,9 @@ export class Config {
    * the shortest possible cached prompt prefix.
    */
   private autoMemoryPrompt = '';
+  private memoryRecallMode: MemoryRecallMode = 'legacy';
+  private memoryCorpusRevision = '';
+  private memoryRecallModeInitialized = false;
   private sdkMode: boolean;
   private memoryFileCount: number;
   private loadedContextFilePaths: string[] = [];
@@ -4633,6 +4656,20 @@ export class Config {
           }
         }
       }
+      const corpusStatus = await this.scanMemoryRecallCorpusStatus().catch(
+        (error: unknown) => {
+          this.debugLogger.warn(
+            'memory metadata readiness scan failed; preserving the active recall protocol',
+            error,
+          );
+          return undefined;
+        },
+      );
+      if (!this.memoryRecallModeInitialized) {
+        this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
+        this.memoryCorpusRevision = corpusStatus?.revision ?? '';
+        this.memoryRecallModeInitialized = true;
+      }
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
           readAutoMemoryIndexWithStats(this.getProjectRoot()),
@@ -4655,20 +4692,29 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
-        getAutoMemoryRoot(this.getProjectRoot()),
-        managedAutoMemoryIndex,
-        {
-          memoryDir: getUserAutoMemoryRoot(),
-          indexContent: userAutoMemoryIndex,
-        },
-        teamMemoryEnabled
-          ? {
-              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-              indexContent: teamAutoMemoryIndex,
-            }
-          : undefined,
-      );
+      this.autoMemoryPrompt =
+        this.memoryRecallMode === 'structured'
+          ? buildStructuredAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              getUserAutoMemoryRoot(),
+              teamMemoryEnabled
+                ? getTeamAutoMemoryRoot(this.getProjectRoot())
+                : undefined,
+            )
+          : this.memoryManager.buildAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              managedAutoMemoryIndex,
+              {
+                memoryDir: getUserAutoMemoryRoot(),
+                indexContent: userAutoMemoryIndex,
+              },
+              teamMemoryEnabled
+                ? {
+                    memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                    indexContent: teamAutoMemoryIndex,
+                  }
+                : undefined,
+            );
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
@@ -6498,6 +6544,14 @@ export class Config {
     }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
+    this.memoryRecallMode = 'legacy';
+    this.memoryCorpusRevision = '';
+    this.memoryRecallModeInitialized = false;
+    // The prompt was built for the previous workspace's roots; when the
+    // refresh below throws (returned as memoryRefreshError), nothing
+    // reassigns it, and the stale text keeps routing to search_memory while
+    // the reset mode leaves that tool undeclared.
+    this.autoMemoryPrompt = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -6668,6 +6722,7 @@ export class Config {
 
   private async shutdownResourcesOnce(): Promise<void> {
     try {
+      this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -7574,6 +7629,141 @@ export class Config {
    */
   getAutoMemoryPrompt(): string {
     return this.autoMemoryPrompt;
+  }
+
+  getMemoryRecallMode(): MemoryRecallMode {
+    return this.memoryRecallMode;
+  }
+
+  async prepareMemoryRecallTransition(): Promise<
+    PreparedMemoryRecallTransition | undefined
+  > {
+    if (!this.getManagedAutoMemoryEnabled()) return undefined;
+    if (this.memoryRecallMode === 'structured') return undefined;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
+    if (to === this.memoryRecallMode) {
+      this.memoryCorpusRevision = status.revision;
+      return undefined;
+    }
+    const projectRoot = this.getProjectRoot();
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
+    // prompt is built from scans, not these indexes, so a tier that cannot be
+    // read or written (EACCES, a rejected root) must not block the
+    // transition — the failed tier's staleness is visible to the next scan.
+    await Promise.all(
+      [
+        ...getProjectMetadataMigrationRoots(
+          projectRoot,
+          this.isTrustedFolder(),
+        ).map((root) =>
+          root === configuredProjectRoot
+            ? rebuildManagedAutoMemoryIndex(projectRoot)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        ),
+        rebuildUserAutoMemoryIndex(),
+        ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
+          ? [rebuildTeamAutoMemoryIndex(projectRoot)]
+          : []),
+      ].map((pending) =>
+        pending.catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Memory index rebuild failed during recall transition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ),
+    );
+    const autoMemoryPrompt = await this.buildAutoMemoryPromptForMode(to);
+    const confirmed = await this.scanMemoryRecallCorpusStatus();
+    if (confirmed.revision !== status.revision) return undefined;
+    return {
+      from: this.memoryRecallMode,
+      to,
+      revision: confirmed.revision,
+      autoMemoryPrompt,
+      previousRevision: this.memoryCorpusRevision,
+      previousAutoMemoryPrompt: this.autoMemoryPrompt,
+    };
+  }
+
+  async confirmMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): Promise<boolean> {
+    if (transition.from !== this.memoryRecallMode) return false;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    return (
+      status.revision === transition.revision &&
+      (status.ready ? 'structured' : 'legacy') === transition.to
+    );
+  }
+
+  commitMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (transition.from !== this.memoryRecallMode) return;
+    this.memoryRecallMode = transition.to;
+    this.memoryCorpusRevision = transition.revision;
+    this.autoMemoryPrompt = transition.autoMemoryPrompt;
+    this.memoryRecallModeInitialized = true;
+  }
+
+  rollbackMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (this.memoryRecallMode !== transition.to) return;
+    this.memoryRecallMode = transition.from;
+    this.memoryCorpusRevision = transition.previousRevision;
+    this.autoMemoryPrompt = transition.previousAutoMemoryPrompt;
+  }
+
+  private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
+    return scanMemoryMetadataCorpusStatus({
+      projectRoot: this.getProjectRoot(),
+      teamMemoryEnabled: this.getTeamMemoryEnabled(),
+      trustedProject: this.isTrustedFolder(),
+    });
+  }
+
+  private async buildAutoMemoryPromptForMode(
+    mode: MemoryRecallMode,
+  ): Promise<string> {
+    const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
+    if (mode === 'structured') {
+      return buildStructuredAutoMemoryPrompt(
+        getAutoMemoryRoot(projectRoot),
+        getUserAutoMemoryRoot(),
+        teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+      );
+    }
+    const [projectIndex, userIndex, teamIndex] = await Promise.all([
+      readAutoMemoryIndexWithStats(projectRoot).then(
+        (result) => result?.content ?? null,
+      ),
+      readUserAutoMemoryIndexWithStats()
+        .then((result) => result?.content ?? null)
+        .catch(() => null),
+      teamEnabled
+        ? fsPromises
+            .readFile(
+              path.join(getTeamAutoMemoryRoot(projectRoot), 'MEMORY.md'),
+              'utf-8',
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return this.memoryManager.buildAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      projectIndex,
+      { memoryDir: getUserAutoMemoryRoot(), indexContent: userIndex },
+      teamEnabled
+        ? {
+            memoryDir: getTeamAutoMemoryRoot(projectRoot),
+            indexContent: teamIndex,
+          }
+        : undefined,
+    );
   }
 
   getOutputLanguageFilePath(): string | undefined {
@@ -10405,6 +10595,14 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.MANAGE_MEMORY, async () => {
+      const { ManageMemoryTool } = await import('../tools/manage-memory.js');
+      return new ManageMemoryTool(this);
+    });
+    await registerLazy(ToolNames.SEARCH_MEMORY, async () => {
+      const { SearchMemoryTool } = await import('../tools/search-memory.js');
+      return new SearchMemoryTool(this);
     });
     await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
       const { ZoomImageTool } = await import('../tools/zoom-image.js');

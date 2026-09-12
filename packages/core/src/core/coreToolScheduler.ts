@@ -263,6 +263,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
+  ToolNames.SEARCH_MEMORY,
 ]);
 
 const OPT_IN_TOOL_MESSAGES: Record<

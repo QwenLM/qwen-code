@@ -5920,6 +5920,16 @@ export class Session implements SessionContext {
 
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
+              // Mirror LlmClient.sendMessageStream: commit a prepared
+              // legacy->structured recall transition before the per-turn
+              // reset, so ACP sessions leave legacy mode once migration
+              // completes instead of re-scanning the corpus every turn.
+              await this.config
+                .getLlmClient()
+                .activatePreparedMemoryRecallTransition();
+              this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
               this.config
                 .getLlmClient()
                 .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
@@ -5969,14 +5979,6 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            if (isFreshUserTurn) {
-              const memory = await this.config
-                .getLlmClient()
-                .consumeManagedAutoMemoryRecall('initial');
-              if (memory?.prompt) {
-                systemReminders.unshift({ text: memory.prompt });
-              }
-            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -6240,7 +6242,11 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      { modelOverride: fullTurnModelOverride },
+                      {
+                        modelOverride: fullTurnModelOverride,
+                        consumeInitialMemory:
+                          isFreshUserTurn && turnCount === 1,
+                      },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
@@ -8066,6 +8072,7 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
+      consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const llmClient = this.config.getLlmClient()!;
@@ -8221,14 +8228,15 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (message[0]?.functionResponse) {
-      const memory =
-        await llmClient.consumeManagedAutoMemoryRecall('tool_result');
-      if (memory?.prompt) {
-        message = insertAfterFunctionResponses(message, [
-          { text: memory.prompt },
-        ]);
-      }
+    const memoryDelivery = options.consumeInitialMemory
+      ? await llmClient.consumeManagedAutoMemoryRecall('initial')
+      : message[0]?.functionResponse
+        ? await llmClient.consumeManagedAutoMemoryRecall('tool_result')
+        : null;
+    if (memoryDelivery?.prompt) {
+      message = insertAfterFunctionResponses(message, [
+        { text: memoryDelivery.prompt },
+      ]);
     }
 
     const chat = this.#getCurrentChat();
@@ -8239,9 +8247,57 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = goalPermit
-      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-      : await chat.sendMessageStream(model, request, promptId);
+    let sourceStream: AsyncGenerator<StreamEvent>;
+    try {
+      sourceStream = goalPermit
+        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+        : await chat.sendMessageStream(model, request, promptId);
+    } catch (error) {
+      llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      throw error;
+    }
+    if (!sourceStream) {
+      llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      return { responseStream: null, stopReason: 'end_turn' };
+    }
+    const responseStream = (async function* () {
+      let committed = false;
+      let receivedChunk = false;
+      let memoryDeliveryStateInvalidated = false;
+      const commitMemoryDelivery = () => {
+        llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+        if (memoryDeliveryStateInvalidated) {
+          llmClient.resetManagedAutoMemoryAfterCompression();
+        }
+        committed = true;
+      };
+      try {
+        for await (const event of sourceStream) {
+          if (event.type === StreamEventType.CHUNK) {
+            receivedChunk = true;
+          } else if (event.type === StreamEventType.COMPRESSED) {
+            llmClient.resetManagedAutoMemoryAfterCompression();
+            memoryDeliveryStateInvalidated = true;
+          } else if (
+            event.type === StreamEventType.RETRY ||
+            event.type === StreamEventType.MODEL_FALLBACK
+          ) {
+            receivedChunk = false;
+          }
+          yield event;
+        }
+        if (receivedChunk) {
+          commitMemoryDelivery();
+        }
+      } finally {
+        if (!committed && receivedChunk && abortSignal.aborted) {
+          commitMemoryDelivery();
+        }
+        if (!committed) {
+          llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+        }
+      }
+    })();
     return { responseStream, requestRouteKey };
   }
 
@@ -8394,10 +8450,25 @@ export class Session implements SessionContext {
       return;
     }
     const memoryManager = this.config.getMemoryManager();
+    const projectRoot = this.config.getProjectRoot();
     const history = this.#getCurrentChat().getHistoryShallow();
+    for (const scope of ['project', 'user'] as const) {
+      void memoryManager
+        .scheduleMetadataMigration({
+          projectRoot,
+          scope,
+          config: this.config,
+        })
+        .catch((error: unknown) => {
+          debugLogger.warn(
+            `Failed to schedule ACP ${scope} memory metadata migration.`,
+            error,
+          );
+        });
+    }
     void memoryManager
       .scheduleExtract({
-        projectRoot: this.config.getProjectRoot(),
+        projectRoot,
         sessionId: this.config.getSessionId(),
         history,
         config: this.config,
@@ -8410,7 +8481,7 @@ export class Session implements SessionContext {
       });
     void memoryManager
       .scheduleDream({
-        projectRoot: this.config.getProjectRoot(),
+        projectRoot,
         sessionId: this.config.getSessionId(),
         config: this.config,
       })
@@ -9586,6 +9657,14 @@ export class Session implements SessionContext {
                 content: { type: 'text', text: echoText },
                 _meta: { source: item.source },
               });
+
+              // Cron-fired prompts stream through the chat directly and never
+              // enter LlmClient.sendMessageStream, so core's per-turn reset is
+              // not on this path; without it a claimed search_memory signature
+              // or exhausted body ref would persist across cron turns.
+              this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
 
               // Prepend session-level system reminders (same rationale as the
               // user-query path in #executePrompt).

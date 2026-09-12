@@ -249,7 +249,11 @@ function setupGoalClient() {
     getStopHookBlockingCap: vi.fn(() => 8),
     isManagedMemoryAvailable: vi.fn(() => false),
     getManagedAutoMemoryEnabled: vi.fn(() => false),
-    getMemoryManager: vi.fn(() => ({})),
+    getMemoryManager: vi.fn(() => ({
+      resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      reconcileMemoryBodiesPresentInHistory: vi.fn(),
+      restoreMemoryBodiesPresentInHistory: vi.fn(),
+    })),
     getAutoSkillEnabled: vi.fn(() => false),
     getSessionId: vi.fn(() => 'goal-test-session'),
     getProjectRoot: vi.fn(() => '/tmp'),

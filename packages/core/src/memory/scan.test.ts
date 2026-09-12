@@ -8,10 +8,24 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryFilePath } from './paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryFilePath,
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
+  rereadAutoMemoryDocument,
+  sanitizeAutoMemoryPromptField,
+  scanAllAutoMemoryTopicDocuments,
+  scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
+  scanTeamAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+  type AutoMemoryDocumentCache,
+  validateStructuredAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -35,6 +49,12 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('strips Unicode control and format characters from prompt fields', () => {
+    expect(sanitizeAutoMemoryPromptField('a\u00adb\u2060c\u{e0061}', 100)).toBe(
+      'abc',
+    );
+  });
+
   it('parses a CRLF (Windows checkout) topic document', () => {
     // Team files are read raw (utf-8); a Windows checkout yields `---\r\n`,
     // which the `^---\n` delimiter would reject — dropping the file from the
@@ -53,6 +73,7 @@ describe('auto-memory topic scanning', () => {
     );
 
     expect(parsed).not.toBeNull();
+    expect(parsed?.scope).toBe('project');
     expect(parsed?.type).toBe('project');
     expect(parsed?.title).toBe('CRLF Memory');
     expect(parsed?.description).toBe('Windows line endings');
@@ -77,15 +98,389 @@ describe('auto-memory topic scanning', () => {
     );
 
     expect(parsed).toEqual({
+      scope: 'project',
       type: 'project',
       filePath: '/tmp/project.md',
       relativePath: 'project.md',
       filename: 'project.md',
       title: 'Project Memory',
       description: 'Project context',
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: ['Project context'],
       body: '# Project Memory\n\n- Release freeze starts Friday.',
       mtimeMs: 0,
     });
+  });
+
+  it('validates the complete structured-memory frontmatter contract', () => {
+    const content = [
+      '---',
+      'name: Recall design',
+      'description: How memory recall is organized',
+      'type: project',
+      'category: project_introduction',
+      'keywords:',
+      '  - memory recall',
+      '  - focused subtree',
+      'usage_scenarios:',
+      '  - Reviewing memory architecture',
+      '---',
+      'Body remains unchanged.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+  });
+
+  it('distinguishes missing and malformed frontmatter', () => {
+    expect(validateStructuredAutoMemoryDocument('Plain memory body.')).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-missing'],
+    });
+    expect(
+      validateStructuredAutoMemoryDocument(
+        '--- \nname: Broken\ntype: project\n---\nBody',
+      ),
+    ).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-malformed'],
+    });
+    for (const malformed of [
+      '\uFEFF---\nname: Broken\n---\nBody',
+      '\n---\nname: Broken\n---\nBody',
+      '---\rname: Broken\r---\rBody',
+      '---\nname: Broken\n  ---\nBody',
+    ]) {
+      expect(validateStructuredAutoMemoryDocument(malformed)).toEqual({
+        valid: false,
+        missingOrInvalidFields: ['frontmatter-malformed'],
+      });
+    }
+  });
+
+  it('keeps legacy parsing permissive while strict validation reports fields', () => {
+    const content = [
+      '---',
+      'title: Legacy memory',
+      'description: Legacy body description',
+      'type: project',
+      'category: invented_category',
+      'keywords:',
+      '  - only-one',
+      'usage_scenarios: invalid',
+      '---',
+      'Legacy body.',
+    ].join('\n');
+
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/legacy.md', content),
+    ).not.toBeNull();
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: false,
+      missingOrInvalidFields: [
+        'name',
+        'category',
+        'keywords',
+        'usage_scenarios',
+      ],
+    });
+  });
+
+  it('rejects duplicate or malformed structured keyword arrays', () => {
+    const content = [
+      '---',
+      'name: Duplicate terms',
+      'description: Invalid keyword metadata',
+      'type: reference',
+      'category: tool_experience',
+      'keywords:',
+      '  - memory search',
+      '  - Memory Search',
+      'usage_scenarios:',
+      '  - Debugging recall',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toMatchObject({
+      valid: false,
+      missingOrInvalidFields: ['keywords'],
+    });
+  });
+
+  it('parses and sanitizes keyword arrays without dropping the document', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/keywords.md',
+      [
+        '---',
+        'type: feedback',
+        'name: Testing preference',
+        'description: User prefers integration tests.',
+        'keywords:',
+        '  - Integration Testing',
+        '  - integration testing',
+        '  - "database\\u200b mocking"',
+        '  - 42',
+        '---',
+        'Use real databases.',
+      ].join('\n'),
+      0,
+      'feedback/testing.md',
+      'user',
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.scope).toBe('user');
+    expect(parsed?.category).toBe('uncategorized');
+    expect(parsed?.keywords).toEqual([
+      'Integration Testing',
+      'database mocking',
+    ]);
+    expect(parsed?.usageScenarios).toEqual(['User prefers integration tests.']);
+  });
+
+  it('preserves unquoted issue references in prompt-facing metadata', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/issues.md',
+      [
+        '---',
+        'type: project',
+        'name: Release issue #1234',
+        'description: Pointers to issue #1234 and freeze PR #5678',
+        'category: project_introduction',
+        'keywords:',
+        '  - issue #1234',
+        '  - freeze release',
+        'usage_scenarios:',
+        '  - Running the freeze checklist for #1234',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed).toMatchObject({
+      title: 'Release issue #1234',
+      description: 'Pointers to issue #1234 and freeze PR #5678',
+      keywords: ['issue #1234', 'freeze release'],
+      usageScenarios: ['Running the freeze checklist for #1234'],
+    });
+  });
+
+  it('does not let a nested same-named key hijack a top-level field', () => {
+    // The rescue reads the YAML document model, which anchors fields at the
+    // top level — a nested `audit.keywords` list must never be scraped into
+    // the real keywords.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/nested.md',
+      [
+        '---',
+        'type: project',
+        'name: D',
+        'description: d',
+        'category: project_introduction',
+        'audit:',
+        '  keywords:',
+        '    - legacy #old',
+        'keywords:',
+        '  - alpha',
+        '  - issue #1234',
+        'usage_scenarios:',
+        '  - s1',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.keywords).toEqual(['alpha', 'issue #1234']);
+  });
+
+  it('validator and scanner agree on unquoted issue references', () => {
+    // The validator decides whether a file gets rewritten as legacy, so it
+    // must apply the same unquoted-`#` rescue as the scanner.
+    const content = [
+      '---',
+      'type: project',
+      'name: Release issue #1234',
+      'description: Pointers to issue #1234 and freeze PR #5678',
+      'category: project_introduction',
+      'keywords:',
+      '  - issue #1234',
+      '  - issue #5678',
+      'usage_scenarios:',
+      '  - Running the freeze checklist for #1234',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/issues.md', content)?.keywords,
+    ).toEqual(['issue #1234', 'issue #5678']);
+  });
+
+  it('keeps YAML comment semantics for fixed-vocabulary fields', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/vocabulary-comment.md',
+      [
+        '---',
+        'type: project # scoped to this repository',
+        'category: project_introduction # fixed list',
+        'name: Release issue #1234',
+        'description: Pointers to issue #1234',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    // Enum fields keep YAML semantics: a trailing ` #...` is a comment there,
+    // while free-text fields still rescue the `#` as content.
+    expect(parsed).not.toBeNull();
+    expect(parsed?.type).toBe('project');
+    expect(parsed?.category).toBe('project_introduction');
+    expect(parsed?.title).toBe('Release issue #1234');
+    expect(parsed?.description).toBe('Pointers to issue #1234');
+  });
+
+  it('does not fold an own-line comment into the preceding field', () => {
+    // An indented `# ...` line after a scalar is a real YAML comment that the
+    // parser attaches to that scalar's node; only a same-line ` #...` is
+    // rescued as content.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/own-line-comment.md',
+      [
+        '---',
+        'type: project',
+        'name: Release issue',
+        '  # see ticket tracker',
+        'description: Pointers to issue',
+        'category: project_introduction',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.title).toBe('Release issue');
+    expect(parsed?.description).toBe('Pointers to issue');
+  });
+
+  it('rescues a free-text field whose whole value YAML read as a comment', () => {
+    const content = [
+      '---',
+      'type: project',
+      'name: #1 priority fix',
+      'description: #1234 regression notes',
+      'category: project_introduction',
+      'keywords:',
+      '  - alpha',
+      '  - beta',
+      'usage_scenarios:',
+      '  - triaging regressions',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    const parsed = parseAutoMemoryTopicDocument('/tmp/hash-value.md', content);
+    expect(parsed?.title).toBe('#1 priority fix');
+    expect(parsed?.description).toBe('#1234 regression notes');
+    // The validator must not report a field the author wrote as missing.
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+  });
+
+  it('does not rescue a vocabulary field whose whole value is a comment', () => {
+    const content = [
+      '---',
+      'type: # scoped comment',
+      'name: Release plan',
+      'description: Release context',
+      'category: project_introduction',
+      'keywords:',
+      '  - alpha',
+      '  - beta',
+      'usage_scenarios:',
+      '  - planning',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/type-comment.md', content),
+    ).toBeNull();
+    expect(
+      validateStructuredAutoMemoryDocument(content).missingOrInvalidFields,
+    ).toContain('type');
+  });
+
+  it('ignores invalid keyword fields while preserving semantic recall data', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/invalid-keywords.md',
+      [
+        '---',
+        'type: project',
+        'name: Release plan',
+        'description: Release context',
+        'keywords: deployment',
+        '---',
+        'Freeze starts Friday.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.title).toBe('Release plan');
+    expect(parsed?.keywords).toEqual([]);
+  });
+
+  it('parses category and usage scenarios with safe fallbacks', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/tree.md',
+      [
+        '---',
+        'type: project',
+        'name: Pull memory tree',
+        'description: Use when designing active memory recall.',
+        'category: project_introduction',
+        'usage_scenarios:',
+        '  - Designing memory navigation',
+        '  - "designing memory navigation"',
+        '  - "Reviewing\\u200b active pull behavior"',
+        '  - ignored overflow',
+        '---',
+        'Tree body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.category).toBe('project_introduction');
+    expect(parsed?.usageScenarios).toEqual([
+      'Designing memory navigation',
+      'Reviewing active pull behavior',
+      'ignored overflow',
+    ]);
+  });
+
+  it('falls back invalid categories to uncategorized', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/category.md',
+      [
+        '---',
+        'type: reference',
+        'name: Category fallback',
+        'description: Missing category handling',
+        'category: invented_nested_category',
+        'usage_scenarios: invalid',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.category).toBe('uncategorized');
+    expect(parsed?.usageScenarios).toEqual(['Missing category handling']);
   });
 
   it('scans existing auto-memory files from nested topic folders', async () => {
@@ -112,6 +507,7 @@ describe('auto-memory topic scanning', () => {
     const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
     expect(referenceDoc?.description).toBe('External references');
+    expect(referenceDoc?.scope).toBe('project');
     expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
@@ -143,5 +539,496 @@ describe('auto-memory topic scanning', () => {
     expect(docs.some((d) => d.relativePath === 'feedback/broken.md')).toBe(
       false,
     );
+  });
+
+  it('returns sourceStatus for a complete project and user snapshot', async () => {
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'memory-base',
+    );
+    clearAutoMemoryRootCache();
+    const projectPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('project', 'context.md'),
+    );
+    await fs.mkdir(path.dirname(projectPath), { recursive: true });
+    await fs.writeFile(
+      projectPath,
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody',
+      'utf-8',
+    );
+
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['project', 'user'],
+    });
+
+    expect(
+      snapshot.docs.some((doc) => doc.relativePath === 'project/context.md'),
+    ).toBe(true);
+    expect(snapshot.sourceStatus).toEqual({
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    });
+    if (previousBaseDir === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+    }
+    clearAutoMemoryRootCache();
+  });
+
+  it('does not follow symlinked directories while scanning memory', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside');
+    const outsideFile = path.join(outsideRoot, 'victim.md');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      outsideFile,
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.symlink(
+      outsideRoot,
+      path.join(memoryRoot, 'link'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(docs.some((doc) => doc.relativePath === 'link/victim.md')).toBe(
+      false,
+    );
+    await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toContain('body');
+  });
+
+  it('follows a symlinked memory root when scanning (dotfiles layout)', async () => {
+    // A symlinked ROOT is the user's own layout choice (e.g. ~/.qwen/memories
+    // linked into a synced dotfiles dir) — the pre-trust scans followed it, so
+    // read paths do too. Within-root entries stay symlink-screened (see the
+    // test above), and migration/write paths keep the strict rejection.
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'memory-base',
+    );
+    clearAutoMemoryRootCache();
+    try {
+      const realRoot = path.join(tempDir, 'dotfiles-memories');
+      await fs.mkdir(realRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(realRoot, 'role.md'),
+        '---\ntype: user\nname: user role\ndescription: who the user is\n---\nbody',
+        'utf-8',
+      );
+      const userRoot = getUserAutoMemoryRoot();
+      await fs.mkdir(path.dirname(userRoot), { recursive: true });
+      await fs.symlink(
+        realRoot,
+        userRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+
+      const docs = await scanUserAutoMemoryTopicDocuments();
+
+      expect(docs.map((doc) => doc.title)).toEqual(['user role']);
+    } finally {
+      if (previousBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('refuses a symlinked in-repo project memory root instead of scanning its target', async () => {
+    // With QWEN_CODE_MEMORY_LOCAL=1 (the test setup default) the project root
+    // is the repo-tracked `<projectRoot>/.qwen/memory`: a committed symlink
+    // there must not redirect the scan outside the repository. The write side
+    // already rejects this shape (TeamMemoryRootSecurityError); the read side
+    // matches it. Only the user-owned root keeps the dotfiles exemption.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside-memory');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(outsideRoot, 'victim.md'),
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.rm(memoryRoot, { recursive: true, force: true });
+    await fs.symlink(
+      outsideRoot,
+      memoryRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(scanAutoMemoryTopicDocuments(projectRoot)).rejects.toThrow(
+      'symlinked memory root',
+    );
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['project'],
+    });
+    expect(snapshot.docs.some((doc) => doc.relativePath === 'victim.md')).toBe(
+      false,
+    );
+  });
+
+  it('refuses a symlinked team memory root instead of scanning its target', async () => {
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside-team-memory');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(outsideRoot, 'victim.md'),
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.symlink(
+      outsideRoot,
+      teamRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(scanTeamAutoMemoryTopicDocuments(projectRoot)).rejects.toThrow(
+      'symlinked memory root',
+    );
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: true,
+    });
+    expect(snapshot.docs.some((doc) => doc.relativePath === 'victim.md')).toBe(
+      false,
+    );
+  });
+
+  it('rejects a memory replaced by an outside symlink after scanning', async () => {
+    const filePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('project', 'context.md'),
+    );
+    const outsideFile = path.join(tempDir, 'outside.md');
+    const content =
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody';
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content, 'utf-8');
+    await fs.writeFile(
+      outsideFile,
+      content.replace('body', 'outside'),
+      'utf-8',
+    );
+    const [doc] = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    await fs.rm(filePath);
+    await fs.symlink(outsideFile, filePath, 'file');
+
+    await expect(rereadAutoMemoryDocument(doc!)).resolves.toBeNull();
+  });
+
+  it('also scans project-local memory files when project memory uses runtime storage', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    try {
+      const localPath = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'feedback',
+        'local.md',
+      );
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(
+        localPath,
+        '---\ntype: feedback\nname: Local memory\ndescription: Project-local fixture\nkeywords:\n  - local fixture\n---\nbody',
+        'utf-8',
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'feedback/local.md'),
+      ).toBe(true);
+      expect(snapshot.sourceStatus.complete).toBe(true);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+    }
+  });
+
+  it('keeps the newest project document when memory roots collide', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'collision.md',
+      );
+      const localFile = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'project',
+        'collision.md',
+      );
+      const content = (name: string) =>
+        `---\ntype: project\nname: ${name}\ndescription: collision fixture\n---\nbody`;
+      await fs.mkdir(path.dirname(runtimeFile), { recursive: true });
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(runtimeFile, content('Older runtime'));
+      await fs.writeFile(localFile, content('Newer local'));
+      await fs.utimes(
+        runtimeFile,
+        new Date('2026-08-26T00:00:00.000Z'),
+        new Date('2026-08-26T00:00:00.000Z'),
+      );
+      await fs.utimes(
+        localFile,
+        new Date('2026-08-27T00:00:00.000Z'),
+        new Date('2026-08-27T00:00:00.000Z'),
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(
+        snapshot.docs.find((doc) => doc.relativePath === 'project/collision.md')
+          ?.title,
+      ).toBe('Newer local');
+      expect(snapshot.sourceStatus).toMatchObject({
+        complete: false,
+        incompleteScopes: [
+          {
+            scope: 'project',
+            reason: 'ref_collision',
+            discovered: 2,
+            returned: 1,
+          },
+        ],
+      });
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('applies one project file cap after merging runtime and local roots', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeRoot = getAutoMemoryRoot(projectRoot);
+      const localRoot = path.join(projectRoot, '.qwen', 'memory');
+      const writeDocs = async (
+        root: string,
+        prefix: string,
+        count: number,
+        timestamp: Date,
+      ) => {
+        await Promise.all(
+          Array.from({ length: count }, async (_, index) => {
+            const filePath = path.join(
+              root,
+              prefix,
+              `${index.toString().padStart(3, '0')}.md`,
+            );
+            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            await fs.writeFile(
+              filePath,
+              `---\ntype: project\nname: ${prefix}-${index}\ndescription: cap fixture\n---\nbody`,
+            );
+            await fs.utimes(filePath, timestamp, timestamp);
+          }),
+        );
+      };
+      await writeDocs(
+        runtimeRoot,
+        'runtime',
+        105,
+        new Date('2026-08-26T00:00:00.000Z'),
+      );
+      await writeDocs(
+        localRoot,
+        'local',
+        100,
+        new Date('2026-08-27T00:00:00.000Z'),
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(snapshot.docs).toHaveLength(200);
+      expect(snapshot.sourceStatus.incompleteScopes).toContainEqual({
+        scope: 'project',
+        reason: 'file_limit',
+        discovered: 205,
+        returned: 200,
+      });
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'local/099.md'),
+      ).toBe(true);
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'runtime/104.md'),
+      ).toBe(false);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('uses relative paths to stabilize equal-mtime filename ties', async () => {
+    const first = getAutoMemoryFilePath(projectRoot, 'a/same.md');
+    const second = getAutoMemoryFilePath(projectRoot, 'z/same.md');
+    await fs.mkdir(path.dirname(first), { recursive: true });
+    await fs.mkdir(path.dirname(second), { recursive: true });
+    const content =
+      '---\ntype: project\nname: Same\ndescription: tie fixture\n---\nbody';
+    await fs.writeFile(first, content);
+    await fs.writeFile(second, content);
+    const timestamp = new Date('2026-08-27T00:00:00.000Z');
+    await fs.utimes(first, timestamp, timestamp);
+    await fs.utimes(second, timestamp, timestamp);
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(
+      docs
+        .filter((doc) => doc.filename === 'same.md')
+        .map((doc) => doc.relativePath),
+    ).toEqual(['a/same.md', 'z/same.md']);
+  });
+
+  it('invalidates a parsed document cache after an in-place rewrite', async () => {
+    const filePath = getAutoMemoryFilePath(projectRoot, 'cached.md');
+    const first =
+      '---\ntype: project\nname: First title\ndescription: cache fixture\n---\nbody';
+    const second = first.replace('First title', 'Other title');
+    await fs.writeFile(filePath, first);
+    const originalMtime = (await fs.stat(filePath)).mtime;
+    const documentCache: AutoMemoryDocumentCache = new Map();
+
+    const initial = await scanAllAutoMemoryTopicDocuments(
+      projectRoot,
+      documentCache,
+    );
+    await fs.writeFile(filePath, second);
+    await fs.utimes(filePath, originalMtime, originalMtime);
+    const changed = await scanAllAutoMemoryTopicDocuments(
+      projectRoot,
+      documentCache,
+    );
+
+    expect(initial.find((doc) => doc.relativePath === 'cached.md')?.title).toBe(
+      'First title',
+    );
+    expect(changed.find((doc) => doc.relativePath === 'cached.md')?.title).toBe(
+      'Other title',
+    );
+  });
+
+  it('reports requested but disabled team memory as unavailable', async () => {
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: false,
+      trustedProject: true,
+    });
+
+    expect(snapshot.docs).toEqual([]);
+    expect(snapshot.sourceStatus).toEqual({
+      requestedScopes: ['team'],
+      searchedScopes: [],
+      unavailableScopes: [{ scope: 'team', reason: 'disabled' }],
+      complete: true,
+      incompleteScopes: [],
+    });
+  });
+
+  it('reports requested but untrusted team memory as unavailable', async () => {
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: true,
+      trustedProject: false,
+    });
+
+    expect(snapshot.sourceStatus.unavailableScopes).toEqual([
+      { scope: 'team', reason: 'untrusted' },
+    ]);
+    expect(snapshot.sourceStatus.searchedScopes).toEqual([]);
+  });
+
+  it('does not scan repo-local project memory when the project is untrusted', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    clearAutoMemoryRootCache();
+    try {
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      await fs.mkdir(memoryRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(memoryRoot, 'payload.md'),
+        [
+          '---',
+          'type: project',
+          'name: Untrusted payload',
+          'description: Repo supplied memory',
+          'keywords:',
+          '  - payload',
+          'usage_scenarios:',
+          '  - Any task',
+          'category: project_introduction',
+          '---',
+          'body',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+        trustedProject: false,
+      });
+
+      expect(snapshot.docs).toEqual([]);
+      expect(snapshot.sourceStatus.unavailableScopes).toEqual([
+        { scope: 'project', reason: 'untrusted' },
+      ]);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 });

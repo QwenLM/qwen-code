@@ -24,10 +24,12 @@ import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
+  collectResidentMemoryBodies,
   microcompactHistory,
   type MicrocompactMeta,
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
@@ -88,7 +90,10 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
-import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import {
+  renderAutoMemoryFocusedSubtree,
+  toAutoMemoryRef,
+} from '../memory/tree.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -107,6 +112,8 @@ import {
   addUserPromptAttributes,
   AgentOutputMessageCapture,
   MemoryRecallDeliveryEvent,
+  MemoryRecallModeTransitionEvent,
+  logMemoryRecallModeTransition,
 } from '../telemetry/index.js';
 import type {
   MemoryRecallDeliveryPoint,
@@ -188,6 +195,7 @@ import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
+const MEMORY_RECALL_ABORT_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -266,9 +274,16 @@ export interface SteerInput {
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
+  focusedPrompt: '',
   prompt: '',
   selectedDocs: [],
   strategy: 'none',
+};
+
+export type MemoryDeliveryResult = RelevantAutoMemoryPromptResult & {
+  deliveredTreeRevision?: string;
+  deliveryEvent?: MemoryRecallDeliveryEvent;
+  commitDeliveryState?: () => void;
 };
 
 function wrapIdeContext(contextText: string): string {
@@ -364,8 +379,8 @@ type MemoryPrefetchHandle = {
   fastResultRef: MemoryFastResultBox;
   /** True after the fast result was injected — prevents double-inject and double-log. */
   fastDelivered: boolean;
-  /** Paths injected by the fast phase, excluded from the later refined delivery. */
-  fastDeliveredPaths: Set<string>;
+  /** Refs injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredRefs: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -472,6 +487,7 @@ export class LlmClient {
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
+  private lastDeliveredMemoryTreeRevision: string | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
@@ -539,7 +555,7 @@ export class LlmClient {
   private lastInjectedDate: string | undefined;
 
   /**
-   * Promises for pending background memory tasks (dream / extract).
+   * Promises for pending background memory tasks (dream / extract / skill review).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
    * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
    */
@@ -1063,6 +1079,14 @@ export class LlmClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    this.config
+      .getMemoryManager()
+      .restoreMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(this.getHistoryShallow()),
+      );
+    // Same rewind hazard as setHistory: the stripped entries may have
+    // carried the complete-tree router prompt.
+    this.lastDeliveredMemoryTreeRevision = undefined;
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -1141,6 +1165,16 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    this.config
+      .getMemoryManager()
+      .restoreMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(history),
+      );
+    // The new history may no longer contain the turn that carried the
+    // complete-tree router prompt; keeping the delivered revision would
+    // suppress its re-delivery for the rest of the session. Re-delivery is
+    // idempotent — the router header states it replaces any older tree.
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.forceFullIdeContext = true;
   }
 
@@ -1162,6 +1196,14 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      this.config
+        .getMemoryManager()
+        .restoreMemoryBodiesPresentInHistory(
+          collectResidentMemoryBodies(this.getHistoryShallow()),
+        );
+      // Same rewind hazard as setHistory: the truncated entries may have
+      // carried the complete-tree router prompt.
+      this.lastDeliveredMemoryTreeRevision = undefined;
     }
     this.forceFullIdeContext = true;
   }
@@ -1206,6 +1248,7 @@ export class LlmClient {
   requestShutdown(): void {
     this.shutdownRequested = true;
     this.cancelPendingMemoryPrefetch('shutdown');
+    this.config.getMemoryManager().cancelMigrations?.();
   }
 
   /**
@@ -1223,18 +1266,37 @@ export class LlmClient {
     deliveryPoint: MemoryRecallDeliveryPoint,
     result: RelevantAutoMemoryPromptResult,
     discardReason?: MemoryRecallDiscardReason,
-  ): void {
-    if (handle.terminalLogged) return;
+    defer = false,
+  ): MemoryRecallDeliveryEvent | undefined {
+    if (handle.terminalLogged) return undefined;
     handle.terminalLogged = true;
+    const event = new MemoryRecallDeliveryEvent({
+      phase: 'refined',
+      delivery_point: deliveryPoint,
+      discard_reason: discardReason,
+      strategy: result.strategy,
+      docs_selected: result.selectedDocs.length,
+      latency_ms: Date.now() - handle.firedAt,
+      router_delivered:
+        'deliveredTreeRevision' in result &&
+        result.deliveredTreeRevision !== undefined,
+    });
+    if (!defer) logMemoryRecallDelivery(this.config, event);
+    return event;
+  }
+
+  private discardPreparedMemoryRecallDelivery(
+    event: MemoryRecallDeliveryEvent,
+  ): void {
     logMemoryRecallDelivery(
       this.config,
       new MemoryRecallDeliveryEvent({
-        phase: 'refined',
-        delivery_point: deliveryPoint,
-        discard_reason: discardReason,
-        strategy: result.strategy,
-        docs_selected: result.selectedDocs.length,
-        latency_ms: Date.now() - handle.firedAt,
+        phase: event.phase,
+        delivery_point: 'discarded',
+        discard_reason: 'no_safe_delivery_point',
+        strategy: event.strategy,
+        docs_selected: event.docs_selected,
+        latency_ms: event.latency_ms,
       }),
     );
   }
@@ -1250,12 +1312,12 @@ export class LlmClient {
     // cancellation reason would inflate the "memory never reached the model"
     // bucket with turns that did get it, so apply the same rule the
     // ToolResult consume point uses. A partial overlap still reports the
-    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // cancellation reason: the documents outside `fastDeliveredRefs`
     // genuinely had no delivery point.
     const everyDocAlreadyDelivered =
       result.selectedDocs.length > 0 &&
       result.selectedDocs.every((doc) =>
-        handle.fastDeliveredPaths.has(doc.filePath),
+        handle.fastDeliveredRefs.has(toAutoMemoryRef(doc)),
       );
     this.logMemoryPrefetchDelivery(
       handle,
@@ -1298,7 +1360,9 @@ export class LlmClient {
       .getMemoryManager()
       .recall(this.config.getProjectRoot(), query, {
         config: this.config,
-        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        ...(this.config.getMemoryRecallMode?.() === 'legacy'
+          ? { excludedFilePaths: this.surfacedRelevantAutoMemoryPaths }
+          : {}),
         recentTools: [...this.recentCompletedToolNames],
         abortSignal: controller.signal,
         onFastResult: (result) => {
@@ -1327,7 +1391,7 @@ export class LlmClient {
       controller,
       fastResultRef,
       fastDelivered: false,
-      fastDeliveredPaths: new Set<string>(),
+      fastDeliveredRefs: new Set<string>(),
     };
     void promise.then((result) => {
       handle.result = result;
@@ -1345,11 +1409,42 @@ export class LlmClient {
   /** @internal */
   consumeManagedAutoMemoryRecall(
     deliveryPoint: 'initial' | 'tool_result',
-  ): Promise<RelevantAutoMemoryPromptResult | null> {
+  ): Promise<MemoryDeliveryResult | null> {
     return this.tryConsumeMemoryPrefetch(
       deliveryPoint,
       deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
     );
+  }
+
+  /** @internal */
+  commitManagedAutoMemoryRecallDelivery(
+    delivery: MemoryDeliveryResult | null,
+  ): void {
+    delivery?.commitDeliveryState?.();
+    if (delivery?.deliveredTreeRevision) {
+      this.lastDeliveredMemoryTreeRevision = delivery.deliveredTreeRevision;
+    }
+    if (delivery?.deliveryEvent) {
+      logMemoryRecallDelivery(this.config, delivery.deliveryEvent);
+    }
+  }
+
+  /** @internal */
+  discardManagedAutoMemoryRecallDelivery(
+    delivery: MemoryDeliveryResult | null,
+  ): void {
+    if (delivery?.deliveryEvent) {
+      this.discardPreparedMemoryRecallDelivery(delivery.deliveryEvent);
+    }
+  }
+
+  /** @internal */
+  resetManagedAutoMemoryAfterCompression(): void {
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.pendingMemoryPrefetch?.fastDeliveredRefs.clear();
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
   }
 
   /** @internal */
@@ -1381,7 +1476,7 @@ export class LlmClient {
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
     waitMs = 0,
-  ): Promise<RelevantAutoMemoryPromptResult | null> {
+  ): Promise<MemoryDeliveryResult | null> {
     const handle = this.pendingMemoryPrefetch;
     if (!handle || handle.consumed) {
       return null;
@@ -1453,25 +1548,41 @@ export class LlmClient {
         return null;
       }
       const fast = handle.fastResultRef.current;
-      if (!fast?.prompt) {
+      if (!fast) {
         return null;
       }
-      handle.fastDelivered = true;
-      for (const doc of fast.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-        handle.fastDeliveredPaths.add(doc.filePath);
-      }
-      logMemoryRecallDelivery(
-        this.config,
-        new MemoryRecallDeliveryEvent({
+      const currentFast = fast.treeSnapshot
+        ? {
+            ...fast,
+            focusedPrompt: renderAutoMemoryFocusedSubtree(fast.selectedDocs, {
+              bodyPresentVersions: this.config
+                .getMemoryManager()
+                .getBodyPresentVersionsInHistory(),
+            }).prompt,
+          }
+        : fast;
+      const delivery = this.prepareMemoryDelivery(currentFast);
+      if (!delivery.prompt) return null;
+      return {
+        ...delivery,
+        commitDeliveryState: () => {
+          handle.fastDelivered = true;
+          for (const doc of fast.selectedDocs) {
+            if (this.config.getMemoryRecallMode?.() === 'legacy') {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+            handle.fastDeliveredRefs.add(toAutoMemoryRef(doc));
+          }
+        },
+        deliveryEvent: new MemoryRecallDeliveryEvent({
           phase: 'fast',
           delivery_point: 'initial',
           strategy: fast.strategy,
           docs_selected: fast.selectedDocs.length,
           latency_ms: Date.now() - handle.firedAt,
+          router_delivered: delivery.deliveredTreeRevision !== undefined,
         }),
-      );
-      return fast;
+      };
     }
 
     handle.consumed = true;
@@ -1481,25 +1592,48 @@ export class LlmClient {
     // results come from the same scan, so the selector never saw the fast
     // documents as excluded and can legitimately re-select them.
     const remainingDocs = result.selectedDocs.filter(
-      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+      (doc) => !handle.fastDeliveredRefs.has(toAutoMemoryRef(doc)),
     );
-    const deduped =
-      remainingDocs.length === result.selectedDocs.length
-        ? result
-        : {
-            ...result,
-            selectedDocs: remainingDocs,
-            prompt:
-              remainingDocs.length > 0
-                ? buildRelevantAutoMemoryPrompt(remainingDocs)
-                : '',
-          };
+    const focusedPrompt = result.treeSnapshot
+      ? renderAutoMemoryFocusedSubtree(remainingDocs, {
+          bodyPresentVersions: this.config
+            .getMemoryManager()
+            .getBodyPresentVersionsInHistory(),
+        }).prompt
+      : remainingDocs.length === result.selectedDocs.length
+        ? result.focusedPrompt || result.prompt
+        : this.config.getMemoryRecallMode?.() === 'legacy'
+          ? buildLegacyRelevantAutoMemoryPrompt(remainingDocs)
+          : renderAutoMemoryFocusedSubtree(remainingDocs, {
+              bodyPresentVersions: this.config
+                .getMemoryManager()
+                .getBodyPresentVersionsInHistory(),
+            }).prompt;
+    const deduped = this.prepareMemoryDelivery({
+      ...result,
+      selectedDocs: remainingDocs,
+      focusedPrompt,
+      prompt: focusedPrompt,
+    });
 
     if (deduped.prompt) {
-      for (const doc of deduped.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-      }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
+      return {
+        ...deduped,
+        commitDeliveryState: () => {
+          if (this.config.getMemoryRecallMode?.() === 'legacy') {
+            for (const doc of deduped.selectedDocs) {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+          }
+        },
+        deliveryEvent: this.logMemoryPrefetchDelivery(
+          handle,
+          deliveryPoint,
+          deduped,
+          undefined,
+          true,
+        ),
+      };
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
@@ -1511,6 +1645,143 @@ export class LlmClient {
       );
     }
     return deduped;
+  }
+
+  private prepareMemoryDelivery(
+    result: RelevantAutoMemoryPromptResult,
+  ): MemoryDeliveryResult {
+    const treeSnapshot = result.treeSnapshot;
+    const includeTree =
+      treeSnapshot !== undefined &&
+      treeSnapshot.revision !== this.lastDeliveredMemoryTreeRevision;
+    return {
+      ...result,
+      prompt: [
+        includeTree ? treeSnapshot?.routerPrompt : '',
+        result.focusedPrompt || result.prompt,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+      ...(includeTree && treeSnapshot
+        ? { deliveredTreeRevision: treeSnapshot.revision }
+        : {}),
+    };
+  }
+
+  /** @internal */
+  async activatePreparedMemoryRecallTransition(): Promise<void> {
+    const startedAt = Date.now();
+    const prepare = this.config.prepareMemoryRecallTransition;
+    if (typeof prepare !== 'function') return;
+    let transition: Awaited<ReturnType<typeof prepare>>;
+    try {
+      transition = await prepare.call(this.config);
+    } catch (error) {
+      debugLogger.warn(
+        'Memory recall mode readiness check failed; preserving the active protocol.',
+        error,
+      );
+      return;
+    }
+    if (!transition) return;
+    logMemoryRecallModeTransition(
+      this.config,
+      new MemoryRecallModeTransitionEvent({
+        from_mode: transition.from,
+        to_mode: transition.to,
+        status: 'ready',
+        duration_ms: Date.now() - startedAt,
+      }),
+    );
+    const pendingRecall = this.pendingMemoryPrefetch;
+    this.cancelPendingMemoryPrefetch('new_query');
+    if (pendingRecall) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const exited = await Promise.race([
+        pendingRecall.promise.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), MEMORY_RECALL_ABORT_WAIT_MS);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!exited) {
+        logMemoryRecallModeTransition(
+          this.config,
+          new MemoryRecallModeTransitionEvent({
+            from_mode: transition.from,
+            to_mode: transition.to,
+            status: 'recall_exit_timeout',
+            duration_ms: Date.now() - startedAt,
+          }),
+        );
+        return;
+      }
+    }
+    if (!(await this.config.confirmMemoryRecallTransition(transition))) {
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'stale',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+      return;
+    }
+    this.config.commitMemoryRecallTransition(transition);
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    try {
+      await this.refreshSystemInstruction();
+      await this.setTools({ skipHistoryReveal: true });
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'committed',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+    } catch (error) {
+      this.config.rollbackMemoryRecallTransition(transition);
+      try {
+        await this.refreshSystemInstruction();
+        await this.setTools({ skipHistoryReveal: true });
+      } catch (rollbackError) {
+        logMemoryRecallModeTransition(
+          this.config,
+          new MemoryRecallModeTransitionEvent({
+            from_mode: transition.from,
+            to_mode: transition.to,
+            status: 'rollback',
+            duration_ms: Date.now() - startedAt,
+          }),
+        );
+        throw new Error(
+          'Memory recall mode transition failed and the previous protocol could not be restored.',
+          { cause: rollbackError },
+        );
+      }
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'rollback',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+      debugLogger.warn(
+        'Memory recall mode transition failed; rolled back.',
+        error,
+      );
+    }
   }
 
   async resetChat(): Promise<void> {
@@ -1540,6 +1811,7 @@ export class LlmClient {
     // Clean up old tool result overflow files on /clear
     void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
+    this.config.getMemoryManager().resetMemoryBodyStateForSession();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
     this.cancelPendingMemoryPrefetch('reset');
@@ -1589,6 +1861,10 @@ export class LlmClient {
       return;
     }
 
+    this.cancelPendingMemoryPrefetch('new_query');
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
     this.getChat().addHistory({
@@ -2227,6 +2503,7 @@ export class LlmClient {
     signal?: AbortSignal,
   ): Promise<LlmChat> {
     signal?.throwIfAborted();
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
@@ -2294,6 +2571,11 @@ export class LlmClient {
         'initial_chat_history',
         () => getInitialChatHistory(this.config, extraHistory),
       );
+      this.config
+        .getMemoryManager()
+        .restoreMemoryBodiesPresentInHistory(
+          collectResidentMemoryBodies(history),
+        );
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       });
@@ -2667,6 +2949,21 @@ export class LlmClient {
       return;
     }
 
+    for (const scope of ['project', 'user'] as const) {
+      void mgr
+        .scheduleMetadataMigration({
+          projectRoot,
+          scope,
+          config: this.config,
+        })
+        .catch((error: unknown) => {
+          debugLogger.warn(
+            `Failed to schedule ${scope} memory metadata migration.`,
+            error,
+          );
+        });
+    }
+
     const extractPromise = mgr
       .scheduleExtract({
         projectRoot,
@@ -2806,6 +3103,14 @@ export class LlmClient {
         // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+        const memoryManager = this.config.getMemoryManager();
+        if (m.unresolvedEvictedMemoryBodies > 0) {
+          memoryManager.markAllMemoryBodiesEvictedFromHistory();
+        } else {
+          memoryManager.markMemoryBodiesEvictedFromHistory(
+            m.evictedMemoryBodies ?? [],
+          );
+        }
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -2842,6 +3147,14 @@ export class LlmClient {
       );
       return false;
     }
+  }
+
+  private restoreMemoryBodyStateFromHistory(): void {
+    this.config
+      .getMemoryManager()
+      .reconcileMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(this.getHistoryShallow()),
+      );
   }
 
   private markStopHookForced(promptId: string): void {
@@ -3562,6 +3875,9 @@ export class LlmClient {
     let normalCompletion = false;
     let sessionTokenLimitExceeded = false;
     let hasToolCalls = false;
+    let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
+    let memoryDeliveryStateInvalidated = false;
+    let modelRequestAccepted = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -3575,6 +3891,10 @@ export class LlmClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
+        if (messageType === SendMessageType.UserQuery) {
+          await this.activatePreparedMemoryRecallTransition();
+        }
+        this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
         this.beginManagedAutoMemoryRecall(
           preHookUserPromptText ?? partToString(request),
           signal,
@@ -3948,6 +4268,7 @@ export class LlmClient {
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
           systemReminders.unshift(userQueryMemory.prompt);
+          memoryDeliveryToCommit = userQueryMemory;
         }
 
         requestToSend = [...systemReminders, ...requestToSend];
@@ -4027,19 +4348,6 @@ export class LlmClient {
             return turn;
           }
         }
-        const toolResultMemory =
-          await this.consumeManagedAutoMemoryRecall('tool_result');
-        if (toolResultMemory?.prompt) {
-          // Append (not prepend): on a ToolResult turn, requestToSend leads
-          // with functionResponse parts that must immediately follow the
-          // model's functionCall (Qwen API constraint — same reason the
-          // IDE-context block above is skipped while a tool call is pending,
-          // see the `hasPendingToolCall` guard). Putting the memory text
-          // after the functionResponse parts keeps the call/response pairing
-          // intact under native Gemini; the OpenAI converter then emits the
-          // text as a separate user message after the tool messages.
-          requestToSend = [...requestToSend, toolResultMemory.prompt];
-        }
         const activeTodoReminder =
           this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
@@ -4059,6 +4367,20 @@ export class LlmClient {
           sizeOnly: true,
           pendingContent: createUserContent(requestToSend),
         });
+        const toolResultMemory =
+          await this.consumeManagedAutoMemoryRecall('tool_result');
+        if (toolResultMemory?.prompt) {
+          // Append (not prepend): on a ToolResult turn, requestToSend leads
+          // with functionResponse parts that must immediately follow the
+          // model's functionCall (Qwen API constraint — same reason the
+          // IDE-context block above is skipped while a tool call is pending,
+          // see the `hasPendingToolCall` guard). Putting the memory text
+          // after the functionResponse parts keeps the call/response pairing
+          // intact under native Gemini; the OpenAI converter then emits the
+          // text as a separate user message after the tool messages.
+          requestToSend = [...requestToSend, toolResultMemory.prompt];
+          memoryDeliveryToCommit = toolResultMemory;
+        }
       }
 
       for (const goalEvent of takePendingGoalEvents()) {
@@ -4111,6 +4433,18 @@ export class LlmClient {
       const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
+          const acceptsModelInput =
+            event.type === LlmEventType.Content ||
+            event.type === LlmEventType.Thought ||
+            event.type === LlmEventType.ToolCallRequest ||
+            event.type === LlmEventType.Finished ||
+            event.type === LlmEventType.Citation;
+          if (acceptsModelInput && !modelRequestAccepted) {
+            modelRequestAccepted = true;
+            if (messageType === SendMessageType.ToolResult) {
+              this.restoreMemoryBodyStateFromHistory();
+            }
+          }
           if (!steerInputSettled) {
             // Settle the attached steer input as soon as the first stream
             // event arrives — the user-content push has landed by now.
@@ -4127,6 +4461,7 @@ export class LlmClient {
             event.type === LlmEventType.Retry ||
             event.type === LlmEventType.ModelFallback
           ) {
+            modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
             agentOutput.restartAttempt(
@@ -4247,6 +4582,8 @@ export class LlmClient {
           // the previous merged IDE context.
           if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
+            this.resetManagedAutoMemoryAfterCompression();
+            memoryDeliveryStateInvalidated = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
@@ -4325,6 +4662,16 @@ export class LlmClient {
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             return turn;
           }
+        }
+        if (memoryDeliveryToCommit && modelRequestAccepted) {
+          this.commitManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+          memoryDeliveryToCommit = null;
+          if (memoryDeliveryStateInvalidated) {
+            this.resetManagedAutoMemoryAfterCompression();
+          }
+        } else if (memoryDeliveryToCommit) {
+          this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+          memoryDeliveryToCommit = null;
         }
       } finally {
         // Fires on every exit from the loop above: normal completion, any of
@@ -4840,6 +5187,10 @@ export class LlmClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
+      if (memoryDeliveryToCommit) {
+        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
+      }
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4863,6 +5214,13 @@ export class LlmClient {
       }
       throw error;
     } finally {
+      if (memoryDeliveryToCommit) {
+        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
+      }
+      if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
+        this.restoreMemoryBodyStateFromHistory();
+      }
       if (
         this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
         (!normalCompletion || !hasToolCalls)
@@ -5071,6 +5429,8 @@ export class LlmClient {
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
       );
+      this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+      this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
@@ -5150,7 +5510,17 @@ export class LlmClient {
         microcompactMeta,
         'compress-fast',
       );
+      const memoryManager = this.config.getMemoryManager();
+      if (microcompactMeta.unresolvedEvictedMemoryBodies > 0) {
+        memoryManager.markAllMemoryBodiesEvictedFromHistory();
+      } else {
+        memoryManager.markMemoryBodiesEvictedFromHistory(
+          microcompactMeta.evictedMemoryBodies ?? [],
+        );
+      }
     }
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.forceFullIdeContext = true;
 
     return info;

@@ -1,0 +1,434 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Config } from '../config/config.js';
+import { logMemorySearch, MemorySearchEvent } from '../telemetry/index.js';
+import {
+  executeSearchMemory,
+  type MemoryBodyCoverage,
+  type SearchMemoryToolResult,
+  type SearchMemoryToolParams,
+} from '../memory/search-memory.js';
+import {
+  AUTO_MEMORY_TREE_CATEGORIES,
+  AUTO_MEMORY_UNCATEGORIZED,
+} from '../memory/types.js';
+import type { ToolInvocation, ToolResult } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
+
+class SearchMemoryToolInvocation extends BaseToolInvocation<
+  SearchMemoryToolParams,
+  ToolResult
+> {
+  constructor(
+    private readonly config: Config,
+    params: SearchMemoryToolParams,
+  ) {
+    super(params);
+  }
+
+  getDescription(): string {
+    return `Search memory (${this.params.mode})`;
+  }
+
+  async execute(signal: AbortSignal): Promise<ToolResult> {
+    if (this.config.getMemoryRecallMode() !== 'structured') {
+      const message =
+        'search_memory is unavailable while the legacy memory protocol is active.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_DENIED },
+      };
+    }
+    const memoryManager = this.config.getMemoryManager();
+    const signature = searchMemoryRequestSignature(this.params);
+    const claimed =
+      this.params.mode !== 'fetch' &&
+      memoryManager.claimSearchMemoryRequestForCurrentTurn(signature);
+    if (this.params.mode !== 'fetch' && !claimed) {
+      const content = JSON.stringify(
+        {
+          mode: this.params.mode,
+          duplicateRequest: true,
+          warning:
+            'This identical search_memory request already ran in the current turn. Use the previous result or change the parameters instead of repeating it.',
+        },
+        null,
+        2,
+      );
+      return { llmContent: content, returnDisplay: content };
+    }
+    const bodyPresentVersions = memoryManager.getBodyPresentVersionsInHistory();
+    const bodyCoverage = memoryManager.getBodyCoverageInHistory();
+    const exhaustedBodyRefs =
+      memoryManager.getExhaustedBodyRefsForCurrentTurn();
+    // Execute against per-call copies and merge only on success. Restoring a
+    // before-snapshot into the shared collections on failure would also wipe
+    // a concurrent sibling call's already-committed reads (search_memory is
+    // Kind.Fetch and runs concurrently).
+    const callBodyPresentVersions = new Map(bodyPresentVersions);
+    const callBodyCoverage = structuredClone(bodyCoverage);
+    const callExhaustedBodyRefs = new Set(exhaustedBodyRefs);
+    // Pre-call snapshots detect which entries the call itself wrote; only
+    // those are committed back. Replaying the whole pre-call state would
+    // resurrect entries a mid-call eviction (memory-pressure compaction)
+    // deliberately cleared, and the next read would claim an evicted body is
+    // still available.
+    const preCallBodyPresentVersions = new Map(bodyPresentVersions);
+    const preCallBodyCoverage = structuredClone(bodyCoverage);
+    const preCallExhaustedBodyRefs = new Set(exhaustedBodyRefs);
+    let result: SearchMemoryToolResult;
+    try {
+      result = await executeSearchMemory(this.params, {
+        projectRoot: this.config.getProjectRoot(),
+        abortSignal: signal,
+        teamMemoryEnabled: this.config.getTeamMemoryEnabled?.() ?? false,
+        trustedProject: this.config.isTrustedFolder?.() ?? false,
+        bodyPresentVersions: callBodyPresentVersions,
+        bodyCoverage: callBodyCoverage,
+        exhaustedBodyRefs: callExhaustedBodyRefs,
+        onComplete: (observation) => {
+          logMemorySearch(
+            this.config,
+            new MemorySearchEvent({
+              mode: observation.mode,
+              docs_scanned: observation.docsScanned,
+              results_returned: observation.resultsReturned,
+              duration_ms: observation.durationMs,
+            }),
+          );
+        },
+      });
+      signal.throwIfAborted();
+    } catch (error) {
+      if (claimed) {
+        memoryManager.releaseSearchMemoryRequestForCurrentTurn(signature);
+      }
+      throw error;
+    }
+    callBodyPresentVersions.forEach((version, ref) => {
+      // Commit only what the call itself wrote: replaying untouched pre-call
+      // entries would resurrect state a mid-call eviction cleared on purpose.
+      if (preCallBodyPresentVersions.get(ref) === version) return;
+      const live = bodyPresentVersions.get(ref);
+      if (live === undefined || live < version) {
+        bodyPresentVersions.set(ref, version);
+      }
+    });
+    callBodyCoverage.forEach((coverage, ref) => {
+      const before = preCallBodyCoverage.get(ref);
+      if (before !== undefined && sameBodyCoverage(before, coverage)) return;
+      const live = bodyCoverage.get(ref);
+      if (!live || live.version < coverage.version) {
+        // The call's entry was cloned from the pre-call snapshot, so it
+        // carries ranges this call never read. When the live entry vanished
+        // mid-call (memory-pressure eviction), committing those inherited
+        // ranges would claim evicted bodies are still in history — strip
+        // everything but the windows this call added.
+        const inherited =
+          before !== undefined &&
+          before.version === coverage.version &&
+          before.total === coverage.total
+            ? before
+            : undefined;
+        bodyCoverage.set(
+          ref,
+          inherited
+            ? {
+                ...coverage,
+                ranges: coverage.ranges.filter(
+                  (range) =>
+                    !inherited.ranges.some(
+                      (b) => b.start === range.start && b.end === range.end,
+                    ),
+                ),
+              }
+            : coverage,
+        );
+        return;
+      }
+      if (live.version > coverage.version) {
+        // A concurrent sibling committed coverage for a newer file version;
+        // this call's stale snapshot entry must not downgrade it.
+        return;
+      }
+      // Same file version: union this call's windows into the live entry so
+      // a concurrent sibling's already-committed windows survive this
+      // call's write-back of its stale snapshot.
+      for (const range of coverage.ranges) {
+        if (
+          !live.ranges.some(
+            (liveRange) =>
+              liveRange.start === range.start && liveRange.end === range.end,
+          )
+        ) {
+          live.ranges.push(range);
+        }
+      }
+      live.ranges.sort((a, b) => a.start - b.start);
+    });
+    callExhaustedBodyRefs.forEach((ref) => {
+      if (!preCallExhaustedBodyRefs.has(ref)) {
+        exhaustedBodyRefs.add(ref);
+      }
+    });
+    const content = JSON.stringify(result, null, 2);
+    return {
+      llmContent: content,
+      // The model gets the full JSON; the transcript shows a one-line
+      // summary — a fetch body can be tens of thousands of characters.
+      returnDisplay: summarizeSearchMemoryResult(result),
+    };
+  }
+}
+
+function sameBodyCoverage(
+  a: MemoryBodyCoverage,
+  b: MemoryBodyCoverage,
+): boolean {
+  return (
+    a.version === b.version &&
+    a.total === b.total &&
+    a.ranges.length === b.ranges.length &&
+    a.ranges.every((range, index) => {
+      const other = b.ranges[index];
+      return other?.start === range.start && other?.end === range.end;
+    })
+  );
+}
+
+function summarizeSearchMemoryResult(result: SearchMemoryToolResult): string {
+  if (result.mode === 'fetch') {
+    const fetched = result.results.filter(
+      (entry) => entry.content !== undefined,
+    );
+    const chars = fetched.reduce(
+      (total, entry) => total + (entry.content?.length ?? 0),
+      0,
+    );
+    const parts = [
+      `Fetched ${result.results.length} memory ${
+        result.results.length === 1 ? 'body' : 'bodies'
+      }`,
+    ];
+    if (chars > 0) {
+      parts.push(`${chars.toLocaleString('en-US')} chars`);
+    }
+    const alreadyAvailable = result.results.length - fetched.length;
+    if (alreadyAvailable > 0) {
+      parts.push(`${alreadyAvailable} already available`);
+    }
+    if (result.missingRefs && result.missingRefs.length > 0) {
+      parts.push(`${result.missingRefs.length} missing`);
+    }
+    return parts.join(', ');
+  }
+  if (result.mode === 'search') {
+    return `Found ${result.results.length} matching ${
+      result.results.length === 1 ? 'memory' : 'memories'
+    }`;
+  }
+  return `Listed ${result.branches.length} memory categories (${result.branches.reduce(
+    (total, branch) => total + branch.leaves.length,
+    0,
+  )} entries)`;
+}
+
+function searchMemoryRequestSignature(params: SearchMemoryToolParams): string {
+  if (params.mode === 'fetch') {
+    return JSON.stringify({
+      mode: params.mode,
+      refs: params.refs,
+      cursor: params.cursor,
+    });
+  }
+  if (params.mode === 'search') {
+    return JSON.stringify({
+      mode: params.mode,
+      keywords: params.keywords,
+      scopes: params.scopes,
+      categories: params.categories,
+      limit: params.limit,
+    });
+  }
+  return JSON.stringify({
+    mode: params.mode,
+    scopes: params.scopes,
+    branches: params.branches?.map((branch) => ({
+      category: branch.category,
+      cursor: branch.cursor,
+    })),
+    limitPerBranch: params.limitPerBranch,
+  });
+}
+
+const SEARCH_MEMORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    mode: {
+      type: 'string',
+      enum: ['fetch', 'search', 'explore'],
+      description: 'mode',
+    },
+    refs: {
+      type: 'array',
+      description:
+        'fetch only: exact opaque refs copied from the tree/results, e.g. project:project/compaction-pipeline.md',
+      items: { type: 'string' },
+      minItems: 1,
+      maxItems: 5,
+    },
+    cursor: {
+      type: 'string',
+      description:
+        'fetch only: cursor returned for the sole ref; copy the returned continuation',
+    },
+    keywords: {
+      type: 'array',
+      description: 'search only: 1-5 terms, phrases, or identifiers',
+      items: { type: 'string', maxLength: 64 },
+      minItems: 1,
+      maxItems: 5,
+    },
+    scopes: {
+      type: 'array',
+      description: 'search/explore only: visible memory scopes',
+      items: { type: 'string', enum: ['project', 'user', 'team'] },
+      minItems: 1,
+    },
+    categories: {
+      type: 'array',
+      description: 'search only: category filters',
+      items: {
+        type: 'string',
+        enum: [...AUTO_MEMORY_TREE_CATEGORIES, AUTO_MEMORY_UNCATEGORIZED],
+      },
+      minItems: 1,
+    },
+    limit: {
+      type: 'integer',
+      description: 'search only: result limit',
+      minimum: 1,
+      maximum: 5,
+    },
+    branches: {
+      type: 'array',
+      description: 'explore only: category branches',
+      maxItems: 3,
+      items: {
+        type: 'object',
+        properties: {
+          category: {
+            type: 'string',
+            enum: [...AUTO_MEMORY_TREE_CATEGORIES, AUTO_MEMORY_UNCATEGORIZED],
+          },
+          cursor: {
+            type: 'string',
+          },
+        },
+        required: ['category'],
+        additionalProperties: false,
+      },
+    },
+    limitPerBranch: {
+      type: 'integer',
+      description: 'explore only: leaf limit per branch',
+      minimum: 1,
+      maximum: 20,
+    },
+  },
+  required: ['mode'],
+  additionalProperties: false,
+} as const;
+
+const SEARCH_MEMORY_DESCRIPTION =
+  'Use visible memory metadata when sufficient. Fetch exact refs copied from the memory tree; search terms or phrases when the ref or relevant body section is unknown; explore categories for an overview. Continue a truncated body with fetch using its returned ref and cursor.';
+
+export class SearchMemoryTool extends BaseDeclarativeTool<
+  SearchMemoryToolParams,
+  ToolResult
+> {
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  constructor(private readonly config: Config) {
+    super(
+      ToolNames.SEARCH_MEMORY,
+      ToolDisplayNames.SEARCH_MEMORY,
+      SEARCH_MEMORY_DESCRIPTION,
+      Kind.Fetch,
+      SEARCH_MEMORY_SCHEMA,
+      true,
+      false,
+      false,
+      false,
+      'memory recall fetch search explore overview category',
+    );
+  }
+
+  protected override validateToolParamValues(
+    params: SearchMemoryToolParams,
+  ): string | null {
+    if (params.mode === 'fetch') {
+      if (!Array.isArray(params.refs) || params.refs.length === 0) {
+        return 'fetch requires refs.';
+      }
+      if (params.cursor && params.refs.length !== 1) {
+        return 'fetch cursor requires exactly one ref.';
+      }
+      if (
+        'query' in params ||
+        'keywords' in params ||
+        'categories' in params ||
+        'limit' in params ||
+        'branches' in params ||
+        'limitPerBranch' in params
+      ) {
+        return 'fetch only accepts refs and optional cursor.';
+      }
+      return null;
+    }
+    if (params.mode === 'search') {
+      if (!Array.isArray(params.keywords) || params.keywords.length === 0) {
+        return 'search requires keywords.';
+      }
+      if (
+        'query' in params ||
+        'refs' in params ||
+        'cursor' in params ||
+        'branches' in params ||
+        'limitPerBranch' in params
+      ) {
+        return 'search accepts keywords, scopes, categories, and limit.';
+      }
+      return null;
+    }
+    if (params.mode === 'explore') {
+      if (
+        'refs' in params ||
+        'cursor' in params ||
+        'query' in params ||
+        'keywords' in params ||
+        'categories' in params ||
+        'limit' in params
+      ) {
+        return 'explore accepts scopes, branches, and limitPerBranch.';
+      }
+      return null;
+    }
+    return 'Invalid search_memory mode.';
+  }
+
+  protected createInvocation(
+    params: SearchMemoryToolParams,
+  ): ToolInvocation<SearchMemoryToolParams, ToolResult> {
+    return new SearchMemoryToolInvocation(this.config, params);
+  }
+}

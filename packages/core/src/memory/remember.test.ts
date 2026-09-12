@@ -37,6 +37,8 @@ vi.mock('./indexer.js', () => ({
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
 
+const recordUserMutation = vi.fn();
+
 function createConfig(
   projectRoot: string,
   managed = true,
@@ -48,6 +50,7 @@ function createConfig(
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+    getMemoryManager: vi.fn().mockReturnValue({ recordUserMutation }),
     ...overrides,
   } as unknown as Config;
 }
@@ -66,6 +69,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockReset();
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
+    recordUserMutation.mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
   });
@@ -172,6 +176,7 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
+    expect(recordUserMutation).not.toHaveBeenCalled();
     // The remember system prompt already embeds the full auto-memory section;
     // the forked-agent config must report an empty auto-memory prompt so
     // AgentCore does not append it a second time (duplication / blank-slate
@@ -984,7 +989,7 @@ describe('remember memory helper', () => {
     expect(params.suppressChatRecording).toBe(true);
   });
 
-  it('rebuilds touched project indexes and best-effort user indexes', async () => {
+  it('records a user mutation before a best-effort user index rebuild', async () => {
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValue(
@@ -1006,6 +1011,13 @@ describe('remember memory helper', () => {
     expect(result.touchedScopes).toEqual(['project', 'user']);
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(recordUserMutation).toHaveBeenCalledWith(
+      projectRoot,
+      expect.any(Object),
+    );
+    expect(recordUserMutation.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(rebuildUserAutoMemoryIndex).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('classifies symlinked project memory paths by realpath', async () => {
@@ -1227,6 +1239,9 @@ describe('remember memory helper', () => {
     expect(params.systemPrompt).toContain('## What NOT to save in memory');
     expect(params.systemPrompt).toContain('## When to access memories');
     expect(params.systemPrompt).toContain('## Before recommending from memory');
+    expect(params.systemPrompt).toContain('category:');
+    expect(params.systemPrompt).toContain('keywords:');
+    expect(params.systemPrompt).toContain('usage_scenarios:');
     // Condensed-only markers must NOT appear
     expect(params.systemPrompt).not.toContain('## Memory types');
     expect(params.systemPrompt).not.toContain('## Do not save');
