@@ -26,6 +26,58 @@ import {
   type MonitorDebugRecorder,
 } from './monitor-debug-store.js';
 
+const rmFailures = vi.hoisted(() => new Map<string, number>());
+const rmCalls = vi.hoisted(
+  () => [] as Array<{ path: string; options: unknown }>,
+);
+// One-shot lstat tampering after `after` real calls, simulating a concurrent
+// pruner or tamperer acting between the prune scan and the deletion phase.
+const lstatTampers = vi.hoisted(
+  () => new Map<string, { after: number; effect: 'enoent' | 'symlink' }>(),
+);
+
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    lstat: async (
+      path: Parameters<typeof fs.lstat>[0],
+      options?: Parameters<typeof fs.lstat>[1],
+    ) => {
+      const key = String(path);
+      const tamper = lstatTampers.get(key);
+      if (tamper) {
+        if (tamper.after > 0) {
+          tamper.after -= 1;
+        } else {
+          lstatTampers.delete(key);
+          if (tamper.effect === 'symlink') {
+            const stat = await fs.lstat(path);
+            stat.isSymbolicLink = () => true;
+            return stat;
+          }
+          throw Object.assign(new Error('no such file or directory'), {
+            code: 'ENOENT',
+          });
+        }
+      }
+      return fs.lstat(path, options);
+    },
+    rm: async (
+      path: Parameters<typeof fs.rm>[0],
+      options?: Parameters<typeof fs.rm>[1],
+    ) => {
+      rmCalls.push({ path: String(path), options });
+      const remaining = rmFailures.get(String(path));
+      if (remaining) {
+        rmFailures.set(String(path), remaining - 1);
+        throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      }
+      return fs.rm(path, options);
+    },
+  };
+});
+
 const INFO: MonitorDebugInfo = {
   taskId: 'monitor-1',
   taskGeneration: 3,
@@ -78,6 +130,9 @@ describe('MonitorDebugStore', () => {
   afterEach(async () => {
     await Promise.all(stores.map((item) => item.flush()));
     vi.restoreAllMocks();
+    rmFailures.clear();
+    rmCalls.length = 0;
+    lstatTampers.clear();
     await rm(temporary, { recursive: true, force: true });
   });
 
@@ -225,26 +280,6 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
-    for (const path of [
-      root,
-      archive.directory,
-      join(archive.directory, 'requests'),
-      directory,
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o700);
-    }
-    for (const path of [
-      join(archive.directory, 'monitor.json'),
-      ...[
-        'request.json',
-        'response.json',
-        'image-0001.jpg',
-        'image-0002.jpg',
-        'input.wav',
-      ].map((file) => join(directory, file)),
-    ]) {
-      expect((await lstat(path)).mode & 0o777).toBe(0o600);
-    }
     expect(log).toHaveBeenCalledWith(
       'proactive.monitor_request_saved',
       expect.objectContaining({
@@ -255,6 +290,43 @@ describe('MonitorDebugStore', () => {
       }),
     );
   });
+
+  // Windows has no POSIX permission bits, so skip (reportedly) rather than
+  // passing a test that asserted nothing.
+  it.skipIf(process.platform === 'win32')(
+    'archives monitor recordings with private permissions',
+    async () => {
+      const archive = await recorder();
+      sendImage(archive, Buffer.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]));
+      sendImage(archive, Buffer.from([0xff, 0xd8, 3, 4, 0xff, 0xd9]));
+      sendAudio(archive, Buffer.from([0, 0, 0xff, 0x7f, 0, 0x80]));
+      commit(archive);
+      archive.result({ status: 'completed', text: 'reply' });
+      await store.flush();
+
+      const directory = join(archive.directory, 'requests', '000001');
+      for (const path of [
+        root,
+        archive.directory,
+        join(archive.directory, 'requests'),
+        directory,
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o700);
+      }
+      for (const path of [
+        join(archive.directory, 'monitor.json'),
+        ...[
+          'request.json',
+          'response.json',
+          'image-0001.jpg',
+          'image-0002.jpg',
+          'input.wav',
+        ].map((file) => join(directory, file)),
+      ]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o600);
+      }
+    },
+  );
 
   it('separates requests and transports without copying old media or cleared inputs', async () => {
     const archive = await recorder();
@@ -404,12 +476,111 @@ describe('MonitorDebugStore', () => {
     });
   });
 
+  it('keeps pruning and recording when one stale archive cannot be deleted', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 12; time += 1)
+      owned.push(await ownedDirectory(time));
+    // The prune visits stale archives newest-first, so blocking owned[1]
+    // leaves the older owned[0] to prove the loop continued. Block the media
+    // subtree, as a held-open media file does: the removal must fail before
+    // the marker is touched, so the next prune still recognizes the archive.
+    rmFailures.set(join(owned[1]!, 'requests'), 1);
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    expect((await lstat(join(owned[1]!, 'monitor.json'))).isFile()).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({
+        directory: owned[1],
+        retained: true,
+        reason: 'EBUSY',
+      }),
+    );
+    // A retained archive must never be logged as destroyed.
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+    // Once the handle clears, the next prune retries and removes the archive.
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[1]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(log).toHaveBeenCalledWith('proactive.monitor_debug_pruned', {
+      directory: owned[1],
+    });
+    // maxRetries rides out a transient handle (AV scanner/indexer) on Windows;
+    // the budget must ride on both removals, not just the media subtree.
+    for (const path of [join(owned[1]!, 'requests'), owned[1]!])
+      expect(rmCalls.find((call) => call.path === path)?.options).toEqual(
+        expect.objectContaining({
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        }),
+      );
+    const recorder = store.create(INFO);
+    expect(recorder).toBeDefined();
+    await recorder!.start();
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_failed',
+      expect.objectContaining({ reason: 'initialization_failed' }),
+    );
+  });
+
+  it('reports nothing when a concurrent pruner removes a stale archive first', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 12; time += 1)
+      owned.push(await ownedDirectory(time));
+    // The scan recognizes owned[1]; a second store on the same root then
+    // removes it before this prune's deletion phase. Nothing was retained,
+    // so neither a failure nor a pruned event may be logged for it.
+    lstatTampers.set(owned[1]!, { after: 1, effect: 'enoent' });
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+  });
+
+  it('reports the reason when a stale archive turns unsafe mid-prune', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 11; time += 1)
+      owned.push(await ownedDirectory(time));
+    // The scan accepts owned[0], then the archive is swapped for a symlink
+    // before the deletion phase rechecks it. The refusal is a privacy guard,
+    // not a transient OS delete failure, and must be reported by name.
+    lstatTampers.set(owned[0]!, { after: 1, effect: 'symlink' });
+    expect(await store.initialize()).toBe(true);
+    expect((await lstat(owned[0]!)).isDirectory()).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({
+        directory: owned[0],
+        retained: true,
+        reason: 'unsafe_directory',
+      }),
+    );
+  });
+
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
-    await chmod(root, 0o755);
     await writeFile(join(root, 'keep.txt'), 'keep');
-    expect(await store.initialize()).toBe(false);
-    expect(store.create(INFO)).toBeUndefined();
+    // Windows has no POSIX permission bits; a shared-looking mode cannot be
+    // expressed or rejected there.
+    if (process.platform !== 'win32') {
+      await chmod(root, 0o755);
+      expect(await store.initialize()).toBe(false);
+      expect(store.create(INFO)).toBeUndefined();
+    }
     const linked = new MonitorDebugStore(
       log,
       join(temporary, 'linked-archives'),
@@ -418,6 +589,25 @@ describe('MonitorDebugStore', () => {
     await symlink(root, linked.root);
     expect(await linked.initialize()).toBe(false);
     expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('accepts directories on Windows, where POSIX permission bits do not exist', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    // Both READMEs' Windows isolation caveat assumes the default root stays
+    // inside the OS temporary directory.
+    expect(new MonitorDebugStore(log).root).toBe(
+      join(tmpdir(), 'qwen-live-monitor-debug'),
+    );
+    await mkdir(root, { mode: 0o700 });
+    // Stand-in for Windows reporting every directory with group/other bits.
+    await chmod(root, 0o755);
+    expect(await store.initialize()).toBe(true);
+
+    // Symlink rejection is not platform-gated and must still apply.
+    const linked = new MonitorDebugStore(log, join(temporary, 'linked-win32'));
+    stores.push(linked);
+    await symlink(root, linked.root);
+    expect(await linked.initialize()).toBe(false);
   });
 
   it('does not recreate an active directory pruned by another store', async () => {

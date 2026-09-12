@@ -64,9 +64,21 @@ describe('Live language preference', () => {
       ...raw,
       language: 'zh-CN',
     });
-    expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
+
+  // Windows has no POSIX permission bits, so skip (reportedly) rather than
+  // passing a test that asserted nothing.
+  it.skipIf(process.platform === 'win32')(
+    'writes the language config with 0600 permissions',
+    () => {
+      const dataDir = directory();
+      const path = join(dataDir, 'config.json');
+      writeFileSync(path, '{"realtimeApiKey":"fixture-key"}');
+      persistLanguagePreference(dataDir, 'zh-CN');
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('rejects invalid language before writing and preserves config on atomic rename failure', () => {
     const dataDir = directory();

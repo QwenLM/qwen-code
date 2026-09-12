@@ -42,7 +42,9 @@ async function privateDirectory(path: string): Promise<void> {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    (stat.mode & 0o077) !== 0 ||
+    // Windows reports every directory with group/other bits set, so POSIX
+    // mode bits cannot reject a shared directory there.
+    (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
     (process.getuid && stat.uid !== process.getuid())
   )
     throw new Error('unsafe_directory');
@@ -198,13 +200,37 @@ export class MonitorDebugStore {
     );
     this.lastCreatedAt = Math.max(this.lastCreatedAt, owned[0]?.createdAt ?? 0);
     for (const entry of owned.slice(10)) {
-      for (const recorder of this.recorders)
-        if (recorder.directory === entry.directory) recorder.evict();
-      await privateDirectory(entry.directory);
-      await rm(entry.directory, { recursive: true, force: true });
-      this.emit('proactive.monitor_debug_pruned', {
-        directory: entry.directory,
-      });
+      try {
+        for (const recorder of this.recorders)
+          if (recorder.directory === entry.directory) recorder.evict();
+        await privateDirectory(entry.directory);
+        // Remove the media subtree first and the marker last: a removal that
+        // fails part-way leaves the archive recognizable, so the next prune
+        // retries it instead of orphaning it.
+        await rm(join(entry.directory, 'requests'), {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+        await rm(entry.directory, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+        this.emit('proactive.monitor_debug_pruned', {
+          directory: entry.directory,
+        });
+      } catch (error) {
+        /* One undeletable archive must not wedge the remaining prune. */
+        const code = (error as NodeJS.ErrnoException).code;
+        // A concurrent pruner on the same root already removed it.
+        if (code === 'ENOENT') continue;
+        this.emit('proactive.monitor_debug_prune_failed', {
+          directory: entry.directory,
+          retained: true,
+          reason: code ?? (error instanceof Error ? error.message : 'unknown'),
+        });
+      }
     }
   }
 }

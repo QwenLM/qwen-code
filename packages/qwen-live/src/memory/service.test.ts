@@ -129,7 +129,6 @@ describe('persistMemoryPreferences', () => {
       retrieve: { useVector: false },
     });
     expect(resolved.updater.model).toBe('custom-memory-model');
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
 
@@ -175,9 +174,23 @@ describe('persistMemoryPreferences', () => {
     });
     expect(saved.memory.observer).not.toHaveProperty('model');
     expect(resolved.observer.model).toBe('custom-memory-model');
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
+
+  // Windows has no POSIX permission bits, so skip (reportedly) rather than
+  // passing a test that asserted nothing.
+  it.skipIf(process.platform === 'win32')(
+    'writes the memory config with 0600 permissions',
+    () => {
+      const plain = fixture();
+      persistMemoryPreferences(plain.dataDir, { enabled: false });
+      expect(statSync(plain.configPath).mode & 0o777).toBe(0o600);
+      const bom = fixture();
+      writeFileSync(bom.configPath, `\uFEFF${JSON.stringify(bom.raw)}`);
+      persistMemoryPreferences(bom.dataDir, { enabled: false });
+      expect(statSync(bom.configPath).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('leaves the original file untouched and cleans its temporary file when replacement fails', () => {
     const { dataDir, configPath } = fixture();
