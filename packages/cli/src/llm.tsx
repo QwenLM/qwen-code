@@ -223,8 +223,9 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // debugLogger.error() uses async fs.appendFile — the write would be
     // abandoned by the process.exit() below. Write synchronously instead.
     let logged = false;
+    let logPath: string | undefined;
     try {
-      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      logPath = Storage.getDebugLogPath(config.getSessionId());
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(logPath, line, 'utf8');
       logged = true;
@@ -247,6 +248,35 @@ export function setupUncaughtExceptionHandler(config: Config) {
     writeStderrLineSafe(
       `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
     );
+    // Monitors are spawned `detached` (their own process group) so the tool
+    // can group-kill them; a side effect is that they outlive this process
+    // unless something kills them first. Reap whatever is still running:
+    // the crashed session can never consume their terminal events, and the
+    // in-memory registry gives a resumed session no way to reattach. The
+    // SIGKILL escalation timer in the abort path cannot survive the exit
+    // below, so children ignoring SIGTERM may still leak — best-effort, and
+    // a crash handler must never throw. (On Windows the taskkill spawn is
+    // fire-and-forget for the same reason.)
+    try {
+      config.getMonitorRegistry().abortAll({ notify: false });
+    } catch (reapError) {
+      // A failed reap means monitors still leak — the one distinguishing
+      // fact this path can produce. The crash lines above were written
+      // before the reap ran, so record the failure separately.
+      try {
+        if (logPath) {
+          const detail =
+            reapError instanceof Error ? reapError.stack : String(reapError);
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP_FAILED] ${detail ?? ''}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
+    }
     process.exit(1);
   };
   process.on('uncaughtException', uncaughtExceptionHandler);
