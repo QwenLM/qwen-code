@@ -440,6 +440,9 @@ export function EmbeddedApp() {
         ).filter(
           (session) =>
             !session.parentSessionId &&
+            // Live voice threads are ordinary 'default' sessions carrying a
+            // sourceId built from LIVE_SESSION_SOURCE_PREFIX in packages/cli;
+            // the literal is inlined since the CLI is not a bundle dependency.
             !(
               session.sourceType === 'default' &&
               session.sourceId?.startsWith('realtime_voice:')
