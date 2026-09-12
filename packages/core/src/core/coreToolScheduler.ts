@@ -508,6 +508,7 @@ async function safelyFirePostToolUseFailureHook(
   isInterrupt: boolean,
   permissionMode?: string,
   tool_call_id?: string,
+  durationMs?: number,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
     return await firePostToolUseFailureHook(
@@ -520,6 +521,7 @@ async function safelyFirePostToolUseFailureHook(
       permissionMode,
       undefined,
       tool_call_id,
+      durationMs,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -5344,6 +5346,14 @@ export class CoreToolScheduler {
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionSettled = false;
     let execSpan: Span | undefined;
+    // Set when the tool actually starts executing, so hook durations exclude
+    // validation and approval time. Read from the monotonic clock so a system
+    // clock adjustment during a long tool cannot skew the duration.
+    let executionStartedAt: number | undefined;
+    const elapsedExecutionMs = (): number | undefined =>
+      executionStartedAt === undefined
+        ? undefined
+        : Math.round(performance.now() - executionStartedAt);
     let producerToolResult: ToolResult | null | undefined;
     let observeProducerOutput = observeSyntheticProducer;
     try {
@@ -5432,6 +5442,7 @@ export class CoreToolScheduler {
           promptIdContext.run(scheduledCall.request.prompt_id, () => {
             // Keep this transition and execution span at the invocation
             // boundary so setup failures remain not_started.
+            executionStartedAt = performance.now();
             this.setStatusInternal(callId, 'executing');
             execSpan = startToolExecutionSpan({
               toolName: canonicalName,
@@ -5475,6 +5486,7 @@ export class CoreToolScheduler {
           promptIdContext.run(scheduledCall.request.prompt_id, () => {
             // Keep this transition and execution span at the invocation
             // boundary so setup failures remain not_started.
+            executionStartedAt = performance.now();
             this.setStatusInternal(callId, 'executing');
             execSpan = startToolExecutionSpan({
               toolName: canonicalName,
@@ -5698,6 +5710,7 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
                 callId,
+                elapsedExecutionMs(),
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -5789,6 +5802,7 @@ export class CoreToolScheduler {
                 permissionMode,
                 undefined, // signal
                 callId, // Original API call ID (e.g., call_xxx)
+                elapsedExecutionMs(),
               ),
             (r) =>
               r.hookError
@@ -6243,6 +6257,7 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
                 callId,
+                elapsedExecutionMs(),
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -6530,6 +6545,7 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
                 callId,
+                elapsedExecutionMs(),
               ),
             this.postToolUseFailureEndMeta,
           );
@@ -6572,6 +6588,7 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
                 callId,
+                elapsedExecutionMs(),
               ),
             this.postToolUseFailureEndMeta,
           );

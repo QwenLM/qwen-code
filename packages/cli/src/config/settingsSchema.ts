@@ -2344,7 +2344,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Slash command names to hide and refuse to execute. Matched ' +
           'case-insensitively against the final command name (for extension ' +
-          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"), ' +
+          'except that a skill command is gated under either spelling — its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf) ' +
+          '— so an entry written before that prefix existed still gates it. ' +
           'Merged as a union across settings scopes, so workspace settings ' +
           'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
@@ -2390,7 +2393,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Skill names to hide. Matched case-insensitively against the skill ' +
           'name. Hidden skills do not appear in <available_skills> or as ' +
-          '/<name> slash commands. UNION-merged across systemDefaults/user/' +
+          '/<name> slash commands. An extension skill matches under either its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf), ' +
+          'so an entry written before that prefix existed still blocks it. ' +
+          'UNION-merged across systemDefaults/user/' +
           'workspace/system scopes — workspace cannot remove entries defined ' +
           'in higher scopes.',
         showInDialog: false,
@@ -2405,7 +2411,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Skill names disabled by default unless explicitly enabled through ' +
           'skills.enabled. Matched case-insensitively and UNION-merged across ' +
-          'settings scopes. skills.disabled always wins.',
+          'settings scopes. An extension skill is disabled under either its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf). ' +
+          'skills.disabled always wins; skills.enabled cancels an entry here ' +
+          'only when the two lists spell the name the same way.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2416,9 +2425,18 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string[] | undefined,
         description:
-          'Explicit opt-ins that override matching skills.defaultDisabled ' +
-          'entries. Matched case-insensitively and UNION-merged across settings ' +
-          'scopes. Cannot override skills.disabled.',
+          'Explicit opt-ins, matched against the skill name as registered — ' +
+          'an extension skill is rust:pdf there. An entry spelled as the ' +
+          'registered name overrides a matching skills.defaultDisabled ' +
+          'entry and, for an extension skill, both the default the owning ' +
+          'extension declares and the enablement stored for this workspace. ' +
+          'A bare pdf entry never matches as a grant; it only cancels an ' +
+          'identically-spelled skills.defaultDisabled entry, and once ' +
+          'cancelled the enablement stored for this workspace decides, else ' +
+          'the default the owning extension declares. Matched ' +
+          'case-insensitively and UNION-merged across settings scopes. Cannot ' +
+          'override skills.disabled or re-enable skills from a ' +
+          'skills.disabledLevels-excluded level.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -3896,6 +3914,66 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute when a permission dialog is displayed.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PostCompact: {
+        type: 'array',
+        label: 'Post Compact Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after conversation compaction completes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PermissionDenied: {
+        type: 'array',
+        label: 'Permission Denied Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when AUTO-mode classification denies a tool call.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      TodoCreated: {
+        type: 'array',
+        label: 'Todo Created Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a new todo item is created. They can block creation during validation.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      TodoCompleted: {
+        type: 'array',
+        label: 'Todo Completed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a todo item is marked as completed. They can block completion during validation.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      InstructionsLoaded: {
+        type: 'array',
+        label: 'Instructions Loaded Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when an instruction file such as QWEN.md is loaded into context.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
