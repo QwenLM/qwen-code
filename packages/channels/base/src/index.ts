@@ -15,6 +15,7 @@ export type {
   AvailableCommand,
   BackgroundResponseContext,
   BridgeSessionInfo,
+  SessionModelInfo,
   ChannelBtwResult,
   ChannelAgentBridge,
   ChannelLoopToolCreateInput,

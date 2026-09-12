@@ -4,7 +4,10 @@ import {
   DingtalkCardRequestError,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  StatusCardController,
+  type StatusCardControllerOptions,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -68,7 +71,12 @@ function createHarness(
   options: {
     model?: string;
     language?: string;
+    showModel?: boolean;
+    showReasoningEffort?: boolean;
     onError?(operation: string, error: unknown): void;
+    quoteContent?: StatusCardControllerOptions['quoteContent'];
+    sessionModelInfo?: StatusCardControllerOptions['sessionModelInfo'];
+    executeCommand?: StatusCardControllerOptions['executeCommand'];
   } = {},
 ) {
   const client = {
@@ -90,6 +98,59 @@ describe('StatusCardController', () => {
     vi.useRealTimers();
   });
 
+  it('includes the originating request and retains owner-bound terminal actions only', async () => {
+    const executeCommand = vi.fn().mockResolvedValue(undefined);
+    const { client, controller } = createHarness({
+      quoteContent: () => 'Alice：检查当前分支',
+      executeCommand,
+    });
+    controller.ensure(segment(), target);
+    const create = vi.mocked(client.createAndDeliver).mock.calls[0][0];
+    expect(create.cardParamMap.quoteContent).toBe('Alice：检查当前分支');
+    expect(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/new').kind,
+    ).toBe('ignored');
+    await controller.complete('segment-1', 'done');
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          hasAction: 'true',
+          stop_action: 'false',
+        }),
+      }),
+    );
+    expect(tracking(controller).recordsByOutTrack.size).toBe(0);
+    expect(
+      controller.claimCommand(create.outTrackId, 'other', '/new').kind,
+    ).toBe('forbidden');
+    expect(
+      controller.claimCommand(create.outTrackId, 'other', '/new').kind,
+    ).toBe('ignored');
+    await acceptedExecution(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/compress'),
+    )();
+    expect(executeCommand).toHaveBeenCalledWith(segment(), '/compress');
+    expect(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/compress').kind,
+    ).toBe('ignored');
+    controller.dispose();
+  });
+
+  it('expires terminal actions without retaining active card records', async () => {
+    vi.useFakeTimers();
+    const executeCommand = vi.fn();
+    const { client, controller } = createHarness({ executeCommand });
+    controller.ensure(segment(), target);
+    await controller.complete('segment-1', 'done');
+    const { outTrackId } = vi.mocked(client.createAndDeliver).mock.calls[0][0];
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
+    expect(controller.claimCommand(outTrackId, 'owner-1', '/new').kind).toBe(
+      'ignored',
+    );
+    expect(executeCommand).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it('creates and opens a status card on the first content snapshot', async () => {
     const { client, controller } = createHarness();
 
@@ -108,6 +169,11 @@ describe('StatusCardController', () => {
           statusLine: '0s',
           hasAction: 'true',
           stop_action: 'true',
+          cardState: 'running',
+          headerTitle: '处理中',
+          headerColor: 'blue',
+          quoteContent: '',
+          agentName: '',
         }),
       }),
     );
@@ -379,6 +445,139 @@ describe('StatusCardController', () => {
       }),
     );
   });
+
+  it('uses the owning session model and effort in running and completed status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const sessionModelInfo = vi.fn(() => ({
+      model: ' qwen3.8-max(openai) ',
+      reasoningEffort: ' high ',
+    }));
+    const { client, controller } = createHarness({
+      model: 'channel-default',
+      sessionModelInfo,
+    });
+    const context = segment();
+    controller.replace(context, target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionModelInfo).toHaveBeenCalledWith(context);
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'qwen3.8-max · high · 0s',
+        }),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    await controller.complete('segment-1', 'answer');
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'Completed · qwen3.8-max · high · 2s',
+        }),
+      }),
+    );
+    controller.dispose();
+  });
+
+  it('keeps model-name parentheses that are not the OpenAI auth suffix', async () => {
+    const { client, controller } = createHarness({ model: 'custom(preview)' });
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(client.createAndDeliver).mock.calls[0][0].cardParamMap
+        .statusLine,
+    ).toBe('custom(preview) · 0s');
+    controller.dispose();
+  });
+
+  it('can hide model and reasoning effort independently', async () => {
+    const sessionModelInfo = vi.fn(() => ({
+      model: 'qwen3.8-max',
+      reasoningEffort: 'high',
+    }));
+    const hiddenModel = createHarness({
+      showModel: false,
+      sessionModelInfo,
+    });
+    hiddenModel.controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(hiddenModel.client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(hiddenModel.client.createAndDeliver).mock.calls[0][0]
+        .cardParamMap.statusLine,
+    ).toBe('high · 0s');
+
+    const hiddenEffort = createHarness({
+      showReasoningEffort: false,
+      sessionModelInfo,
+    });
+    hiddenEffort.controller.ensure(
+      segment('segment-2', { runId: 'run-2' }),
+      target,
+    );
+    await vi.waitFor(() =>
+      expect(hiddenEffort.client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(hiddenEffort.client.createAndDeliver).mock.calls[0][0]
+        .cardParamMap.statusLine,
+    ).toBe('qwen3.8-max · 0s');
+
+    hiddenModel.controller.dispose();
+    hiddenEffort.controller.dispose();
+  });
+
+  it('does not read session model metadata when both fields are hidden', async () => {
+    const sessionModelInfo = vi.fn(() => ({
+      model: 'qwen3.8-max',
+      reasoningEffort: 'high',
+    }));
+    const { client, controller } = createHarness({
+      model: 'channel-default',
+      showModel: false,
+      showReasoningEffort: false,
+      sessionModelInfo,
+    });
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(sessionModelInfo).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(client.createAndDeliver).mock.calls[0][0].cardParamMap
+        .statusLine,
+    ).toBe('0s');
+    controller.dispose();
+  });
+
+  it.each([' ', 'default', undefined])(
+    'omits unspecified effort (%s) and uses fresh session metadata for a later run',
+    async (reasoningEffort) => {
+      const sessionModelInfo = vi.fn((context: ChannelOutputSegmentContext) =>
+        context.sessionId === 'session-1'
+          ? { model: 'model-one', reasoningEffort }
+          : { model: 'model-two' },
+      );
+      const { client, controller } = createHarness({ sessionModelInfo });
+      controller.ensure(segment(), target);
+      controller.ensure(
+        segment('segment-2', { sessionId: 'session-2', runId: 'run-2' }),
+        target,
+      );
+      await vi.waitFor(() =>
+        expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
+      );
+      const lines = vi
+        .mocked(client.createAndDeliver)
+        .mock.calls.map(([input]) => input.cardParamMap.statusLine);
+      expect(lines).toEqual(['model-one · 0s', 'model-two · 0s']);
+      controller.dispose();
+    },
+  );
 
   it('periodically republishes the full content for reconnected clients', async () => {
     vi.useFakeTimers();
@@ -744,6 +943,10 @@ describe('StatusCardController', () => {
         cardParamMap: {
           blockList: '[{"type":0,"markdown":"answer"}]',
           content: 'answer',
+          markdown: 'answer',
+          cardState: 'completed',
+          headerTitle: '已完成',
+          headerColor: 'green',
           copy_content: 'answer',
           flowStatus: 3,
           statusLine: 'Completed · 0s',
@@ -916,6 +1119,9 @@ describe('StatusCardController', () => {
         expect.objectContaining({
           cardParamMap: {
             flowStatus: 3,
+            cardState: 'cancelled',
+            headerTitle: '已取消',
+            headerColor: 'grey',
             hasAction: 'false',
             stop_action: 'false',
           },
@@ -1319,6 +1525,9 @@ describe('StatusCardController', () => {
       expect.objectContaining({
         cardParamMap: {
           flowStatus: 3,
+          cardState: 'cancelled',
+          headerTitle: '已取消',
+          headerColor: 'grey',
           hasAction: 'false',
           stop_action: 'false',
         },

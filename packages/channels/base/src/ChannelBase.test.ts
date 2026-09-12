@@ -40,6 +40,13 @@ import type { CreatePairingRequestResult } from './PairingStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
+  cardCommand(
+    envelope: Envelope,
+    sessionId: string,
+    command: '/new' | '/compress',
+  ) {
+    return this.handleSessionCardCommand(envelope, sessionId, command);
+  }
   sent: Array<{ chatId: string; text: string }> = [];
   threadMessages: Array<{
     chatId: string;
@@ -9804,6 +9811,61 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: cmd }));
         expect(ch.sent[0]!.text).toContain('Session cleared');
       }
+    });
+
+    it('card commands clear only the original current session and reject old cards', async () => {
+      const ch = createChannel({
+        sessionScope: 'single',
+        allowedUsers: ['user1'],
+      });
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('Session cleared');
+      await ch.handleInbound(envelope());
+      const current = vi.mocked(bridge.prompt).mock.calls.at(-1)![0];
+      expect(current).not.toBe(sid);
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('会话已变更');
+      await ch.handleInbound(envelope());
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)![0]).toBe(current);
+    });
+
+    it('card compression uses the bound session and cannot act in another chat', async () => {
+      const ch = createChannel();
+      Object.assign(bridge, { availableCommands: [{ name: 'compress' }] });
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/compress');
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)!.slice(0, 2)).toEqual([
+        sid,
+        '/compress',
+      ]);
+      const calls = vi.mocked(bridge.prompt).mock.calls.length;
+      await ch.cardCommand(
+        envelope({ chatId: 'other-chat' }),
+        sid,
+        '/compress',
+      );
+      expect(bridge.prompt).toHaveBeenCalledTimes(calls);
+      expect(ch.sent.at(-1)?.text).toContain('会话已变更');
+    });
+
+    it('card compression refuses unsupported commands and busy sessions', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/compress');
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(ch.sent.at(-1)?.text).toContain('暂不支持');
+      const active = (ch as unknown as { activePrompts: Map<string, unknown> })
+        .activePrompts;
+      active.set(sid, {});
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('正在处理中');
+      active.delete(sid);
+      await ch.handleInbound(envelope());
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)![0]).toBe(sid);
     });
 
     it('/status shows session info', async () => {

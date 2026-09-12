@@ -144,6 +144,99 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('reads model metadata from the owning daemon snapshot and clears switched effort', async () => {
+    const queue = new EventQueue();
+    const session = createFakeSession(queue);
+    session.context = vi.fn().mockResolvedValue({
+      sessionId: session.sessionId,
+      state: {
+        models: { currentModelId: 'model-a' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'high' }],
+      },
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: async () => session,
+    });
+    await bridge.newSession('/repo');
+    await waitFor(() => {
+      expect(bridge.getSessionModelInfo(session.sessionId)).toEqual({
+        model: 'model-a',
+        reasoningEffort: 'high',
+      });
+    });
+    queue.push({ v: 1, type: 'model_switched', data: { modelId: 'model-b' } });
+    await waitFor(() => {
+      expect(bridge.getSessionModelInfo(session.sessionId)).toEqual({
+        model: 'model-b',
+      });
+    });
+    await bridge.discardSession(session.sessionId);
+    expect(bridge.getSessionModelInfo(session.sessionId)).toBeUndefined();
+  });
+
+  it('keeps resumed model state when a snapshot is unavailable or targets another session', async () => {
+    const session = {
+      ...createFakeSession(new EventQueue()),
+      state: { models: { currentModelId: 'resumed-model' } },
+      context: vi.fn().mockResolvedValue({
+        sessionId: 'other-session',
+        state: { models: { currentModelId: 'wrong-model' } },
+      }),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: async () => session,
+    });
+    await bridge.loadSession(session.sessionId, '/repo');
+    await Promise.resolve();
+    expect(bridge.getSessionModelInfo(session.sessionId)).toEqual({
+      model: 'resumed-model',
+    });
+    expect(bridge.getSessionModelInfo('other-session')).toBeUndefined();
+    await bridge.stop();
+  });
+
+  it('does not let a late context snapshot overwrite a newer model update', async () => {
+    const queue = new EventQueue();
+    let resolveContext!: (context: {
+      sessionId: string;
+      state: unknown;
+    }) => void;
+    const session = createFakeSession(queue);
+    session.context = () =>
+      new Promise((resolve) => {
+        resolveContext = resolve;
+      });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: async () => session,
+    });
+    await bridge.newSession('/repo');
+    queue.push({
+      v: 1,
+      type: 'model_switched',
+      data: { modelId: 'new-model' },
+    });
+    await waitFor(() => {
+      expect(bridge.getSessionModelInfo(session.sessionId)?.model).toBe(
+        'new-model',
+      );
+    });
+    resolveContext({
+      sessionId: session.sessionId,
+      state: {
+        models: { currentModelId: 'old-model' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'high' }],
+      },
+    });
+    await Promise.resolve();
+    expect(bridge.getSessionModelInfo(session.sessionId)).toEqual({
+      model: 'new-model',
+    });
+    await bridge.stop();
+  });
+
   it('forwards BTW to the exact daemon session with its abort signal', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

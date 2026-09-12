@@ -3067,6 +3067,52 @@ export abstract class ChannelBase {
     this.commands.set(name.toLowerCase(), handler);
   }
 
+  private readonly cardCommandSessions = new WeakMap<Envelope, string>();
+
+  protected async handleSessionCardCommand(
+    envelope: Envelope,
+    sessionId: string,
+    command: '/new' | '/compress',
+  ): Promise<void> {
+    if (this.namedSessions) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `请在当前任务中发送 ${command}。`,
+      );
+      return;
+    }
+    envelope.text = command === '/new' ? '/new confirm' : command;
+    this.cardCommandSessions.set(envelope, sessionId);
+    await this.handleInbound(envelope);
+  }
+
+  private isStaleCardCommand(envelope: Envelope): boolean {
+    const sessionId = this.cardCommandSessions.get(envelope);
+    if (!sessionId) return false;
+    if (
+      this.router.getSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
+      ) === sessionId &&
+      this.router.isSessionLive(sessionId) &&
+      !this.activePrompts.has(sessionId)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private async sendStaleCardCommandMessage(envelope: Envelope): Promise<void> {
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      '此卡片的会话已变更或正在处理中，请使用最新卡片或等待任务结束。',
+    );
+  }
+
   protected registerCancelCommand(name = 'cancel'): void {
     this.registerCommand(name, async (envelope) => {
       // /cancel aborts an in-flight turn — destructive in a shared session, where
@@ -6537,6 +6583,10 @@ export abstract class ChannelBase {
     }
 
     // 3. Slash command handling — before session/agent routing
+    if (this.isStaleCardCommand(envelope)) {
+      await this.sendStaleCardCommandMessage(envelope);
+      return;
+    }
     let btwQuestion: string | undefined;
     if (parsed) {
       const handler = this.commands.get(parsed.command);
@@ -6687,6 +6737,20 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           `No task is currently selected. Use /session new <name> or /session use <name>.`,
+        );
+        return;
+      }
+    } else if (this.cardCommandSessions.has(envelope)) {
+      if (this.isStaleCardCommand(envelope)) {
+        await this.sendStaleCardCommandMessage(envelope);
+        return;
+      }
+      sessionId = this.cardCommandSessions.get(envelope)!;
+      if (!this.isRecognizedCommand(envelope.text, sessionId)) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          '当前会话暂不支持压缩上下文，请稍后重试。',
         );
         return;
       }

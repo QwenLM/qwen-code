@@ -231,8 +231,36 @@ export function resolvePromptImages(
     });
 }
 
+export interface SessionModelInfo {
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export function readSessionModelInfo(state: unknown): SessionModelInfo {
+  if (!state || typeof state !== 'object') return {};
+  const { models, configOptions } = state as Record<string, unknown>;
+  const info: SessionModelInfo = {};
+  if (models && typeof models === 'object') {
+    const { currentModelId } = models as Record<string, unknown>;
+    if (typeof currentModelId === 'string' && currentModelId) {
+      info.model = currentModelId;
+    }
+  }
+  if (Array.isArray(configOptions)) {
+    for (const option of configOptions) {
+      if (!option || typeof option !== 'object') continue;
+      const { id, currentValue } = option as Record<string, unknown>;
+      if (typeof currentValue !== 'string' || !currentValue) continue;
+      if (id === 'model') info.model = currentValue;
+      if (id === 'reasoning_effort') info.reasoningEffort = currentValue;
+    }
+  }
+  return info;
+}
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
+  getSessionModelInfo?(sessionId: string): SessionModelInfo | undefined;
   getAvailableCommands?(sessionId: string): AvailableCommand[];
   on<K extends keyof ChannelAgentBridgeEventMap>(
     eventName: K,

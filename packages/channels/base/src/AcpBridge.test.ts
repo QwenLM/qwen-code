@@ -60,6 +60,10 @@ const child = vi.hoisted(() => {
     instances: [] as MockChild[],
     clients: [] as Array<{
       requestPermission: (params: unknown) => Promise<unknown>;
+      extNotification: (
+        method: string,
+        params: Record<string, unknown>,
+      ) => Promise<void>;
     }>,
     connections: [] as Array<{
       initialize: ReturnType<typeof vi.fn>;
@@ -145,6 +149,46 @@ function requestPermission(sessionId: string, toolCallId: string) {
 }
 
 describe('AcpBridge', () => {
+  it('tracks authoritative per-session model and optional effort with cleanup', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn().mockResolvedValue({}),
+      newSession: vi.fn().mockResolvedValue({
+        sessionId: 'new',
+        models: { currentModelId: 'model-a' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'high' }],
+      }),
+      unstable_resumeSession: vi.fn().mockResolvedValue({
+        models: { currentModelId: 'model-b' },
+      }),
+    };
+    await bridge.newSession('/tmp');
+    await bridge.loadSession('loaded', '/tmp');
+    expect(bridge.getSessionModelInfo('new')).toEqual({
+      model: 'model-a',
+      reasoningEffort: 'high',
+    });
+    expect(bridge.getSessionModelInfo('loaded')).toEqual({ model: 'model-b' });
+    const info = bridge.getSessionModelInfo('new')!;
+    info.model = 'mutated';
+    expect(bridge.getSessionModelInfo('new')?.model).toBe('model-a');
+    bridge.handleSessionUpdate({
+      sessionId: 'new',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [{ id: 'model', currentValue: 'model-c' }],
+      },
+    });
+    expect(bridge.getSessionModelInfo('new')).toEqual({ model: 'model-c' });
+    await bridge.discardSession('new');
+    expect(bridge.getSessionModelInfo('new')).toBeUndefined();
+    expect(bridge.getSessionModelInfo('loaded')).toEqual({ model: 'model-b' });
+  });
+
   beforeEach(() => {
     child.instances.length = 0;
     child.clients.length = 0;
@@ -215,6 +259,41 @@ describe('AcpBridge', () => {
     pending.splice(0).forEach((resolve) => resolve());
     await Promise.all([first, second]);
     expect(bridge.channelLoopMcpRegistered).toBe(true);
+  });
+
+  it('clears old reasoning effort on model-switch notifications and stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    await bridge.start();
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({
+        sessionId: 's-1',
+        models: { currentModelId: 'old-model' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'high' }],
+      }),
+    };
+    await bridge.newSession('/tmp');
+    await child.clients[0]!.extNotification(
+      'qwen/notify/session/model-update',
+      {
+        sessionId: 's-1',
+        currentModelId: 'new-model',
+      },
+    );
+    expect(bridge.getSessionModelInfo('s-1')).toEqual({ model: 'new-model' });
+    await child.clients[0]!.extNotification(
+      'qwen/notify/session/model-update',
+      {
+        sessionId: 'unknown',
+        currentModelId: 'other-model',
+      },
+    );
+    expect(bridge.getSessionModelInfo('unknown')).toBeUndefined();
+    bridge.stop();
+    expect(bridge.getSessionModelInfo('s-1')).toBeUndefined();
   });
 
   it('waits for pending channel loop MCP registration before creating a session', async () => {

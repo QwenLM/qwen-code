@@ -9,6 +9,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   parseBackgroundResponseContext,
   resolvePromptImages,
+  readSessionModelInfo,
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
@@ -17,6 +18,7 @@ import {
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
   type ToolCallEvent,
+  type SessionModelInfo,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import { sanitizeLogText } from './sanitize.js';
@@ -42,6 +44,8 @@ export interface DaemonChannelSessionClient {
   readonly worktree?: { slug: string; path: string; branch: string };
   readonly worktreeState?: 'persisted-v1';
   readonly lastEventId?: number;
+  readonly state?: unknown;
+  context?(): Promise<{ sessionId: string; state: unknown }>;
   prompt(
     req: {
       prompt: Array<Record<string, unknown>>;
@@ -333,6 +337,7 @@ export class DaemonChannelBridge
 {
   private readonly options: DaemonChannelBridgeOptions;
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
+  private readonly sessionModelInfo = new Map<string, SessionModelInfo>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
@@ -394,6 +399,11 @@ export class DaemonChannelBridge
 
   getAvailableCommands(sessionId: string): AvailableCommand[] {
     return this.availableCommandsBySession.get(sessionId) ?? [];
+  }
+
+  getSessionModelInfo(sessionId: string): SessionModelInfo | undefined {
+    const info = this.sessionModelInfo.get(sessionId);
+    return info ? { ...info } : undefined;
   }
 
   listSessions(): BridgeSessionInfo[] {
@@ -927,6 +937,11 @@ export class DaemonChannelBridge
     }
 
     this.sessions.set(session.sessionId, session);
+    this.sessionModelInfo.set(
+      session.sessionId,
+      readSessionModelInfo(session.state),
+    );
+    this.refreshSessionModelInfo(session);
     this.sessionBindingTokens.set(session.sessionId, bindingToken);
     const controller = new AbortController();
     this.eventControllers.set(session.sessionId, controller);
@@ -940,6 +955,26 @@ export class DaemonChannelBridge
       this.lastError = error;
     });
     throw new Error('Daemon channel bridge stopped during session creation');
+  }
+
+  private refreshSessionModelInfo(session: DaemonChannelSessionClient): void {
+    if (!session.context) return;
+    const previous = this.sessionModelInfo.get(session.sessionId);
+    void session.context().then(
+      (context) => {
+        if (
+          this.sessions.get(session.sessionId) === session &&
+          this.sessionModelInfo.get(session.sessionId) === previous &&
+          context.sessionId === session.sessionId
+        ) {
+          this.sessionModelInfo.set(
+            session.sessionId,
+            readSessionModelInfo(context.state),
+          );
+        }
+      },
+      () => {},
+    );
   }
 
   private ensureSession(sessionId: string): DaemonChannelSessionClient {
@@ -1055,6 +1090,13 @@ export class DaemonChannelBridge
 
     const type = getString(update['sessionUpdate']);
     switch (type) {
+      case 'config_option_update': {
+        this.sessionModelInfo.set(sessionId, {
+          model: this.sessionModelInfo.get(sessionId)?.model,
+          ...readSessionModelInfo(update),
+        });
+        break;
+      }
       case 'agent_message_chunk': {
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (typeof meta?.['parentToolCallId'] === 'string') {
@@ -1267,6 +1309,7 @@ export class DaemonChannelBridge
       this.emitProtocolError('Malformed daemon model_switched event', data);
       return;
     }
+    this.sessionModelInfo.set(sessionId, { model: data['modelId'] });
     this.emit('modelSwitched', {
       sessionId,
       modelId: data['modelId'],
@@ -1320,6 +1363,7 @@ export class DaemonChannelBridge
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
+    this.sessionModelInfo.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
     this.channelLoopDisabledSessions.delete(sessionId);
     this.abortActivePrompts(sessionId);
