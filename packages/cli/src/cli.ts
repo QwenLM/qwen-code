@@ -271,7 +271,17 @@ function hasFlag(
 // -v ...` printed the version), so this scan must count it too. Tokens
 // after `--` are positional data and never count. The index rather than a
 // boolean because the `--bg` gate below has to compare positions.
+//
+// `sessions answer <id> [text..]` takes the rest of the line as free text,
+// so a `-v`/`--version` after the two command tokens is the reply and must
+// reach the answer parser (where `forgetInheritedOptions` keeps it in the
+// text). The scan therefore stops counting once the `sessions answer` chain
+// has started: a version token before it still prints the version, and
+// every other command chain — `mcp remove victim -v help` in particular —
+// keeps the fail-closed intercept (demoting to the full parser EXECUTES
+// subcommands).
 function versionTokenIndex(argv: readonly string[]): number {
+  let inSessionsAnswerTail = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
@@ -281,8 +291,19 @@ function versionTokenIndex(argv: readonly string[]): number {
       i++; // skip the value slot; the loop increment consumes the token
       continue;
     }
+    if (!arg.startsWith('-')) {
+      // The chain is recognised by its adjacent token pair, not by an
+      // ordinal: a root global in front of the subcommand shifts it off
+      // argv[0], and a value-taking global outside BASE_VALUE_FLAGS
+      // contributes its value as a positional of its own, so an ordinal
+      // count never reached the pair and the answer's `-v` was intercepted.
+      if (arg === 'sessions' && argv[i + 1] === 'answer') {
+        inSessionsAnswerTail = true;
+      }
+      continue;
+    }
     if (arg === '--version' || arg === '-v') {
-      return i;
+      if (!inSessionsAnswerTail) return i;
     }
   }
   return -1;

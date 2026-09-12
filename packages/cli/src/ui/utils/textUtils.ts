@@ -344,6 +344,21 @@ export function sanitizeTerminalText(value: string): string {
     .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
 }
 
+/**
+ * One-line variant of `sanitizeTerminalText`: the same passes, then TAB
+ * and LF dropped.
+ *
+ * `sanitizeTerminalText` deliberately preserves TAB and LF because they
+ * legitimately structure multi-line output, but a one-line render site —
+ * a table cell, a labelled line — must not keep them: a preserved LF lets
+ * embedded text start a forged continuation line at column 0, and a TAB
+ * misaligns the columns. Every one-line renderer shares this recipe so
+ * that invariant is maintained in one place.
+ */
+export function sanitizeSingleLineTerminalText(value: string): string {
+  return sanitizeTerminalText(value).replace(/[\t\n]/g, '');
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *
