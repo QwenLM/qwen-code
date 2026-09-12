@@ -256,6 +256,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    resolveImageReferences: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -326,6 +327,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      resolveImageReferences: vi.fn((parts) => parts),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -5159,6 +5161,37 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Routing this image turn to vision-agent'),
     );
+  });
+
+  it('resolves a stored image id before applying the headless vision bridge', async () => {
+    setupMetricsMock();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    mockLlmClient.resolveImageReferences.mockReturnValue(headlessImageParts);
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'focused transcription' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect Image #abc123abc123',
+      'prompt-stored-image',
+    );
+
+    expect(mockLlmClient.resolveImageReferences).toHaveBeenCalled();
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('does not leak a headless image route into a notification drain', async () => {

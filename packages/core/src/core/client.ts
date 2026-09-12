@@ -620,6 +620,12 @@ export class LlmClient {
       );
       this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
+      chat.rememberImagePayloads(
+        resumedSessionData.conversation.messages.flatMap((record) =>
+          record.message ? [record.message] : [],
+        ),
+      );
+      chat.reconcileImagePayloads(chat.getHistory());
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -695,6 +701,10 @@ export class LlmClient {
       throw new Error('Chat not initialized');
     }
     return this.chat;
+  }
+
+  resolveImageReferences(message: PartListUnion): PartListUnion {
+    return this.getChat().resolveImageReferences(message);
   }
 
   isInitialized(): boolean {
@@ -1133,7 +1143,9 @@ export class LlmClient {
 
   setHistory(history: Content[]) {
     this.trustedUserAnswers.clear();
-    this.getChat().setHistory(history);
+    const chat = this.getChat();
+    chat.setHistory(history);
+    chat.reconcileImagePayloads(history);
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -2804,7 +2816,9 @@ export class LlmClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
-        this.getChat().setHistory(mcResult.history);
+        const chat = this.getChat();
+        chat.setHistory(mcResult.history);
+        chat.reconcileImagePayloads?.(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -5049,6 +5063,7 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      previousChat.copyImagePayloadsTo(this.getChat());
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

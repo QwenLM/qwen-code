@@ -19,6 +19,13 @@ const IMAGE_REFERENCE_PATTERN = new RegExp(
   `\\[Image #([a-f0-9]{${IMAGE_ID_LENGTH}}): [^\\]]+\\]`,
   'gi',
 );
+// The same id without its eviction metadata. Only user-authored text and tool
+// output may name an id this way (see `collectMentionedImageIds`); a model
+// reply echoing one must not resurrect the payload (#9423).
+const BARE_IMAGE_REFERENCE_PATTERN = new RegExp(
+  `Image #([a-f0-9]{${IMAGE_ID_LENGTH}})`,
+  'gi',
+);
 
 export interface StoredImagePayload {
   id: string;
@@ -49,6 +56,30 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
   get(id: string): StoredImagePayload | undefined {
     return this.images.get(id);
   }
+
+  clear(): void {
+    this.images.clear();
+  }
+
+  copyTo(target: InMemoryImagePayloadStore): void {
+    for (const [id, image] of this.images) {
+      target.images.set(id, image);
+    }
+  }
+
+  /**
+   * Drop payloads no longer referenced by `contents` and absorb any raw
+   * payloads still inline in them. Call after any operation that replaces
+   * history wholesale (compaction, truncation, thought stripping) so evicted
+   * references do not pin their bytes for the rest of the session.
+   */
+  reconcile(contents: Content[]): void {
+    const referencedIds = collectMentionedImageIds(contents);
+    for (const id of this.images.keys()) {
+      if (!referencedIds.has(id)) this.images.delete(id);
+    }
+    rememberImagePayloads(contents, this);
+  }
 }
 
 export function countAllInlineImages(contents: Content[]): number {
@@ -58,9 +89,26 @@ export function countAllInlineImages(contents: Content[]): number {
 }
 
 /**
+ * Historical images `contents` still carries: raw payloads plus the ids their
+ * eviction markers or mentions keep alive. Drives the payload threshold, which
+ * asks how many images the conversation holds — not how many happen to be
+ * inline in this pass.
+ */
+export function countImageReferences(contents: Content[]): number {
+  return (
+    countAllInlineImages(contents) + collectMentionedImageIds(contents).size
+  );
+}
+
+/**
  * Replace image payloads in-place with text references, storing the
  * originals in the provided store. This mutates the history so that
  * subsequent `countAllInlineImages` returns a lower count.
+ *
+ * `skipContent` is the live turn: its own parts stay inline. Skipping is by
+ * part identity rather than by content identity because curating can merge a
+ * live user turn into an earlier user entry, and the historical payloads that
+ * came along must still be evicted.
  *
  * Returns the stored payloads in order of appearance for downstream
  * reattach decisions.
@@ -114,9 +162,15 @@ export function buildReattachParts(
   const recent = recentUniqueImages(candidates, maxRecentImages).map(
     ({ stored }) => stored,
   );
+  // The recency cap bounds reattachment; an id the current turn still
+  // references only gets the single slot the cap leaves it (`0` still keeps
+  // that one, so a marker in the live turn is never dropped entirely).
   const reattachLimit = Math.max(maxRecentImages, 1);
   if (store) {
     for (const id of lastReferencedIds) {
+      // A resolution pass may already have inlined this payload (an explicit
+      // prompt naming the id is resolved before the send); reattaching it
+      // again would ship the same bytes twice.
       if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
         continue;
       }
@@ -179,11 +233,25 @@ export function prepareImagePayloadsForRequest(
     maxRecentImages: number;
     preserveImagePartsForContentIndex?: number;
     preserveLastUserImagePartCount?: number;
+    /**
+     * Ids the current prompt named directly. The caller vouches for them, so
+     * they resolve from the store even when no marker survives in `contents`.
+     */
+    namedImageIds?: ReadonlySet<string>;
     store: ImagePayloadStore;
   },
 ): Content[] {
-  const referencedIds = collectReferencedImageIds(
-    contents.at(-1) ? [contents.at(-1)!] : [],
+  const markerIds = collectReferencedImageIds(contents);
+  const namedIds = options.namedImageIds;
+  const lastContent = contents.at(-1);
+  // A reference only authorizes reattaching the payload it names when the
+  // marker that produced it is still part of the request contents — or when
+  // the caller identified the id as explicitly named. Text that merely echoes
+  // an id (a model reply, a summary) must not resurrect bytes (#9423).
+  const referencedIds = new Set(
+    [...collectMentionedImageIds(lastContent ? [lastContent] : [])].filter(
+      (id) => markerIds.has(id) || namedIds?.has(id),
+    ),
   );
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
@@ -241,9 +309,16 @@ export function prepareImagePayloadsForRequest(
     ...[...reattachById.values()].map(storedImageToPart),
   ];
 
-  const last = transformed.at(-1);
+  const lastIndex = transformed.length - 1;
+  const last = transformed[lastIndex];
   if (last?.role === 'user') {
-    last.parts = [...(last.parts ?? []), ...reattachParts];
+    // Replace the entry rather than mutating it: `preserveImageParts*` hands
+    // the caller's own content back, and the live turn must not grow a
+    // reattach region behind the caller's back.
+    transformed[lastIndex] = {
+      ...last,
+      parts: [...(last.parts ?? []), ...reattachParts],
+    };
     return transformed;
   }
 
@@ -290,9 +365,17 @@ function* inlineImageParts(
   contents: Content[],
   skipContent?: Content,
 ): Generator<Part> {
+  const skipParts = skipContent
+    ? new Set(
+        (skipContent.parts ?? []).flatMap((part) => [
+          part,
+          ...(getFunctionResponseParts(part) ?? []),
+        ]),
+      )
+    : undefined;
   for (const content of contents) {
-    if (content === skipContent) continue;
     for (const part of content.parts ?? []) {
+      if (skipParts?.has(part)) continue;
       if (
         part.inlineData?.mimeType?.startsWith('image/') &&
         part.inlineData.data
@@ -300,6 +383,7 @@ function* inlineImageParts(
         yield part;
       }
       for (const inner of getFunctionResponseParts(part) ?? []) {
+        if (skipParts?.has(inner)) continue;
         if (
           inner.inlineData?.mimeType?.startsWith('image/') &&
           inner.inlineData.data
@@ -311,21 +395,57 @@ function* inlineImageParts(
   }
 }
 
-function collectReferencedImageIds(contents: Content[]): Set<string> {
+interface ImageIdScope {
+  /** Bare `Image #<id>` in user-authored text parts. */
+  bareInUserText: boolean;
+  /** Bare `Image #<id>` nested in function responses (tool output). */
+  bareInToolText: boolean;
+}
+
+function collectImageIds(
+  contents: Content[],
+  scope: ImageIdScope,
+): Set<string> {
   const ids = new Set<string>();
-  const collect = (parts: Part[] | undefined): void => {
+  const collect = (parts: Part[] | undefined, allowBare: boolean): void => {
     for (const part of parts ?? []) {
-      for (const match of part.text?.matchAll(IMAGE_REFERENCE_PATTERN) ?? []) {
+      const pattern = allowBare
+        ? BARE_IMAGE_REFERENCE_PATTERN
+        : IMAGE_REFERENCE_PATTERN;
+      for (const match of part.text?.matchAll(pattern) ?? []) {
         const id = match[1];
         if (id) ids.add(id.toLowerCase());
       }
-      collect(getFunctionResponseParts(part));
+      collect(getFunctionResponseParts(part), scope.bareInToolText);
     }
   };
   for (const content of contents) {
-    collect(content.parts);
+    collect(content.parts, scope.bareInUserText && content.role === 'user');
   }
   return ids;
+}
+
+/**
+ * Ids an eviction marker ties to a stored payload, plus ids named directly by
+ * tool output — a screenshot result is a real reference, not an echo.
+ */
+export function collectReferencedImageIds(contents: Content[]): Set<string> {
+  return collectImageIds(contents, {
+    bareInUserText: false,
+    bareInToolText: true,
+  });
+}
+
+/**
+ * Every id the conversation still names, markers included. Used where the
+ * question is whether the transcript still refers to a payload (retaining or
+ * dropping stored bytes) rather than whether it may be reattached.
+ */
+export function collectMentionedImageIds(contents: Content[]): Set<string> {
+  return collectImageIds(contents, {
+    bareInUserText: true,
+    bareInToolText: true,
+  });
 }
 
 function recentUniqueImages(
@@ -347,7 +467,7 @@ function recentUniqueImages(
   return recent.reverse();
 }
 
-function imagePartToStoredPayload(part: Part): StoredImagePayload {
+export function imagePartToStoredPayload(part: Part): StoredImagePayload {
   const data = part.inlineData?.data ?? '';
   const mimeType = part.inlineData?.mimeType ?? 'application/octet-stream';
   const hash = createHash('sha256')
@@ -389,4 +509,33 @@ function storedImageToPart(stored: StoredImagePayload): Part {
       displayName: stored.displayName,
     },
   };
+}
+
+/**
+ * Absorb every raw image payload in `contents` into `store` without rewriting
+ * the contents. Used on resume, where history is rebuilt from the original
+ * JSONL and the store must be repopulated before references are resolved.
+ */
+export function rememberImagePayloads(
+  contents: Content[],
+  store: ImagePayloadStore,
+): void {
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        store.put(part);
+      }
+      for (const nested of getFunctionResponseParts(part) ?? []) {
+        if (
+          nested.inlineData?.mimeType?.startsWith('image/') &&
+          nested.inlineData.data
+        ) {
+          store.put(nested);
+        }
+      }
+    }
+  }
 }

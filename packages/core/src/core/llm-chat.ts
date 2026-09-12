@@ -14,6 +14,7 @@ import type {
   FunctionCall,
   SendMessageParameters,
   Part,
+  PartListUnion,
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
@@ -91,7 +92,10 @@ import {
 import {
   InMemoryImagePayloadStore,
   buildReattachParts,
-  countAllInlineImages,
+  collectMentionedImageIds,
+  countImageReferences,
+  prepareImagePayloadsForRequest,
+  rememberImagePayloads,
   replaceImagePayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
@@ -2455,31 +2459,46 @@ export class LlmChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(currentUserContent?: Content): Content[] {
+  private getRequestHistory(
+    currentUserContent?: Content,
+    supportedModalities?: InputModalities,
+  ): Content[] {
     const curatedHistory = extractCuratedHistory(this.history);
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
-    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+    // History holds `Image #<id>` markers rather than raw bytes: that is what
+    // survives compaction, truncation and resume. The threshold only decides
+    // how many payloads are reattached to the outgoing request.
+    const imageCount = countImageReferences(curatedHistory);
+    // Evict only what this target can actually receive. A model without image
+    // input drops the payload from the outgoing contents anyway, so evicting
+    // it would trade live bytes for a marker the model never saw — keep them
+    // in history for the next image-capable turn.
+    const replaced =
+      supportedModalities?.image === true
+        ? replaceImagePayloadsInPlace(
+            curatedHistory,
+            this.imagePayloadStore,
+            currentUserContent,
           )
-        : undefined;
-      replaced = replaceImagePayloadsInPlace(
-        curatedHistory,
-        this.imagePayloadStore,
-        skipEntry,
-      );
-    }
+        : [];
     const requestHistory = curatedHistory.map(copyContentContainer);
+    // A prompt naming explicit image ids attaches only those, so the recent
+    // window contributes nothing; below the threshold every historical image
+    // stays attached; at or above it only the configured recent ones do.
+    const hasExplicitReferences =
+      collectMentionedImageIds(
+        requestHistory.at(-1) ? [requestHistory.at(-1)!] : [],
+      ).size > 0;
+    const reattachCount = hasExplicitReferences
+      ? 0
+      : imageCount >= imagePayloadThreshold
+        ? maxRecentImages
+        : imageCount;
     const reattachParts = buildReattachParts(
       replaced,
-      maxRecentImages,
+      reattachCount,
       requestHistory,
       this.imagePayloadStore,
     );
@@ -2494,12 +2513,48 @@ export class LlmChat {
     return requestHistory;
   }
 
+  /**
+   * Resolve `Image #<id>` references the user typed into the outgoing message
+   * back into their stored payloads, so an explicitly named historical image
+   * is re-sent even though history carries only its marker.
+   */
+  resolveImageReferences(message: PartListUnion): PartListUnion {
+    const current = createUserContent(message);
+    const namedImageIds = collectMentionedImageIds([current]);
+    if (namedImageIds.size === 0) {
+      return message;
+    }
+    const history = extractCuratedHistory(this.history);
+    const resolved = prepareImagePayloadsForRequest([...history, current], {
+      maxRecentImages: 0,
+      preserveImagePartsForContentIndex: history.length,
+      namedImageIds,
+      store: this.imagePayloadStore,
+    }).at(-1)?.parts;
+    return resolved?.some((part) => part.inlineData) ? resolved : message;
+  }
+
+  /** Absorb raw payloads in `contents` into the store without rewriting them. */
+  rememberImagePayloads(contents: Content[]): void {
+    rememberImagePayloads(contents, this.imagePayloadStore);
+  }
+
+  /** Drop stored payloads no longer referenced by `contents`. */
+  reconcileImagePayloads(contents: Content[]): void {
+    this.imagePayloadStore.reconcile(contents);
+  }
+
+  /** Seed a forked chat's store so it can resolve the parent's references. */
+  copyImagePayloadsTo(target: LlmChat): void {
+    this.imagePayloadStore.copyTo(target.imagePayloadStore);
+  }
+
   private getRequestHistoryForRoute(
     currentUserContent: Content | undefined,
     supportedModalities: InputModalities,
   ): Content[] {
     return slimCompactionInput(
-      this.getRequestHistory(currentUserContent),
+      this.getRequestHistory(currentUserContent, supportedModalities),
       supportedModalities,
     ).slimmedHistory;
   }
@@ -2664,6 +2719,7 @@ export class LlmChat {
         });
       }
       this.setHistory(newHistory);
+      this.reconcileImagePayloads(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       // Compression rewrote the shared history every retained entry sizes,
@@ -2803,6 +2859,7 @@ export class LlmChat {
       }),
     );
     this.setHistory(newHistory);
+    this.reconcileImagePayloads(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.tokenCountsRouteKey = this.currentRouteKey();
@@ -5230,6 +5287,7 @@ export class LlmChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.imagePayloadStore.clear();
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5405,6 +5463,7 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    this.reconcileImagePayloads(this.history);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -5426,6 +5485,7 @@ export class LlmChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    this.reconcileImagePayloads(this.history);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does — and drop
@@ -5486,6 +5546,9 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+    if (strippedEntries.length > 0) {
+      this.reconcileImagePayloads(this.history);
+    }
     return strippedEntries;
   }
 
