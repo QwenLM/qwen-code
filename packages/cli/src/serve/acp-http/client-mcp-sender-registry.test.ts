@@ -114,7 +114,7 @@ describe('ClientMcpSenderRegistry', () => {
   it('never falls back to a global sender for a reserved session server', async () => {
     const reg = new ClientMcpSenderRegistry();
     const globalSender = vi.fn(async () => msg(1));
-    reg.set('channel_loop', globalSender, 'browser');
+    reg.claim('channel_loop', globalSender, 'browser');
     reg.setSession(
       'channel_loop',
       'session-a',
