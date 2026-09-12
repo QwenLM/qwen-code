@@ -82,6 +82,21 @@ describe('matchesHookPattern', () => {
     );
   });
 
+  it('trims list entries before rebuilding the regular expression', () => {
+    expect(matchesHookPattern('read_.* | edit', 'read_file')).toBe(true);
+    expect(matchesHookPattern('read_.* | write_.*', 'write_file')).toBe(true);
+    expect(matchesHookPattern('read_.* | write_.*', 'run_shell_command')).toBe(
+      false,
+    );
+  });
+
+  it('never splits a list on an escaped pipe', () => {
+    expect(matchesHookPattern('notes\\|', 'x/notes|y')).toBe(true);
+    expect(matchesHookPattern('a\\||b', 'b')).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+    expect(matchesHookPattern('foo\\|bar', 'bar')).toBe(false);
+  });
+
   it('warns only about a matcher that does not compile as a whole', () => {
     expect(matchesHookPattern('a(b|c)', 'ab')).toBe(true);
     expect(matchesHookPattern('read_(file|edit)', 'read_file')).toBe(true);

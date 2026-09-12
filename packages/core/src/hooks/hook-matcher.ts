@@ -24,14 +24,17 @@ export interface HookPatternOptions {
  * - An empty matcher, `*` or `.*` matches everything.
  * - The matcher matches the subject or an alias exactly.
  * - Unless the whole matcher starts with `^` or `(`, a `|`-separated list
- *   matches when any entry is `*`, `.*`, or exactly the subject or an alias.
- *   Entries are never compiled on their own, so a fragment such as the
- *   `todo\.md` in `notes\|todo\.md` cannot match by itself.
+ *   matches when any entry, with surrounding spaces removed, is `*`, `.*`, or
+ *   exactly the subject or an alias. Only an unescaped `|` separates entries:
+ *   a `|` preceded by a backslash, as in `notes\|todo\.md`, stays part of its
+ *   entry. Entries are never compiled on their own.
  * - Otherwise the matcher is an unanchored regular expression tested against
- *   the subject only; aliases are never matched through a regex. Empty list
- *   entries are dropped before the expression is compiled, so a stray `|`
- *   never turns it into a match-all, and a matcher made only of `|` matches
- *   nothing. An invalid expression matches nothing further.
+ *   the subject only; aliases are never matched through a regex. For a list
+ *   that does not start with `^` or `(`, the expression is rebuilt from the
+ *   trimmed, non-empty entries, so a stray `|` never turns it into a
+ *   match-all and a matcher made only of `|` matches nothing. A matcher that
+ *   starts with `^` or `(` is compiled as written, so a trailing `|` there
+ *   does match everything. An invalid expression matches nothing further.
  */
 export function matchesHookPattern(
   matcher: string,
@@ -54,16 +57,17 @@ export function matchesHookPattern(
     !pattern.startsWith('^') &&
     !pattern.startsWith('(')
   ) {
+    // Split only on unescaped pipes, and compare and rebuild from the same
+    // trimmed entries, so `read_.* | edit` reads as `read_.*|edit`.
     const alternatives = pattern
-      .split('|')
-      .filter((entry) => entry.trim() !== '');
+      .split(/(?<!\\)\|/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
     if (
-      alternatives.some((entry) => {
-        const trimmed = entry.trim();
-        return (
-          trimmed === '*' || trimmed === '.*' || exactTargets.includes(trimmed)
-        );
-      })
+      alternatives.some(
+        (entry) =>
+          entry === '*' || entry === '.*' || exactTargets.includes(entry),
+      )
     ) {
       return true;
     }
