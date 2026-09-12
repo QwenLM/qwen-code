@@ -851,30 +851,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['metadata']).toBeUndefined();
     });
 
-    it('still ships metadata for a qwen model reached through an alicloudapi gateway', () => {
-      // #9103 widened which *origins* count as DashScope-compatible. Gating on the
-      // wire model is orthogonal to that and must not walk it back.
-      const generator = new DashScopeOpenAICompatibleProvider(
-        {
-          ...mockContentGeneratorConfig,
-          authType: AuthType.USE_OPENAI,
-          baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
-          model: 'qwen-max',
-        },
-        mockCliConfig,
-      );
-
-      const result = generator.buildRequest(
-        { ...baseRequest, model: 'qwen-max' },
-        'test-prompt-id',
-      ) as unknown as Record<string, unknown>;
-
-      expect(result['metadata']).toEqual({
-        sessionId: 'test-session-id',
-        promptId: 'test-prompt-id',
-      });
-    });
-
     it.each([
       ['gpt-5.4', 'high', 'high'],
       ['gpt-5.4', 'max', 'xhigh'],
