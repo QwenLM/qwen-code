@@ -438,21 +438,44 @@ describe('e2e workflow', () => {
         'isolated-nightly',
         'web-shell-browser-regression',
       ]);
+      // Fragment pins, not a byte-exact body: a formatting-only rewrite or
+      // a post-install line appended after `done` must stay green (the repo
+      // pins this same recipe in qwen-autofix.yml by fragment), while
+      // dropping the loop, the backoff, or the failure exit still reddens.
       for (const [jobName, step] of installSteps) {
-        expect(step.run, jobName).toBe(
-          [
-            'for attempt in 1 2 3; do',
-            '  if npm ci --prefer-offline --no-audit --progress=false; then',
-            '    break',
-            '  fi',
-            '  if [[ "${attempt}" == "3" ]]; then',
-            '    exit 1',
-            '  fi',
-            '  sleep $((attempt * 15))',
-            'done',
-          ].join('\n'),
+        expect(step.run, jobName).toContain('for attempt in 1 2 3; do');
+        expect(step.run, jobName).toContain(
+          'if npm ci --prefer-offline --no-audit --progress=false; then',
         );
+        expect(step.run, jobName).toContain('exit 1');
+        expect(step.run, jobName).toContain('sleep $((attempt * 15))');
+        // The ::warning:: keeps an absorbed install transient countable even
+        // though the recovered job concludes green — the same rule the
+        // upload-artifact retry's announce step follows. Deleting the echo
+        // from any one copy must red this loop.
+        expect(step.run, jobName).toContain('echo "::warning::npm ci');
+        // The defect under test is a bare `npm ci` line outside the loop.
+        expect(step.run, jobName).not.toMatch(/^\s*npm ci/m);
       }
+    });
+
+    it('retries every npm ci run body, whatever the step is named', () => {
+      // The name-keyed collection above misses an install hiding under any
+      // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
+      // 'Install dependencies and build' — so scan the command itself.
+      // Reading step.run keeps this blind to the `npm ci` mentions in YAML
+      // comments, and the loop marker is the same fragment pinned above.
+      const bareInstalls = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
+        (job.steps ?? [])
+          .filter(
+            (step) =>
+              typeof step.run === 'string' &&
+              step.run.includes('npm ci') &&
+              !step.run.includes('for attempt in 1 2 3; do'),
+          )
+          .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
+      );
+      expect(bareInstalls).toEqual([]);
     });
   });
 
