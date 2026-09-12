@@ -526,6 +526,11 @@ export function createProductionDispatch(
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
     }
+    if (opts.stepId !== undefined && !isWorkflowReferenceString(opts.stepId)) {
+      throw new Error(
+        'agent({stepId}): expected a non-empty string of at most 256 characters without surrounding whitespace or control characters.',
+      );
+    }
     const taskName = prompt;
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     if (opts.extensions !== undefined) {

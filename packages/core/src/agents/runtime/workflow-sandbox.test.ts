@@ -1829,6 +1829,20 @@ describe('createWorkflowSandbox security', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it('validates stepId without invoking script-realm mutable methods', async () => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`
+        String.prototype.trim = function () { return String(this); };
+        Array.from = function () { return []; };
+        Array.prototype.some = function () { return false; };
+        return agent('check', { stepId: '\\u001b[31mEVIL\\u202e' });
+      `),
+    ).rejects.toThrow(/stepId.*non-empty string/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('agent({workingDir}) is passed through to dispatch', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({

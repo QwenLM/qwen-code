@@ -97,7 +97,9 @@ say explicitly what each one should read and whether it may edit files.
   extensions with this option. Loaded context is quoted as untrusted text.
   An unknown or inactive extension, or required context that is unreadable,
   outside the extension directory, oversized, or over the shared context
-  budget, rejects the dispatch. Extension context does not grant permissions.
+  budget, makes the admitted `agent()` resolve to `null` and records the reason
+  in the run's failures list; check for `null`. An invalid `extensions` value
+  rejects the call. Extension context does not grant permissions.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with

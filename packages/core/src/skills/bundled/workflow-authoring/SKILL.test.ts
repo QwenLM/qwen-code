@@ -98,6 +98,7 @@ describe('bundled workflow-authoring skill', () => {
     ['An `@ext:<name>` mention in the prompt text loads nothing here'],
     ['quoted as untrusted text'],
     ['over the shared context budget'],
+    ['makes the admitted `agent()` resolve to `null`'],
     ['Extension context does not grant permissions'],
     ['no-progress stall watchdog'],
     ['Call-shape validation failures'],

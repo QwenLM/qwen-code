@@ -2593,6 +2593,17 @@ describe('createProductionDispatch', () => {
     expect(created).toHaveLength(0);
   });
 
+  it.each([' invalid ', 'a\u202eb', 'x'.repeat(257)])(
+    'refuses an invalid stepId at the host dispatch boundary',
+    async (stepId) => {
+      const config = {} as Config;
+      await expect(
+        createProductionDispatch(config)('check', { stepId }),
+      ).rejects.toThrow(/stepId.*non-empty string/);
+      expect(created).toHaveLength(0);
+    },
+  );
+
   it.each([false, true])(
     'does not start a leaf when its extension is disabled or unreadable (active=%s)',
     async (isActive) => {
@@ -3911,7 +3922,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       agentType: 'restricted',
       extensions: ['data-expert'],
     });
-    expect(calls[0].prompt).toContain('- Skills: schema-audit');
+    expect(calls[0].prompt).toContain('- Skills: data-expert:schema-audit');
     expect(calls[0].prompt).not.toContain(
       'Invoke listed Skills through the Skill tool',
     );

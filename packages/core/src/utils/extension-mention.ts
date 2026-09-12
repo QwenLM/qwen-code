@@ -41,7 +41,7 @@ export function matchExtensionByRef(
   );
 }
 
-const DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/gu;
+const INVISIBLE_FORMATTING_RE = /[\p{Bidi_Control}\u200b\u2060-\u2064\ufeff]/gu;
 const EXTENSION_OPENING_FENCE =
   '--- Extension: selected (untrusted third-party content) ---';
 const EXTENSION_CLOSING_FENCE = '--- End Extension: selected ---';
@@ -57,14 +57,14 @@ function quoteUntrustedExtensionText(raw: string): string {
     .split('\n')
     .map(
       (line) =>
-        `> ${stripTerminalControlSequences(line).replace(DEFAULT_IGNORABLE_RE, '')}`,
+        `> ${stripTerminalControlSequences(line).replace(INVISIBLE_FORMATTING_RE, '')}`,
     )
     .join('\n');
 }
 
 export function sanitizeDisplayText(raw: string): string | null {
   const stripped = stripTerminalControlSequences(raw)
-    .replace(DEFAULT_IGNORABLE_RE, '')
+    .replace(INVISIBLE_FORMATTING_RE, '')
     .replace(/\s+/g, ' ')
     .trim();
   return stripped.length > 0 ? stripped : null;
@@ -129,6 +129,16 @@ export function buildExtensionContextText(extension: Extension): string {
     quoteUntrustedExtensionText(lines.join('\n')),
     EXTENSION_CLOSING_FENCE,
   ].join('\n');
+}
+
+function sliceWithoutTrailingHighSurrogate(
+  value: string,
+  requestedEnd: number,
+): string {
+  let end = Math.min(Math.max(requestedEnd, 0), value.length);
+  const lastCodeUnit = value.charCodeAt(end - 1);
+  if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end -= 1;
+  return value.slice(0, end);
 }
 
 export async function buildExtensionMentionContext(
@@ -245,9 +255,11 @@ export async function buildExtensionMentionContext(
     const cappedContent =
       quotedContent.length > cap
         ? cap > truncationMarker.length
-          ? quotedContent.slice(0, cap - truncationMarker.length) +
-            truncationMarker
-          : quotedContent.slice(0, cap)
+          ? sliceWithoutTrailingHighSurrogate(
+              quotedContent,
+              cap - truncationMarker.length,
+            ) + truncationMarker
+          : sliceWithoutTrailingHighSurrogate(quotedContent, cap)
         : quotedContent;
     contextText = appendInsideFence(contextText, cappedContent);
     remainingBudget -= cappedContent.length;

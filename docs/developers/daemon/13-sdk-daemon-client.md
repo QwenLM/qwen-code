@@ -285,12 +285,13 @@ return await agent('Inspect the selected table', {
 runtime dispatch keeps its own unique `id`. `extensions` selects active extension
 capabilities and context for that agent. Unknown or inactive extensions and
 unreadable, out-of-directory, over-limit context files, or selections that exceed
-the shared context budget fail the dispatch. Files already absent when the extension
-is loaded are omitted by the loader. Context is structurally quoted as untrusted
-text before injection, and an `@ext:<name>` mention in the prompt does not select an
+the shared context budget make the admitted `agent()` resolve to `null` and record
+the reason in the run's failures list. Files already absent when the extension is
+loaded are omitted by the loader. Context is structurally quoted as untrusted text
+before injection, and an `@ext:<name>` mention in the prompt does not select an
 extension. Extension context does not grant tool permissions. Both options
-participate in journal matching, so a changed node or expert invalidates reuse from that call.
-Legacy scripts that omit these options retain their existing behavior.
+participate in journal matching, so a changed node or expert invalidates reuse from
+that call. Legacy scripts that omit these options retain their existing behavior.
 
 For observation, `sessionWorkflowTasks(sessionId)` exposes
 optional workflow `sourceRef` and `dispatches[].stepId`. Correlate a native tool

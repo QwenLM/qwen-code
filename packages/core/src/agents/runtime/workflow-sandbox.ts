@@ -1505,14 +1505,19 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           (code >= 0x2066 && code <= 0x2069);
       };
       const validateAgentStepId = function (stepId) {
-        if (stepId !== undefined && (
+        if (stepId === undefined) return;
+        if (
           typeof stepId !== 'string' ||
           stepId.length === 0 ||
           stepId.length > 256 ||
-          stepId.trim() !== stepId ||
-          Array.from(stepId).some(isUnsafeWorkflowReferenceCharacter)
-        )) {
+          safeStringTrim(stepId) !== stepId
+        ) {
           throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
+        }
+        for (let i = 0; i < stepId.length; i++) {
+          if (isUnsafeWorkflowReferenceCharacter(stepId[i])) {
+            throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
+          }
         }
       };
       const validateAgentExtensions = function (extensions) {
