@@ -535,7 +535,8 @@ export function SessionHistoryDropdown({
                         >
                           <Pencil size={13} aria-hidden="true" />
                         </button>
-                        {!active && !liveElsewhere &&
+                        {!active &&
+                          !liveElsewhere &&
                           (confirmDeleteId === session.sessionId ? (
                             <button
                               type="button"
