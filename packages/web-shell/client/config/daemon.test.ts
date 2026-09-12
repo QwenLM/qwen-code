@@ -143,7 +143,7 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     expect(mod.getDaemonBaseUrl()).toBe('');
   });
 
-  it('does not treat an explicit loopback tunnel as host-local', async () => {
+  it('treats a different-origin loopback daemon as remote on a loopback page', async () => {
     setup('http://127.0.0.1:5173/?daemon=http://127.0.0.1:4170');
     const mod = await import('./daemon');
     expect(mod.isLocalDaemon()).toBe(false);
@@ -383,6 +383,26 @@ describe('getDaemonToken', () => {
       // Same-load behavior is unaffected; only refresh persistence is lost.
       expect(mod.getDaemonToken()).toBe('frag-secret');
     });
+  });
+
+  // An opaque-origin document (file://, srcdoc, about:blank) reports origin
+  // 'null', which is not a usable URL base. The token flow runs before the boot
+  // fallback panel is removed, so throwing here would leave the shell blank;
+  // the pre-persistence behavior is to degrade to the single key.
+  it('does not throw for an opaque-origin document', async () => {
+    Object.defineProperty(window, 'location', {
+      value: { href: 'about:srcdoc', search: '', hash: '#token=opaque-secret' },
+      writable: true,
+      configurable: true,
+    });
+    const mod = await import('./daemon');
+    expect(() => mod.getDaemonToken()).not.toThrow();
+    expect(mod.getDaemonToken()).toBe('opaque-secret');
+    expect(() => mod.persistDaemonToken('opaque-secret')).not.toThrow();
+    expect(() => mod.hasReloadSurvivableDaemonToken()).not.toThrow();
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
+      'opaque-secret',
+    );
   });
 
   describe('hasReloadSurvivableDaemonToken', () => {

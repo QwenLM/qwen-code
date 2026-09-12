@@ -23,9 +23,14 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 /**
- * Whether the browser and the daemon are on the same machine. Host-local
- * affordances (e.g. opening a folder in the OS file manager) only make sense
- * then; a LAN-paired client must not see them.
+ * Whether host-local affordances are safe to offer here: true only when this
+ * page was served from a loopback host AND the shell is not pointed at a
+ * different daemon origin. Deliberately narrower than "the browser and the
+ * daemon are on the same machine": it is the same-origin form of that question.
+ * A remote browser reaching a forwarded loopback daemon is excluded because its
+ * page host is not loopback, and an explicit `?daemon=` naming another origin
+ * is treated as remote even when that origin is loopback too — the shell cannot
+ * prove a same-machine pair from a different origin.
  */
 export function isLocalDaemon(): boolean {
   if (typeof window === 'undefined') return false;
@@ -40,14 +45,24 @@ const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
 const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
 
 function daemonTokenStorageKey(baseUrl?: string): string {
-  const pageOrigin = new URL(window.location.href).origin;
-  const daemonOrigin = new URL(
-    baseUrl || getDaemonBaseUrl() || pageOrigin,
-    pageOrigin,
-  ).origin;
-  return daemonOrigin === pageOrigin
-    ? DAEMON_TOKEN_STORAGE_KEY
-    : `${DAEMON_TOKEN_STORAGE_KEY}:${daemonOrigin}`;
+  // Total by contract: callers include the boot path, and the module must
+  // degrade rather than throw. An opaque-origin document (file://, srcdoc,
+  // about:blank) has origin 'null' and window.location.href is not a usable
+  // base; a window-less caller has no location at all. Both fall back to the
+  // single (page-origin) key, which is the pre-persistence behavior.
+  if (typeof window === 'undefined') return DAEMON_TOKEN_STORAGE_KEY;
+  try {
+    const pageOrigin = new URL(window.location.href).origin;
+    // baseUrl / getDaemonBaseUrl() are absolute origins by construction (see
+    // getAllowedDaemonOrigin), so no base argument is needed here.
+    const daemonOrigin = new URL(baseUrl || getDaemonBaseUrl() || pageOrigin)
+      .origin;
+    return daemonOrigin === pageOrigin
+      ? DAEMON_TOKEN_STORAGE_KEY
+      : `${DAEMON_TOKEN_STORAGE_KEY}:${daemonOrigin}`;
+  } catch {
+    return DAEMON_TOKEN_STORAGE_KEY;
+  }
 }
 
 // sessionStorage access can throw (privacy modes, storage-disabled
