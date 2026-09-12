@@ -980,6 +980,8 @@ describe('Session', () => {
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       reloadModelProvidersConfig: vi.fn(),
+      stageModelProvidersReload: vi.fn(),
+      applyPendingModelProvidersReload: vi.fn().mockResolvedValue(false),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -1140,7 +1142,7 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
-  it('reloads model providers from the session-owned settings', () => {
+  it('stages model providers from the session-owned settings', () => {
     const modelProviders = {
       idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
     };
@@ -1155,7 +1157,7 @@ describe('Session', () => {
       SettingScope.User,
       SettingScope.Workspace,
     ]);
-    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+    expect(mockConfig.stageModelProvidersReload).toHaveBeenCalledWith(
       modelProviders,
       { idealab: 'openai' },
     );
@@ -1169,7 +1171,7 @@ describe('Session', () => {
     expect(() => session.reloadModelProvidersFromDisk()).toThrow(
       'Unable to reload model-provider settings from disk.',
     );
-    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(mockConfig.stageModelProvidersReload).not.toHaveBeenCalled();
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
@@ -7308,6 +7310,43 @@ describe('Session', () => {
         modelId: 'qwen3-coder-plus',
         authType: AuthType.USE_OPENAI,
       });
+    });
+
+    it('applies staged providers before resolving an idle model selection', async () => {
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([]);
+      vi.mocked(mockConfig.applyPendingModelProvidersReload).mockImplementation(
+        async () => {
+          vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+            {
+              id: 'new-model',
+              label: 'New model',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://new.example/v1',
+            },
+          ]);
+          return true;
+        },
+      );
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `new-model(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(
+        mockConfig.applyPendingModelProvidersReload,
+      ).toHaveBeenCalledOnce();
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'new-model',
+        undefined,
+      );
+      expect(
+        vi.mocked(mockConfig.applyPendingModelProvidersReload).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockConfig.switchModel).mock.invocationCallOrder[0]!,
+      );
     });
 
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {

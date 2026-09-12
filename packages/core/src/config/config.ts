@@ -20,6 +20,11 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
+import { getOpenAIReasoningState } from '../core/openaiContentGenerator/reasoning-profile.js';
+import {
+  getModelReasoningConfig,
+  resolveEffectiveReasoning,
+} from '../core/model-reasoning-config.js';
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -4803,11 +4808,60 @@ export class Config {
     this.baseLlmClient?.clearPerModelGeneratorCache();
   }
 
-  /**
-   * The raw modelProviders config the model registry was last built from.
-   * Lets hot-reload listeners diff against the APPLIED registry state instead
-   * of a listener-local snapshot (which out-of-band reloads would desync).
-   */
+  getNextPromptModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelsConfig.getNextPromptModelProvidersConfig();
+  }
+
+  stageModelProvidersReload(
+    modelProviders?: ModelProvidersConfig,
+    providerProtocol?: ProviderProtocolConfig,
+    modelId?: string | null,
+    baseUrl?: string,
+  ): void {
+    this.modelsConfig.stageModelProvidersReload(
+      modelProviders,
+      providerProtocol,
+      modelId,
+      baseUrl,
+    );
+  }
+
+  async applyPendingModelProvidersReload(): Promise<boolean> {
+    try {
+      return await this.modelsConfig.applyPendingModelProvidersReload(
+        async (selection) => {
+          const authType = this.getAuthType();
+          if (
+            authType &&
+            selection &&
+            (selection.modelId !== this.getModel() ||
+              (selection.baseUrl !== undefined &&
+                selection.baseUrl !== this.getCurrentModelRegistryBaseUrl()))
+          ) {
+            await this.switchModel(authType, selection.modelId, {
+              ...(selection.baseUrl !== undefined
+                ? { baseUrl: selection.baseUrl }
+                : {}),
+            });
+          } else if (authType) {
+            // Keep reload non-interactive. Without isInitialAuth=true, unavailable
+            // cached Qwen OAuth credentials can start device auth mid-session and
+            // stall ACP or headless callers that cannot answer the prompt.
+            await this.refreshAuth(authType, true);
+          }
+          this.baseLlmClient?.clearPerModelGeneratorCache();
+        },
+      );
+    } catch (error) {
+      this.debugLogger.error(
+        'Failed to apply staged model-provider configuration; keeping the current configuration',
+        error,
+      );
+      return false;
+    }
+  }
+
+  /** The raw provider config currently active in this session. */
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelsConfig.getModelProvidersConfig();
   }
@@ -5761,6 +5815,17 @@ export class Config {
     return this.modelFallbacks;
   }
 
+  getEffectiveReasoning(): ContentGeneratorConfig['reasoning'] {
+    const generation = this.getContentGeneratorConfig();
+    if (!generation) return undefined;
+    const resolved = getModelReasoningConfig(this, generation);
+    return resolved &&
+      (generation.authType === AuthType.USE_OPENAI ||
+        generation.authType === AuthType.QWEN_OAUTH)
+      ? getOpenAIReasoningState(generation, resolved)
+      : resolveEffectiveReasoning(generation, resolved);
+  }
+
   /**
    * Read the active reasoning-effort tier from the live content-generator
    * config. Returns undefined when thinking is disabled (`reasoning: false`) or
@@ -5784,18 +5849,36 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
+    if (!cfg) {
       return undefined;
     }
 
-    const configuredReasoning = cfg.authType
-      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
-    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    const externalReasoning = getModelReasoningConfig(this, cfg);
+    const explicitDashScopeEffort =
+      externalReasoning?.profile === 'dashscope-effort';
+    if (
+      !explicitDashScopeEffort &&
+      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)
+    ) {
+      return undefined;
+    }
+
+    const configuredReasoning =
+      externalReasoning ??
+      (cfg.authType
+        ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+            ?.capabilities.reasoning
+        : undefined);
+    const tieredModel =
+      explicitDashScopeEffort ||
+      isTieredEffortWireModel(cfg.model, configuredReasoning);
     if (!tieredModel) return undefined;
 
-    const currentEffort = this.getReasoningEffort();
+    const currentEffort =
+      this.getReasoningEffort() ??
+      (externalReasoning && !externalReasoning.toggleOnly
+        ? externalReasoning.defaultEffort
+        : undefined);
     const selected = selectDashScopeThinkingKnob(
       cfg.model,
       cfg.extra_body,
@@ -6078,6 +6161,7 @@ export class Config {
       // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
+      this.contentGeneratorConfig.reasoningConfig = config.reasoningConfig;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;

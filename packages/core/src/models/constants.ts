@@ -32,6 +32,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'cacheRetentionByBlock',
   'schemaCompliance',
   'reasoning',
+  'reasoningConfig',
   'contextWindowSize',
   'customHeaders',
   'extra_body',

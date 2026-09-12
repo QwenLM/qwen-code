@@ -82,7 +82,16 @@ export interface ModelsConfigOptions {
  * Config uses this as a thin entry point for all model-related operations.
  */
 export class ModelsConfig {
-  private readonly modelRegistry: ModelRegistry;
+  private modelRegistry: ModelRegistry;
+  private pendingModelRegistry?: ModelRegistry;
+  private pendingModelSelection?: { modelId: string; baseUrl?: string };
+  private pendingModelSelectionSource?: {
+    authType: AuthType | undefined;
+    modelId: string;
+    baseUrl: string | null | undefined;
+    revision: number;
+  };
+  private modelSelectionRevision = 0;
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -559,6 +568,7 @@ export class ModelsConfig {
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);
       }
+      this.modelSelectionRevision += 1;
     } catch (error) {
       // Rollback on error
       this.rollbackToStateSnapshot(rollbackSnapshot);
@@ -1337,11 +1347,13 @@ export class ModelsConfig {
       }
 
       // Apply generation config
-      if (runtimeModelSnapshot.generationConfig) {
-        Object.assign(
-          this._generationConfig,
-          runtimeModelSnapshot.generationConfig,
-        );
+      for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this._generationConfig as any)[field] =
+          runtimeModelSnapshot.generationConfig?.[field];
+        const source = runtimeModelSnapshot.sources[field];
+        if (source) this.generationConfigSources[field] = { ...source };
+        else delete this.generationConfigSources[field];
       }
 
       const requiresRefresh = isAuthTypeChange;
@@ -1352,6 +1364,7 @@ export class ModelsConfig {
           requiresRefresh,
         );
       }
+      this.modelSelectionRevision += 1;
     } catch (error) {
       this.rollbackToStateSnapshot(rollbackSnapshot);
       throw error;
@@ -1453,6 +1466,97 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.pendingModelRegistry = undefined;
+    this.pendingModelSelection = undefined;
+    this.pendingModelSelectionSource = undefined;
+  }
+
+  getNextPromptModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return (
+      this.pendingModelRegistry ?? this.modelRegistry
+    ).getModelProvidersConfig();
+  }
+
+  /**
+   * Stage providers for the next prompt. An omitted modelId preserves an
+   * already staged selection, null clears it, and a resolvable string replaces
+   * it. An unresolvable string drops the selection so it cannot block the
+   * provider snapshot. baseUrl is used only with a string modelId.
+   */
+  stageModelProvidersReload(
+    modelProviders?: ModelProvidersConfig,
+    providerProtocol?: ProviderProtocolConfig,
+    modelId?: string | null,
+    baseUrl?: string,
+  ): void {
+    this.pendingModelRegistry = this.modelRegistry.prepareReload(
+      structuredClone(modelProviders),
+      structuredClone(providerProtocol),
+    );
+    if (modelId !== undefined) {
+      const selectionResolves =
+        modelId !== null &&
+        (this.currentAuthType === undefined ||
+          this.pendingModelRegistry.hasModel(
+            this.currentAuthType,
+            modelId,
+            baseUrl,
+          ));
+      if (modelId !== null && !selectionResolves) {
+        debugLogger.warn(
+          `Ignoring staged model selection "${modelId}" because it is not present in the staged registry`,
+        );
+      }
+      this.pendingModelSelection = !selectionResolves
+        ? undefined
+        : {
+            modelId,
+            ...(baseUrl !== undefined ? { baseUrl } : {}),
+          };
+      this.pendingModelSelectionSource = !selectionResolves
+        ? undefined
+        : {
+            authType: this.currentAuthType,
+            modelId: this.getModel(),
+            baseUrl: this.currentRegistryBaseUrl,
+            revision: this.modelSelectionRevision,
+          };
+    }
+  }
+
+  async applyPendingModelProvidersReload(
+    refresh: (selection?: {
+      modelId: string;
+      baseUrl?: string;
+    }) => Promise<void>,
+  ): Promise<boolean> {
+    const pending = this.pendingModelRegistry;
+    if (!pending) return false;
+    const source = this.pendingModelSelectionSource;
+    const pendingModelSelection =
+      !source ||
+      (source.authType === this.currentAuthType &&
+        source.modelId === this.getModel() &&
+        source.baseUrl === this.currentRegistryBaseUrl &&
+        source.revision === this.modelSelectionRevision)
+        ? this.pendingModelSelection
+        : undefined;
+    const previousRegistry = this.modelRegistry;
+    const previousState = this.createStateSnapshotForRollback();
+    this.modelRegistry = pending;
+    try {
+      await refresh(pendingModelSelection);
+      if (this.pendingModelRegistry === pending) {
+        this.pendingModelRegistry = undefined;
+        this.pendingModelSelection = undefined;
+        this.pendingModelSelectionSource = undefined;
+      }
+      return true;
+    } catch (error) {
+      this.modelRegistry = previousRegistry;
+      this.rollbackToStateSnapshot(previousState);
+      throw error;
+    }
   }
 
   /** The raw providers config the registry was last built from. */

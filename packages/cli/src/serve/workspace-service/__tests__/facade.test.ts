@@ -64,6 +64,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       STREAM_JSON: 'stream-json',
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    REASONING_PROFILES: (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).REASONING_PROFILES,
     getGptReasoningCapabilities: vi.fn(() => undefined),
     clampReasoningEffort: (
       await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
@@ -3722,6 +3725,34 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reload', () => {
+    it('forwards per-session reload failures to the response and event', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const sessionFailures = [
+        { sessionId: 'session-1', error: 'invalid reasoningConfig' },
+      ];
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        env: { updatedKeys: [], removedKeys: [] },
+        changedKeys: ['modelProviders'],
+        sessionsRefreshed: [],
+        sessionsSkipped: [],
+        sessionFailures,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await expect(svc.reload(makeCtx())).resolves.toMatchObject({
+        childReloaded: true,
+        sessionFailures,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'settings_reloaded',
+          data: expect.objectContaining({ sessionFailures }),
+        }),
+      );
+    });
+
     it('surfaces a parent runtime environment reload failure', async () => {
       const publishWorkspaceEvent = vi.fn();
       const invokeWorkspaceCommand = vi.fn().mockResolvedValue({

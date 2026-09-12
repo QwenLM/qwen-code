@@ -644,6 +644,8 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  await config.applyPendingModelProvidersReload?.();
+  signal?.throwIfAborted();
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn

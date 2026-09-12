@@ -34,6 +34,10 @@ describe('effortCommand', () => {
       services: {
         config: {
           getReasoningEffort,
+          getEffectiveReasoning: vi.fn(() => {
+            const effort = getReasoningEffort();
+            return effort ? { effort } : undefined;
+          }),
           setReasoningEffort,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
@@ -101,6 +105,24 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ type: 'message', messageType: 'info' });
     expect(getReasoningEffort).toHaveBeenCalled();
     expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('reports a model default resolved outside the saved preference', async () => {
+    vi.mocked(context.services.config!.getEffectiveReasoning).mockReturnValue({
+      effort: 'medium',
+    });
+    const res = await effortCommand.action!(
+      { ...context, executionMode: 'non_interactive' },
+      '',
+    );
+
+    expect(getReasoningEffort).not.toHaveBeenCalled();
+    expect((res as { content: string }).content).toContain(
+      'Current reasoning effort:',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'using the model/provider default',
+    );
   });
 
   it.each(['high', 'max', 'low'] as const)(

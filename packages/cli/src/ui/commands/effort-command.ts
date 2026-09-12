@@ -73,7 +73,8 @@ export const effortCommand: SlashCommand = {
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'effort' };
       }
-      const current = config.getReasoningEffort();
+      const effective = config.getEffectiveReasoning();
+      const current = effective === false ? undefined : effective?.effort;
       return {
         type: 'message',
         messageType: 'info',

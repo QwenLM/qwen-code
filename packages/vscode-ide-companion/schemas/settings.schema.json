@@ -40,9 +40,78 @@
       }
     },
     "modelProviders": {
-      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generationConfig": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "reasoningConfig": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": false,
+                  "properties": {
+                    "profile": {
+                      "type": "string",
+                      "enum": [
+                        "openai-reasoning",
+                        "openai-effort",
+                        "deepseek-openai",
+                        "dashscope-thinking",
+                        "dashscope-effort",
+                        "qwen-chat-template",
+                        "anthropic-manual",
+                        "anthropic-adaptive",
+                        "anthropic-adaptive-only",
+                        "deepseek-anthropic",
+                        "gemini"
+                      ]
+                    },
+                    "supportedEfforts": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max"
+                        ]
+                      }
+                    },
+                    "defaultEffort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations."
     },
     "providerProtocol": {
       "description": "Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {\"idealab\": \"openai\"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.",
@@ -839,6 +908,55 @@
           "description": "Generation configuration settings.",
           "type": "object",
           "properties": {
+            "reasoningConfig": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "profile": {
+                  "type": "string",
+                  "enum": [
+                    "openai-reasoning",
+                    "openai-effort",
+                    "deepseek-openai",
+                    "dashscope-thinking",
+                    "dashscope-effort",
+                    "qwen-chat-template",
+                    "anthropic-manual",
+                    "anthropic-adaptive",
+                    "anthropic-adaptive-only",
+                    "deepseek-anthropic",
+                    "gemini"
+                  ]
+                },
+                "supportedEfforts": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  }
+                },
+                "defaultEffort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "description": "Override the thinking profile, supported efforts and default effort for this model."
+            },
             "timeout": {
               "description": "Request timeout in milliseconds.",
               "type": "number"

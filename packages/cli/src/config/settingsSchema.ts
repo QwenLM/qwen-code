@@ -12,6 +12,7 @@ import type {
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
+  ModelReasoningConfig,
   ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -30,6 +31,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   OutputFormat,
   REASONING_EFFORT_TIERS,
+  REASONING_PROFILES,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -37,6 +39,22 @@ import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
+
+const MODEL_REASONING_CONFIG_SCHEMA = {
+  type: 'object',
+  minProperties: 1,
+  additionalProperties: false,
+  properties: {
+    profile: { type: 'string', enum: [...REASONING_PROFILES] },
+    supportedEfforts: {
+      type: 'array',
+      minItems: 1,
+      uniqueItems: true,
+      items: { type: 'string', enum: [...REASONING_EFFORT_TIERS] },
+    },
+    defaultEffort: { type: 'string', enum: [...REASONING_EFFORT_TIERS] },
+  },
+};
 
 export type SettingsType =
   | 'boolean'
@@ -371,6 +389,25 @@ const SETTINGS_SCHEMA = {
     description:
       'Model providers configuration keyed by provider id (a built-in AuthType such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.',
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      additionalProperties: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+            generationConfig: {
+              type: 'object',
+              additionalProperties: true,
+              properties: { reasoningConfig: MODEL_REASONING_CONFIG_SCHEMA },
+            },
+          },
+        },
+      },
+    },
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
@@ -1653,7 +1690,7 @@ const SETTINGS_SCHEMA = {
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
-        // WebShell persists none; the TUI keeps its existing tier-only control.
+        // WebShell also persists none.
         jsonSchemaOverride: {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
@@ -1855,6 +1892,17 @@ const SETTINGS_SCHEMA = {
         description: 'Generation configuration settings.',
         showInDialog: false,
         properties: {
+          reasoningConfig: {
+            type: 'object',
+            label: 'Model Reasoning Configuration',
+            category: 'Model',
+            requiresRestart: false,
+            default: undefined as ModelReasoningConfig | undefined,
+            description:
+              'Override the thinking profile, supported efforts and default effort for this model.',
+            showInDialog: false,
+            jsonSchemaOverride: MODEL_REASONING_CONFIG_SCHEMA,
+          },
           timeout: {
             type: 'number',
             label: 'Timeout',

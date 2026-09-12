@@ -58,6 +58,7 @@ export type ModelGenerationConfig = Pick<
   | 'cacheRetentionByBlock'
   | 'schemaCompliance'
   | 'reasoning'
+  | 'reasoningConfig'
   | 'customHeaders'
   | 'extra_body'
   | 'thinkingMandatory'

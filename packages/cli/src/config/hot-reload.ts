@@ -267,23 +267,11 @@ export function registerMcpHotReload(
 
 /**
  * Subscribe the running {@link Config} to settings changes so `modelProviders`
- * edits take effect without a session restart (issue #10568). Mirrors
- * {@link registerMcpHotReload}: the watcher already debounces and filters out
- * restart-required keys, so this listener only diffs the merged
- * `modelProviders` against the registry's APPLIED config (same design as the
- * MCP listener diffing against `getSettingsMcpServers()`) and calls the
- * existing reload primitive. The diff gate keeps unrelated settings edits
- * (theme, …) from rebuilding the model registry. Called once at startup,
- * after `settingsWatcher.startWatching()`; returns a disposer that
- * unsubscribes.
- *
- * Diffing against applied state (not a listener-local snapshot) keeps the
- * gate correct when other paths rewrite the registry without a watcher event
- * (provider-template updates, ACP session reloads), and means a throwing
- * reload retries on the next event — applied state never advanced. A
- * rejected `refreshAuth` is the one exception: the registry reload has
- * already advanced applied state by then, so a listener-local flag retries
- * only the auth refresh on subsequent events (never the registry reload).
+ * edits take effect without a session restart (issue #10568). The watcher
+ * already debounces and filters restart-required keys. This listener stages
+ * the latest valid provider snapshot, and each runtime applies it at its next
+ * user-prompt boundary. Called once at startup, after
+ * `settingsWatcher.startWatching()`; returns a disposer that unsubscribes.
  *
  * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
  * schema, so this listener does not pass it to the reload primitive.
@@ -296,62 +284,20 @@ export function registerModelProvidersHotReload(
   modelProvidersDebugLogger.debug(
     'registered modelProviders hot-reload listener on SettingsWatcher',
   );
-  // Pending refreshAuth retry after a successful registry reload: the reload
-  // already advanced applied state, so the modelProviders gate below would
-  // skip every later unchanged event — re-attempt ONLY refreshAuth on
-  // subsequent events (never the registry reload) until it succeeds.
-  let refreshAuthRetryPending = false;
-  const reconcile = async () => {
+  const reconcile = () => {
     const next = settings.merged.modelProviders;
-    const providersUnchanged = equal(
-      config.getModelProvidersConfig() ?? {},
-      next ?? {},
-    );
-    if (providersUnchanged && !refreshAuthRetryPending) {
+    if (equal(config.getNextPromptModelProvidersConfig() ?? {}, next ?? {}))
       return;
-    }
-    if (!providersUnchanged) {
-      modelProvidersDebugLogger.debug(
-        'modelProviders changed — reloading model registry',
-      );
-      try {
-        config.reloadModelProvidersConfig(next);
-      } catch (err) {
-        // Applied state is unchanged, so the next event retries.
-        modelProvidersDebugLogger.error(
-          `reloadModelProvidersConfig threw: ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`,
-        );
-        return;
-      }
-    }
-
-    const authType = config.getAuthType();
-    if (!authType) {
-      return;
-    }
     try {
-      // `isInitialAuth=true` keeps a watcher-triggered refresh
-      // non-interactive: with it, a QWEN_OAUTH session whose cached
-      // credentials are unavailable (expired/rotated refresh token,
-      // transient network error) rejects with "credentials expired" into the
-      // catch below instead of falling through to `authWithQwenDeviceFlow` —
-      // an unrequested device-auth prompt mid-session that also stalls
-      // ACP/headless runs, where there is no terminal to answer it. Mirrors
-      // boot (`performInitialAuth`, packages/cli/src/core/auth.ts).
-      await config.refreshAuth(authType, true);
-      refreshAuthRetryPending = false;
-    } catch (err) {
-      // The registry reload above already advanced applied state, so the
-      // providers gate skips every later unchanged event — without a retry
-      // flag the half-applied state (registry reloaded, active client stale)
-      // would persist until another modelProviders edit or a restart.
-      refreshAuthRetryPending = true;
+      config.stageModelProvidersReload(next);
+    } catch (error) {
       modelProvidersDebugLogger.error(
-        `refreshAuth after modelProviders reload threw: ${
-          err instanceof Error ? (err.stack ?? err.message) : String(err)
-        }`,
+        'Invalid model-provider update; keeping the current configuration',
+        error,
+      );
+      appEvents.emit(
+        AppEvent.LogError,
+        'Failed to reload model provider settings; the current model configuration remains active. Run with --debug for details.',
       );
     }
   };

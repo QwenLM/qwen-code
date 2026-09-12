@@ -636,6 +636,134 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it('preserves a request-level Gemini opt-out object for optional thinking', async () => {
+    const optional = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      reasoningConfig: { profile: 'gemini' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await optional.generateContent(
+      {
+        model: 'gemini-alias',
+        contents: [],
+        config: {
+          thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+        },
+      },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+        }),
+      }),
+    );
+  });
+
+  it('keeps config-level Gemini reasoning false after adding a declaration', async () => {
+    const disabled = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      reasoning: false,
+      reasoningConfig: { profile: 'gemini' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await disabled.generateContent(
+      { model: 'gemini-alias', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: false },
+        }),
+      }),
+    );
+  });
+
+  it('keeps an optional declaration without a tier unspecified', async () => {
+    const optional = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      reasoning: {},
+      reasoningConfig: { profile: 'gemini' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await optional.generateContent(
+      { model: 'gemini-alias', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('forces the lowest declared Gemini tier when mandatory thinking has no default', async () => {
+    const mandatory = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      thinkingMandatory: true,
+      reasoningConfig: { profile: 'gemini' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await mandatory.generateContent(
+      {
+        model: 'gemini-alias',
+        contents: [],
+        config: {
+          thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+        },
+      },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: true, thinkingLevel: 'LOW' },
+        }),
+      }),
+    );
+  });
+
+  it('uses canonical tier order for a mandatory unsorted declaration', async () => {
+    const mandatory = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-alias',
+      thinkingMandatory: true,
+      reasoning: false,
+      reasoningConfig: {
+        profile: 'gemini',
+        supportedEfforts: ['high', 'low'],
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await mandatory.generateContent(
+      { model: 'gemini-alias', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: true, thinkingLevel: 'LOW' },
+        }),
+      }),
+    );
+  });
+
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     const request = {
       model: 'gemini-1.5-flash',

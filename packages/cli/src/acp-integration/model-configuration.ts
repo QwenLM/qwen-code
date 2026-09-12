@@ -5,6 +5,11 @@
  */
 
 import {
+  getModelReasoningConfig,
+  getOpenAIReasoningState,
+  resolveEffectiveReasoning,
+  resolveModelReasoningConfig,
+  type ReasoningProfile,
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   getGptReasoningCapabilities,
@@ -22,11 +27,13 @@ import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
 export type ModelReasoningConfiguration =
   | {
       readonly thinking: true;
+      readonly profile?: ReasoningProfile;
       readonly toggleOnly: true;
       readonly canDisable?: false;
     }
   | {
       readonly thinking: true;
+      readonly profile?: ReasoningProfile;
       readonly toggleOnly?: false;
       readonly efforts: readonly ReasoningEffort[];
       readonly defaultEffort?: ReasoningEffort;
@@ -138,6 +145,7 @@ export function getGptReasoningOverrideState(
       blocksTierChange: true;
     }
   | undefined {
+  if (generation.reasoningConfig !== undefined) return undefined;
   const capabilities = getGptReasoningCapabilities(generation.model);
   if (!capabilities || generation.reasoning === false) return undefined;
   const reasoning = getModelConfiguration(
@@ -234,6 +242,15 @@ export function resolvePersistedReasoningConfigState(
     getModelConfiguration(modelId, reasoning)?.reasoning?.canDisable === false;
   let selection = parseReasoningSelection(value);
   if (
+    reasoning?.profile &&
+    !reasoning.toggleOnly &&
+    selection &&
+    selection !== REASONING_EFFORT_NONE &&
+    selection !== REASONING_EFFORT_DEFAULT
+  ) {
+    selection = clampReasoningEffort(selection, reasoning.efforts);
+  }
+  if (
     gptReasoning &&
     !parseModelReasoningCapabilities(reasoning) &&
     selection &&
@@ -271,9 +288,10 @@ export function getModelConfiguration(
   const gpt = getGptReasoningCapabilities(modelId);
   return configured
     ? {
-        reasoning: gpt?.thinkingMandatory
-          ? { ...configured, canDisable: false }
-          : configured,
+        reasoning:
+          gpt?.thinkingMandatory && !('profile' in configured)
+            ? { ...configured, canDisable: false }
+            : configured,
       }
     : gpt
       ? {
@@ -295,6 +313,15 @@ export function getConfiguredModelReasoning(
   modelId = config.getModel?.(),
   fallbackToManifest = true,
 ): ModelReasoningConfiguration | undefined {
+  const currentGeneration = config.getContentGeneratorConfig?.();
+  if (currentGeneration?.reasoningConfig !== undefined) {
+    const external = getModelReasoningConfig(
+      config,
+      currentGeneration,
+      modelId,
+    );
+    if (external) return external;
+  }
   if (
     config.getActiveRuntimeModelSnapshot?.() ||
     config.getModel?.().startsWith(ACP_ROUTE_ID_PREFIX)
@@ -436,19 +463,27 @@ export function buildModelReasoningConfigOption(
     (state.effort !== undefined ||
       reasoning.toggleOnly ||
       reasoning.defaultEnabled !== false);
+  const rawEffort = state.effort as string | undefined;
+  const nativeEffort =
+    rawEffort && !REASONING_EFFORT_TIERS.includes(rawEffort as ReasoningEffort)
+      ? rawEffort
+      : undefined;
   const effort =
+    !nativeEffort &&
     state.effort &&
     !reasoning.toggleOnly &&
-    getGptReasoningCapabilities(modelId) &&
-    !parseModelReasoningCapabilities(configuredReasoning)
+    (reasoning.profile ||
+      (getGptReasoningCapabilities(modelId) &&
+        !parseModelReasoningCapabilities(configuredReasoning)))
       ? clampReasoningEffort(state.effort, reasoning.efforts)
-      : state.effort;
+      : (nativeEffort ?? state.effort);
   const currentValue =
     !enabled && canDisable
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT
-        : (reasoning.efforts.find((candidate) => candidate === effort) ??
+        : (nativeEffort ??
+          reasoning.efforts.find((candidate) => candidate === effort) ??
           reasoning.defaultEffort ??
           REASONING_EFFORT_DEFAULT);
 
@@ -492,6 +527,15 @@ export function buildModelReasoningConfigOption(
               name: REASONING_EFFORT_NAMES[effort],
               description: 'Apply this effort to the next request',
             })),
+            ...(nativeEffort
+              ? [
+                  {
+                    value: nativeEffort,
+                    name: nativeEffort,
+                    description: 'Current provider-specific effort',
+                  },
+                ]
+              : []),
           ]),
     ],
     _meta: {
@@ -519,6 +563,10 @@ export function buildModelReasoningConfigPreview(
   configuredReasoning?: ModelReasoningConfiguration,
   generation?: ContentGeneratorConfig,
 ): SessionConfigOption[] | undefined {
+  const external = generation
+    ? resolveModelReasoningConfig(generation, configuredReasoning)
+    : undefined;
+  configuredReasoning = external ?? configuredReasoning;
   const reasoning = getModelConfiguration(
     modelId,
     configuredReasoning,
@@ -545,10 +593,24 @@ export function buildModelReasoningConfigPreview(
       { ...generation, reasoning: undefined },
       configuredReasoning,
     );
+  const externalState =
+    generation && external
+      ? generation.authType === 'openai' || generation.authType === 'qwen-oauth'
+        ? getOpenAIReasoningState(
+            { ...generation, reasoning: effectiveReasoning },
+            external,
+          )
+        : resolveEffectiveReasoning({ reasoning: effectiveReasoning }, external)
+      : undefined;
   const option = buildModelReasoningConfigOption(
     modelId,
     {
       ...state,
+      ...(externalState === false
+        ? { enabled: false }
+        : externalState
+          ? { enabled: true, effort: externalState.effort }
+          : {}),
       ...(override
         ? {
             enabled: override.enabled,

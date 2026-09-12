@@ -87,8 +87,13 @@ export function buildAgentContentGeneratorConfig(
     return nextConfig;
   }
 
-  if (modelId && modelId !== parentConfig.model) {
+  if (
+    (modelId && modelId !== parentConfig.model) ||
+    (authOverrides.baseUrl !== undefined &&
+      authOverrides.baseUrl !== parentConfig.baseUrl)
+  ) {
     nextConfig.thinkingMandatory = undefined;
+    nextConfig.reasoningConfig = undefined;
   }
 
   nextConfig.apiKey = resolveCredentialField(
@@ -177,7 +182,11 @@ function applyResolvedModelConfig(
   // model capabilities such as thinkingMandatory, which must not leak.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined || field === 'thinkingMandatory') {
+    if (
+      registryValue !== undefined ||
+      field === 'thinkingMandatory' ||
+      field === 'reasoningConfig'
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }

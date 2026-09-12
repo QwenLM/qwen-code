@@ -2978,14 +2978,7 @@ export class Session implements SessionContext {
       };
     }
 
-    const metadata = (params as { _meta?: Record<string, unknown> })._meta;
-    const isRetry =
-      (params as { retry?: boolean }).retry === true ||
-      metadata?.[DAEMON_RETRY_META_KEY] === true;
-    const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
-    const isRestoreAskUserQuestion =
-      metadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
-    if (isRetry || isContinue || isRestoreAskUserQuestion) {
+    if (this.#isPromptContinuation(params)) {
       this.#clearTodoStopGuardQueuedPromptWait();
       if (this.todoStopGuard.hasTrustedUnfinishedState) {
         this.todoStopGuard.resumeTrustedPrompt();
@@ -3007,6 +3000,16 @@ export class Session implements SessionContext {
       startsWorkChain: true,
       drainSupersededAutomaticQueues,
     };
+  }
+
+  #isPromptContinuation(params: PromptRequest): boolean {
+    const metadata = (params as { _meta?: Record<string, unknown> })._meta;
+    return (
+      (params as { retry?: boolean }).retry === true ||
+      metadata?.[DAEMON_RETRY_META_KEY] === true ||
+      metadata?.[DAEMON_CONTINUE_META_KEY] === true ||
+      metadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true
+    );
   }
 
   #prepareTodoStopGuardForAutomaticTurn(
@@ -3843,7 +3846,7 @@ export class Session implements SessionContext {
     ) {
       throw new Error('Unable to reload model-provider settings from disk.');
     }
-    this.config.reloadModelProvidersConfig(
+    this.config.stageModelProvidersReload(
       this.settings.merged.modelProviders,
       this.settings.merged.providerProtocol ?? {},
     );
@@ -5011,6 +5014,16 @@ export class Session implements SessionContext {
     let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      if (
+        scheduledGoalTurn === undefined &&
+        !this.#isPromptContinuation(params) &&
+        (await this.config.applyPendingModelProvidersReload?.())
+      ) {
+        this.reconcileReasoningSelection(this.config.getModel(), {
+          persist: false,
+        });
+      }
+
       const result = await this.#executePrompt(
         params,
         pendingSend,
@@ -5510,11 +5523,7 @@ export class Session implements SessionContext {
         const daemonPromptId = getInvocationContext()?.promptId;
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
-        const continuesCurrentWorkChain =
-          (params as { retry?: boolean }).retry === true ||
-          promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
-          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
-          promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+        const continuesCurrentWorkChain = this.#isPromptContinuation(params);
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -11008,6 +11017,15 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
+    if (
+      this.isIdle() &&
+      (await this.config.applyPendingModelProvidersReload?.())
+    ) {
+      this.reconcileReasoningSelection(this.config.getModel(), {
+        persist: false,
+      });
+    }
+
     const resolvedRoute = resolveAcpModelOption(
       rawModelId,
       this.config.getAllConfiguredModels(),
@@ -11235,7 +11253,8 @@ export class Session implements SessionContext {
     const supportsPreference = (value: ReasoningSelection | undefined) =>
       value !== undefined &&
       value !== REASONING_EFFORT_DEFAULT &&
-      ((gptModel && value !== REASONING_EFFORT_NONE) ||
+      (((gptModel || (modelReasoning?.profile && !modelReasoning.toggleOnly)) &&
+        value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
           modelId,
           value,

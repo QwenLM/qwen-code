@@ -1431,6 +1431,9 @@ export function createDaemonWorkspaceService(
       let changedKeys: string[] = [];
       let sessionsRefreshed: string[] | undefined;
       let sessionsSkipped: string[] | undefined;
+      let sessionFailures:
+        | Array<{ sessionId: string; error: string }>
+        | undefined;
       let childError: string | undefined;
       try {
         const childResult = await invokeWorkspaceCommand<{
@@ -1438,6 +1441,7 @@ export function createDaemonWorkspaceService(
           changedKeys: string[];
           sessionsRefreshed: string[];
           sessionsSkipped: string[];
+          sessionFailures?: Array<{ sessionId: string; error: string }>;
         }>(
           SERVE_CONTROL_EXT_METHODS.workspaceReload,
           { cwd: boundWorkspace },
@@ -1448,6 +1452,7 @@ export function createDaemonWorkspaceService(
         changedKeys = childResult.changedKeys;
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
+        sessionFailures = childResult.sessionFailures;
       } catch (err) {
         if (err instanceof SessionNotFoundError) {
           childError = 'ACP child not running';
@@ -1466,6 +1471,7 @@ export function createDaemonWorkspaceService(
           childReloaded,
           sessionsRefreshed,
           sessionsSkipped,
+          sessionFailures,
           childError,
           ...(runtimeEnvironmentApplied === undefined
             ? {}
@@ -1480,6 +1486,7 @@ export function createDaemonWorkspaceService(
         childReloaded,
         sessionsRefreshed,
         sessionsSkipped,
+        sessionFailures,
         childError,
         ...(runtimeEnvironmentApplied === undefined
           ? {}

@@ -282,6 +282,11 @@ vi.mock('./config/settingsWatcher.js', () => ({
   },
 }));
 
+vi.mock('./config/hot-reload.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/hot-reload.js')>()),
+  registerModelProvidersHotReload: vi.fn(() => () => {}),
+}));
+
 vi.mock('./config/lsp-config-watcher.js', () => ({
   LspConfigWatcher: class {
     listener?: (event: unknown) => void | Promise<void>;

@@ -20,7 +20,7 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). `providerProtocol` is read once at startup and **requires a restart**.
+> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are validated and staged by a running session without a restart (the file watcher debounces ~300ms). The latest valid snapshot becomes active when the next user prompt starts; a new session reads it immediately. `providerProtocol` is read once at startup and **requires a restart**.
 
 ### Image generation routes
 
@@ -68,6 +68,76 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 `envKey`. Image generation uses the same endpoint and credential as the route;
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
+
+## Override model thinking rules
+
+Use `generationConfig.reasoningConfig` to describe a new model or override the
+thinking rules inferred from an existing model name and endpoint:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "company-model-v2",
+        "baseUrl": "https://gateway.example.com/v1",
+        "envKey": "COMPANY_MODEL_API_KEY",
+        "generationConfig": {
+          "reasoningConfig": {
+            "profile": "dashscope-effort",
+            "supportedEfforts": ["low", "medium", "xhigh"],
+            "defaultEffort": "medium"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+- `profile` selects an existing thinking request format. OpenAI-compatible
+  routes accept `openai-reasoning`, `openai-effort`, `deepseek-openai`,
+  `dashscope-thinking`, `dashscope-effort`, or `qwen-chat-template`.
+  `openai-responses` routes use `openai-reasoning`.
+  Anthropic routes accept `anthropic-manual`, `anthropic-adaptive`,
+  `anthropic-adaptive-only`, or `deepseek-anthropic`. Gemini/Vertex routes use
+  `gemini`. A profile does not change the endpoint, authentication or SDK.
+- `supportedEfforts` overrides the supported subset of
+  `low/medium/high/xhigh/max`. Leaving this field out inherits known model
+  capabilities when available, then falls back to the selected profile's safe
+  default ladder. Gemini uses
+  `low/medium/high`. The two toggle-only profiles (`dashscope-thinking` and
+  `qwen-chat-template`) do not accept effort fields.
+- `defaultEffort` is sent when no explicit effort is selected, and the controls
+  display the same value. When `supportedEfforts` is also present, the default
+  must belong to that set; otherwise the declared default extends the inherited
+  ladder.
+
+Existing `capabilities.reasoning` settings continue to work; an explicit new
+declaration takes precedence for fields it can express. A registry
+`canDisable: false` constraint is still inherited, and an inferred toggle-only
+capability rejects effort fields unless `profile` explicitly selects an
+effort-capable format.
+The declaration must contain at least one of the three fields;
+`"reasoningConfig": {}` is invalid.
+`reasoning: false` still disables thinking, and `thinkingMandatory: true`
+prevents disabling it. Fixed budgets continue to use `reasoning.budget_tokens`;
+there is no per-effort budget mapping setting.
+Place `reasoningConfig` inside each model provider entry's `generationConfig`.
+On a declared OpenAI-compatible route, its profile serializer keeps the
+configured reasoning state alongside unrelated `samplingParams`; explicit raw
+thinking fields still take precedence.
+
+Settings reload validates and stages the model update. The entire current
+prompt, including tools and retries, retains its configuration. The latest
+valid staged update applies when the next user prompt starts; new sessions use
+the latest settings immediately. Invalid updates report a configuration error
+and preserve the running configuration. Model and endpoint identities remain
+separate, so two routes with the same model name can use different profiles.
+
+This supports new models that reuse these thinking protocols. New authentication
+schemes, response formats and other unsupported model restrictions still need a
+corresponding implementation.
 
 ## Configuration Examples by Auth Type
 
@@ -736,7 +806,7 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 | **OpenAI / DeepSeek** (`api.deepseek.com`)    | Flat `reasoning_effort: <effort>` body parameter                                         | When `reasoning.effort` is set in the nested config shape, it's rewritten to flat `reasoning_effort` and `'low'`/`'medium'` are normalized to `'high'`, `'xhigh'` to `'max'` — mirroring DeepSeek's [server-side back-compat](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). Top-level `samplingParams.reasoning_effort` or `extra_body.reasoning_effort` overrides skip this normalization and ship verbatim. `max` is accepted only on a real DeepSeek hostname; a `deepseek`-named model on another host keeps the generic `xhigh` ceiling, matching the hostname gate on the reshape itself.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **OpenAI / Z.ai** (`z.ai`, `bigmodel.cn`)     | Flat `reasoning_effort: <effort>` body parameter                                         | GLM-5.2+ on a Z.ai host takes the full ladder, `max` included, and the nested `reasoning.effort` is rewritten to the flat field. Older GLM ids, and a `glm-*` model reached on any other host, keep the generic `xhigh` ceiling: the model name alone says nothing about what that endpoint accepts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | **OpenAI** (other compatible servers)         | Known GPT-5 / GPT-6 Astra: flat `reasoning_effort`; other models: nested `reasoning`     | GPT effort is clamped in both directions to the supported subset for the known model. GPT-5.6 and GPT-6 Astra allow `max`, while earlier models have lower ceilings. Tiers below the model floor are raised: GPT-5 Pro accepts only `high`; GPT-5.2 Pro, GPT-5.4 Pro and GPT-5.5 Pro raise `low` to `medium`. OpenRouter retains nested `reasoning`. Unknown model names keep the generic `xhigh` ceiling and nested shape. Explicit reasoning values in `samplingParams` / `extra_body` bypass the configured-tier clamp.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **OpenAI Responses** (`openai-responses`)     | `reasoning: { effort, summary: "auto" }` plus `include: ["reasoning.encrypted_content"]` | Every tier passes through verbatim with no clamping. `extra_body.enable_thinking: true` is translated to `reasoning: { effort: "medium" }` when no explicit `reasoning` is set (and is never itself forwarded — it has no meaning on this wire); prefer setting `reasoning.effort` directly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **OpenAI Responses** (`openai-responses`)     | `reasoning: { effort, summary: "auto" }` plus `include: ["reasoning.encrypted_content"]` | Declared canonical tiers are clamped to `supportedEfforts`; Responses-native values outside the shared ladder, such as `minimal`, pass through verbatim. `extra_body.enable_thinking: true` is translated to `reasoning: { effort: "medium" }` when no explicit `reasoning` is set (and is never itself forwarded — it has no meaning on this wire); prefer setting `reasoning.effort` directly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | **Anthropic** (real `api.anthropic.com`)      | `output_config: { effort }` plus the `effort-2025-11-24` beta header                     | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a `debugLogger.warn` line (once per generator); if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Anthropic** (`api.deepseek.com/anthropic`)  | Same `output_config: { effort }` + beta header                                           | `'max'` is passed through unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | **Gemini** (`@google/genai`)                  | `thinkingConfig: { includeThoughts: true, thinkingLevel }`                               | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -755,15 +825,17 @@ On an `openrouter.ai` baseURL, the OpenAI pipeline emits OpenRouter's provider-l
 
 > [!warning]
 >
-> Except for known GPT models and models with explicit reasoning capabilities, when `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests. A `reasoning` object placed inside `samplingParams` is your own value and ships unchanged while reasoning is enabled: the effort ceiling above applies only to the tier the pipeline injects from `/effort`.
+> Except for known GPT models, models with explicit reasoning capabilities, and routes with `reasoningConfig`, when `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests. A `reasoning` object placed inside `samplingParams` is your own value and ships unchanged while reasoning is enabled: the effort ceiling above applies only to the tier the pipeline injects from `/effort`.
 >
 > Known GPT-5 models and GPT-6 Astra keep configured effort alongside unrelated sampling keys. For example, `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` sends `temperature: 0.5` and flat `reasoning_effort: 'xhigh'` on GPT-5.4, or `'max'` on GPT-5.6 / GPT-6 Astra. On an `openrouter.ai` baseURL the same clamped tier ships as nested `reasoning: { effort }` instead. On non-OpenRouter endpoints, explicit flat reasoning overrides win; nullish or empty-string flat placeholders allow the configured tier. On OpenRouter, a sampling flat override suppresses configured nested effort unless explicit model capabilities inject it; an extra-body-only flat override does not replace the configured nested effort.
 >
 > DashScope Qwen models are another exception: their provider reads `reasoning` directly and maps it to `reasoning_effort` or `enable_thinking`. On the qwen3.8-max family, provider-specific `samplingParams` fields still take precedence when the wire parameters conflict; on older qwen hybrids, a configured effort tier collapses to `enable_thinking: true`, which overrides a `samplingParams.enable_thinking` value.
 >
-> For other models, include the provider's reasoning knob directly when using `samplingParams` — for DeepSeek that is `samplingParams.reasoning_effort`. Known GPT models map configured effort automatically; only add a raw override when intentionally bypassing that mapping. Raw nested `reasoning`, including `null`, remains a whole-object override while reasoning is enabled. Disabling via `reasoning: false` or request-level `includeThoughts: false` removes the nested value, including raw overrides in either layer. Non-OpenRouter GPT requests then send `reasoning_effort: 'none'` when disabling is allowed; OpenRouter uses its nested disable field instead. Mandatory-thinking models receive neither substitute. Outside OpenRouter its meaning depends on the gateway, so model controls show the model default. Any raw override that blocks a configured tier causes an explicit tier change to fail without saving a preference. The thinking switch restores configured raw defaults after disabling only when they permit thinking. If the raw state or configured reasoning default is off, the thinking switch cannot be turned on and the saved preference is retained. This also applies when explicit capabilities omit a default tier or expose only a thinking toggle. An explicit default command still resets the preference. Remove the blocking raw override to choose a different tier.
+> For other models, include the provider's reasoning knob directly when using `samplingParams` — for DeepSeek that is `samplingParams.reasoning_effort`. Known GPT models map configured effort automatically; only add a raw override when intentionally bypassing that mapping. Raw nested `reasoning`, including `null`, remains a whole-object override while reasoning is enabled. Disabling via `reasoning: false` or request-level `includeThoughts: false` removes the nested value, including raw overrides in either layer. Non-OpenRouter GPT requests then send `reasoning_effort: 'none'` when disabling is allowed; OpenRouter uses its nested disable field instead. Mandatory-thinking models receive neither substitute. Outside OpenRouter its meaning depends on the gateway, so model controls show the model default. Any raw override that blocks a configured tier causes an explicit tier change to fail without saving a preference. The thinking switch restores configured raw defaults after disabling only when they permit thinking. If the raw state or configured reasoning default is off, the thinking switch cannot be turned on and the saved preference is retained. This also applies when explicit capabilities omit a default tier or expose only a thinking toggle. Remove the blocking raw override to choose a different tier.
 >
-> The Anthropic and Gemini converters are unaffected — they always read `reasoning.effort` directly regardless of `samplingParams`.
+> The explicit `/effort default` command clears a saved preference without adding a model-default entry to the picker.
+>
+> Anthropic and Gemini routes also apply `reasoningConfig` defaults and supported-tier rules. Their native `samplingParams` handling remains independent of the OpenAI-compatible raw-override behavior described above.
 
 ### `budget_tokens`
 

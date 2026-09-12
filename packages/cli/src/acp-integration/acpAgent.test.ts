@@ -246,6 +246,18 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  resolveModelReasoningConfig: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelReasoningConfig,
+  getModelReasoningConfig: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getModelReasoningConfig,
+  getOpenAIReasoningState: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getOpenAIReasoningState,
+  REASONING_PROFILES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).REASONING_PROFILES,
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -2313,6 +2325,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      stageModelProvidersReload: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -4623,6 +4636,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         syncAfterAuthRefresh: vi.fn(),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      stageModelProvidersReload: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
@@ -4652,6 +4666,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getEffectiveReasoning: vi.fn().mockReturnValue(undefined),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       setReasoningEffort: vi.fn(),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -5683,13 +5698,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = {
           mcpServers: {},
           modelProviders: { openai: [{ id: 'new-model' }] },
         };
+        return true;
       }),
-      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -11394,8 +11409,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
     });
     let reasoningEffort: 'none' | 'low' = 'none';
-    settings.reloadScopeFromDisk = vi.fn(() => {
-      settings.merged.model = { name: 'qwen3.7-plus', reasoningEffort };
+    let diskChanged = false;
+    settings.reloadScopesFromDiskAtomically = vi.fn(() => {
+      if (diskChanged)
+        settings.merged.model = { name: 'qwen3.7-plus', reasoningEffort };
       return true;
     });
     let model = 'qwen3.8-max';
@@ -11414,6 +11431,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     try {
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      diskChanged = true;
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(switchModel).toHaveBeenCalledWith('api-key', 'qwen3.7-plus');
       expect(lastSessionMock!.reloadReasoningSelection).toHaveBeenCalledOnce();
@@ -11550,6 +11568,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
       );
       expect(generation.reasoning).toBeUndefined();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('accepts the current provider-native effort as an ACP no-op', async () => {
+    const sessionId = 'provider-native-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = {
+      model: 'gpt-5.1',
+      authType: AuthType.USE_OPENAI,
+      reasoningConfig: {
+        profile: 'openai-effort' as const,
+        supportedEfforts: ['low', 'medium', 'high'] as const,
+      },
+      reasoning: { effort: 'minimal' },
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('gpt-5.1');
+    innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getEffectiveReasoning = vi.fn(() => ({ effort: 'minimal' }));
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as SetSessionConfigOptionResponse;
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('minimal');
+      expect(option?.options).toContainEqual(
+        expect.objectContaining({ value: 'minimal' }),
+      );
+
+      const unchanged = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'minimal',
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        unchanged.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('minimal');
+      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(
+        lastSessionMock?.setSessionReasoningSelection,
+      ).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -28921,6 +28989,7 @@ describe('sessionLanguage multi-session propagation', () => {
         syncAfterAuthRefresh: vi.fn(),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      stageModelProvidersReload: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       switchModel: vi.fn().mockResolvedValue(undefined),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
@@ -29383,7 +29452,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('clears removed providerProtocol mappings and refreshes auth on workspace reload', async () => {
+  it('stages removed providerProtocol mappings until the next user prompt', async () => {
     const providerConfig = {
       idealab: [
         {
@@ -29397,18 +29466,25 @@ describe('sessionLanguage multi-session propagation', () => {
       modelProviders: providerConfig,
       providerProtocol: { idealab: 'openai' },
     };
+    let reloadedSettings: Record<string, unknown> = {
+      modelProviders: providerConfig,
+    };
     const settings = {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { modelProviders: providerConfig };
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        mergedSettings = reloadedSettings;
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
+    const setDisabledTools = vi.fn();
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-reload'),
+      stageModelProvidersReload: vi.fn(),
+      setDisabledTools,
       getAuthType: vi.fn().mockReturnValue('openai'),
       // The reload re-derivation applies the Session Workflow gate to live
       // sessions unconditionally; report the (unchanged) effective gate so
@@ -29462,13 +29538,70 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(cfg.reloadModelProvidersConfig).mockClear();
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
 
-    expect(cfg.reloadModelProvidersConfig).toHaveBeenCalledWith(
+    expect(cfg.stageModelProvidersReload).toHaveBeenCalledWith(
       providerConfig,
       {},
     );
-    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai', undefined);
-    expect(getSessionReasoningSelection).toHaveBeenCalledOnce();
-    expect(reloadReasoningSelection).toHaveBeenCalledOnce();
+    expect(cfg.refreshAuth).not.toHaveBeenCalled();
+    expect(reloadReasoningSelection).not.toHaveBeenCalled();
+
+    const selectedProviderConfig = {
+      idealab: [{ ...providerConfig.idealab[0], name: 'Qwen 3 updated' }],
+    };
+    reloadedSettings = {
+      modelProviders: selectedProviderConfig,
+      model: {
+        name: 'qwen3',
+        baseUrl: 'https://idealab.example/v1',
+      },
+    };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(cfg.stageModelProvidersReload).toHaveBeenLastCalledWith(
+      selectedProviderConfig,
+      {},
+      'qwen3',
+      'https://idealab.example/v1',
+    );
+    expect(reloadReasoningSelection).not.toHaveBeenCalled();
+
+    const clearedSelectionProviderConfig = {
+      idealab: [{ ...providerConfig.idealab[0], name: 'Qwen 3 final' }],
+    };
+    reloadedSettings = {
+      modelProviders: clearedSelectionProviderConfig,
+      model: { generationConfig: {} },
+    };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(cfg.stageModelProvidersReload).toHaveBeenLastCalledWith(
+      clearedSelectionProviderConfig,
+      {},
+      null,
+      undefined,
+    );
+
+    reloadedSettings = {
+      modelProviders: {
+        idealab: [{ ...providerConfig.idealab[0], id: 'invalid-update' }],
+      },
+      tools: { disabled: ['shell'] },
+    };
+    vi.mocked(cfg.stageModelProvidersReload).mockImplementationOnce(() => {
+      throw new Error('invalid reasoningConfig.defaultEffort');
+    });
+    const failed = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(setDisabledTools).toHaveBeenCalledWith(new Set(['shell']));
+    expect(failed).toMatchObject({
+      sessionFailures: [
+        {
+          sessionId: 's-reload',
+          error: 'invalid reasoningConfig.defaultEffort',
+        },
+      ],
+      sessionsSkipped: [],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -29483,8 +29616,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = { tools: { approvalMode: nextMode } };
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -29589,8 +29723,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = { experimental: { sessionWorkflow: nextEnabled } };
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -29695,16 +29830,21 @@ describe('sessionLanguage multi-session propagation', () => {
 
   it('does not re-pin or clear live sessions when a reload diff fires against a stale settings view', async () => {
     // The child boots with the gate off on disk; its settings view only
-    // syncs through reloadScopeFromDisk, and the UI write path never
+    // syncs through the atomic settings reload, and the UI write path never
     // triggers one — so after a UI toggle the first reload diffs the new
     // merged view against a stale clone.
     let viewEnabled = false;
+    let reloadCount = 0;
     const settings = {
       get merged() {
         return { experimental: { sessionWorkflow: viewEnabled } };
       },
-      reloadScopeFromDisk: vi.fn(() => {
-        viewEnabled = true; // the UI write persisted true behind the child's back
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        if (reloadCount > 0) {
+          viewEnabled = true; // the UI write persisted true behind the child's back
+        }
+        reloadCount += 1;
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -29783,7 +29923,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     // A genuine disk flip away from the pinned value must still reach the
     // live session.
-    settings.reloadScopeFromDisk = vi.fn(() => {
+    settings.reloadScopesFromDiskAtomically = vi.fn(() => {
       viewEnabled = false;
       return true;
     });
@@ -29810,7 +29950,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29876,7 +30016,7 @@ describe('sessionLanguage multi-session propagation', () => {
       user: { settings: {}, path: '/home/u/.qwen/settings.json' },
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29908,7 +30048,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29974,7 +30114,7 @@ describe('sessionLanguage multi-session propagation', () => {
       user: { settings: {}, path: '/home/u/.qwen/settings.json' },
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30026,7 +30166,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30138,7 +30278,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30261,7 +30401,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30375,7 +30515,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30467,7 +30607,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30560,7 +30700,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30695,7 +30835,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30779,7 +30919,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30858,7 +30998,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30946,7 +31086,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31036,8 +31176,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = reloadedSettings;
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),

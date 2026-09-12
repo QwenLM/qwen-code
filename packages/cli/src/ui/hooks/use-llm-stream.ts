@@ -3766,6 +3766,13 @@ export const useLlmStream = (
           scheduledToolCallId?: string;
         };
         try {
+          if (
+            submitType === SendMessageType.UserQuery &&
+            !allowConcurrentBtwDuringResponse
+          ) {
+            abortSignal.throwIfAborted();
+            await config.applyPendingModelProvidersReload?.();
+          }
           preparedQuery =
             submitType === SendMessageType.Goal
               ? queuedGoal

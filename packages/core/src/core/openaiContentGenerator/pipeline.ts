@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getModelReasoningConfig,
+  type ResolvedModelReasoningConfig,
+} from '../model-reasoning-config.js';
+import { applyOpenAIReasoningProfile } from './reasoning-profile.js';
 import type OpenAI from 'openai';
 import {
   type GenerateContentParameters,
@@ -86,6 +91,25 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function shouldDropDashScopeRequiredToolChoice(
+  isDashScope: boolean,
+  model: string,
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  thinkingMandatory: boolean,
+): boolean {
+  if (!isDashScope || request.tool_choice !== 'required') return false;
+  const body = request as unknown as Record<string, unknown>;
+  const reasoningEffort = body['reasoning_effort'];
+  const thinkingBudget = body['thinking_budget'];
+  return (
+    thinkingMandatory ||
+    (isQwenFamilyWireModel(model) &&
+      (body['enable_thinking'] === true ||
+        (thinkingBudget != null && body['enable_thinking'] !== false) ||
+        (typeof reasoningEffort === 'string' && reasoningEffort !== 'none')))
+  );
 }
 
 function applyConfiguredReasoningEffort(
@@ -965,6 +989,39 @@ export class ContentGenerationPipeline {
       );
     }
 
+    const externalReasoning = getModelReasoningConfig(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      context.model,
+    );
+    const model = (context.model ?? '').toLowerCase();
+    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+      this.contentGeneratorConfig,
+    );
+    if (externalReasoning) {
+      const requiredThinking = this.requiresThinking(model);
+      const resolved: ResolvedModelReasoningConfig = requiredThinking
+        ? { ...externalReasoning, canDisable: false as const }
+        : externalReasoning;
+      const shaped = applyOpenAIReasoningProfile(
+        providerRequest,
+        this.contentGeneratorConfig,
+        resolved,
+        request.config?.thinkingConfig?.includeThoughts === false,
+      );
+      if (
+        shouldDropDashScopeRequiredToolChoice(
+          isDashScope,
+          model,
+          shaped,
+          resolved.canDisable === false,
+        )
+      ) {
+        delete shaped.tool_choice;
+      }
+      return shaped;
+    }
+
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),
     //   - the config-level opt-out is set (`reasoning: false`).
@@ -979,10 +1036,6 @@ export class ContentGenerationPipeline {
     // model generation config). For these, never emit the disable on the
     // wire: a "disabled" shape is a guaranteed request failure, so the flag
     // also overrides the config-level `reasoning: false` opt-out.
-    const model = (context.model ?? '').toLowerCase();
-    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-      this.contentGeneratorConfig,
-    );
     const explicitThinkingMandatory =
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);
@@ -1165,14 +1218,12 @@ export class ContentGenerationPipeline {
     // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
-      isDashScope &&
-      typed['tool_choice'] === 'required' &&
-      (explicitThinkingMandatory ||
-        (isQwenFamilyWireModel(model) &&
-          (typed['enable_thinking'] === true ||
-            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
-            (typeof reasoningEffort === 'string' &&
-              reasoningEffort !== 'none'))))
+      shouldDropDashScopeRequiredToolChoice(
+        isDashScope,
+        model,
+        providerRequest,
+        explicitThinkingMandatory,
+      )
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',

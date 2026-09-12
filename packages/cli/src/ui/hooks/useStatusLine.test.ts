@@ -77,6 +77,9 @@ const mockConfig = {
   })),
   getCliVersion: vi.fn(() => '1.0.0'),
   getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
+  getEffectiveReasoning: vi.fn(
+    () => mockConfig.getContentGeneratorConfig()?.reasoning,
+  ),
 };
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => mockConfig,
@@ -203,6 +206,9 @@ describe('useStatusLine', () => {
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
+    mockConfig.getEffectiveReasoning.mockImplementation(
+      () => mockConfig.getContentGeneratorConfig()?.reasoning,
+    );
   });
 
   afterEach(() => {
@@ -485,6 +491,17 @@ describe('useStatusLine', () => {
 
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual(['Test Model high · Test Model']);
+    });
+
+    it('renders reasoning resolved outside the generation config', () => {
+      mockConfig.getEffectiveReasoning.mockReturnValue({ effort: 'medium' });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual(['Test Model medium']);
     });
 
     it('refreshes when status line settings are saved in the same process', async () => {

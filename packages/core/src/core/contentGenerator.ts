@@ -29,6 +29,10 @@ import {
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
+import {
+  getModelReasoningConfig,
+  type ModelReasoningConfig,
+} from './model-reasoning-config.js';
 
 /**
  * Interface abstracting the core content generation functionality.
@@ -130,6 +134,7 @@ export type ContentGeneratorConfig = {
     // (e.g. `max_completion_tokens` for GPT-5 / o-series, `reasoning_effort`).
     [key: string]: unknown;
   };
+  reasoningConfig?: ModelReasoningConfig;
   reasoning?:
     | false
     | {
@@ -269,6 +274,11 @@ export function resolveContentGeneratorConfigWithSources(
   if (!validation.valid) {
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }
+
+  getModelReasoningConfig(
+    config,
+    newContentGeneratorConfig as ContentGeneratorConfig,
+  );
 
   return {
     config: newContentGeneratorConfig as ContentGeneratorConfig,

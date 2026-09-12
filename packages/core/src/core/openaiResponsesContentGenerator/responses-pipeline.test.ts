@@ -395,6 +395,150 @@ describe('ResponsesPipeline', () => {
   });
 
   describe('reasoning request shape', () => {
+    it('applies an external default and supported effort set', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['low', 'medium'],
+            defaultEffort: 'medium',
+          },
+          reasoning: { effort: 'high' },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'medium', summary: 'auto' });
+      expect(body.include).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('preserves a Responses-native effort outside the shared ladder', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['low', 'medium', 'high'],
+          },
+          reasoning: {
+            effort: 'minimal',
+          } as unknown as ContentGeneratorConfig['reasoning'],
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'minimal', summary: 'auto' });
+    });
+
+    it('keeps external mandatory reasoning on for a request opt-out', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['medium'],
+            defaultEffort: 'medium',
+          },
+          reasoning: false,
+          thinkingMandatory: true,
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(
+        {
+          ...textRequest('hi'),
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'p1',
+      )) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'medium', summary: 'auto' });
+      expect(body.include).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('keeps explicitly mandatory GPT reasoning on for a request opt-out', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'gpt-5',
+          thinkingMandatory: true,
+          reasoning: false,
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(
+        {
+          ...textRequest('hi'),
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'p1',
+      )) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'medium', summary: 'auto' });
+      expect(body.include).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('keeps configured reasoning when a mandatory route has no default effort', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          thinkingMandatory: true,
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['low', 'medium'],
+          },
+          extra_body: { reasoning: { effort: 'low' } },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(
+        {
+          ...textRequest('hi'),
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'p1',
+      )) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'low' });
+    });
+
     it('passes the effort straight through with no clamping, plus include + summary auto', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),
