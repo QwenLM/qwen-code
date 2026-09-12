@@ -475,11 +475,11 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
-      'client_mcp_over_ws',
       'workspace_session_live_state',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
+      'client_mcp_over_ws',
       'voice_transcribe',
       'web_terminal',
     ]);
