@@ -42,6 +42,12 @@ developer Macs.
 
 3. For each method below, record the change in the `df` used column and the
    wall time. Use `df`, not `du`: `du` counts cloned files at full size.
+   `df` reports the whole mount, so a concurrent `npm ci` or a swept
+   worktree inside the timed window lands in the recorded delta: quiesce the
+   window (pause or stop the runner service, or record that no other job
+   ran), take the `df` reading immediately before and after the command, and
+   in the report note whether concurrent host activity was observed in any
+   window.
 
    | Method       | Command in the new worktree                                                                                                                                                                                                                 |
    | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -61,12 +67,21 @@ developer Macs.
      they pass even when a nested workspace root's `node_modules` was not
      copied; this one does not.
 
-5. Record the peak number of concurrent worktrees per host over a week:
-   sample `git worktree list | wc -l` at most 5 minutes apart (for example
-   with cron) and keep the maximum. Worktrees on these hosts can live for
-   under an hour — review worktrees under `.qwen/tmp` are created and swept
-   within a single run — so a daily sample reports the floor between runs,
-   not the peak.
+5. Record the peak number of concurrent worktrees per host over a week. The
+   sampler is installed and removed by the operator, is time-boxed to the
+   measurement week, and writes only inside the measurement's own directory;
+   do not add a host cron/rc entry — the product's permission policy treats
+   crontab edits as unauthorized persistence, and a scheduler that is never
+   removed keeps firing after the measurement ends. `git worktree list` is
+   repository-scoped, so sample once per clone: run
+   `git -C <primary-checkout> worktree list | wc -l` at most 5 minutes apart
+   and keep the maximum, and have the sampler exit non-zero when git fails
+   rather than record a count (a bare `git worktree list` from a directory
+   that is not a clone fails but still feeds `wc` a 0). Sum the per-clone
+   counts for the per-host peak. Worktrees on these hosts can live for under
+   an hour — review worktrees under `.qwen/tmp` are created and swept within
+   a single run — so a daily sample reports the floor between runs, not the
+   peak.
 
 **Report:** a table of host, filesystem, method, `df` delta and wall time;
 the peak concurrent worktree count; and free disk per host.
@@ -87,7 +102,10 @@ script changes.
    matrix), and `timeout-minutes: 150`. Do not edit the smoke workflow
    itself — its job runs on three operating systems under a 20-minute
    ceiling the chain below far exceeds, and the scripts tests assert it
-   contains no build step. After the install step, add `npm run build`,
+   contains no build step. Record the new file's byte size in
+   `.github/workflows/.size-baseline`, or `npm run test:ci` fails on the
+   workflow-size ratchet under both installers before the steps below run.
+   After the install step, add `npm run build`,
    `npm run typecheck`, `npm run lint:ci`, `npm run test:ci`,
    `npm run bundle`, and `npm run check:serve-fast-path-bundle`.
 2. Run the workflow with `gh workflow run <workflow-file> --ref <branch>`.
