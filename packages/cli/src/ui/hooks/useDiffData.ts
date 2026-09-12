@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import type { Hunk } from 'diff';
+import type { StructuredPatchHunk as Hunk } from 'diff';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   fetchGitDiff,
