@@ -8,6 +8,7 @@ import {
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
+import { registerServiceWorker } from './register-service-worker';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -357,6 +358,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 async function main() {
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
   removeDaemonTokenFromUrl();
+  registerServiceWorker();
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token

@@ -70,6 +70,7 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     reqPath === '//' ||
     reqPath === '/assets' ||
     reqPath.startsWith('/assets/') ||
+    /^\/(?:manifest\.webmanifest|service-worker\.js)\/?$/u.test(reqPath) ||
     reqPath === '/mcp-app-sandbox'
   )
     return true;

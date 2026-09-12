@@ -587,10 +587,18 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   const webShellDistDir = join(root, 'packages', 'web-shell', 'dist');
   const webShellIndexHtml = join(webShellDistDir, 'index.html');
   const webShellAssetsDir = join(webShellDistDir, 'assets');
-  if (existsSync(webShellIndexHtml) && existsSync(webShellAssetsDir)) {
+  if (
+    existsSync(webShellIndexHtml) &&
+    existsSync(webShellAssetsDir) &&
+    existsSync(join(webShellDistDir, 'manifest.webmanifest')) &&
+    existsSync(join(webShellDistDir, 'service-worker.js'))
+  ) {
     const destWebShellDir = join(distDir, 'web-shell');
     mkdirSync(destWebShellDir, { recursive: true });
     copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
+    for (const file of ['manifest.webmanifest', 'service-worker.js']) {
+      copyFileSync(join(webShellDistDir, file), join(destWebShellDir, file));
+    }
     copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
     console.log('Copied Web Shell UI to dist/web-shell/');
   } else {

@@ -464,6 +464,38 @@ Notes:
 - **An IPv6 wildcard bind is dialled back on the loopback this host actually assigns** — `--hostname ::` (or `[::]`) binds an IPv6 socket. (An empty `--hostname` never reaches the listener: boot refuses it as operator error before binding, so a compose file with an unset `HOSTNAME` fails loudly instead of silently wildcarding.) That socket is dual-stack (Node pins `IPV6_V6ONLY=0` on it, so the `net.ipv6.bindv6only` sysctl does not change this), and both loopbacks usually reach it — but a host with no IPv4 at all has only `::1`, while a host that binds `::` yet carries no `::1` on its loopback (for example `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. Workers are sent to `[::1]` when this host assigns it and to `127.0.0.1` otherwise. A serving certificate for an IPv6 wildcard bind should carry both loopbacks in its SANs (`mkcert localhost 127.0.0.1 ::1` covers it); the boot trust diagnostic inspects the exact URL workers will dial and names the gap. `--hostname 0.0.0.0` is unchanged and still needs `127.0.0.1`.
 - **Rotating `--tls-cert` in place needs a daemon restart** — the daemon serves the bytes it read at boot, so until it restarts, respawned workers can load newer contents than the daemon presents and their handshakes fail.
 
+## Install the Web Shell as an app
+
+On a supported browser, open the daemon's Web Shell and use the browser's
+**Install app** or **Add to Home screen** action. The installed app opens the
+same server in a standalone window with the Qwen Code name and icon. On iOS,
+use the browser's Share menu and **Add to Home Screen**. Availability depends
+on the browser and device.
+
+Use a trusted HTTPS connection for a phone or other remote device; HTTP on
+`localhost` or a loopback address is supported for local development. Plain
+HTTP on a LAN IP does not enable the service worker. See the TLS instructions
+above; installation does not bypass certificate or authentication checks.
+
+Installation always launches the server root. A token, session link or workspace
+in the current address is never included in the app's launch URL. You may need
+to enter the token again in the installed app: it uses the existing Web Shell
+authentication flow and does not add persistent credential storage.
+
+The server must remain running and reachable. After the service worker has
+activated and taken control of a page, opening the root or a session link when
+the connection fails shows a retry page. No conversations, files, API responses
+or credentials are saved in a service-worker cache. Existing HTTP errors still
+come from the server. This first step does not provide offline work, Web Push
+or notifications while the app is closed. Worker updates use the browser's
+normal lifecycle and do not force an active conversation to reload.
+
+The installation metadata uses the built-in Qwen Code identity; runtime custom
+branding still applies inside the Web Shell. Embedded library consumers do not
+register the worker. To remove the installation, use your browser or operating
+system's app management; to remove its service worker and stored site data, use
+the browser's site settings.
+
 ## CLI flags
 
 | Flag                                    | Default            | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |

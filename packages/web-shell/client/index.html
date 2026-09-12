@@ -2,6 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <!--
       `interactive-widget=resizes-content` is Chrome-on-Android-only (108+);
       iOS Safari silently ignores it — the virtual keyboard always overlays
@@ -234,7 +235,12 @@
           // error is also kept out of the panel's list: a bare Event on that
           // element carries no message, so recording it would add a content-free
           // 'unknown error' entry that points the operator at nothing.
-          var isIcon = !!(t && t.tagName === 'LINK' && t.rel === 'icon');
+          // Installation metadata is optional for normal browser use too.
+          var isIcon = !!(
+            t &&
+            t.tagName === 'LINK' &&
+            (t.rel === 'icon' || t.rel === 'manifest')
+          );
           var isResource = !!(
             t &&
             ((t.tagName === 'SCRIPT' && t.src) ||

@@ -9845,6 +9845,27 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it.each(['manifest.webmanifest', 'service-worker.js'])(
+    'serves %s as the first cold request before bearer auth',
+    async (file) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pwa-')),
+      );
+      const shellDir = writeWebShellFixture(tmpDir);
+      fs.writeFileSync(path.join(shellDir, file), 'public fixture');
+      const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+      try {
+        const response = await fetch(`${handle.url}/${file}`);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe('public fixture');
+        expect(createBridge).toHaveBeenCalledTimes(1);
+        await expect(handle.runtimeReady).resolves.toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('serves Web Shell assets during the deferred runtime window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-')),

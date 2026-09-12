@@ -4008,6 +4008,64 @@ describe('createServeApp', () => {
       await fsp.rm(webShellDir, { recursive: true, force: true });
     });
 
+    it.each([
+      [
+        'manifest.webmanifest',
+        'application/manifest+json',
+        '{"start_url":"/"}',
+      ],
+      [
+        'service-worker.js',
+        'text/javascript',
+        'self.addEventListener("fetch", () => {});',
+      ],
+    ])(
+      'serves %s publicly without opening API access',
+      async (file, mime, content) => {
+        await fsp.writeFile(path.join(webShellDir, file), content);
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret' },
+          undefined,
+          { webShellDir },
+        );
+        for (const pathname of [`/${file}`, `/${file.toUpperCase()}/`]) {
+          const get = await request(app).get(pathname).set('Host', host);
+          expect(get.status).toBe(200);
+          expect(get.headers['content-type']).toContain(mime);
+          expect(get.headers['cache-control']).toBe('no-cache');
+          expect(get.headers['x-content-type-options']).toBe('nosniff');
+          expect(get.text).toBe(content);
+          expect(
+            (await request(app).head(pathname).set('Host', host)).status,
+          ).toBe(200);
+        }
+        for (const pathname of [
+          `/${file}/extra`,
+          `/${file}.bak`,
+          '/capabilities',
+        ]) {
+          expect(
+            (await request(app).get(pathname).set('Host', host)).status,
+          ).toBe(401);
+        }
+        expect(
+          (await request(app).post(`/${file}`).set('Host', host)).status,
+        ).toBe(401);
+        expect(
+          (
+            await request(app)
+              .get(`/${file}`)
+              .set('Host', host)
+              .set('Origin', 'https://evil.example')
+          ).status,
+        ).toBe(403);
+        await fsp.unlink(path.join(webShellDir, file));
+        const missing = await request(app).get(`/${file}`).set('Host', host);
+        expect(missing.status).toBe(404);
+        expect(missing.text).not.toContain('<div id="root">');
+      },
+    );
+
     it('serves the shell at the root with security headers', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app).get('/').set('Host', host);

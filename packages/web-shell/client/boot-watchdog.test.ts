@@ -140,6 +140,18 @@ describe('boot watchdog', () => {
       );
     });
 
+    it('does not treat a failing manifest as a boot failure', () => {
+      installBootWatchdog();
+      parseRoot();
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = '/manifest.webmanifest';
+      document.head.appendChild(link);
+      link.dispatchEvent(new Event('error'));
+      expect(fallback()).toBeNull();
+      link.remove();
+    });
+
     it('does not treat a failing favicon as proof that boot is impossible', () => {
       installBootWatchdog();
       parseRoot();
