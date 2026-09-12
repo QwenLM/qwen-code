@@ -10,6 +10,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHookOutput, HookEventName, HookType } from './types.js';
+import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
 import type {
   HookConfig,
   HookInput,
@@ -39,11 +40,6 @@ import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
-
-/**
- * Default timeout for hook execution (60 seconds)
- */
-const DEFAULT_HOOK_TIMEOUT = 60000;
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -743,7 +739,7 @@ export class HookRunner {
       hookEvent: eventName,
       sessionId: input.session_id,
       startTime: Date.now(),
-      timeout: hookConfig.timeout || DEFAULT_HOOK_TIMEOUT,
+      timeout: resolveCommandHookTimeoutMs(hookConfig.timeout, hookName),
       stdout: '',
       stderr: '',
     });
@@ -1004,7 +1000,10 @@ export class HookRunner {
     startTime: number,
     signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
-    const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
+    const timeout = resolveCommandHookTimeoutMs(
+      hookConfig.timeout,
+      hookConfig.name || hookConfig.command,
+    );
 
     return new Promise((resolve) => {
       if (!hookConfig.command) {
@@ -1239,7 +1238,7 @@ export class HookRunner {
           error: new Error(
             aborted
               ? 'Hook execution cancelled (aborted)'
-              : `Hook timed out after ${timeout}ms`,
+              : `Hook timed out after ${timeout / 1000}s`,
           ),
           stdout,
           stderr,
@@ -1359,7 +1358,7 @@ export class HookRunner {
             hookConfig,
             eventName,
             success: false,
-            error: new Error(`Hook timed out after ${timeout}ms`),
+            error: new Error(`Hook timed out after ${timeout / 1000}s`),
             stdout,
             stderr,
             duration,

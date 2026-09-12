@@ -52,6 +52,26 @@ describe('cleanup', () => {
     expect(asyncFn).toHaveBeenCalledTimes(1);
   });
 
+  it('shares an in-flight cleanup pass between concurrent callers', async () => {
+    let finishCleanup: (() => void) | undefined;
+    const cleanupFn = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    registerCleanup(cleanupFn);
+
+    const first = runExitCleanup();
+    await vi.waitFor(() => expect(cleanupFn).toHaveBeenCalledOnce());
+    const second = runExitCleanup();
+
+    expect(second).toBe(first);
+    finishCleanup?.();
+    await Promise.all([first, second]);
+    expect(cleanupFn).toHaveBeenCalledOnce();
+  });
+
   it('should let a caller unregister a cleanup', async () => {
     const cleanupFn = vi.fn();
     const unregister = registerCleanup(cleanupFn);
