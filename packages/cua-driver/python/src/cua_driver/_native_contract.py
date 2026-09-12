@@ -4228,17 +4228,21 @@ class _UniffiFfiConverterTypePasteFormat(_UniffiConverterRustBuffer):
 
 @dataclass
 class PasteInput:
-    def __init__(self, *, pid:int, window_id:int, text:str, format:PasteFormat):
+    def __init__(self, *, pid:int, window_id:int, text:str, format:PasteFormat, app_context:typing.Optional[bool] = _DEFAULT):
         self.pid = pid
         self.window_id = window_id
         self.text = text
         self.format = format
+        if app_context is _DEFAULT:
+            self.app_context = None
+        else:
+            self.app_context = app_context
 
 
 
 
     def __str__(self):
-        return "PasteInput(pid={}, window_id={}, text={}, format={})".format(self.pid, self.window_id, self.text, self.format)
+        return "PasteInput(pid={}, window_id={}, text={}, format={}, app_context={})".format(self.pid, self.window_id, self.text, self.format, self.app_context)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
@@ -4247,6 +4251,8 @@ class PasteInput:
         if self.text != other.text:
             return False
         if self.format != other.format:
+            return False
+        if self.app_context != other.app_context:
             return False
         return True
 
@@ -4258,6 +4264,7 @@ class _UniffiFfiConverterTypePasteInput(_UniffiConverterRustBuffer):
             window_id=_UniffiFfiConverterUInt64.read(buf),
             text=_UniffiFfiConverterString.read(buf),
             format=_UniffiFfiConverterTypePasteFormat.read(buf),
+            app_context=_UniffiFfiConverterOptionalBoolean.read(buf),
         )
 
     @staticmethod
@@ -4266,6 +4273,7 @@ class _UniffiFfiConverterTypePasteInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.check_lower(value.window_id)
         _UniffiFfiConverterString.check_lower(value.text)
         _UniffiFfiConverterTypePasteFormat.check_lower(value.format)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.app_context)
 
     @staticmethod
     def write(value, buf):
@@ -4273,6 +4281,7 @@ class _UniffiFfiConverterTypePasteInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.window_id, buf)
         _UniffiFfiConverterString.write(value.text, buf)
         _UniffiFfiConverterTypePasteFormat.write(value.format, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.app_context, buf)
 
 @dataclass
 class PerformSecondaryActionInput:

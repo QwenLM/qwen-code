@@ -2951,7 +2951,8 @@ export type PasteInput = {
     pid: number,
     windowId: bigint,
     text: string,
-    format: PasteFormat
+    format: PasteFormat,
+    appContext?: boolean
 }
 
 /**
@@ -2959,6 +2960,7 @@ export type PasteInput = {
  */
 export const PasteInput = (() => {
     const defaults = () => ({
+        appContext: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<PasteInput, ReturnType<typeof defaults>>(defaults);
@@ -2978,7 +2980,8 @@ const FfiConverterTypePasteInput = (() => {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterUInt64.read(from),
                 text: FfiConverterString.read(from),
-                format: FfiConverterTypePasteFormat.read(from)
+                format: FfiConverterTypePasteFormat.read(from),
+                appContext: FfiConverterOptionalBoolean.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -2986,12 +2989,14 @@ const FfiConverterTypePasteInput = (() => {
             FfiConverterUInt64.write(value.windowId, into);
             FfiConverterString.write(value.text, into);
             FfiConverterTypePasteFormat.write(value.format, into);
+            FfiConverterOptionalBoolean.write(value.appContext, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterUInt64.allocationSize(value.windowId) +
              FfiConverterString.allocationSize(value.text) +
-             FfiConverterTypePasteFormat.allocationSize(value.format);
+             FfiConverterTypePasteFormat.allocationSize(value.format) +
+             FfiConverterOptionalBoolean.allocationSize(value.appContext);
 
         }
     };

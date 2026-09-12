@@ -98,6 +98,38 @@ pub(crate) fn all_windows_any_layer() -> Vec<WindowInfo> {
     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::AnyLayer).windows
 }
 
+pub(crate) fn match_ax_window(
+    pid: i32,
+    title: Option<&str>,
+    frame: [f64; 4],
+    windows: &[WindowInfo],
+) -> Option<u32> {
+    const FRAME_TOLERANCE: f64 = 2.0;
+
+    if frame.iter().any(|value| !value.is_finite()) || frame[2] <= 0.0 || frame[3] <= 0.0 {
+        return None;
+    }
+
+    let matches_frame = |window: &&WindowInfo| {
+        window.pid == pid
+            && (window.bounds.x - frame[0]).abs() <= FRAME_TOLERANCE
+            && (window.bounds.y - frame[1]).abs() <= FRAME_TOLERANCE
+            && (window.bounds.width - frame[2]).abs() <= FRAME_TOLERANCE
+            && (window.bounds.height - frame[3]).abs() <= FRAME_TOLERANCE
+    };
+    let candidates: Vec<_> = windows.iter().filter(matches_frame).collect();
+    if candidates.len() == 1 {
+        return Some(candidates[0].window_id);
+    }
+
+    let title = title.map(str::trim).filter(|title| !title.is_empty())?;
+    let titled: Vec<_> = candidates
+        .into_iter()
+        .filter(|window| window.title.trim() == title)
+        .collect();
+    (titled.len() == 1).then_some(titled[0].window_id)
+}
+
 /// Supplement an explicitly requested application's visible AX dialogs only.
 /// This is discovery evidence, not authorization for an input route.
 pub(crate) fn append_visible_dialogs(
@@ -509,6 +541,49 @@ mod tests {
             on_current_space: None,
             space_ids: None,
         }
+    }
+
+    #[test]
+    fn ax_window_matching_uses_same_pid_geometry_and_title_for_ambiguity() {
+        let mut target = window(42, 800, "TextEdit");
+        target.title = "Document.rtf".into();
+        let mut duplicate = target.clone();
+        duplicate.window_id = 43;
+        duplicate.title = "Other.rtf".into();
+        let other_process = window(44, 900, "Preview");
+        let windows = vec![target, duplicate, other_process];
+
+        assert_eq!(
+            match_ax_window(
+                800,
+                Some("Document.rtf"),
+                [0.4, 579.6, 500.5, 499.5],
+                &windows,
+            ),
+            Some(42)
+        );
+        assert_eq!(
+            match_ax_window(800, None, [0.0, 580.0, 500.0, 500.0], &windows),
+            None
+        );
+    }
+
+    #[test]
+    fn ax_window_matching_refuses_invalid_or_non_unique_geometry() {
+        let windows = vec![window(42, 800, "TextEdit")];
+
+        assert_eq!(
+            match_ax_window(800, None, [0.0, 580.0, 500.0, 500.0], &windows),
+            Some(42)
+        );
+        assert_eq!(
+            match_ax_window(800, None, [0.0, 580.0, 0.0, 500.0], &windows),
+            None
+        );
+        assert_eq!(
+            match_ax_window(900, None, [0.0, 580.0, 500.0, 500.0], &windows),
+            None
+        );
     }
 
     #[test]

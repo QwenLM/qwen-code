@@ -1396,10 +1396,18 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     .await;
     // Preserve the existing post-action observation interval so menu-close
     // notifications arrive before the next app observation.
-    let _ = super::finish_window_observation(snapshot, &args).await;
+    let changes = super::finish_window_observation(snapshot, &args).await;
     match result {
-        Ok(Ok(())) => ToolResult::text("Click dispatched.").with_structured(serde_json::json!({
-            "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
+        Ok(Ok(())) => ToolResult::text(format!("Click dispatched.{}", changes.result_suffix()))
+            .with_structured(serde_json::json!({
+                "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
+            })),
+        Ok(Err(_)) if changes.new_windows.iter().any(|window| window.pid == pid) => ToolResult::text(format!(
+            "Click changed the app.{}",
+            changes.result_suffix()
+        ))
+        .with_structured(serde_json::json!({
+            "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "partial"
         })),
         Ok(Err(error)) => ToolResult::error(format!("click failed: {error}")),
         Err(error) => ToolResult::error(format!("click task failed: {error}")),

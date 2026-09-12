@@ -61,10 +61,11 @@ that image; use `getState({ includeScreenshot: true })` when the caller needs to
 inspect it.
 
 Native code selects semantic or synthesized input after checking the target.
-App clicks and keyboard input use the native background path. Native drag input
-selects its supported foreground route before dispatch and restores the prior
-app afterward. There is no foreground retry. Failed,
-partial, unverifiable and cancelled dispatched actions are never replayed.
+App clicks and keyboard input start on the native background path. When native
+preflight proves that no actuator ran and recommends foreground delivery, the
+App handle makes one guarded foreground attempt and restores the prior app.
+Native drag and App paste select their guarded foreground route before dispatch.
+Failed, partial, unverifiable and cancelled possible-dispatch actions are never replayed.
 Errors request fresh observation before another action; they do not ask the
 model to choose a delivery mode. Argument errors detected before native dispatch
 retain their specific correction; uncertain post-dispatch failures retain the
@@ -77,6 +78,9 @@ cautious observe-before-retry message.
 receiving app chooses which supplied format it accepts. The clipboard is restored
 only while the transaction still owns it, preserving newer external clipboard
 changes.
+The App method activates the exact window only for the Command-V dispatch and
+restores the previous foreground app. The exact-window `computer.paste(...)`
+method retains PID-addressed background delivery.
 
 `app.selectText(element, text, { prefix?, suffix?, selection?, signal? })` uses a
 current short element ID and selects one exact, case-sensitive text match. Prefix

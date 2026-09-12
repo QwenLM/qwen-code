@@ -503,6 +503,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"pid":1,"window_id":2,"text":"hello"}))
                 .unwrap();
         assert_eq!(paste.format, PasteFormat::Text);
+        assert_eq!(paste.app_context, None);
         let select: SelectTextInput = serde_json::from_value(
             serde_json::json!({"pid":1,"window_id":2,"element_token":"token","text":"hello"}),
         )

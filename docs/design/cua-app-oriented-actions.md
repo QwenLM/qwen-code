@@ -34,12 +34,17 @@ retained locally. The PR's E2E report records the verification outcomes and limi
 Confirmed principles are canonical installation identity, per-app serialization,
 focused/main/last AX window selection, separate open-menu context, structural
 projection before revision rendering, and native semantic or synthesized input
-without a general foreground retry. Qwen implements these principles using its
+without blind replay after a possible dispatch. Qwen implements these principles using its
 existing driver. The follow-up implements the verified three-field focus preparation branches,
 process notification tracking, independent AX menu notifications, and attributed
 text capture. It does not claim every private transform or the complete
 SystemFocusStealPreventer state machine; unknown application-specific rules are
 not inferred from names.
+
+Window identity follows the reference service's AX/WindowServer pairing: use the
+AX window ID when available, then require a unique same-process bounds match,
+using the title only to disambiguate identical bounds. An ambiguous match is
+rejected instead of selecting an unrelated window.
 
 ## Implementation after native reverse engineering
 
@@ -75,9 +80,10 @@ Local validation errors that have not dispatched retain their corrective message
 Errors after a possible dispatch remain sanitized and require observation before
 retry, without exposing process, window or delivery choices.
 
-App keyboard actions use native background focus preparation and PID delivery. The facade
-no longer chooses a mode from cached capability/role heuristics or retries
-after a refusal. Native code chooses semantic versus synthesized input using
+App keyboard actions start with native background focus preparation and PID delivery. The facade
+no longer chooses a mode from cached capability/role heuristics. It makes one
+guarded foreground attempt only when native preflight returns structured proof
+that no actuator ran and recommends that route. Native code chooses semantic versus synthesized input using
 current target facts. Missing proof or unconfirmed effects return an error or
 unverifiable receipt without replay. Explicitly foreground exact-window
 consumers keep that option. Native fixes cover unadvertised text-control

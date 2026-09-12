@@ -1056,8 +1056,12 @@ pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool
     set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
 }
 
-/// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.
-/// Returns `None` if the element is not a composited window.
+/// Get the CGWindowID of an AX window element.
+///
+/// The private SPI is the fast path. Some native apps return a valid AX window
+/// but reject that SPI, so fall back to the unique same-process WindowServer
+/// window with matching AX bounds. A title match may disambiguate identical
+/// bounds; otherwise the fallback refuses to guess.
 ///
 /// # Safety
 ///
@@ -1066,10 +1070,21 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
     let mut wid: u32 = 0;
     let err = _AXUIElementGetWindow(element, &mut wid);
     if err == kAXErrorSuccess && wid != 0 {
-        Some(wid)
-    } else {
-        None
+        return Some(wid);
     }
+
+    let mut pid = 0;
+    if AXUIElementGetPid(element, &mut pid) != kAXErrorSuccess || pid <= 0 {
+        return None;
+    }
+    let frame = element_screen_rect(element)?;
+    let title = copy_string_attr(element, "AXTitle");
+    crate::windows::match_ax_window(
+        pid,
+        title.as_deref(),
+        frame,
+        &crate::windows::all_windows_any_layer(),
+    )
 }
 
 /// Read the `AXWindows` attribute of an application element.
