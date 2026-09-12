@@ -379,10 +379,8 @@ describe('TeamManager teammate model routing (#10071)', () => {
 
   it('fails loudly when the dedicated route generator cannot be created', async () => {
     // The definition selects a route but the generator for it cannot be
-    // created (e.g. missing API key). InProcessBackend swallows that
-    // failure and falls back to the leader's generator; the spawn path
-    // must detect the missing dedicated generator and fail into the
-    // rollback instead of letting the teammate join misrouted (#10071).
+    // created (e.g. missing API key). The backend must reject before
+    // starting the agent, not run it on the leader while awaiting rollback.
     await writeAgentDefinition(projectDir, 'unroutable-worker.md', {
       name: 'unroutable-worker',
       description: 'A worker whose route cannot be created',
@@ -403,20 +401,12 @@ describe('TeamManager teammate model routing (#10071)', () => {
         agentType: 'unroutable-worker',
         cwd: projectDir,
       }),
-    ).rejects.toThrow(
-      /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\): The API key for Anthropic is not set/,
-    );
+    ).rejects.toThrow('The API key for Anthropic is not set');
 
-    // Rollback must run: no member persisted, and the rolled-back id
-    // must stay respawnable — otherwise every retry dies with 'Agent
-    // "X" already exists.' masking this route failure. The stopped
-    // handle itself stays readable for post-stop inspection (Arena
-    // reads transcripts through it on the timeout path); the backend
-    // tracks the stop separately so the respawn gate still clears, as
-    // pinned by the retry test below.
+    // No member or running agent is created; the same name can retry.
     expect(teamManager.getTeamFile().members).toHaveLength(0);
     const agentId = formatAgentId('w6', TEAM_NAME);
-    expect(backend.getAgent(agentId)?.getStatus()).toBe(AgentStatus.CANCELLED);
+    expect(backend.getAgent(agentId)).toBeUndefined();
   });
 
   it('releases a rolled-back teammate name so the same spawn can retry', async () => {
@@ -443,9 +433,7 @@ describe('TeamManager teammate model routing (#10071)', () => {
         agentType: 'retry-worker',
         cwd: projectDir,
       }),
-    ).rejects.toThrow(
-      /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\)/,
-    );
+    ).rejects.toThrow('The API key for Anthropic is not set');
     expect(teamManager.getTeamFile().members).toHaveLength(0);
 
     // Same-name respawn must succeed once the route is creatable.
