@@ -378,6 +378,26 @@ describe('redactErrorText', () => {
     }
   });
 
+  it('should mask a JSON-escaped registered secret after unescaping', () => {
+    // The MCP tool-error builder JSON-stringifies response parts, so a
+    // registered credential containing a quote reaches the raw pass as
+    // `SYNTHETIC\"SECRET` — the literal registered value never occurs in
+    // the raw text. The unescape reconstructs it, so masking must run
+    // again on the normalised shape or the full credential ships.
+    registerKnownSecretValues(['SYNTHETIC"SECRET_12345']);
+    try {
+      const jsonError = JSON.stringify([
+        { text: 'upstream echoed SYNTHETIC"SECRET_12345' },
+      ]);
+      const out = redactErrorText(jsonError);
+      expect(out).not.toContain('SYNTHETIC"SECRET_12345');
+      expect(out).not.toContain('SYNTHETIC\\"SECRET_12345');
+      expect(out).not.toContain('SECRET_12345');
+    } finally {
+      clearKnownSecretValuesForTest();
+    }
+  });
+
   it('should stay linear on dash-dense adversarial input', () => {
     // Two-stage bound: the work is bounded BEFORE the passes (the URL
     // pass's dash-permissive class is quadratic past the pre-bound; a

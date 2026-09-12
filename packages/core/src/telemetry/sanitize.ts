@@ -234,6 +234,13 @@ export function redactErrorText(value: string): string {
     .replace(VT_SEPARATOR_RUN_RE, ' ')
     .replace(VT_ANY_RUN_RE, '')
     .replace(CONTROL_CHARS_EXCEPT_NEWLINES_RE, ' ');
+  // Exact-value masking runs again on the normalised text: a registered
+  // secret containing a quote or backslash does not occur literally in a
+  // JSON-stringified error (`SYNTHETIC"SECRET` arrives as
+  // `SYNTHETIC\"SECRET`), so the raw pass above misses it and the unescape
+  // above reconstructs it — after the only value-based protection has
+  // finished. Mask the reconstructed shape before the pattern passes.
+  text = maskKnownSecretValues(text);
   text = redactUrlCredentials(text);
   text = text.replace(AUTHORIZATION_HEADER_PATTERN, `$1${MASK}`);
   text = text.replace(BEARER_TOKEN_PATTERN, `$1$2${MASK}`);
