@@ -103,7 +103,7 @@ const MAX_EVENTS = 1000;
  */
 const MAX_RETRY_EVENTS = 100;
 
-const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt', 'error'];
+const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt'];
 const REDACTED_ERROR_TEXT = '***REDACTED***';
 
 export interface LogResponse {
@@ -1118,10 +1118,6 @@ export class QwenLogger {
       success: event.success ? 1 : 0,
       exit_code: event.exit_code,
     };
-
-    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
-      properties['error'] = event.error;
-    }
 
     const rumEvent = this.createActionEvent(
       'hook',

@@ -779,7 +779,7 @@ describe('QwenLogger', () => {
       }
     });
 
-    it('should log a failed hook call event with error when telemetry log prompts enabled', () => {
+    it('should log a failed hook call event without forwarding raw error text', () => {
       const configWithLogPrompts = makeFakeConfig({
         getTelemetryLogPromptsEnabled: () => true,
       });
@@ -814,51 +814,13 @@ describe('QwenLogger', () => {
             duration_ms: 200,
             success: 0,
             exit_code: 1,
-            error: '***REDACTED***',
-          }),
-        }),
-      );
-    });
-
-    it('should not include error when telemetry log prompts disabled', () => {
-      const configWithoutLogPrompts = makeFakeConfig({
-        getTelemetryLogPromptsEnabled: () => false,
-      });
-      // Clear singleton to create new instance with different config
-      (QwenLogger as unknown as { instance: undefined }).instance = undefined;
-      const logger = QwenLogger.getInstance(configWithoutLogPrompts)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'PostToolUse',
-        'command',
-        'cleanup.sh',
-        { tool_name: 'shell' },
-        200,
-        false,
-        undefined,
-        1,
-        '',
-        'error output',
-        'Command failed with sensitive data',
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            hook_event_name: 'PostToolUse',
-            hook_type: 'command',
-            hook_name: 'cleanup.sh',
-            duration_ms: 200,
-            success: 0,
-            exit_code: 1,
           }),
         }),
       );
 
-      // Error should NOT be in properties
+      // Hook error text is dropped fail-closed: the failure is already
+      // signalled by `success` / `exit_code`, so no raw `error` property
+      // is forwarded to the sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
     });
@@ -1143,7 +1105,6 @@ describe('QwenLogger', () => {
         properties: {
           error_message: 'raw error message',
           error_excerpt: 'raw error excerpt',
-          error: 'raw hook error',
           error_type: 'exit_code',
         },
       };
@@ -1154,7 +1115,6 @@ describe('QwenLogger', () => {
       expect(event.properties).toEqual({
         error_message: '***REDACTED***',
         error_excerpt: '***REDACTED***',
-        error: '***REDACTED***',
         error_type: 'exit_code',
       });
     });
