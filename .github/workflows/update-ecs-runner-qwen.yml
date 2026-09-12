@@ -1,5 +1,5 @@
 name: 'HK2 Read-only Incident Diagnostic'
-run-name: 'HK2 read-only incident diagnostic 20260912'
+run-name: 'HK2 read-only incident diagnostic 20260912 v2'
 on:
   workflow_dispatch:
 permissions: {}
@@ -40,76 +40,60 @@ jobs:
           #!/usr/bin/env bash
           set -u
           export LC_ALL=C
-          since='2026-09-10 18:00:00 UTC'
-          
           section() { printf '\n===== %s =====\n' "$1"; }
           section identity
           date -Is
-          hostname
           uptime
-          who -b
-          id
-          last -x -n 20
-          journalctl --list-boots --no-pager | tail -8
-          
-          section runner-service-state
-          for n in $(seq 1 32); do
-            systemctl show "actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service" \
-              -p Id -p ActiveState -p SubState -p Result -p MainPID -p Restart \
-              -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p ExecMainStatus \
-              -p ActiveEnterTimestamp -p InactiveEnterTimestamp --no-pager
-          done
-          section offline-runners
-          for n in 1 7; do
-            journalctl -u "actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service" \
-              --since "$since" -n 150 --no-pager -o short-iso
-          done
-          section runner-transitions
-          journalctl -u 'actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-*.service' \
-            --since "$since" --no-pager -o short-iso |
-            grep -Ei 'Stopping|Stopped|Started|Starting|Shutting|Sending SIG|listener.*exit|Listening for Jobs|re-launch|Connected to GitHub|error|failed' | tail -2500
-          section systemd-transitions
-          journalctl _PID=1 --since "$since" --no-pager -o short-iso | tail -2000
-          section kernel
-          journalctl _TRANSPORT=kernel --since "$since" --no-pager -o short-iso |
-            grep -Ei 'oom|out of memory|killed process|lockup|watchdog|I/O error|segfault|shutdown|reboot|Linux version' | tail -200
-          section sudo-history
-          journalctl _COMM=sudo --since "$since" --no-pager -o short-iso |
-            grep -Ei 'systemctl|service |kill|pkill|shutdown|reboot|cloudmonitor|argus|runsvc|runner' | tail -500
-          
-          section scheduled-maintenance
-          systemctl list-timers --all --no-pager
-          systemctl cat qwen-docker-cleanup.service qwen-docker-cleanup.timer --no-pager
-          crontab -l
-          for f in /etc/crontab /etc/cron.d/*; do
-            [ -f "$f" ] || continue
-            printf '\n--- %s ---\n' "$f"
-            sed -n '1,160p' "$f"
-          done
-          section monitoring-services
-          systemctl list-units --all --type=service --no-pager |
-            grep -Ei 'cloudmonitor|argus|aliyun|assist|audit|ssh'
-          for f in /usr/local/cloudmonitor/local_data/logs/argusagentd.log /usr/local/cloudmonitor/local_data/logs/argusagent.log; do
-            [ -f "$f" ] || continue
-            stat "$f"
-            tail -700 "$f"
-          done
-          journalctl -u argusagent.service -u cloudmonitor.service -u aliyun.service -u aliyun-service.service \
-            --since "$since" -n 500 --no-pager -o short-iso
-          section audit-status
-          systemctl status auditd --no-pager
-          if command -v auditctl >/dev/null; then auditctl -l; fi
-          section resources
           free -h
-          df -h
-          df -i
-          ps -eo pid,ppid,user,etimes,stat,pcpu,pmem,comm --sort=-pcpu | head -60
-          section historical-memory
-          if command -v sar >/dev/null; then
-            for f in /var/log/sysstat/sa11 /var/log/sa/sa11 /var/log/sysstat/sa12 /var/log/sa/sa12; do
-              [ -f "$f" ] && sar -r -f "$f"
+          section limits
+          for n in 1 7 10; do
+            unit="actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service"
+            systemctl show "$unit" -p Id -p ActiveState -p Result -p MainPID -p ControlGroup -p MemoryCurrent -p MemoryPeak -p MemoryMax -p MemoryHigh -p MemorySwapMax -p TasksCurrent -p TasksMax -p OOMPolicy -p OOMScoreAdjust -p Slice -p Restart -p ExecMainStartTimestamp
+            systemctl cat "$unit" --no-pager
+            cg=$(systemctl show "$unit" -p ControlGroup --value)
+            if [[ -n "$cg" ]]; then
+              for f in memory.events memory.max memory.high memory.peak memory.current pids.events pids.max pids.current; do
+                p="/sys/fs/cgroup${cg}/$f"
+                if [ -r "$p" ]; then printf '%s: ' "$p"; cat "$p"; fi
+              done
+            fi
+          done
+          section global-limits
+          systemctl show system.slice -p MemoryMax -p TasksMax -p MemoryHigh
+          cat /proc/sys/kernel/pid_max /proc/sys/kernel/threads-max /proc/sys/vm/overcommit_memory /proc/sys/vm/overcommit_ratio
+          cat /proc/pressure/memory /proc/pressure/cpu /proc/pressure/io
+          ps -eo pid,ppid,nlwp,etimes,stat,rss,pcpu,comm --sort=-nlwp | head -40
+          section allowed-sudo
+          sudo -n -l
+          section runner-diagnostics
+          for n in 1 7 2 10; do
+            d="/home/github-runner/actions-runner-hk2-${n}/_diag"
+            printf '\n--- runner %s ---\n' "$n"
+            find "$d" -maxdepth 1 -type f -name 'Runner_2026091*.log' -print | sort | while IFS= read -r f; do
+              printf '\n--- %s ---\n' "$f"
+              grep -Ein 'out of memory|exception|EAGAIN|137|session|connect error|reconnect|job request|running job|job completed|received job|jobId|planId|runId|buildId|Stop|SIGTERM' "$f" | tail -120
             done
-          fi
+            find "$d" -maxdepth 1 -type f -name 'Worker_2026091*.log' -print | sort | tail -10 | while IFS= read -r f; do
+              printf '\n--- %s ---\n' "$f"
+              grep -En '"(run_id|run_number|job|workflow|event_name|ref|sha|repository)"|Job ID|Job name|Job Id|PlanId|Out of memory|EAGAIN|No space left|Killed|Process completed with exit code|systemctl (stop|restart)|killall|pkill' "$f" | head -60
+            done
+          done
+          section cloudmonitor-window
+          ls -lh /usr/local/cloudmonitor/local_data/logs/argusagent*
+          for f in /usr/local/cloudmonitor/local_data/logs/argusagent*.log*; do
+            [ -r "$f" ] || continue
+            printf '\n--- %s ---\n' "$f"
+            case "$f" in *.gz) continue;; esac
+            grep -Ei '2026-09-12 (00:4|12:3|12:4|12:5|13:0)|2026-09-11 04:3|starting|stopping|shutdown|terminated|out of memory' "$f" | grep -v 'failed to read file /proc/' | tail -200
+          done
+          section selected-timer-code
+          systemctl cat qwen-docker-cleanup.service qwen-runner-cleanup.service qwen-runner-watchdog.service --no-pager
+          section sar-resources
+          for f in /var/log/sysstat/sa12 /var/log/sa/sa12; do
+            [ -r "$f" ] || continue
+            sar -q -f "$f"
+            sar -r -f "$f" -s 10:30:00 -e 13:00:00
+          done
           exit 0
           HK2_SCRIPT
           chmod 600 "$work/collect.sh"
