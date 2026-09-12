@@ -114,8 +114,8 @@ network 命名空间；这里只用到 network 那一个——D6 解释为什么
 - 不改的话，`SANDBOX=bwrap` 会落进通用分支，模型被告知自己"运行在一个沙箱
   **容器**里"——这是错的，而且那段文字点的是 `Operation not permitted`，而
   bwrap 的拒绝读作 `Read-only file system`。
-- 加一个小分支后，边界就变得准确且自描述：点明后端、可写根、`EROFS`/`EACCES`
-  两种写法，并指示模型把疑似约束拒绝上报给用户，而不是绕道解决。
+- 加一个小分支后，边界就变得准确且自描述：点明后端与可写根边界，区分只读挂载
+  拒绝（`EROFS`）与普通权限错误（`EACCES`），并指示模型上报约束拒绝，而不是绕道解决。
 
 该分支是 P0 的工作项（见 § Phase P0），不是后续跟进项。
 
@@ -261,7 +261,7 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    | --------------- | ---------------------------------------------------------------------------------------------------- |
    | `TARGET_DIR`    | `realpathSync(process.cwd())`                                                                        |
    | `TMP_DIR`       | `realpathSync(os.tmpdir())` —— 以可写方式绑定；`/tmp` 从不被换成新的 tmpfs（见下）                   |
-   | `CACHE_DIR`     | `XDG_CACHE_HOME` ?? `~/.cache`（mkdir -p，然后 realpath）                                            |
+   | `CACHE_DIR`     | `XDG_CACHE_HOME`，为空或未设置则用 `~/.cache`（只创建末级目录，然后 realpath）                       |
    | `QWEN_DIR`      | `Storage.getGlobalQwenDir()`（mkdir -p，realpath）                                                   |
    | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()`（mkdir -p，realpath）                                                  |
    | git 目录        | `git rev-parse --git-dir` 与 `--git-common-dir`，当它们解析到 `TARGET_DIR` 之外时                    |
@@ -378,8 +378,9 @@ sandbox-exec 分支（它们是原地 hop，不是镜像——没有
 `packages/core/src/core/prompts.ts:406-427`：为原地内核后端加一个分支。不加的话
 `SANDBOX=bwrap` 会落进通用分支，那会告诉模型它跑"在一个沙箱容器里"，并教它去找
 `Operation not permitted`——对 bwrap 的拒绝而言这是错的形状。新分支点明后端、
-说明可写根之外主机根是只读的、给出 `EROFS` / `EACCES` 两种写法，并带上既有分支
-同样的指示：把疑似约束拒绝上报给用户，而不是绕道解决。理由见 D2。该分支只匹配
+说明可写根之外主机根是只读的、给出 `Read-only file system`（`EROFS`）拒绝，
+并区分 `Permission denied`（`EACCES`）也可能是可写根内的普通权限错误。
+把约束拒绝上报给用户，而不是绕道解决。理由见 D2。该分支只匹配
 `bwrap`；P1 会把 `qwen-landlock-run` 与强制等级措辞一起加进来，原因和 UI 后缀
 要等的原因相同。
 
@@ -400,9 +401,19 @@ CI 通道与 E2E 表也都要求这一点。
 - `qwen sandbox <cmd>…` —— 通过解析出的后端跑一条命令并报告结果（对应
   `codex sandbox`）。
 - `qwen sandbox --verify` —— 行为电池：工作区外的写入必须失败；工作区内的写入
-  必须成功；worktree 检出里的 `git commit` 必须成功；主机 `/proc` 必须保持可见
+  必须成功；主机 `/proc` 必须保持可见
   （D6 的回归守卫）；网络在 `closed` 下必须不可达、在 `open`/`proxied` 下必须
   可达。
+
+### 审查跟进契约
+
+- 在启动 bwrap 前，拒绝规范化后等于 HOME 或其任意祖先（包括 `/`）的可写根。此规则也适用于符号链接和额外工作区目录。应使用范围更小的工作区或缓存路径，不能静默授予整个 HOME 或主机文件系统。
+- 使用共享 `gitEnv()` 清理器派生 Git 根，防止环境中的仓库选择变量重定向探测。仅真实 `.git` 目录，或在 common 仓库下登记且反向指针匹配的 linked worktree，才能自动获得 Git 授权。符号链接元数据、伪造 gitfile、独立 Git 目录及没有该登记的 submodule gitfile 均不贡献根；用户必须显式添加所需的外部元数据目录。合法 linked worktree 继续保留 common Git 目录授权。
+- 检查命令传递显式 sandbox/image 参数；bare 模式跳过 settings 和 `.env` 加载，safe 模式忽略 settings。纯检查在无后端时可以成功退出；无法实际执行的验证或命令请求返回非零，包括已经处于沙箱内的情况。带自身参数的命令必须放在 `--` 后；之前的未知参数在解析时失败。
+- 透传命令直接继承 stdin、stdout、stderr。此模式的检查文本写入 stderr，从而保留大输出及管道中的结构化输出。验证电池继续捕获输出供各项断言使用。
+- bwrap 再执行将 Node 启动参数追加到继承参数后，保留子进程环境的优先级，并在 managed 启动标记要求时恢复 Electron 的 Node 模式。
+- `full` 描述文件系统挂载约束，不代表与主机服务隔离。检查报告与提示词说明：即使 closed 网络模式下主机 Unix socket 仍可访问，proxied 模式也不强制所有连接经过代理。可写 Git 配置/hooks 和 Qwen settings 能影响后续无约束启动；这一剩余能力随既有授权保留。改变该策略需要跨后端的独立决策。
+- 回归验收：拒绝过宽根及其符号链接；环境 Git 选择变量和伪造 gitfile 无法授权无关仓库；未实际执行的请求返回非零；命令参数要么完整保留、要么被拒绝；透传输出不被捕获；继承的 Node 参数与 managed Electron 模式到达子进程。Linux 挂载约束及 procfs 边缘场景需要 Linux 主机，不能用 mock spawn 测试宣称已验证。
 
 ## Phase P1 —— `qwen-landlock-run` vendored 回退
 
@@ -660,13 +671,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
    填了代理变量，而 `:376-388` 从不把它传给 `spawn`，因此 macOS 上的
    `QWEN_SANDBOX_PROXY_COMMAND` 启动了一个受约束进程看不见的代理。这同样是独立
    修复 —— 它改变 macOS 行为、需要自己的回归测试，所以刻意不在此处打包。
-8. **`XDG_CACHE_HOME` 指向 `/proc` 下时的无法解释的挂起**：在验证 VM 上实测，
-   把 `XDG_CACHE_HOME` 指向 procfs 内一个不存在的路径（`/proc/nope/cache`）会让
-   进程卡在一个连 `timeout` 的信号都打不断的状态。该根的 `mkdir` 与 `realpath`
-   都在 `try`/`catch` 内，而针对一个普通不可写路径（`/usr/local/nope-cache`，
-   属 root）的同一测试表现正确 —— 该根被丢弃、启动继续 —— 所以挂起不在解析逻辑
-   里。此处只作记录不作解释：它需要一次 procfs 层面的调查，而且没有任何现实配置
-   会走到它。
+8. **`/proc` 下的可选缓存目录创建**：验证 VM 曾报告 Node 递归创建 `/proc/nope/cache` 时挂起。缓存路径现在只执行一次非递归 `mkdir`：不创建缺失的父目录，并丢弃该可选根；正常缺失的 `~/.cache` 末级目录仍会创建。本次跟进在 macOS 上检查了普通缺失父目录与首次创建场景；Linux procfs 场景仍需真实 Linux 验证。必需的 Qwen 与运行时目录创建保持原样。
 
 ## 证据
 
@@ -675,7 +680,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   `/sys/kernel/security/lsm` 中。探测脚本曾位于
   `.qwen/scripts/verify-bwrap-assumptions.sh`，而 `.gitignore` 按仓库约定排除该
   目录，因此它不属于本次改动 —— 它产出的测量结果改为记录在下方，而
-  `qwen sandbox --verify` 是那些值得重复执行的检查的、已提交且有测试的继任者。
+  `qwen sandbox --verify` 是已提交且有测试的四项检查子集，不能替代手动 Git 与 socket 检查。
   该脚本演练了本文档中的十项主张：九项通过，一项失败（D6 中的 `--proc` 主张，
   已在上文就地修正）。经测量确认：文档中的探测 argv 能启动；可写根之外的写入
   返回 `EROFS`；一个 `--bind` 根是可写的；不带 `--unshare-pid` 时主机 PID 保持

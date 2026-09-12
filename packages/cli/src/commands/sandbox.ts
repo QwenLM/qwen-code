@@ -5,6 +5,7 @@
  */
 
 import type { CommandModule } from 'yargs';
+import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
 
 /**
  * One assertion in the `--verify` battery: a command to run confined, and a
@@ -23,6 +24,10 @@ interface VerifyCase {
 interface SandboxArgs {
   cmd?: string[];
   verify?: boolean;
+  sandbox?: boolean;
+  sandboxImage?: string;
+  bare?: boolean;
+  safeMode?: boolean;
   /** Everything after `--`, which is how a command with its own flags has to be
    * passed so yargs does not try to parse `-c` and friends as ours. */
   '--'?: Array<string | number>;
@@ -56,10 +61,12 @@ export const sandboxCommand: CommandModule = {
         default: false,
         describe: 'Run the confinement behavior battery and report pass/fail',
       })
+      .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
+      .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
       .example('$0 sandbox', 'Report the resolved backend and writable roots')
       .example('$0 sandbox --verify', 'Prove the confinement actually holds')
       .example("$0 sandbox -- sh -c 'ls /'", 'Run one command confined')
-      .strict(false),
+      .strict(),
   handler: async (argv) => {
     const [
       { loadSettings },
@@ -67,12 +74,16 @@ export const sandboxCommand: CommandModule = {
       sandboxModule,
       { writeStdoutLine, writeStderrLine },
       { spawnSync },
+      { isBareMode },
+      { isSafeModeEnv },
     ] = await Promise.all([
       import('../config/settings.js'),
       import('../config/sandboxConfig.js'),
       import('../serve/sandbox.js'),
       import('../utils/stdioHelpers.js'),
       import('node:child_process'),
+      import('@qwen-code/qwen-code-core/utils/bareMode.js'),
+      import('@qwen-code/qwen-code-core/utils/safe-mode.js'),
     ]);
 
     const {
@@ -89,27 +100,37 @@ export const sandboxCommand: CommandModule = {
       ...(args.cmd ?? []),
       ...(args['--']?.map(String) ?? []),
     ];
+    const writeReportLine = requestedCmd.length
+      ? writeStderrLine
+      : writeStdoutLine;
     const cwd = process.cwd();
-    const settings = loadSettings(cwd, false);
+    const bare = isBareMode(args.bare);
+    const settings = bare ? {} : loadSettings(cwd, false).merged;
+    const effectiveSettings =
+      bare || (args.safeMode ?? isSafeModeEnv()) ? {} : settings;
 
     // `SANDBOX` is set inside a confinement, and `loadSandboxConfig` answers
     // "already sandboxed" by returning no command for it. Reporting from in
     // there would describe nothing, so say what is actually true instead.
     if (process.env['SANDBOX']) {
-      writeStdoutLine(`Already inside a sandbox: ${process.env['SANDBOX']}`);
+      writeReportLine(`Already inside a sandbox: ${process.env['SANDBOX']}`);
       const enforcement = process.env['SANDBOX_ENFORCEMENT'];
       if (enforcement) {
-        writeStdoutLine(`Enforcement: ${enforcement}`);
+        writeReportLine(`Enforcement: ${enforcement}`);
       }
-      writeStdoutLine(
+      writeReportLine(
         'Run this from outside the sandbox to inspect a backend.',
       );
+      if (args.verify || requestedCmd.length) {
+        writeStderrLine('No verification or command was run.');
+        process.exitCode = 1;
+      }
       return;
     }
 
     let sandboxConfig;
     try {
-      sandboxConfig = await loadSandboxConfig(settings.merged, {});
+      sandboxConfig = await loadSandboxConfig(effectiveSettings, args);
     } catch (error) {
       // A probe failure for an explicitly requested backend is fatal by design
       // (never silently unconfined). Surfacing it here is the whole point of
@@ -122,22 +143,28 @@ export const sandboxCommand: CommandModule = {
     }
 
     if (!sandboxConfig) {
-      writeStdoutLine('Backend: none (running unconfined)');
-      writeStdoutLine(
+      writeReportLine('Backend: none (running unconfined)');
+      writeReportLine(
         'Enable one with --sandbox, QWEN_SANDBOX=<command>, or tools.sandbox.',
       );
+      if (args.verify || requestedCmd.length) {
+        writeStderrLine(
+          'No verification or command was run: no sandbox is configured.',
+        );
+        process.exitCode = 1;
+      }
       return;
     }
 
-    writeStdoutLine(`Backend: ${sandboxConfig.command}`);
+    writeReportLine(`Backend: ${sandboxConfig.command}`);
     if (sandboxConfig.image) {
-      writeStdoutLine(`Image: ${sandboxConfig.image}`);
+      writeReportLine(`Image: ${sandboxConfig.image}`);
     }
 
     if (sandboxConfig.command !== 'bwrap') {
       // The roots and the battery below are bwrap-specific. Other backends
       // still report what they are rather than pretending to be inspectable.
-      writeStdoutLine(
+      writeReportLine(
         `Inspection of writable roots is implemented for bwrap; '${sandboxConfig.command}' reports its backend only.`,
       );
       if (args.verify || requestedCmd.length) {
@@ -156,15 +183,23 @@ export const sandboxCommand: CommandModule = {
     // below are the settings-derived set, not necessarily every root a
     // differently-invoked session would get.
     const { targetDir, roots } = resolveBwrapWritableRoots(
-      settings.merged.context?.includeDirectories ?? [],
+      effectiveSettings.context?.includeDirectories ?? [],
     );
 
-    writeStdoutLine('Enforcement: full');
-    writeStdoutLine(`Network: ${networkMode}`);
-    writeStdoutLine(`Target dir: ${targetDir}`);
-    writeStdoutLine('Writable roots:');
+    writeReportLine('Enforcement: full');
+    writeReportLine(
+      'Boundary: filesystem mounts; host Unix sockets remain reachable',
+    );
+    writeReportLine(`Network: ${networkMode}`);
+    if (networkMode === 'proxied') {
+      writeReportLine(
+        'Proxy settings are advisory; direct connections remain possible.',
+      );
+    }
+    writeReportLine(`Target dir: ${targetDir}`);
+    writeReportLine('Writable roots:');
     for (const root of roots) {
-      writeStdoutLine(`  ${root}`);
+      writeReportLine(`  ${root}`);
     }
 
     const runConfined = (
@@ -187,9 +222,18 @@ export const sandboxCommand: CommandModule = {
     };
 
     if (requestedCmd.length) {
-      const result = runConfined(requestedCmd);
-      if (result.output) {
-        writeStdoutLine(result.output.trimEnd());
+      const result = spawnSync(
+        'bwrap',
+        buildBwrapArgs({
+          writableRoots: roots,
+          targetDir,
+          networkMode,
+          cliArgs: requestedCmd,
+        }),
+        { stdio: 'inherit' },
+      );
+      if (result.error) {
+        writeStderrLine(`Sandbox command failed: ${result.error.message}`);
       }
       process.exitCode = result.status ?? 1;
       return;

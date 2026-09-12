@@ -28,6 +28,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -260,6 +261,7 @@ export function resolveGitWritableRoots(cwd: string): string[] {
     try {
       const result = spawnSync('git', gitArgs, {
         cwd,
+        env: gitEnv(),
         encoding: 'utf8',
         stdio: 'pipe',
         timeout: GIT_ROOT_PROBE_TIMEOUT_MS,
@@ -274,19 +276,48 @@ export function resolveGitWritableRoots(cwd: string): string[] {
     }
   };
 
-  const roots: string[] = [];
-  for (const gitArgs of [
-    ['rev-parse', '--absolute-git-dir'],
-    // `--git-common-dir` predates `--path-format=absolute` and can answer with a
-    // path relative to cwd, so resolve rather than trusting it to be absolute.
-    ['rev-parse', '--git-common-dir'],
-  ]) {
-    const value = read(gitArgs);
-    if (value) {
-      roots.push(path.resolve(cwd, value));
+  try {
+    const topLevel = read(['rev-parse', '--show-toplevel']);
+    const gitDirValue = read(['rev-parse', '--absolute-git-dir']);
+    const commonDirValue = read(['rev-parse', '--git-common-dir']);
+    if (!topLevel || !gitDirValue || !commonDirValue) {
+      return [];
     }
+    const targetDir = fs.realpathSync(topLevel);
+    const currentDir = fs.realpathSync(cwd);
+    if (currentDir !== targetDir && !isSubpath(targetDir, currentDir)) {
+      return [];
+    }
+    const gitEntry = path.join(targetDir, '.git');
+    const entryStat = fs.lstatSync(gitEntry);
+    const gitDir = fs.realpathSync(path.resolve(cwd, gitDirValue));
+    const commonDir = fs.realpathSync(path.resolve(cwd, commonDirValue));
+    if (entryStat.isDirectory()) {
+      return fs.realpathSync(gitEntry) === gitDir && commonDir === gitDir
+        ? [gitDir, commonDir]
+        : [];
+    }
+    if (!entryStat.isFile()) {
+      return [];
+    }
+    // A gitfile is workspace-controlled. Require the common repository's
+    // worktree registration and its reverse pointer before granting writes.
+    const registration = path.join(
+      commonDir,
+      'worktrees',
+      path.basename(gitDir),
+    );
+    const backPointerPath = path.join(gitDir, 'gitdir');
+    if (gitDir !== registration || !fs.lstatSync(backPointerPath).isFile()) {
+      return [];
+    }
+    const backPointer = fs.readFileSync(backPointerPath, 'utf8').trim();
+    return fs.realpathSync(path.resolve(gitDir, backPointer)) === gitEntry
+      ? [gitDir, commonDir]
+      : [];
+  } catch {
+    return [];
   }
-  return roots;
 }
 
 /**
@@ -301,6 +332,7 @@ export function resolveGitWritableRoots(cwd: string): string[] {
 export function normalizeWritableRoots(
   candidates: readonly string[],
 ): string[] {
+  const homeDir = fs.realpathSync(os.homedir());
   const resolved: string[] = [];
   for (const candidate of candidates) {
     let real: string;
@@ -310,6 +342,11 @@ export function normalizeWritableRoots(
       // bwrap fails the entire launch on a missing bind source, so a root that
       // is not there is dropped instead of turning startup into an error.
       continue;
+    }
+    if (real === homeDir || isSubpath(real, homeDir)) {
+      throw new FatalSandboxError(
+        `Refusing sandbox writable root '${real}': the home directory and its ancestors must stay read-only.`,
+      );
     }
     if (
       resolved.some(
@@ -354,16 +391,13 @@ export function resolveBwrapWritableRoots(
 
   const targetDir = fs.realpathSync(process.cwd());
   const homeDir = os.homedir();
-  // Seatbelt grants CACHE_DIR by path prefix whether or not it exists; a bwrap
-  // bind needs the source to be there, so create it to keep the two profiles
-  // equivalent. Best-effort on purpose: `XDG_CACHE_HOME` is user-controlled and
-  // may point somewhere uncreatable, which must not take the whole hop down —
-  // an absent root is simply dropped by `normalizeWritableRoots` below. The
-  // Qwen dirs above are different: without them there is nothing to run.
+  // A non-recursive create handles the usual missing ~/.cache leaf without
+  // entering Node's recursive mkdir retry loop on an uncreatable procfs path.
+  // Missing parents leave the optional cache root out of the bind set.
   const cacheDir =
-    process.env['XDG_CACHE_HOME'] ?? path.join(homeDir, '.cache');
+    process.env['XDG_CACHE_HOME'] || path.join(homeDir, '.cache');
   try {
-    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.mkdirSync(cacheDir);
   } catch {
     // Leave it to the drop below.
   }
@@ -615,9 +649,12 @@ export async function start_sandbox(
     });
 
     const nodeOptions = [
+      childEnv?.['NODE_OPTIONS'] ?? process.env['NODE_OPTIONS'],
       ...(process.env['DEBUG'] ? ['--inspect-brk'] : []),
       ...nodeArgs,
-    ].join(' ');
+    ]
+      .filter(Boolean)
+      .join(' ');
 
     // Unlike the seatbelt branch — which prefixes its `sh -c` string with the
     // assignments — the confined argv is exec'd directly, so everything the
@@ -630,6 +667,9 @@ export async function start_sandbox(
     };
     if (nodeOptions) {
       bwrapEnv['NODE_OPTIONS'] = nodeOptions;
+    }
+    if (process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
+      bwrapEnv['ELECTRON_RUN_AS_NODE'] = '1';
     }
     // `shouldAttemptBrowserLaunch()` decides on Linux purely by the presence of
     // these three. Left set, an OAuth login would xdg-open a browser as a

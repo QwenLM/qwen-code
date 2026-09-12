@@ -422,8 +422,8 @@ You are running under macos seatbelt with limited access to files outside the pr
     const backend = process.env['SANDBOX'];
     return `
 # Kernel Sandbox (${backend})
-You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY except for the project directory, the system temp directory, the Qwen configuration and runtime directories, the git directories of the current checkout, and any directories the user added explicitly. A refused write fails with 'Read-only file system' (EROFS) or 'Permission denied' (EACCES). Network reachability follows the configured sandbox network mode.
-When a command fails with one of those errors, treat the sandbox as the likely cause: report it to the user, name the path that was refused, and explain that they can add that path to the sandbox or run without one. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY outside the writable roots configured at startup. Run 'qwen sandbox' outside the sandbox to inspect that set. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions, even inside a writable root. Host services reached through Unix sockets remain outside this filesystem boundary, including in closed network mode. Proxied mode supplies proxy settings without preventing direct connections.
+When a write fails with EROFS, report it to the user, name the refused path, and explain that changing the writable roots requires restarting with the appropriate sandbox configuration. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
     return `

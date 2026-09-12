@@ -322,6 +322,22 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot();
   });
 
+  it('describes the bwrap filesystem boundary and distinguishes ordinary permissions', () => {
+    vi.stubEnv('SANDBOX', 'bwrap');
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('# Kernel Sandbox (bwrap)');
+    expect(prompt).toContain("'Read-only file system' (EROFS)");
+    expect(prompt).toContain(
+      "'Permission denied' (EACCES) can instead come from ordinary file permissions",
+    );
+    expect(prompt).toContain(
+      'Host services reached through Unix sockets remain outside this filesystem boundary',
+    );
+    expect(prompt).toContain('changing the writable roots requires restarting');
+    expect(prompt).not.toContain("(EROFS) or 'Permission denied'");
+    expect(prompt).not.toContain('You are running in a sandbox container');
+  });
+
   it('should include non-sandbox instructions when SANDBOX env var is not set', () => {
     vi.stubEnv('SANDBOX', undefined); // Ensure it's not set
     const prompt = getCoreSystemPrompt();

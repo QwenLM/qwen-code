@@ -131,9 +131,9 @@ yields "# Outside of Sandbox". Two consequences:
   is told it "is running in a sandbox **container**" — wrong, and it names
   `Operation not permitted` while bwrap denials read `Read-only file system`.
 - With a small added branch the boundary becomes accurate and self-describing:
-  name the backend, the enforcement level, the writable roots, and both
-  `EROFS`/`EACCES` spellings, and instruct the model to surface a suspected
-  confinement denial to the user instead of detouring around it.
+  name the backend and writable-root boundary, distinguish read-only mount
+  refusals (`EROFS`) from ordinary permissions (`EACCES`), and instruct the
+  model to report a confinement refusal instead of detouring around it.
 
 That branch is a P0 work item (see § Phase P0), not a follow-up.
 
@@ -307,7 +307,7 @@ the seatbelt branch (`sandbox.ts:229-389`):
    | --------------- | ------------------------------------------------------------------------------------------------------ |
    | `TARGET_DIR`    | `realpathSync(process.cwd())`                                                                          |
    | `TMP_DIR`       | `realpathSync(os.tmpdir())` — bound writable; `/tmp` is never replaced by a fresh tmpfs (see below)    |
-   | `CACHE_DIR`     | `XDG_CACHE_HOME` ?? `~/.cache` (mkdir -p, then realpath)                                               |
+   | `CACHE_DIR`     | `XDG_CACHE_HOME` or `~/.cache` when empty/unset (create leaf only, then realpath)                      |
    | `QWEN_DIR`      | `Storage.getGlobalQwenDir()` (mkdir -p, realpath)                                                      |
    | `RUNTIME_DIR`   | `Storage.getRuntimeBaseDir()` (mkdir -p, realpath)                                                     |
    | git dirs        | `git rev-parse --git-dir` and `--git-common-dir`, when they resolve outside `TARGET_DIR`               |
@@ -440,9 +440,9 @@ kernel backend. Without it `SANDBOX=bwrap` lands in the generic branch, which
 tells the model it runs "in a sandbox container" and teaches it to look for
 `Operation not permitted` — the wrong shape for a bwrap denial. The new branch
 states the backend, that the host root is read-only outside the writable roots,
-both `EROFS` / `EACCES` spellings, and the same instruction the existing
-branches carry: report a suspected confinement denial to the user rather than
-detouring around it. Rationale in D2. The branch matches `bwrap` only; P1 adds
+the `Read-only file system` (`EROFS`) refusal, and the distinction that
+`Permission denied` (`EACCES`) can be ordinary permissions inside a writable
+root. Report a confinement refusal rather than detouring around it. Rationale in D2. The branch matches `bwrap` only; P1 adds
 `qwen-landlock-run` to it together with the enforcement wording, for the same
 reason the UI suffix waits.
 
@@ -464,9 +464,18 @@ what the CI lanes and the E2E table below call.
 - `qwen sandbox <cmd>…` — run one command through the resolved backend and
   report the outcome (the `codex sandbox` equivalent).
 - `qwen sandbox --verify` — the behavior battery: write outside the workspace
-  must fail; write inside must succeed; `git commit` must succeed in a worktree
-  checkout; host `/proc` must stay visible (the regression guard for D6);
+  must fail; write inside must succeed; host `/proc` must stay visible (the regression guard for D6);
   network must be unreachable in `closed` and reachable in `open`/`proxied`.
+
+### Review follow-up contract
+
+- Reject a canonical writable root equal to the home directory or any ancestor, including `/`, before spawning bwrap. The rule also applies through symlinks and to additional workspace directories. Use a narrower workspace or cache path instead of silently granting the whole home or host filesystem.
+- Derive Git roots with the shared `gitEnv()` sanitizer so ambient repository selectors cannot redirect the probe. Only a real `.git` directory or a linked worktree registered under the common repository with a matching reverse pointer receives automatic Git grants. Symlinked metadata, planted gitfiles, separate Git directories, and submodule gitfiles without that registration contribute no roots; users must explicitly include any required external metadata directory. Legitimate linked worktrees retain their common Git directory grant.
+- Inspection forwards the explicit sandbox and image flags, skips settings and `.env` loading in bare mode, and suppresses settings in safe mode. Plain inspection may exit successfully without a backend; a verification or command request that cannot run exits non-zero, including when already confined. Commands with their own flags must follow `--`; unknown flags before it fail parsing.
+- Pass-through commands inherit stdin, stdout, and stderr directly. Inspection text goes to stderr for this mode, so large output and piped structured output are preserved. The verification battery retains captured output for its predicates.
+- The bwrap re-exec appends Node launch options to the inherited options, preserves child-environment precedence, and restores Electron's Node mode when the managed launch marker requests it.
+- `full` describes filesystem mount enforcement, not isolation from host services. The inspection report and prompt state that host Unix sockets remain reachable, including in closed network mode, and that proxied mode does not enforce exclusive proxy use. Writable Git configuration/hooks and Qwen settings can affect later unconfined launches; this residual capability is retained with the existing grants. Changing that policy requires a separate decision across backends.
+- Regression acceptance: broad roots and symlinks are refused; ambient Git selectors and planted gitfiles cannot grant an unrelated repository; failed-to-run requests are non-zero; command flags are preserved or rejected; pass-through output is not captured; inherited Node options and managed Electron mode reach the child. Linux mount enforcement and the procfs edge case require a Linux host and are not claimed from mocked spawn tests.
 
 ## Phase P1 — `qwen-landlock-run` vendored fallback
 
@@ -760,15 +769,7 @@ CONTRIBUTING.md size thresholds.
    `QWEN_SANDBOX_PROXY_COMMAND` on macOS starts a proxy the confined process
    cannot see. Also a standalone fix — it changes macOS behavior and wants its
    own regression test, so it is deliberately not bundled here.
-8. **Unexplained hang with `XDG_CACHE_HOME` under `/proc`**: measured on the
-   verification VM, pointing `XDG_CACHE_HOME` at a non-existent path inside
-   procfs (`/proc/nope/cache`) wedges the process in a state that not even
-   `timeout`'s signals interrupt. Both the `mkdir` and the `realpath` of that
-   root are inside `try`/`catch`, and the same test against an ordinary
-   unwritable path (`/usr/local/nope-cache`, root-owned) behaves correctly — the
-   root is dropped and startup continues — so the hang is not in the resolution
-   logic. Left recorded rather than explained: it needs a procfs-level
-   investigation, and no realistic configuration reaches it.
+8. **Optional cache creation under `/proc`**: the verification VM reported a hang with recursive Node directory creation at `/proc/nope/cache`. The cache path now uses a single non-recursive `mkdir`: an absent parent is not created and the optional root is dropped. The normal missing `~/.cache` leaf is still created. This follow-up was checked with ordinary missing-parent and first-run cases on macOS; the Linux procfs case still requires a real Linux verification. Required Qwen and runtime directory creation is unchanged.
 
 ## Evidence
 
@@ -778,8 +779,8 @@ CONTRIBUTING.md size thresholds.
   `.qwen/scripts/verify-bwrap-assumptions.sh`, which `.gitignore` excludes by
   repository convention, so it is not part of this change — the measurements it
   produced are recorded below instead, and `qwen sandbox --verify` is the
-  committed, tested successor for the checks worth repeating. It
-  exercises ten claims from this document: nine passed and one failed (the
+  committed four-check subset, not a replacement for the manual Git and socket checks. The original probe
+  exercised ten claims from this document: nine passed and one failed (the
   `--proc` claim in D6, corrected in place above). Confirmed by measurement:
   the documented probe argv launches; a write outside the roots returns
   `EROFS`; a `--bind` root is writable; host PIDs stay visible without

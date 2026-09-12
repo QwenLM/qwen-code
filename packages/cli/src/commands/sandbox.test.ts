@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import yargs from 'yargs';
 
 const spawnSyncMock = vi.hoisted(() => vi.fn());
 const loadSandboxConfigMock = vi.hoisted(() => vi.fn());
@@ -57,6 +58,10 @@ async function run(args: Record<string, unknown> = {}): Promise<void> {
 
 describe('qwen sandbox', () => {
   beforeEach(() => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.stubEnv('SANDBOX_ENFORCEMENT', undefined);
+    vi.stubEnv('QWEN_CODE_SIMPLE', undefined);
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', undefined);
     loadSettingsMock.mockReturnValue({ merged: {} });
     resolveSandboxNetworkModeMock.mockReturnValue('open');
     resolveBwrapWritableRootsMock.mockReturnValue({
@@ -82,7 +87,98 @@ describe('qwen sandbox', () => {
     await run();
 
     expect(report()).toContain('Backend: none (running unconfined)');
+    expect(process.exitCode).toBeUndefined();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
   });
+
+  it.each([{ verify: true }, { '--': ['echo', 'must-run'] }])(
+    'fails an unfulfilled request without a backend: %j',
+    async (args) => {
+      loadSandboxConfigMock.mockResolvedValue(undefined);
+      await run(args);
+      expect(process.exitCode).toBe(1);
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(writeStderrLineMock).toHaveBeenCalledWith(
+        expect.stringContaining('No verification or command was run'),
+      );
+    },
+  );
+
+  it.each([{ verify: true }, { '--': ['echo', 'must-run'] }])(
+    'fails an unfulfilled request inside a sandbox: %j',
+    async (args) => {
+      vi.stubEnv('SANDBOX', 'bwrap');
+      await run(args);
+      expect(process.exitCode).toBe(1);
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(loadSandboxConfigMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('forwards explicit sandbox options to the resolver', async () => {
+    loadSandboxConfigMock.mockResolvedValue({
+      command: 'docker',
+      image: 'flag/image',
+    });
+    await run({ sandbox: true, sandboxImage: 'flag/image' });
+    expect(loadSandboxConfigMock).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ sandbox: true, sandboxImage: 'flag/image' }),
+    );
+    expect(report()).toContain('Image: flag/image');
+  });
+
+  it.each(['bare', 'safeMode'])('ignores settings in %s mode', async (mode) => {
+    loadSettingsMock.mockReturnValue({
+      merged: {
+        tools: { sandbox: true },
+        context: { includeDirectories: ['/extra'] },
+      },
+    } as never);
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    await run({ [mode]: true });
+    expect(loadSandboxConfigMock).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ [mode]: true }),
+    );
+    expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith([]);
+    if (mode === 'bare') {
+      expect(loadSettingsMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rejects command flags before -- instead of silently dropping them', () => {
+    const handler = vi.fn();
+    expect(() =>
+      yargs()
+        .exitProcess(false)
+        .showHelpOnFail(false)
+        .command({ ...sandboxCommand, handler })
+        .parseSync(['sandbox', 'npm', 'publish', '--dry-run']),
+    ).toThrow('Unknown argument');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { input: ['sandbox', 'npm', 'test'], expected: { cmd: ['npm', 'test'] } },
+    {
+      input: ['sandbox', '--', 'sh', '-c', 'echo hi'],
+      expected: { '--': ['sh', '-c', 'echo hi'] },
+    },
+  ])(
+    'preserves the supported command spelling $input',
+    async ({ input, expected }) => {
+      let captured: unknown;
+      const handler = vi.fn((args) => {
+        captured = structuredClone(args);
+      });
+      await yargs()
+        .exitProcess(false)
+        .command({ ...sandboxCommand, handler })
+        .parseAsync(input);
+      expect(captured).toEqual(expect.objectContaining(expected));
+    },
+  );
 
   it('reports the resolved backend, roots, and network mode', async () => {
     loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
@@ -93,6 +189,8 @@ describe('qwen sandbox', () => {
     expect(text).toContain('Backend: bwrap');
     expect(text).toContain('Network: open');
     expect(text).toContain('/repo/.git');
+    expect(text).toContain('Enforcement: full');
+    expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('feeds the settings-declared workspace directories into the roots', async () => {
@@ -117,6 +215,7 @@ describe('qwen sandbox', () => {
     await run();
 
     expect(report()).toContain('Already inside a sandbox: bwrap');
+    expect(report()).toContain('Enforcement: full');
     expect(loadSandboxConfigMock).not.toHaveBeenCalled();
   });
 
@@ -161,6 +260,11 @@ describe('qwen sandbox', () => {
       'exit 42',
     ]);
     expect(process.exitCode).toBe(42);
+    expect(spawnSyncMock).toHaveBeenCalledWith('bwrap', expect.any(Array), {
+      stdio: 'inherit',
+    });
+    expect(writeStdoutLineMock).not.toHaveBeenCalled();
+    expect(writeStderrLineMock).toHaveBeenCalledWith('Backend: bwrap');
   });
 
   describe('--verify', () => {
