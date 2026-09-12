@@ -266,15 +266,6 @@ export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog's
- * COLLAPSED body still ends inside the viewport: the non-body region plus
- * the collapsed body window. Excludes any payload the dialog only reveals
- * on ctrl-s expansion — that bound lives in pendingCardMaxRows.
- */
-export const PENDING_CARD_VIEWPORT_RESERVE_ROWS =
-  DIALOG_EXPANDED_RESERVE_ROWS + CONFIRM_BODY_COLLAPSED_ROWS;
-
-/**
  * The collapsed-dialog bound's non-body rows: the transcript region above
  * the card plus the dialog's frame, title/question, outcome list and
  * footer. This IS the expanded reserve — both bounds price the same region
@@ -307,64 +298,75 @@ const CARD_DESC_WRAP_RATIO = 0.7;
  * `type` is confirmationDetails.type; `body` is the text the dialog renders
  * for the types whose body is a plain text block (info's prompt, plan's
  * plan, exec's command — see event-adapter's confirmationDialogBody, which
- * mirrors dialogs-confirm's ConfirmationBody switch).
+ * mirrors dialogs-confirm's ConfirmationBody switch); `extra` is the rows
+ * the dialog renders OUTSIDE the body window (info's urls block, exec's
+ * warnings).
  */
 export interface PendingDialogBody {
   type?: string;
   body?: string;
+  extra?: string;
 }
 
 /**
  * The pending confirmation dialog's body in physical rows: `expanded` is
  * the body's full height, charged by the expanded-dialog bound — or null
  * for the fixed-body types whose dialogs render no measurable text;
- * `collapsed` is the body height the collapsed-dialog bound charges. A body
- * that fits the collapsed window makes the two bounds coincide (the two
- * reserves are one quantity by construction), so no collapsed/expanded gate
- * decides between them — the expanded bound only binds past the window.
+ * `collapsed` is the body height the collapsed-dialog bound charges, and is
+ * present only where it can decide the price. For a measured body the
+ * expanded bound always dominates: the two bounds subtract the same chrome
+ * quantity (COLLAPSED_DIALOG_CHROME_ROWS IS DIALOG_EXPANDED_RESERVE_ROWS)
+ * and the collapsed window never charges MORE than the full body, so the
+ * collapsed term cannot win the min and is omitted. The collapsed bound is
+ * live only for the fixed-body types and the body-less proxy.
  *
  * info and plan render an expandable TextBody and exec renders its command
  * in full (no window at all), so for them the body's OWN rows decide
  * (measured like TextBody: sanitized, split on newlines, each logical row
  * charged its wrapped height): a many-short-line plan folds to one card row
  * but fills the dialog, and a multi-line command folds to one card row but
- * renders every line. exec therefore charges its full body to BOTH bounds —
- * its dialog has no collapsed window — while info/plan charge the collapsed
- * bound only the windowed footprint. The named fixed-body types return a
- * null expansion: mcp's dialog body is two fixed lines and the card is the
- * only surface carrying the call's arguments (R5-9); edit's dialog is a
- * tail-windowed diff below an UNBOUNDED warnings list, but edit-kind cards
- * carry a one-row description (the edit tools return just the path), so
- * there is nothing to yield; ask_user_question's question/options list is
- * fixed at ask time. Everything else — a typed confirmation whose body text
- * never arrived, and any type this module does not know (a future
- * ToolCallConfirmationDetails variant, a version-skewed wire event) —
- * keeps the folded card-payload proxy: there the yield is what brings the
- * outcome list back on screen, so the safe side is yielding.
+ * renders every line. Rows the dialog renders OUTSIDE the body window —
+ * info's urls block and exec's warnings, carried as `extra` — charge in
+ * addition to the measured body, the same split the render makes (TextBody
+ * windows only the prompt). The named
+ * fixed-body types return a null expansion: mcp's dialog body is two fixed
+ * lines and the card is the only surface carrying the call's arguments
+ * (R5-9); edit's dialog is a tail-windowed diff below an UNBOUNDED warnings
+ * list, but edit-kind cards carry a one-row description (the edit tools
+ * return just the path), so there is nothing to yield; ask_user_question's
+ * question/options list is fixed at ask time. Everything else — a typed
+ * confirmation whose body text never arrived, and any type this module does
+ * not know (a future ToolCallConfirmationDetails variant, a version-skewed
+ * wire event) — keeps the folded card-payload proxy: there the yield is
+ * what brings the outcome list back on screen, so the safe side is
+ * yielding.
  */
 function dialogBodyMeasure(
   dialog: PendingDialogBody | undefined,
   payloadRows: number,
   dialogWidth: number,
   measureCap: number,
-): { expanded: number | null; collapsed: number } {
+): { expanded: number | null; collapsed?: number } {
   const type = dialog?.type;
   if (
     (type === 'info' || type === 'plan' || type === 'exec') &&
     dialog?.body !== undefined
   ) {
+    const cols = Math.max(dialogWidth - 2, 10);
     const rows = physicalRowsTotal(
       sanitizeTerminalText(dialog.body).split('\n'),
-      Math.max(dialogWidth - 2, 10),
+      cols,
       measureCap,
     );
-    return {
-      expanded: rows,
-      // The exec dialog has no collapsed window — it renders the command in
-      // full — so the collapsed bound charges the whole body too.
-      collapsed:
-        type === 'exec' ? rows : Math.min(rows, CONFIRM_BODY_COLLAPSED_ROWS),
-    };
+    const extra =
+      dialog.extra === undefined
+        ? 0
+        : physicalRowsTotal(
+            sanitizeTerminalText(dialog.extra).split('\n'),
+            cols,
+            measureCap,
+          );
+    return { expanded: rows + extra };
   }
   if (type === 'mcp' || type === 'edit' || type === 'ask_user_question') {
     return {
@@ -391,8 +393,12 @@ function dialogBodyMeasure(
  * and both bounds are shared between the `pendingCount` cards awaiting
  * approval, since N parked calls each painting the full region push the
  * first call's dialog off the alt screen. `descriptionWidth` is the display
- * width of the text the card would print; short terminals fall back to the
- * settled cap.
+ * width of the text the card would print; a lone pending card never drops
+ * below the settled cap (the short-terminal fallback), but once siblings
+ * share the region the floor drops to one row — a floor at the settled cap
+ * would lift the divided bound back up from the batch size where it falls
+ * below it (floor(34.3/7) = 4), and N cards at the cap grow the region
+ * linearly past the viewport with nothing left to give.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
@@ -411,8 +417,7 @@ export function pendingCardMaxRows(
   // is width + 4 (the headWindowPhysical-style measure then subtracts its
   // own 2 columns). The measure stops once the count can no longer change
   // the clamped outcome: every total past h - DIALOG_EXPANDED_RESERVE_ROWS
-  // bottoms the expanded bound out at the same TOOL_CARD_DESCRIPTION_ROWS
-  // floor.
+  // bottoms the expanded bound out at the floor.
   const body = dialogBodyMeasure(
     dialog,
     payloadRows,
@@ -427,13 +432,16 @@ export function pendingCardMaxRows(
             CARD_DESC_WRAP_RATIO) /
             Math.max(pendingCount, 1),
         );
-  const collapsedDialogBound = Math.floor(
-    ((h - COLLAPSED_DIALOG_CHROME_ROWS - body.collapsed) *
-      CARD_DESC_WRAP_RATIO) /
-      Math.max(pendingCount, 1),
-  );
+  const collapsedDialogBound =
+    body.collapsed === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.floor(
+          ((h - COLLAPSED_DIALOG_CHROME_ROWS - body.collapsed) *
+            CARD_DESC_WRAP_RATIO) /
+            Math.max(pendingCount, 1),
+        );
   return Math.max(
-    TOOL_CARD_DESCRIPTION_ROWS,
+    pendingCount > 1 ? 1 : TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
       collapsedDialogBound,

@@ -175,7 +175,7 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // duplicates the card's description in its body, so a wide payload
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
     // (mem0 e2e regression). The collapsed bound prices the region above
-    // the card plus the dialog chrome (46 - 20 = 26 physical rows) plus the
+    // the card plus the dialog chrome (the 26-row reserve) plus the
     // collapsed body, converted to budget rows by the 0.7 wrap ratio — a
     // budget row renders ~1/0.7 physical rows, so spending physical rows
     // directly as budget rows over-budgets the card by ~1.37x.
@@ -282,6 +282,49 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(
       pendingCardMaxRows(80, 3900, 110, { type: 'info', body: sharedBody }, 2),
     ).toBe(8);
+  });
+
+  it('charges the rows a dialog renders outside its body window (R4-1)', () => {
+    // An info dialog's urls block (a margin row, a header row and one row
+    // per URL) and an exec dialog's warnings render OUTSIDE the windowed
+    // body, so they charge in addition to it: a 20-row prompt alone prices
+    // (80 - 26 - 20) * 0.7 = 23, and the same prompt with a 3-row urls
+    // block prices (80 - 26 - 23) * 0.7 = 21.
+    const prompt = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
+    expect(pendingCardMaxRows(80, 0, 110, { type: 'info', body: prompt })).toBe(
+      23,
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 110, {
+        type: 'info',
+        body: prompt,
+        extra: '\nURLs to fetch:\n - https://example.com/x',
+      }),
+    ).toBe(21);
+    // exec renders its command in full plus one row per warning:
+    // (80 - 26 - 3) * 0.7 = 35; without the two warnings it would be 37.
+    expect(
+      pendingCardMaxRows(80, 0, 110, {
+        type: 'exec',
+        body: 'echo hi',
+        extra: '⚠ one\n⚠ two',
+      }),
+    ).toBe(35);
+  });
+
+  it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8)', () => {
+    // The settled 5-row floor must not lift the divided bound back up: at
+    // N=8 (mcp dialogs) floor((80-26-5)*0.7/8) = 4, and eight 5-row cards
+    // would paint 8*5/0.7 = 57 physical rows against the 80-26-5 = 49-row
+    // region, pushing the mounted dialog off the alt screen; at 4 the sum
+    // fits (8*4/0.7 = 45.7). The tall-body dialogs (collapsed body 20)
+    // cross one batch size earlier: floor((80-26-20)*0.7/5) = 4 and
+    // 5*4/0.7 = 28.6 <= 34, where 5*5/0.7 = 35.7 would not.
+    const mcp = pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 8);
+    expect(mcp).toBe(4);
+    expect((8 * mcp) / 0.7).toBeLessThanOrEqual(80 - 26 - 5);
+    const tall = pendingCardMaxRows(80, 0, 110, undefined, 5);
+    expect((5 * tall) / 0.7).toBeLessThanOrEqual(80 - 26 - 20);
   });
 
   it('falls back to the settled cap on short terminals', () => {

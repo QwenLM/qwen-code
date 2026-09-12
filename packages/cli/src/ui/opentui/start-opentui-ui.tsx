@@ -236,6 +236,10 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
+  // The callId primitive, not the array: a sibling parking beside the
+  // mounted call leaves waitingCalls[0] unchanged, and the memoized
+  // renderMain must not re-create for it.
+  const activeWaitingCallId = live.waitingCalls[0]?.callId;
   const renderMain = useCallback(
     () => (
       <box flexDirection="column" flexGrow={1}>
@@ -246,10 +250,11 @@ function OpenTuiEntryApp({
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
+          activeWaitingCallId={activeWaitingCallId}
         />
       </box>
     ),
-    [live.items, width, height, thoughtsExpanded],
+    [live.items, width, height, thoughtsExpanded, activeWaitingCallId],
   );
 
   const handleRenderError = useCallback(

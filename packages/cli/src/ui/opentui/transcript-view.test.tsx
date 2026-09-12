@@ -219,17 +219,20 @@ describe('OpenTuiTranscriptView', () => {
     // payload as the dialog body. The ~4k-char payload wraps to ~38 folded
     // rows — past the collapsed window — so the expanded-payload bound
     // shrinks the card to 11 budget rows (1060 visible columns at 110).
-    // Two markers bracket the budget: MID_MARKER at 2512 must leave the
-    // screen, and HEAD_MARKER at ~611 — inside the budget but past the
-    // settled 5-row floor's 412 columns — must stay, so an over-yielding
-    // card fails too.
+    // Two markers bracket the budget: MID_MARKER at 1512 must leave the
+    // screen — and it sits inside the collapsed-only 23-row budget's 2356
+    // visible columns, so losing the payload proxy (collapsing to that
+    // bound) turns this red — while HEAD_MARKER at ~611, inside the 11-row
+    // budget's 1060 columns but past the settled 5-row floor's 412, must
+    // stay, so an over-yielding card fails too. The payload total stays
+    // ~4024 columns so payloadRows keeps the intended budget at 11.
     const description =
       '{"content":"' +
       'a'.repeat(600) +
       'HEAD_MARKER' +
-      'a'.repeat(1889) +
+      'a'.repeat(889) +
       'MID_MARKER' +
-      'b'.repeat(1500) +
+      'b'.repeat(2500) +
       '"}';
     const { container } = render(
       <OpenTuiTranscriptView
@@ -320,6 +323,52 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).not.toContain('MID_MARKER');
   });
 
+  it('keeps eight parked sibling cards inside the shared region (R4-8)', () => {
+    // floor((80-26-5)*0.7/8) = 4 rows each — if the settled 5-row floor
+    // lifted the divided bound back up, eight cards would paint 8*5/0.7 = 57
+    // physical rows against the 80-26-5 = 49-row region and push the one
+    // mounted dialog off the alt screen. N8_MARKER at ~351 sits past the
+    // 4-row budget's 304 visible columns but inside the 5-row floor's 412,
+    // so only the released floor hides it; HEAD_MARKER at ~52 stays either
+    // way, so an over-yielding card fails too.
+    const description =
+      '{"content":"' +
+      'h'.repeat(40) +
+      'HEAD_MARKER' +
+      'a'.repeat(288) +
+      'N8_MARKER' +
+      'b'.repeat(300) +
+      '"}';
+    const parked = (id: string) =>
+      toolItem({
+        id,
+        tool: 'mcp__fs__write_file',
+        description,
+        confirm: 'pending',
+        confirmType: 'mcp',
+      });
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          parked('t1'),
+          parked('t2'),
+          parked('t3'),
+          parked('t4'),
+          parked('t5'),
+          parked('t6'),
+          parked('t7'),
+          parked('t8'),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('HEAD_MARKER');
+    expect(text).not.toContain('N8_MARKER');
+  });
+
   it('memoizes the pending-card measure across sibling re-renders', () => {
     // A sibling call's stream events re-render the whole transcript, and the
     // pending card's dialog-body measure scans the whole confirmation body —
@@ -366,10 +415,10 @@ describe('OpenTuiTranscriptView', () => {
       confirm: 'pending',
       confirmType: 'mcp',
     });
-    const view = (items: LiveToolItem[]) => (
+    const view = (items: LiveToolItem[], width = 110, height = 80) => (
       <OpenTuiTranscriptView
-        availableWidth={110}
-        availableTerminalHeight={80}
+        availableWidth={width}
+        availableTerminalHeight={height}
         items={items}
       />
     );
@@ -404,6 +453,36 @@ describe('OpenTuiTranscriptView', () => {
         }),
       ]),
     );
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The dialog's outside-window rows only (the urls/warnings block).
+    const withExtra = {
+      ...base,
+      confirmType: 'edit',
+      confirmBody: 'a\nb',
+      confirmExtra: '⚠ w',
+    };
+    const sibling = toolItem({
+      id: 't2',
+      description: 'sib',
+      confirm: 'pending',
+      confirmType: 'mcp',
+    });
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([withExtra, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The terminal height only: a resize with the dialog up. toolCardText
+    // is width-independent, so nothing but the terminalHeight dep can fire
+    // here — removing it from the memo's dep array leaves the stale 80-row
+    // cap in place and this assertion fails.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([withExtra, sibling], 110, 40));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The width only.
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([withExtra, sibling], 100, 40));
     expect(mainCardCalls()).not.toHaveLength(0);
   });
 
@@ -494,16 +573,21 @@ describe('OpenTuiTranscriptView', () => {
   });
 
   it('prices every parked card against the one mounted dialog', () => {
-    // Exactly one confirmation dialog is mounted — the earliest parked
-    // call's — so a parked sibling must budget against THAT dialog's body,
-    // not its own fixed-lines mcp arm: cards pricing themselves against
-    // different dialogs over-commit the shared region.
+    // Exactly one confirmation dialog is mounted — the shell renders
+    // waitingToolCalls[0], whose order is (re-)park time: a
+    // resolve-then-re-park appends the call at the waiting list's end while
+    // its transcript card keeps its original index, so the mounted call can
+    // be a LATER transcript item. Every parked card must budget against the
+    // mounted dialog (t2's fixed-lines mcp arm), not the first parked
+    // card's — cards pricing themselves against different dialogs
+    // over-commit the shared region.
     const hookBody = Array.from({ length: 20 }, () => 'reason').join('\n');
     const callsBefore = mocks.pendingSpy.mock.calls.length;
     render(
       <OpenTuiTranscriptView
         availableWidth={110}
         availableTerminalHeight={80}
+        activeWaitingCallId="t2"
         items={[
           toolItem({
             id: 't1',
@@ -528,7 +612,11 @@ describe('OpenTuiTranscriptView', () => {
       .map((call) => call[3]);
     expect(dialogs.length).toBeGreaterThanOrEqual(2);
     for (const dialog of dialogs) {
-      expect(dialog).toEqual({ type: 'info', body: hookBody });
+      expect(dialog).toEqual({
+        type: 'mcp',
+        body: undefined,
+        extra: undefined,
+      });
     }
   });
 

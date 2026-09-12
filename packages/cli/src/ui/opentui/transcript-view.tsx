@@ -79,6 +79,11 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
   /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
   thoughtsExpanded?: boolean;
+  /** The callId whose confirmation dialog the shell has mounted
+   * (waitingToolCalls[0] — opentui-app-shell renders that call's dialog), so
+   * parked cards price against THAT dialog rather than the transcript's
+   * first parked item. */
+  activeWaitingCallId?: string;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -105,6 +110,7 @@ export function OpenTuiTranscriptView({
   availableWidth = 80,
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
+  activeWaitingCallId,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   // Pending tool cards share the transcript region with the confirmation
@@ -115,14 +121,20 @@ export function OpenTuiTranscriptView({
       item.kind === 'tool' && item.confirm === 'pending' && !item.done,
   );
   const pendingCount = pendingItems.length;
-  // Exactly one confirmation dialog is ever mounted — the shell renders the
-  // earliest parked call (waitingToolCalls[0], fed by the same confirm
-  // events in the same order) — so every parked card budgets against THAT
-  // dialog's body rather than a hypothetical one of its own: a parked mcp
-  // sibling of an exec call must yield for the command the mounted dialog
-  // renders in full.
-  const pendingDialogType = pendingItems[0]?.confirmType;
-  const pendingDialogBody = pendingItems[0]?.confirmBody;
+  // Exactly one confirmation dialog is ever mounted — the shell renders
+  // waitingToolCalls[0]. The two orderings can diverge: a resolved call's
+  // card updates in place at its transcript index while a re-parked call
+  // appends at the waiting list's end, so the mounted call can be a LATER
+  // transcript item. Every parked card budgets against the MOUNTED dialog's
+  // body rather than a hypothetical one of its own: a parked mcp sibling of
+  // an exec call must yield for the command the mounted dialog renders in
+  // full.
+  const mountedPending =
+    pendingItems.find((item) => item.id === activeWaitingCallId) ??
+    pendingItems[0];
+  const pendingDialogType = mountedPending?.confirmType;
+  const pendingDialogBody = mountedPending?.confirmBody;
+  const pendingDialogExtra = mountedPending?.confirmExtra;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -139,6 +151,7 @@ export function OpenTuiTranscriptView({
             pendingCount={pendingCount}
             pendingDialogType={pendingDialogType}
             pendingDialogBody={pendingDialogBody}
+            pendingDialogExtra={pendingDialogExtra}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -155,6 +168,7 @@ function TranscriptItem({
   pendingCount,
   pendingDialogType,
   pendingDialogBody,
+  pendingDialogExtra,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
@@ -164,6 +178,7 @@ function TranscriptItem({
   pendingCount: number;
   pendingDialogType?: string;
   pendingDialogBody?: string;
+  pendingDialogExtra?: string;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -183,6 +198,7 @@ function TranscriptItem({
           pendingCount={pendingCount}
           pendingDialogType={pendingDialogType}
           pendingDialogBody={pendingDialogBody}
+          pendingDialogExtra={pendingDialogExtra}
         />
       );
     case 'task':
@@ -327,6 +343,7 @@ function ToolCard({
   pendingCount,
   pendingDialogType,
   pendingDialogBody,
+  pendingDialogExtra,
 }: {
   item: LiveToolItem;
   maxRows: number;
@@ -335,6 +352,7 @@ function ToolCard({
   pendingCount: number;
   pendingDialogType?: string;
   pendingDialogBody?: string;
+  pendingDialogExtra?: string;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -369,7 +387,11 @@ function ToolCard({
               terminalHeight,
               getCachedStringWidth(text),
               width,
-              { type: pendingDialogType, body: pendingDialogBody },
+              {
+                type: pendingDialogType,
+                body: pendingDialogBody,
+                extra: pendingDialogExtra,
+              },
               pendingCount,
             )
           : TOOL_CARD_DESCRIPTION_ROWS,
@@ -382,6 +404,7 @@ function ToolCard({
       pendingCount,
       pendingDialogType,
       pendingDialogBody,
+      pendingDialogExtra,
       item.confirm,
       item.done,
     ],

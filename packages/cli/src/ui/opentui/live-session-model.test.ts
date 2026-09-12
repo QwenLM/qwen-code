@@ -149,7 +149,11 @@ describe('foldLiveEvent confirm (pending card dialog measure)', () => {
       tool: 'run_shell_command',
       title: 'Run?',
       confirmType: 'exec',
-      confirmBody: 'echo hi',
+      confirmBody: 'echo $(date)',
+      confirmExtra: '⚠ Command substitution detected',
+    });
+    expect(parked[0]).toMatchObject({
+      confirmExtra: '⚠ Command substitution detected',
     });
     const items = foldLiveEvent(parked, {
       type: 'confirm',
@@ -163,6 +167,7 @@ describe('foldLiveEvent confirm (pending card dialog measure)', () => {
       confirm: 'pending',
       confirmType: 'info',
       confirmBody: 'hook said no',
+      confirmExtra: undefined,
     });
   });
 });

@@ -168,6 +168,89 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         confirmBody: 'echo hi\necho bye',
       },
     ]);
+    // An info dialog renders a `URLs to fetch:` block OUTSIDE the prompt's
+    // window (one margin row, one header row, one row per URL — web_fetch
+    // always produces this shape), so the block travels as its own field:
+    // the dialog's TextBody windows only the prompt, and the block's rows
+    // must charge in addition to the body, not inside the same string.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c5', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt:
+              'Fetch content from https://example.com/docs and process with: summarize',
+            urls: ['https://example.com/docs'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c5',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody:
+          'Fetch content from https://example.com/docs and process with: summarize',
+        confirmExtra: '\nURLs to fetch:\n - https://example.com/docs',
+      },
+    ]);
+    // The dialog's displayUrls predicate: a single URL identical to the
+    // prompt would be listed twice, so no block renders and none is priced.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c6', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt: 'https://example.com',
+            urls: ['https://example.com'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c6',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody: 'https://example.com',
+        confirmExtra: undefined,
+      },
+    ]);
+    // An exec dialog renders one row per warning below the command —
+    // outside any body window — so the rows join the priced body.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c7', name: 'run_shell_command' },
+          details: {
+            title: 'Confirm Shell Command',
+            type: 'exec',
+            command: 'echo $(date)',
+            warnings: ['Command substitution detected'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c7',
+        tool: 'run_shell_command',
+        title: 'Confirm Shell Command',
+        confirmType: 'exec',
+        confirmBody: 'echo $(date)',
+        confirmExtra: '⚠ Command substitution detected',
+      },
+    ]);
   });
 
   it('carries FileDiff resultDisplay as a structured diff payload', () => {

@@ -36,6 +36,9 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
   /** The dialog's body text for the plain-text-body confirmations
    * (info's prompt, plan's plan, exec's command). */
   confirmBody?: string;
+  /** Rows the dialog renders outside the body window (info's urls block,
+   * exec's warnings) — charged in addition to the windowed body. */
+  confirmExtra?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -364,6 +367,7 @@ export function foldLiveEvent(
           confirm: 'pending',
           confirmType: ev.confirmType,
           confirmBody: ev.confirmBody,
+          confirmExtra: ev.confirmExtra,
         };
         return items;
       }
@@ -379,6 +383,7 @@ export function foldLiveEvent(
         confirm: 'pending',
         confirmType: ev.confirmType,
         confirmBody: ev.confirmBody,
+        confirmExtra: ev.confirmExtra,
       });
       return items;
     }
