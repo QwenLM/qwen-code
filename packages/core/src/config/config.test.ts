@@ -13678,10 +13678,10 @@ describe('Model Switching and Config Updates', () => {
   });
 
   it('carries enableRequestMetadata across a qwen-oauth hot model switch', async () => {
-    // The DashScope metadata gate reads enableRequestMetadata off
-    // getContentGeneratorConfig(). A hot switch rebuilds that object field by
-    // field, so a per-model override that is not copied would leave the gate
-    // reading the previous model's value.
+    // The DashScope provider reads enableRequestMetadata off its own
+    // contentGeneratorConfig, which on the main route is this same object. A
+    // hot switch rebuilds it field by field, so a per-model override that is
+    // not copied would leave the gate reading the previous model's value.
     const config = new Config(baseParams);
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
