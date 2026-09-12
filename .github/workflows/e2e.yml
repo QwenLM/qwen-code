@@ -210,8 +210,75 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # One attempt, no same-host retry: a job's runner is fixed at
+      # pickup, so when the failure is a host whose egress to github.com
+      # is dead (runs 34088422718, 34098892239 — one host each while
+      # peer hosts checked out fine, both recovered only by re-dispatch
+      # to another host) an in-job retry pays three more ~135s connect
+      # timeouts against the same dead host and still fails, ~16 of the
+      # job's 60 minutes into the reserve the shard-retry gate draws on
+      # (.github/scripts/run-e2e-tests.sh). Failing fast at ~8 minutes
+      # leaves that reserve intact.
       - name: 'Checkout'
+        id: 'checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      # What a retry could have healed, this step heals for the NEXT job
+      # on this runner instead: a corrupt object in the reused
+      # workspace's .git (run 33851931669, #11016) fails every later
+      # checkout that lands here until the workspace is wiped. The job
+      # is already failing when this runs, so the wipe never delays a
+      # green run, and the outcome clause keeps it from running after a
+      # TEST failure, where the workspace is not the suspect. The wipe
+      # follows the guarded pool idiom of qwen-code-pr-review.yml and
+      # serve-ab.yml: validate the path before any rm (a symlinked
+      # component would redirect the delete outside the runner
+      # workspace), keep the directory node, and announce the heal and
+      # any survivors, or a sick host heals silently for weeks.
+      - name: 'Reset workspace after failed checkout'
+        if: "${{ runner.environment == 'self-hosted' && failure() && steps.checkout.outcome == 'failure' }}"
+        run: |-
+          set -uo pipefail
+          echo "::warning::checkout failed on ${RUNNER_NAME:-this runner}; wiping the workspace so the next job on this runner starts clean (#11016)"
+          WS="${GITHUB_WORKSPACE:?}"
+          RWS="${RUNNER_WORKSPACE:?}"
+          # Heal a leaf a previous job replaced with a symlink (or any
+          # non-directory) — a refusal removes nothing and wedges every
+          # later job on this runner (#9480). Judge the PARENT,
+          # canonicalized: resolving $WS would follow the very link.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")")"
+            case "$HEAL_PARENT" in
+              "$RWS"|"$RWS"/*) ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: $WS"; exit 1 ;;
+            esac
+            if [ -L "$WS" ]; then
+              heal_target="$(readlink -- "$WS" || printf '%s' '<unreadable>')"
+              heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+              echo "::warning::healing workspace $WS: it was a symlink"
+              printf 'heal: %s pointed at %s\n' "$WS" "$heal_target"
+            else
+              echo "::warning::healing workspace $WS: it was not a directory"
+            fi
+            rm -f -- "$WS" || exit 1
+            mkdir -- "$WS" || exit 1
+          fi
+          if [ "$(realpath -- "$WS")" != "$WS" ]; then
+            echo "::error::refusing to wipe: workspace resolves through a symlinked component: $WS"
+            exit 1
+          fi
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: $WS"; exit 1 ;;
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;
+          esac
+          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null ||
+            sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + ||
+            echo "::warning::could not clear the workspace; the next job on this runner inherits the leftovers"
+          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\r\n' ' ' | cut -c1-500)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::workspace wipe left survivors: ${survivors}; the next job inherits them"
+          fi
 
       # Hosted-only, mirroring ci.yml: on the pool, nodejs.org may be
       # unreachable through the egress proxy, and the action's post step
