@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
@@ -142,7 +142,7 @@ describe('ChatRecordingService', () => {
       parts.pop();
       return parts.join('/');
     });
-    vi.mocked(execSync).mockReturnValue('main\n');
+    vi.mocked(execFileSync).mockReturnValue('main\n');
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
@@ -1521,6 +1521,24 @@ describe('ChatRecordingService', () => {
           resultCode: 'RESULT_TEXT_TRUNCATED',
         }),
       ).toBe(false);
+    });
+
+    it.each([
+      [undefined, true],
+      [1_500, true],
+      [NaN, false],
+      [Infinity, false],
+      ['1500', false],
+    ])('validates cancellation timestamp %s', (cancelledAt, valid) => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1_000,
+          cancelledAt,
+          endedAt: 2_000,
+        }),
+      ).toBe(valid);
     });
 
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
@@ -3162,7 +3180,7 @@ describe('ChatRecordingService', () => {
     });
 
     it('refreshes the cached git branch at the attribution turn boundary', async () => {
-      vi.mocked(execSync)
+      vi.mocked(execFileSync)
         .mockReturnValueOnce('main\n')
         .mockReturnValueOnce('feature\n');
 

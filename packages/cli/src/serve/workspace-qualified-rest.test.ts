@@ -1717,6 +1717,22 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('refuses to delete a builtin agent from the selected workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const response = await request(h.app)
+        .delete(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/agents/general-purpose`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('agent_readonly');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes project agents to the selected workspace', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {

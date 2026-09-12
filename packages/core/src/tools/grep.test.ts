@@ -915,7 +915,15 @@ describe('GrepTool', () => {
         .execute(abortSignal);
 
       for (const args of argsFor('git')) {
-        expect(args[0]).toBe('grep');
+        // Git only reads `-c` before the subcommand, so the guard has to stay
+        // ahead of it.
+        expect(args.slice(0, 5)).toEqual([
+          '-c',
+          'core.fsmonitor=',
+          '-c',
+          'log.showSignature=false',
+          'grep',
+        ]);
         expect(args).toEqual(
           expect.arrayContaining(['--untracked', '-z', '-E']),
         );

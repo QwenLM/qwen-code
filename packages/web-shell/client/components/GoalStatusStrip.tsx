@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
+import {
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  type GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { formatRuntime } from '../utils/formatRuntime';
@@ -67,6 +70,16 @@ export function GoalStatusStrip({
   const canPause = goal.status === 'active';
   const canResume = canResumeGoal(goal);
   const tokenLabel = getGoalTokenLabel(goal, t);
+  // A stall streak shows here whatever the status, where a daemon-session user
+  // is already looking -- including on a Goal the breaker stopped, which the
+  // terminal footer pill labels by its status instead. The failure text itself
+  // is left to the Goals dialog, which has room for it.
+  const checkpointStalls = goal.checkpointStalls ?? 0;
+  // Kept as the tooltip too: on a narrow pane the label is ellipsized.
+  const checkpointLabel = t('goal.checkpointStalled', {
+    count: checkpointStalls,
+    limit: GOAL_CHECKPOINT_STALL_LIMIT,
+  });
 
   return (
     <div
@@ -96,6 +109,20 @@ export function GoalStatusStrip({
             </span>
             <span className={styles.elapsed} data-testid="goal-active-tokens">
               {tokenLabel}
+            </span>
+          </>
+        ) : null}
+        {checkpointStalls > 0 ? (
+          <>
+            <span className={styles.separator} aria-hidden="true">
+              ·
+            </span>
+            <span
+              className={styles.checkpoint}
+              title={checkpointLabel}
+              data-testid="goal-checkpoint-stalls"
+            >
+              {checkpointLabel}
             </span>
           </>
         ) : null}
