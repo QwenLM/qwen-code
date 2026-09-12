@@ -469,6 +469,8 @@ const ARGS_MAX_DEPTH = 64;
  */
 export interface WorkflowAgentOpts {
   label?: string;
+  stepId?: string;
+  extensions?: string[];
   phase?: string;
   schema?: object;
   model?: string;
@@ -552,6 +554,7 @@ export interface WorkflowOrchestratorEmitter {
   /** A dispatch was issued and joined to the runtime dependency graph. */
   dispatchQueued?(event: {
     id: string;
+    stepId?: string;
     label?: string;
     prompt: string;
     dependsOn: string[];
@@ -978,12 +981,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   // delete it as the first init action, and have the init script build vm-realm
   // wrappers that internally call the bridge but only return / throw vm-realm
   // values.
+  const hostJSONParse = JSON.parse;
   const bridge = {
     argsJson,
     pushPhase: safePhase,
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
-    hostAgent: opts.dispatch,
+    hostAgent: (prompt: string, agentOptsJson: string) =>
+      opts.dispatch(prompt, hostJSONParse(agentOptsJson) as WorkflowAgentOpts),
     // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
     // catch path. Mirrors the rejection-logging in settleToNullArray so an
     // operator running with debug logging can distinguish "thunk rejected"
@@ -1091,6 +1096,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     `(() => {
       const __b = globalThis.__workflowBridge;
       delete globalThis.__workflowBridge;
+      const safeJSONParse = JSON.parse;
+      const safeJSONStringify = JSON.stringify;
 
       // --- Math (vm-realm, random throws) ---
       const realMath = Math;
@@ -1126,7 +1133,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // so for...of, .map, .forEach, spread, destructuring all work — and
       // their inherited methods' constructors are vm-realm Function, which
       // cannot reach host process.
-      globalThis.args = __b.argsJson === null ? undefined : JSON.parse(__b.argsJson);
+      globalThis.args = __b.argsJson === null ? undefined : safeJSONParse(__b.argsJson);
 
       // --- Wrap a host async function so it returns a vm-realm Promise ---
       // FIX-Round1-T1/T8/T14: success and failure both cross the boundary
@@ -1484,7 +1491,64 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      const KNOWN_AGENT_OPTS = ['label', 'stepId', 'extensions', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      // 在 workflow 脚本修改自身 realm 前固定这些原生方法。下方校验不再
+      // 调用调用方数组或可变 String.prototype 上的方法。
+      const safeArrayIsArray = Array.isArray;
+      const safeStringTrim = Function.prototype.call.bind(String.prototype.trim);
+      const safeStringToLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
+      const safeStringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+      // Keep aligned with isWorkflowReferenceString. This VM bootstrap cannot
+      // import host modules, so the code-point ranges must be mirrored here.
+      const isUnsafeWorkflowReferenceCharacter = function (char) {
+        const code = safeStringCharCodeAt(char, 0);
+        return code < 32 ||
+          (code >= 127 && code <= 159) ||
+          code === 0x061c || code === 0x200e || code === 0x200f ||
+          (code >= 0x202a && code <= 0x202e) ||
+          (code >= 0x2066 && code <= 0x2069);
+      };
+      const validateAgentStepId = function (stepId) {
+        if (stepId === undefined) return;
+        if (
+          typeof stepId !== 'string' ||
+          stepId.length === 0 ||
+          stepId.length > 256 ||
+          safeStringTrim(stepId) !== stepId
+        ) {
+          throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
+        }
+        for (let i = 0; i < stepId.length; i++) {
+          if (isUnsafeWorkflowReferenceCharacter(stepId[i])) {
+            throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
+          }
+        }
+      };
+      const validateAgentExtensions = function (extensions) {
+        if (extensions === undefined) return;
+        if (!safeArrayIsArray(extensions) || extensions.length === 0 || extensions.length > 16) {
+          throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+        }
+        const normalizedNames = [];
+        for (let i = 0; i < extensions.length; i++) {
+          const name = extensions[i];
+          if (typeof name !== 'string' || name.length === 0 || name.length > 128 || safeStringTrim(name) !== name) {
+            throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+          }
+          for (let j = 0; j < name.length; j++) {
+            if (isUnsafeWorkflowReferenceCharacter(name[j])) {
+              throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+            }
+          }
+          const normalizedName = safeStringToLowerCase(name);
+          for (let j = 0; j < normalizedNames.length; j++) {
+            if (normalizedNames[j] === normalizedName) {
+              throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+            }
+          }
+          normalizedNames[i] = normalizedName;
+        }
+      };
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1497,6 +1561,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
+        validateAgentStepId(agentOpts.stepId);
+        validateAgentExtensions(agentOpts.extensions);
         // P3: schema + model + agentType + isolation are all wired through
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
@@ -1547,24 +1613,23 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             __b.pushPhase(agentOpts.phase);
           }
         }
-        // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
-        // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
-        // A Proxy / inherited-getter / non-plain object in agentOpts.schema
-        // would let host-side code (SyntheticOutputTool constructor + AJV
-        // compile) trigger user-controlled trap handlers that execute with
-        // the host realm's full surface. Revive agentOpts through JSON
-        // round-trip BEFORE crossing so the host only ever sees vm-realm
-        // plain objects with vm-realm prototypes. Same mechanism that
-        // makes args + parallel/pipeline results safe.
+        // agentOpts 完全由脚本控制。先用初始化阶段固定的 JSON 原生方法生成
+        // 快照并在 VM 内校验，再只把 JSON 字符串跨边界传给宿主；宿主解析后
+        // 得到自己的普通对象，后续哈希、追踪和 dispatch 都不会触发脚本 realm
+        // 中可变的原型方法、Proxy 或 getter。
         var safeOpts;
+        var safeOptsJson;
         try {
-          safeOpts = JSON.parse(JSON.stringify(agentOpts));
+          safeOptsJson = safeJSONStringify(agentOpts);
+          safeOpts = safeJSONParse(safeOptsJson);
         } catch (e) {
           throw new Error(
             "agent() opts contain a non-JSON-serializable value: " +
             String(e && e.message != null ? e.message : e)
           );
         }
+        validateAgentStepId(safeOpts.stepId);
+        validateAgentExtensions(safeOpts.extensions);
         // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
         // path is verbatim (no re-wrap of resolved values). Host-realm
         // strings cross the boundary harmlessly because primitives have no
@@ -1593,12 +1658,12 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // value isn't a tool_call payload. logRevivalFailure surfaces
         // the actionable detail (slot 0 + the error string) to operators
         // so a real trigger in production isn't silent.
-        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+        return __b.hostAgent(prompt, safeOptsJson).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
           }
           try {
-            return JSON.parse(JSON.stringify(value));
+            return safeJSONParse(safeJSONStringify(value));
           } catch (e) {
             __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
             return null;
@@ -1636,7 +1701,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         const out = [];
         for (let i = 0; i < hostArr.length; i++) {
           try {
-            out[i] = JSON.parse(JSON.stringify(hostArr[i]));
+            out[i] = safeJSONParse(safeJSONStringify(hostArr[i]));
           } catch (e) {
             // Cross to host realm for debug logging. The bridge function
             // accepts only primitive strings/numbers; the error message is
@@ -1705,10 +1770,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           try {
             safeRef = nameOrRef === undefined
               ? undefined
-              : JSON.parse(JSON.stringify(nameOrRef));
+              : safeJSONParse(safeJSONStringify(nameOrRef));
             safeArgs = wfArgs === undefined
               ? undefined
-              : JSON.parse(JSON.stringify(wfArgs));
+              : safeJSONParse(safeJSONStringify(wfArgs));
           } catch (e) {
             throw new Error(
               'workflow() received a non-JSON-serializable argument: ' +
@@ -1720,7 +1785,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               return value;
             }
             try {
-              return JSON.parse(JSON.stringify(value));
+              return safeJSONParse(safeJSONStringify(value));
             } catch (e) {
               __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
               return null;

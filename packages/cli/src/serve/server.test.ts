@@ -11080,6 +11080,11 @@ describe('createServeApp', () => {
           ],
           availableSkills: [],
           workflowsEnabled: true,
+          workflowToolFeatures: {
+            sourceRef: true,
+            agentStepId: true,
+            agentExtensions: true,
+          },
           savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
         }),
         cancelSessionTaskImpl: async () => ({ cancelled: true }),
@@ -11129,6 +11134,11 @@ describe('createServeApp', () => {
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toMatchObject({
         workflowsEnabled: false,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          agentExtensions: true,
+        },
         savedWorkflows: [],
       });
       expect(commandsRes.body.availableCommands).toEqual([

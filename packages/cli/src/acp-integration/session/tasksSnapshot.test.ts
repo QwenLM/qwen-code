@@ -549,6 +549,40 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves definition provenance and node identity in historical tasks', () => {
+    const sourceRef = { id: 'flow-1', revision: 'r1', title: 'Table check' };
+    const stored = workflowSnapshot({
+      sourceRef,
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          stepId: 'inspect',
+          phaseVisitId: null,
+          label: 'Inspect',
+          prompt: 'Inspect the table',
+          status: 'completed',
+          dependsOn: [],
+          queuedAt: 1,
+        },
+      ],
+    });
+    const status = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [stored],
+      { includeWorkflows: true },
+    );
+    expect(status.tasks).toMatchObject([
+      {
+        kind: 'workflow',
+        isHistorical: true,
+        sourceRef,
+        dispatches: [{ id: 'dispatch-1', stepId: 'inspect' }],
+      },
+    ]);
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',
@@ -566,6 +600,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       id: 'wf_graph',
       runId: 'wf_graph',
       toolUseId: 'workflow-call-1',
+      sourceRef: { id: 'flow-1', revision: 'r1' },
       description: 'wf_graph',
       meta: null,
       status: 'running',
@@ -587,6 +622,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       dispatches: [
         {
           id: 'dispatch-1',
+          stepId: 'inspect',
           phaseVisitId: 'phase-1',
           label: 'Scope mapper',
           prompt: 'Inspect the repository',
@@ -666,6 +702,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       toolUseId: 'workflow-call-1',
+      sourceRef: { id: 'flow-1', revision: 'r1' },
       workflowName: 'review-and-fix',
       label: 'review-and-fix',
       currentPhase: 'Review',
@@ -681,7 +718,12 @@ describe('buildSessionTasksStatus workflow graph', () => {
         { id: 'phase-2', title: 'Review' },
       ],
       dispatches: [
-        { id: 'dispatch-1', status: 'completed', dependsOn: [] },
+        {
+          id: 'dispatch-1',
+          stepId: 'inspect',
+          status: 'completed',
+          dependsOn: [],
+        },
         {
           id: 'dispatch-2',
           status: 'running',

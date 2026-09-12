@@ -20,7 +20,10 @@ import {
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  listWorkflowSnapshots,
+  writeWorkflowSnapshot,
+} from '../workflow-snapshot.js';
 import {
   createProductionDispatch,
   resolveConcurrencyLimit,
@@ -47,11 +50,17 @@ import {
   type ReviewWorkflowLimits,
 } from './review-workflow.js';
 
+import {
+  normalizeWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-source-ref.js';
+
 export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
   toolUseId?: string;
   workflowName?: string;
+  sourceRef?: WorkflowSourceRef;
   script?: string;
   scriptPath?: string;
   args: unknown;
@@ -83,6 +92,7 @@ export class WorkflowRunHandle {
   readonly scriptPath: string | undefined;
   /** This run's resume journal, when the config has a `storage` to hold one. */
   readonly journalPath: string | undefined;
+  readonly sourceRef: WorkflowSourceRef | undefined;
 
   constructor(
     readonly runId: string,
@@ -91,10 +101,17 @@ export class WorkflowRunHandle {
     private readonly controller: AbortController,
     private readonly scheduler: WorkflowDispatchScheduler,
     start: () => Promise<WorkflowRunSettlement>,
-    locations: { scriptPath?: string; journalPath?: string } = {},
+    locations: {
+      scriptPath?: string;
+      journalPath?: string;
+      sourceRef?: WorkflowSourceRef;
+    } = {},
   ) {
     this.scriptPath = locations.scriptPath;
     this.journalPath = locations.journalPath;
+    this.sourceRef = locations.sourceRef
+      ? { ...locations.sourceRef }
+      : undefined;
     this.completion = Promise.resolve().then(start);
   }
 
@@ -176,6 +193,8 @@ export class WorkflowRunner {
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
+    let previousEntry: WorkflowTask | undefined;
+    let sourceRef: WorkflowSourceRef | undefined;
     let entry: WorkflowTask | undefined;
     const isCurrentEntry = (): boolean =>
       registry === undefined ||
@@ -200,7 +219,6 @@ export class WorkflowRunner {
       }
     };
     const storage = config.storage;
-    const previousEntry = registry?.get(runId);
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
       : undefined;
@@ -215,6 +233,22 @@ export class WorkflowRunner {
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
     try {
+      previousEntry = registry?.get(runId);
+      const previousSnapshot =
+        options.resumeFromRunId &&
+        options.sourceRef === undefined &&
+        previousEntry === undefined
+          ? (await listWorkflowSnapshots(config)).find(
+              (snapshot) => snapshot.runId === runId,
+            )
+          : undefined;
+      const source =
+        options.sourceRef === undefined
+          ? (previousEntry?.sourceRef ?? previousSnapshot?.sourceRef)
+          : options.sourceRef;
+      sourceRef =
+        source === undefined ? undefined : normalizeWorkflowSourceRef(source);
+      assertStartNotCancelled();
       const loaded =
         options.scriptPath && options.script === undefined
           ? await resolveSavedWorkflowScript(
@@ -303,6 +337,7 @@ export class WorkflowRunner {
           runId,
           toolUseId: options.toolUseId,
           ...(workflowName ? { workflowName } : {}),
+          ...(sourceRef ? { sourceRef } : {}),
           meta: null,
           status: 'running',
           startTime: Date.now(),
@@ -553,6 +588,7 @@ export class WorkflowRunner {
       },
       {
         ...(scriptPath ? { scriptPath } : {}),
+        ...(sourceRef ? { sourceRef } : {}),
         ...(journalPath ? { journalPath } : {}),
       },
     );

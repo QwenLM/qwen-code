@@ -221,6 +221,89 @@ await client.updateWorkspace(workspace.id, { displayName: null });
 
 ## Workflow
 
+### Native Dynamic Workflow metadata
+
+Use the current agent's native `workflow` tool to execute a generated task flow.
+The normal tool scheduler applies its hooks, permission decision, cancellation,
+and child-tool approvals. Omit `run_in_background` for the default foreground
+execution. Metadata does not change the existing ACP background restrictions.
+
+Before preparing a flow, inspect the read-only capability snapshot:
+
+```typescript
+const commands = await client.sessionSupportedCommands(sessionId);
+// Implementation support is independent of this session's availability.
+const features = commands.workflowToolFeatures;
+if (
+  !commands.workflowsEnabled ||
+  !features?.sourceRef ||
+  !features.agentStepId
+) {
+  throw new Error(
+    'This session cannot run task flows with source and node metadata',
+  );
+}
+// A flow using expert extensions also requires features.agentExtensions.
+```
+
+An older daemon may omit `workflowToolFeatures`; clients must not infer support
+from its version or from `workflowsEnabled`. A supporting daemon reports
+`sourceRef`, `agentStepId`, and `agentExtensions` as `true` even when Workflow is
+disabled or the workspace is untrusted. Availability and approval still apply.
+
+After the application freezes a generated script under
+`$QWEN_CODE_PROJECT_DIR/workflows/generated`, the agent submits native tool
+arguments such as:
+
+```json
+{
+  "scriptPath": "/runtime/project/workflows/generated/task-flow/session-hash/script-hash.js",
+  "sourceRef": {
+    "id": "table-check",
+    "revision": "7",
+    "digest": "sha256:definition-digest",
+    "title": "Check tables"
+  }
+}
+```
+
+`sourceRef` is optional provenance. Its `id` and `revision` are required when
+present; `digest` and `title` are optional. It is retained in the run, tool result,
+snapshot, and resume/retry path. It is neither a permission grant nor a runtime
+verification of the script digest.
+
+The script may associate an agent call with a definition node and load an expert:
+
+```javascript
+return await agent('Inspect the selected table', {
+  stepId: 'inspect-table',
+  extensions: ['data-expert'],
+});
+```
+
+`stepId` identifies a definition node; multiple calls can share it, while each
+runtime dispatch keeps its own unique `id`. `extensions` selects active extension
+capabilities and context for that agent. Unknown or inactive extensions and
+unreadable, out-of-directory, over-limit context files, or selections that exceed
+the shared context budget make the admitted `agent()` resolve to `null` and record
+the reason in the run's failures list. Files already absent when the extension is
+loaded are omitted by the loader. Context is structurally quoted as untrusted text
+before injection, and an `@ext:<name>` mention in the prompt does not select an
+extension. Extension context does not grant tool permissions. Both options
+participate in journal matching, so a changed node or expert invalidates reuse from
+that call. Legacy scripts that omit these options retain their existing behavior.
+
+For observation, `sessionWorkflowTasks(sessionId)` exposes
+optional workflow `sourceRef` and `dispatches[].stepId`. Correlate a native tool
+call with the task's `toolUseId`; the task's `id` is the run ID. Foreground results
+arrive through the native tool result, including its resume trailer; a top-level
+`workflowRunId` is only provided for the existing background handle response.
+
+Preparing or saving a script does not execute it. Repeating a native tool call
+can execute it again; when its outcome is uncertain, inspect the existing call
+and tasks before deciding to retry. There is no additional startup or idempotency
+protocol for this integration.
+
 ### Create-or-attach + first prompt
 
 ```mermaid

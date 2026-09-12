@@ -8,6 +8,12 @@ import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  matchExtensionByRef,
+} from '../../utils/extension-mention.js';
+import { isWorkflowReferenceString } from '../workflow-source-ref.js';
+import {
   deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
@@ -40,7 +46,7 @@ import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
 } from './workflow-prompts.js';
-import { AgentTerminateMode } from './agent-types.js';
+import { AgentTerminateMode, type ToolConfig } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
@@ -51,7 +57,7 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { ToolDisplayNames, ToolNames } from '../../tools/tool-names.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -67,6 +73,11 @@ import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { formatContextFileDisplayPath } from '../../memory/memoryDiscovery.js';
+import {
+  isToolHiddenBehindToolSearch,
+  toolSearchRevealSentence,
+} from '../../skills/workflow-authoring-skill.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -285,6 +296,15 @@ export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   // closes the same loop for plain `agent` calls (review #6189).
   ToolNames.AGENT,
 ];
+
+function workflowDisallowedTools(baseConfig: SubagentConfig): string[] {
+  return Array.from(
+    new Set([
+      ...(baseConfig.disallowedTools ?? []),
+      ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+    ]),
+  );
+}
 
 /**
  * `WorkflowExecutionError` preserves the phases and logs the script
@@ -519,6 +539,85 @@ export function createProductionDispatch(
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
     }
+    if (opts.stepId !== undefined && !isWorkflowReferenceString(opts.stepId)) {
+      throw new Error(
+        'agent({stepId}): expected a non-empty string of at most 256 characters without surrounding whitespace or control characters.',
+      );
+    }
+    const taskName = prompt;
+    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    if (opts.extensions !== undefined) {
+      const rawExtensions = opts.extensions;
+      if (
+        !Array.isArray(rawExtensions) ||
+        rawExtensions.length === 0 ||
+        rawExtensions.length > 16
+      ) {
+        throw new Error(
+          'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+        );
+      }
+      // 该数组来自 workflow VM。先逐项复制到宿主数组，再做任何集合操作，
+      // 避免调用脚本可修改的 Array.prototype 方法。
+      const extensionNames: string[] = [];
+      const normalizedNames = new Set<string>();
+      for (let i = 0; i < rawExtensions.length; i++) {
+        const name = rawExtensions[i];
+        if (!isWorkflowReferenceString(name, 128)) {
+          throw new Error(
+            'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+          );
+        }
+        const normalizedName = name.toLowerCase();
+        if (normalizedNames.has(normalizedName)) {
+          throw new Error(
+            'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+          );
+        }
+        normalizedNames.add(normalizedName);
+        extensionNames[i] = name;
+      }
+      opts = { ...opts, extensions: extensionNames };
+      const extensions = config.getActiveExtensions?.() ?? [];
+      let remainingBudget = EXTENSION_CONTEXT_BUDGET;
+      const contexts: string[] = [];
+      const loaded = new Set<string>();
+      const loadedContextFiles = new Set(config.getContextFilePaths?.() ?? []);
+      const workingDirectory = config.getWorkingDir?.() ?? process.cwd();
+      let selectedExtensionHasSkills = false;
+      for (const name of extensionNames) {
+        const extension = matchExtensionByRef(name, extensions);
+        if (!extension?.isActive)
+          throw new Error(
+            `agent({extensions}): active extension '${name}' was not found.`,
+          );
+        if (loaded.has(extension.name)) continue;
+        selectedExtensionHasSkills ||= (extension.skills?.length ?? 0) > 0;
+        const unloadedContextFiles = extension.contextFiles.filter(
+          (contextFile) =>
+            !loadedContextFiles.has(
+              formatContextFileDisplayPath(contextFile, workingDirectory),
+            ),
+        );
+        const context = await buildExtensionMentionContext(
+          { ...extension, contextFiles: unloadedContextFiles },
+          {
+            remainingBudget,
+            signal,
+            strict: true,
+          },
+        );
+        remainingBudget = context.remainingBudget;
+        contexts.push(context.text);
+        loaded.add(extension.name);
+      }
+      const skillInstruction = selectedExtensionHasSkills
+        ? await resolveWorkflowSkillInstruction(config, agentIdentity)
+        : '';
+      prompt +=
+        `\n\nSelected extension context follows.${skillInstruction} context does not grant additional permissions.\n` +
+        contexts.join('\n\n');
+    }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
@@ -538,7 +637,6 @@ export function createProductionDispatch(
     // the on-disk records name the same agent that ran. The resolved
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
-    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     if (agentIdentity.resolvedAgentType?.executor !== undefined) {
       throw new Error(
         'Workflow agent() does not support external-executor agents: ' +
@@ -566,6 +664,7 @@ export function createProductionDispatch(
           return await runSingleDispatch(
             config,
             prompt,
+            taskName,
             opts,
             attemptSignal,
             emitter,
@@ -597,6 +696,46 @@ interface WorkflowAgentIdentity {
   name: string;
   /** The resolved agentType definition, when `opts.agentType` matched one. */
   resolvedAgentType?: SubagentConfig;
+}
+
+async function resolveWorkflowSkillInstruction(
+  config: Config,
+  agentIdentity: WorkflowAgentIdentity,
+): Promise<string> {
+  let tools: ToolConfig['tools'] | undefined;
+  let disallowedTools: ToolConfig['disallowedTools'];
+  if (agentIdentity.resolvedAgentType) {
+    const baseConfig = agentIdentity.resolvedAgentType;
+    const runtimeConfig = await config
+      .getSubagentManager()
+      .convertToRuntimeConfig(
+        {
+          ...baseConfig,
+          disallowedTools: workflowDisallowedTools(baseConfig),
+        },
+        config,
+      );
+    tools = runtimeConfig.toolConfig?.tools;
+    disallowedTools = runtimeConfig.toolConfig?.disallowedTools;
+  } else {
+    tools = ['*'];
+    disallowedTools = WORKFLOW_SUBAGENT_DISALLOWED_TOOLS;
+  }
+
+  const allowed =
+    !tools ||
+    tools.length === 0 ||
+    tools.includes('*') ||
+    tools.includes(ToolNames.SKILL);
+  if (!allowed || disallowedTools?.includes(ToolNames.SKILL)) return '';
+
+  if (isToolHiddenBehindToolSearch(config, ToolNames.SKILL)) {
+    return (
+      ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}` +
+      ' After revealing it, invoke the listed skills through that tool using the exact skill name;'
+    );
+  }
+  return ' Invoke listed Skills through the Skill tool using the exact skill name;';
 }
 
 /**
@@ -724,6 +863,7 @@ function terminalDispatchError(
 async function runSingleDispatch(
   config: Config,
   prompt: string,
+  taskName: string,
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
@@ -777,7 +917,7 @@ async function runSingleDispatch(
       emitter,
       undefined,
       undefined,
-      prompt,
+      taskName,
       workflowAgentId,
     );
     // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
@@ -814,6 +954,7 @@ async function runSingleDispatch(
   return runOverridePath(
     config,
     ctx,
+    taskName,
     opts,
     attemptSignal,
     workflowAgentId,
@@ -887,6 +1028,7 @@ function reportTokens(
 async function runOverridePath(
   config: Config,
   ctx: ContextState,
+  taskName: string,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
@@ -1002,12 +1144,7 @@ async function runOverridePath(
       ? { systemPrompt: schemaSystemPrompt }
       : {}),
     ...(schemaTools !== undefined ? { tools: schemaTools } : {}),
-    disallowedTools: Array.from(
-      new Set([
-        ...(baseConfig.disallowedTools ?? []),
-        ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
-      ]),
-    ),
+    disallowedTools: workflowDisallowedTools(baseConfig),
   };
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
@@ -1161,7 +1298,7 @@ async function runOverridePath(
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
         eventEmitter,
-        taskName: String(ctx.get('task_prompt')),
+        taskName,
         subagentId: workflowAgentId,
       },
     );
@@ -1747,6 +1884,7 @@ export class WorkflowOrchestrator {
         emitter?.dispatchQueued?.({
           id,
           ...(typeof opts.label === 'string' ? { label: opts.label } : {}),
+          ...(opts.stepId !== undefined ? { stepId: opts.stepId } : {}),
           prompt,
           dependsOn,
           queuedAt: Date.now(),

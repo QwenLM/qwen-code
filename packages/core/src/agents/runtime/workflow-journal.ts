@@ -98,11 +98,11 @@ export interface JournalReplay {
 }
 
 /**
- * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * Project the dispatch and replay-identity opts into a stable canonical
+ * string. Runtime choices plus `stepId` and ordered `extensions` determine
+ * whether a completed call may be reused; `label` / `phase` / `stallMs` are
+ * cosmetic or operational and must NOT bust the cache. Object keys are sorted
+ * recursively so a re-serialized schema with reordered keys hashes the same.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -117,6 +117,8 @@ export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
     'isolation',
     'agentType',
     'workingDir',
+    'stepId',
+    'extensions',
   ] as const) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
@@ -124,7 +126,11 @@ export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   }
   const sortDeep = (val: unknown): unknown => {
     if (typeof val === 'function') return undefined;
-    if (Array.isArray(val)) return val.map(sortDeep);
+    if (Array.isArray(val)) {
+      const out: unknown[] = [];
+      for (let i = 0; i < val.length; i++) out[i] = sortDeep(val[i]);
+      return out;
+    }
     if (val && typeof val === 'object') {
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(val as Record<string, unknown>).sort()) {

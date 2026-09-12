@@ -5,7 +5,10 @@
  */
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
-import type { HookEventName } from '@qwen-code/qwen-code-core';
+import type {
+  HookEventName,
+  WorkflowSourceRef,
+} from '@qwen-code/qwen-code-core';
 import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -694,6 +697,12 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  /** 原生工具参数的实现支持；会话当前是否可用由 workflowsEnabled 表示。 */
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    agentExtensions: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
@@ -865,6 +874,7 @@ export type ServeWorkflowDispatchStatus =
 
 export interface ServeWorkflowDispatchStatusEntry {
   id: string;
+  stepId?: string;
   phaseVisitId: string | null;
   label: string;
   prompt: string;
@@ -930,6 +940,7 @@ export type ServeWorkflowEvent =
 
 export interface ServeSessionWorkflowTaskStatus {
   kind: 'workflow';
+  sourceRef?: WorkflowSourceRef;
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;

@@ -12516,6 +12516,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
       workflowsEnabled: true,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        agentExtensions: true,
+      },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
@@ -15268,6 +15273,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               { name: 'init', description: 'Initialize', input: null },
             ],
         workflowsEnabled: false,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          agentExtensions: true,
+        },
         savedWorkflows: [],
       });
       await expect(
@@ -15548,6 +15558,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       script: 'return await agent(args.prompt)',
       scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       args: { prompt: 'retry this path' },
+      sourceRef: { id: 'flow-1', revision: '7' },
     };
     const registry = {
       get: vi.fn(() => task),
@@ -15593,6 +15604,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         script: task.script,
         args: task.args,
+        sourceRef: task.sourceRef,
         resumeFromRunId: task.runId,
       },
       undefined,
@@ -15853,6 +15865,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       script: 'return await agent(args.prompt)',
       scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       args: { prompt: 'rerun everything' },
+      sourceRef: { id: 'flow-1', revision: '7' },
     };
     const rerun = {
       ...task,
@@ -15925,6 +15938,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         scriptPath: task.scriptPath,
         args: task.args,
+        sourceRef: task.sourceRef,
       },
       task.workflowName,
     );

@@ -612,6 +612,7 @@ export type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowSourceRef,
   DaemonWorkflowApprovalStatusEntry,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,

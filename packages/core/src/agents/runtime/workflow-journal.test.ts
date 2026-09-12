@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -56,6 +56,60 @@ describe('canonicalizeAgentOpts', () => {
         workingDir: '.qwen/tmp/review-pr-1',
       }),
     );
+  });
+
+  it('separates business steps while preserving label changes and legacy keys', () => {
+    const prompt = 'check the selected table';
+    const first = deriveAgentKey('', prompt, {
+      stepId: 'validate',
+      label: 'Check',
+    });
+    expect(first).not.toBe(
+      deriveAgentKey('', prompt, { stepId: 'publish', label: 'Check' }),
+    );
+    expect(first).toBe(
+      deriveAgentKey('', prompt, { stepId: 'validate', label: 'Verify' }),
+    );
+    expect(canonicalizeAgentOpts({ stepId: undefined })).toBe('{}');
+    expect(deriveAgentKey('', prompt, {})).toBe(
+      deriveAgentKey('', prompt, { stepId: undefined }),
+    );
+    expect(deriveAgentKey(first, prompt, { stepId: 'validate' })).not.toBe(
+      first,
+    );
+  });
+
+  it('includes selected extensions in resume identity and leaves legacy keys unchanged', () => {
+    const first = deriveAgentKey('', 'check', { extensions: ['tables'] });
+    expect(first).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files'] }),
+    );
+    expect(first).toBe(deriveAgentKey('', 'check', { extensions: ['tables'] }));
+    expect(first).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files', 'tables'] }),
+    );
+    expect(
+      deriveAgentKey('', 'check', { extensions: ['tables', 'files'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files', 'tables'] }),
+    );
+    expect(deriveAgentKey('', 'check', {})).toBe(
+      deriveAgentKey('', 'check', { extensions: undefined }),
+    );
+  });
+
+  it('canonicalizes arrays without invoking caller-owned map methods', () => {
+    const extensions = ['a', 'b'];
+    const map = vi.fn(() => ['tampered']);
+    Object.defineProperty(extensions, 'map', {
+      configurable: true,
+      value: map,
+    });
+
+    expect(canonicalizeAgentOpts({ extensions })).toBe(
+      '{"extensions":["a","b"]}',
+    );
+    expect(map).not.toHaveBeenCalled();
   });
 
   it('sorts object keys deeply so reordered schemas hash the same', () => {

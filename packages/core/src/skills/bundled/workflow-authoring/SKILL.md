@@ -83,11 +83,23 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
+`agent(prompt, { label?, stepId?, extensions?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
 
 - `label` (string) — the name shown in the run views and the failures list.
   Make it unique per dispatch: a failure line carries only the label and the
   error, so two failed dispatches that share a label cannot be told apart.
+- `stepId` (string, at most 256 characters) — associates the dispatch with an
+  external definition step. Multiple dispatches may share one step id;
+  changing it invalidates resume reuse from that call onward.
+- `extensions` (array of 1 to 16 unique names) — loads each selected active
+  extension's capabilities and retained context before the subagent starts.
+  An `@ext:<name>` mention in the prompt text loads nothing here; select
+  extensions with this option. Loaded context is quoted as untrusted text.
+  An unknown or inactive extension, or required context that is unreadable,
+  outside the extension directory, oversized, or over the shared context
+  budget, makes the admitted `agent()` resolve to `null` and records the reason
+  in the run's failures list; check for `null`. An invalid `extensions` value
+  rejects the call. Extension context does not grant permissions.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with

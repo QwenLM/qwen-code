@@ -18,8 +18,8 @@ describe('buildExtensionContextText', () => {
 
     const skillsLine = buildExtensionContextText(extension)
       .split('\n')
-      .find((line) => line.startsWith('- Skills:'));
+      .find((line) => line.startsWith('> - Skills:'));
 
-    expect(skillsLine).toBe('- Skills: rust:pdf (invoke via /<skill-name>)');
+    expect(skillsLine).toBe('> - Skills: rust:pdf (invoke via /<skill-name>)');
   });
 });

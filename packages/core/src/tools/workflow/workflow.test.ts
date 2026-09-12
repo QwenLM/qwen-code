@@ -26,6 +26,7 @@ import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budge
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
+import { WORKFLOW_SOURCE_REF_LIMITS } from '../../agents/workflow-source-ref.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
 
 /**
@@ -91,11 +92,23 @@ describe('WorkflowTool', () => {
     const schema = tool.schema.parametersJsonSchema as {
       properties: {
         run_in_background: { default?: boolean; description?: string };
+        sourceRef: {
+          description?: string;
+          properties: Record<string, { maxLength?: number }>;
+        };
       };
     };
     expect(schema.properties.run_in_background.default).toBe(false);
     expect(schema.properties.run_in_background.description).toContain(
       'cooperatively pause/resume',
+    );
+    for (const [field, limit] of Object.entries(WORKFLOW_SOURCE_REF_LIMITS)) {
+      expect(schema.properties.sourceRef.properties[field]?.maxLength).toBe(
+        limit,
+      );
+    }
+    expect(schema.properties.sourceRef.description).toContain(
+      'no surrounding whitespace',
     );
   });
 
@@ -815,6 +828,7 @@ await agent('scan package.json')
     expect(() =>
       new WorkflowTool(acpConfig).build({
         script: 'return 1',
+        sourceRef: { id: 'flow-1', revision: 'r1' },
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
@@ -1134,6 +1148,39 @@ await agent('scan package.json')
     await expect(run(false)).resolves.toEqual(await run(undefined));
   });
 
+  it('returns external definition provenance without changing workflow permission', async () => {
+    const { config, registry } = configWithRegistry();
+    const sourceRef = { id: 'flow-1', revision: '7', title: 'Check tables' };
+    const invocation = new WorkflowTool(config, {
+      dispatch: async () => 'ok',
+    }).build({
+      script: 'return 1;',
+      sourceRef,
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).resolves.toMatchObject({
+      type: 'info',
+      hideAlwaysAllow: true,
+      permissionRules: [],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.sourceRef).toEqual(sourceRef);
+    expect(registry.list()[0].sourceRef).toEqual(sourceRef);
+  });
+
+  it.each([
+    { id: 'flow', revision: ' ' },
+    { id: 'flow', revision: '7', permissions: ['*'] },
+  ])('rejects invalid sourceRef before launch %j', (sourceRef) => {
+    const { config, registry } = configWithRegistry();
+    expect(() =>
+      new WorkflowTool(config).build({ script: 'return 1;', sourceRef }),
+    ).toThrow(/sourceRef/);
+    expect(registry.list()).toHaveLength(0);
+  });
+
   // A headless run (`qwen --prompt`, CI, a cron job) has no TUI, no approval
   // bridge, and a closed stdin. `getDefaultPermission()` is 'ask', which the
   // scheduler resolves against the run's approval mode — but nothing INSIDE
@@ -1158,6 +1205,76 @@ await agent('scan package.json')
 
     expect(result.error).toBeUndefined();
     expect(JSON.stringify(result.llmContent)).toContain('answered:what is it');
+  });
+
+  it('runs a generated task flow in the foreground with native call and node identity', async () => {
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-native-'));
+    try {
+      const registry = new WorkflowRunRegistry();
+      const storage = new Storage(path.join(runtimeDir, 'project'), runtimeDir);
+      const config = {
+        storage,
+        isInteractive: () => false,
+        getExperimentalZedIntegration: () => true,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        'task-flow',
+        'session-hash',
+        'script-hash.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(
+        scriptPath,
+        'return await agent("inspect", { stepId: "inspect-table", extensions: ["data-expert"] });',
+        'utf8',
+      );
+      const sourceRef = {
+        id: 'flow-1',
+        revision: 'r1',
+        title: 'Inspect table',
+      };
+      const dispatch = vi.fn(async () => 'table inspected');
+      const invocation = new WorkflowTool(config, { dispatch }).build({
+        scriptPath,
+        sourceRef,
+      });
+      (
+        invocation as unknown as { setCallId: (callId: string) => void }
+      ).setCallId('native-workflow-call');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.list()).toHaveLength(0);
+
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.sourceRef).toEqual(sourceRef);
+      expect(result.workflowRunId).toBeUndefined();
+      expect(JSON.stringify(result.llmContent)).toContain('table inspected');
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch).toHaveBeenCalledWith(
+        'inspect',
+        expect.objectContaining({
+          stepId: 'inspect-table',
+          extensions: ['data-expert'],
+        }),
+        expect.any(String),
+      );
+      expect(registry.list()).toMatchObject([
+        {
+          toolUseId: 'native-workflow-call',
+          scriptPath,
+          sourceRef,
+          status: 'completed',
+          isBackgrounded: false,
+          dispatches: [{ stepId: 'inspect-table', status: 'completed' }],
+        },
+      ]);
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {

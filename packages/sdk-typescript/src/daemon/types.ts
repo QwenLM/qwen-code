@@ -2885,11 +2885,25 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  /** 原生工具参数的实现支持；会话当前是否可用由 workflowsEnabled 表示。 */
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    agentExtensions: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
     source: 'project' | 'user';
   }>;
+}
+
+/** 外部任务定义的来源标识，不参与权限判定。 */
+export interface DaemonWorkflowSourceRef {
+  id: string;
+  revision: string;
+  digest?: string;
+  title?: string;
 }
 
 /** Parsed `export const meta` contract of a saved workflow script. */
@@ -3032,6 +3046,7 @@ export type DaemonWorkflowDispatchStatus =
 
 export interface DaemonWorkflowDispatchStatusEntry {
   id: string;
+  stepId?: string;
   phaseVisitId: string | null;
   label: string;
   prompt: string;
@@ -3097,6 +3112,7 @@ export type DaemonWorkflowEvent =
 
 export interface DaemonSessionWorkflowTaskStatus {
   kind: 'workflow';
+  sourceRef?: DaemonWorkflowSourceRef;
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;

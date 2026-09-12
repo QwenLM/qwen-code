@@ -37,6 +37,7 @@ const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  listWorkflowSnapshotsMock,
   persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
   writeLineMock,
@@ -45,6 +46,7 @@ const {
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  listWorkflowSnapshotsMock: vi.fn().mockResolvedValue([]),
   persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
@@ -55,9 +57,15 @@ vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowRun: logWorkflowRunMock,
 }));
 
-vi.mock('../workflow-snapshot.js', () => ({
-  writeWorkflowSnapshot: writeWorkflowSnapshotMock,
-}));
+vi.mock('../workflow-snapshot.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../workflow-snapshot.js')>();
+  return {
+    ...actual,
+    listWorkflowSnapshots: listWorkflowSnapshotsMock,
+    writeWorkflowSnapshot: writeWorkflowSnapshotMock,
+  };
+});
 
 vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
   const actual =
@@ -154,6 +162,8 @@ describe('WorkflowRunner', () => {
     createProductionDispatchMock.mockReset();
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    listWorkflowSnapshotsMock.mockReset();
+    listWorkflowSnapshotsMock.mockResolvedValue([]);
     persistInlineWorkflowScriptMock.mockClear();
     resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
@@ -216,6 +226,172 @@ describe('WorkflowRunner', () => {
     resolveSavedWorkflowScriptMock.mockResolvedValue({ scriptPath, script });
     return { config, registry, scriptPath };
   }
+
+  it('preserves source references and repeated business step mappings through cached resume', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    const sourceRef = {
+      id: 'flow-1',
+      revision: '7',
+      digest: 'sha256:abc',
+      title: 'Check tables',
+    };
+    const script = `
+      await agent('check', { label: 'Check', stepId: 'prepare' });
+      await agent('check', { label: 'Check', stepId: 'inspect' });
+      return await agent('check', { label: 'Check', stepId: 'inspect' });
+    `;
+    const dispatch = vi.fn(async () => 'ok');
+    const first = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      sourceRef,
+      script,
+      dispatch,
+    });
+    await first.completion;
+    const expectedSource = { ...sourceRef };
+    sourceRef.revision = '8';
+    expect(first.sourceRef).toEqual(expectedSource);
+    expect(registry.get(first.runId)?.sourceRef).toEqual(expectedSource);
+    expect(
+      registry
+        .get(first.runId)
+        ?.dispatches.map(({ id, stepId, label }) => ({ id, stepId, label })),
+    ).toEqual([
+      { id: 'dispatch-1', stepId: 'prepare', label: 'Check' },
+      { id: 'dispatch-2', stepId: 'inspect', label: 'Check' },
+      { id: 'dispatch-3', stepId: 'inspect', label: 'Check' },
+    ]);
+    const results: JournalReplay['results'] = new Map();
+    let prefix = deriveArgsSeed(undefined);
+    for (const [index, stepId] of ['prepare', 'inspect', 'inspect'].entries()) {
+      prefix = deriveAgentKey(prefix, 'check', { stepId, label: 'Check' });
+      results.set(prefix, {
+        type: 'result',
+        key: prefix,
+        agentId: String(index + 1),
+        result: 'ok',
+      });
+    }
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockResolvedValue({ results, started: new Map(), failed: new Set() });
+    try {
+      dispatch.mockClear();
+      const resumed = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        args: undefined,
+        script,
+        resumeFromRunId: first.runId,
+        dispatch,
+      });
+      await resumed.completion;
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(resumed.sourceRef).toEqual(expectedSource);
+      expect(
+        registry
+          .get(resumed.runId)
+          ?.dispatches.map(({ stepId, status }) => ({ stepId, status })),
+      ).toEqual([
+        { stepId: 'prepare', status: 'cached' },
+        { stepId: 'inspect', status: 'cached' },
+        { stepId: 'inspect', status: 'cached' },
+      ]);
+      expect(
+        writeWorkflowSnapshotMock.mock.calls.at(-1)?.[1].sourceRef,
+      ).toEqual(expectedSource);
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('recovers source references from a snapshot after the registry is lost', async () => {
+    const { config } = configWithRegistry();
+    const sourceRef = {
+      id: 'flow-1',
+      revision: '7',
+      title: 'Check tables',
+    };
+    listWorkflowSnapshotsMock.mockResolvedValue([
+      { runId: 'wf_1234abcd', sourceRef },
+    ]);
+    const resumed = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: 'wf_1234abcd',
+    });
+    await resumed.completion;
+    expect(resumed.sourceRef).toEqual(sourceRef);
+    expect(writeWorkflowSnapshotMock.mock.calls.at(-1)?.[1].sourceRef).toEqual(
+      sourceRef,
+    );
+  });
+
+  it('keeps snapshot recovery inside the cancellable start window', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let releaseSnapshotRead: (() => void) | undefined;
+    listWorkflowSnapshotsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSnapshotRead = () => resolve([{ runId }]);
+        }),
+    );
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: runId,
+      runInBackground: true,
+    });
+
+    try {
+      await vi.waitFor(() => expect(releaseSnapshotRead).toBeDefined());
+      expect(registry.listStartingRunIds()).toEqual([runId]);
+      expect(registry.cancelStarting(runId)).toBe(true);
+      releaseSnapshotRead!();
+      await expect(start).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(registry.get(runId)).toBeUndefined();
+    } finally {
+      releaseSnapshotRead?.();
+      await start.catch(() => undefined);
+    }
+  });
+
+  it('still resumes when no valid prior snapshot is available', async () => {
+    const { config } = configWithRegistry();
+    listWorkflowSnapshotsMock.mockResolvedValue([]);
+    const resumed = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      args: undefined,
+      script: 'return 1;',
+      resumeFromRunId: 'wf_1234abcd',
+    });
+    await expect(resumed.completion).resolves.toMatchObject({ ok: true });
+    expect(resumed.sourceRef).toBeUndefined();
+  });
+
+  it('rejects malformed provenance before registering a run', async () => {
+    const { config, registry } = configWithRegistry();
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        args: undefined,
+        script: 'return 1;',
+        sourceRef: { id: '', revision: '1' },
+      }),
+    ).rejects.toThrow(/sourceRef.id/);
+    expect(registry.list()).toHaveLength(0);
+  });
 
   it('dispatches a generated review through a ten-agent window before any result returns', async () => {
     vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', undefined);

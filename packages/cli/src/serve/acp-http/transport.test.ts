@@ -8857,6 +8857,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         ],
         availableSkills: [],
         workflowsEnabled: true,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          agentExtensions: true,
+        },
         savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
       });
       const connId = await initialize();
@@ -8930,6 +8935,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(byId.get(60)).toMatchObject({
         result: {
           workflowsEnabled: false,
+          workflowToolFeatures: {
+            sourceRef: true,
+            agentStepId: true,
+            agentExtensions: true,
+          },
           savedWorkflows: [],
           availableCommands: [{ name: 'init', description: 'Initialize' }],
         },

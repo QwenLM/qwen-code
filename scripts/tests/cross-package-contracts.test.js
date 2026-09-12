@@ -110,7 +110,34 @@ it('distinguishes locale resolution from prompt sanitization', () => {
   ).toEqual(['packages/core/src/extension/i18n.ts']);
   expect(
     definitionFiles('^export function getSanitizedExtensionDisplayName[(]'),
-  ).toEqual(['packages/cli/src/utils/extension-mention.ts']);
+  ).toEqual(['packages/core/src/utils/extension-mention.ts']);
+});
+
+it('keeps workflow tool feature keys aligned across daemon surfaces', () => {
+  const featureKeys = (path, pattern) => {
+    const text = readFileSync(join(root, path), 'utf8');
+    const body = text.match(pattern)?.[1];
+    expect(body, `workflowToolFeatures declaration in ${path}`).toBeDefined();
+    return Array.from(
+      body.matchAll(/^\s*(\w+)\s*:/gm),
+      (match) => match[1],
+    ).sort();
+  };
+  const bridgeKeys = featureKeys(
+    'packages/acp-bridge/src/status.ts',
+    /workflowToolFeatures\?:\s*{([\s\S]*?)\n\s*};/,
+  );
+  const sdkKeys = featureKeys(
+    'packages/sdk-typescript/src/daemon/types.ts',
+    /workflowToolFeatures\?:\s*{([\s\S]*?)\n\s*};/,
+  );
+  const cliKeys = featureKeys(
+    'packages/cli/src/acp-integration/acpAgent.ts',
+    /workflowToolFeatures:\s*{([\s\S]*?)\n\s*},/,
+  );
+  expect(bridgeKeys).toEqual(['agentExtensions', 'agentStepId', 'sourceRef']);
+  expect(sdkKeys).toEqual(bridgeKeys);
+  expect(cliKeys).toEqual(bridgeKeys);
 });
 
 it('publishes the external subagent runtime through its declared subpath', () => {

@@ -20,6 +20,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { deleteInlineWorkflowScript } from './runtime/workflow-saved.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import {
+  isWorkflowReferenceString,
+  isWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from './workflow-source-ref.js';
+import {
   isActiveWorkflowStatus,
   isWorkflowRunPersistenceActive,
   isTerminalWorkflowStatus,
@@ -45,6 +50,7 @@ export interface WorkflowSnapshot {
   description?: string;
   /** Saved workflow definition name. Absent for inline and legacy runs. */
   workflowName?: string;
+  sourceRef?: WorkflowSourceRef;
   /** Prior run used by retry or rerun. Absent on legacy snapshots. */
   sourceRunId?: string;
   /** How this run was started from sourceRunId. */
@@ -85,6 +91,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
+    ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
     meta: task.meta,
@@ -282,6 +289,8 @@ function isWorkflowDispatch(value: unknown): value is WorkflowDispatchTrace {
   const status = value['status'];
   return (
     typeof value['id'] === 'string' &&
+    (value['stepId'] === undefined ||
+      isWorkflowReferenceString(value['stepId'])) &&
     (value['phaseVisitId'] === null ||
       typeof value['phaseVisitId'] === 'string') &&
     typeof value['label'] === 'string' &&
@@ -384,6 +393,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isOptionalString(value['toolUseId']) &&
     isOptionalString(value['description']) &&
     isOptionalString(value['workflowName']) &&
+    (value['sourceRef'] === undefined ||
+      isWorkflowSourceRef(value['sourceRef'])) &&
     isOptionalString(value['sourceRunId']) &&
     (value['startMode'] === undefined ||
       value['startMode'] === 'retry' ||

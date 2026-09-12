@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { Extension } from '../../extension/extensionManager.js';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -37,6 +38,7 @@ import {
   WorkflowAgentCapExceededError,
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
+import { formatContextFileDisplayPath } from '../../memory/memoryDiscovery.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -2401,6 +2403,262 @@ describe('createProductionDispatch', () => {
     nextExecuteHook.value = undefined;
   });
 
+  it('does not duplicate loaded extension files while loading missing ones', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workflow-leaf-extension-'),
+    );
+    const contextFile = path.join(root, 'QWEN.md');
+    fs.writeFileSync(
+      contextFile,
+      'EXPERT_RULE: verify the table schema first.',
+    );
+    const missingContextFile = path.join(root, 'WORKFLOW.md');
+    fs.writeFileSync(missingContextFile, 'WORKFLOW_RULE: inspect the query.');
+    const extension: Extension = {
+      id: 'data-expert',
+      name: 'data-expert',
+      version: '1',
+      isActive: true,
+      path: root,
+      config: {
+        name: 'data-expert',
+        version: '1',
+        description: 'Inspect tables',
+      },
+      contextFiles: [contextFile, missingContextFile],
+    };
+    const config = {
+      getActiveExtensions: () => [extension],
+      getWorkingDir: () => process.cwd(),
+      getContextFilePaths: () => [
+        formatContextFileDisplayPath(contextFile, process.cwd()),
+      ],
+    } as unknown as Config;
+    try {
+      await createProductionDispatch(config)('check the table', {
+        extensions: ['data-expert'],
+        stepId: 'inspect',
+      });
+      expect(created).toHaveLength(1);
+      expect(created[0].prompt).toContain('check the table');
+      expect(created[0].prompt).not.toContain(
+        'EXPERT_RULE: verify the table schema first.',
+      );
+      expect(created[0].prompt).toContain('WORKFLOW_RULE: inspect the query.');
+      expect(created[0].prompt).toContain('untrusted third-party content');
+      expect(created[0].prompt).not.toContain(
+        'Invoke listed Skills through the Skill tool',
+      );
+      expect(created[0].toolConfig?.disallowedTools).toContain('send_message');
+      expect(created[0].taskName).toBe('check the table');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('injects selected extension files when memory did not load them', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workflow-leaf-extension-safe-'),
+    );
+    const contextFile = path.join(root, 'QWEN.md');
+    fs.writeFileSync(contextFile, 'SAFE_MODE_RULE: inspect first.');
+    const extension = {
+      id: 'data-expert',
+      name: 'data-expert',
+      version: '1',
+      isActive: true,
+      path: root,
+      config: { name: 'data-expert', version: '1' },
+      contextFiles: [contextFile],
+      skills: [
+        {
+          name: 'schema-audit',
+          description: 'Audit a schema',
+          level: 'extension',
+          filePath: path.join(root, 'skills', 'schema-audit', 'SKILL.md'),
+          body: 'Audit the schema.',
+        },
+      ],
+    } as Extension;
+    const config = {
+      getActiveExtensions: () => [extension],
+      getWorkingDir: () => process.cwd(),
+      getContextFilePaths: () => [],
+    } as unknown as Config;
+    try {
+      await createProductionDispatch(config)('check the table', {
+        extensions: ['data-expert'],
+      });
+      const leafPrompt = created[0].prompt;
+      expect(leafPrompt).toContain('SAFE_MODE_RULE: inspect first.');
+      expect(leafPrompt.indexOf('SAFE_MODE_RULE: inspect first.')).toBeLessThan(
+        leafPrompt.indexOf('--- End Extension:'),
+      );
+      expect(leafPrompt).toContain(
+        'Invoke listed Skills through the Skill tool',
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('deduplicates extension aliases and preserves distinct selection order', async () => {
+    const first = {
+      id: 'first',
+      name: 'first',
+      version: '1',
+      isActive: true,
+      path: '/first',
+      config: { name: 'First Alias', version: '1' },
+      contextFiles: [],
+    } as Extension;
+    const second = {
+      ...first,
+      id: 'second',
+      name: 'second',
+      path: '/second',
+      config: { name: 'Second Alias', version: '1' },
+    } as Extension;
+    const config = {
+      getActiveExtensions: () => [first, second],
+    } as unknown as Config;
+    await createProductionDispatch(config)('check', {
+      extensions: ['First Alias', 'second', 'first'],
+    });
+    const leafPrompt = created[0].prompt;
+    expect(leafPrompt.split('--- Extension:')).toHaveLength(3);
+    expect(leafPrompt.indexOf('Extension: first')).toBeLessThan(
+      leafPrompt.indexOf('Extension: second'),
+    );
+  });
+
+  it('threads one shared context budget across selected extensions', async () => {
+    const makeExtension = (name: string): Extension =>
+      ({
+        id: name,
+        name,
+        version: '1',
+        isActive: true,
+        path: `/${name}`,
+        config: {
+          name,
+          version: '1',
+          description: 'x'.repeat(110_000),
+        },
+        contextFiles: [],
+      }) as Extension;
+    const config = {
+      getActiveExtensions: () => [
+        makeExtension('first'),
+        makeExtension('second'),
+      ],
+    } as unknown as Config;
+    await expect(
+      createProductionDispatch(config)('check', {
+        extensions: ['first', 'second'],
+      }),
+    ).rejects.toThrow(/shared context budget/);
+    expect(created).toHaveLength(0);
+  });
+
+  it('refuses unavailable extension context before any leaf starts', async () => {
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    await expect(
+      createProductionDispatch(config)('check', { extensions: ['missing'] }),
+    ).rejects.toThrow(/active extension 'missing' was not found/);
+    expect(created).toHaveLength(0);
+  });
+
+  it.each(['a\u0085b', 'a\u009bb', 'a\u061cb', 'a\u202eb', 'a\u2066b'])(
+    'refuses an unsafe extension reference before any leaf starts',
+    async (name) => {
+      const config = { getActiveExtensions: () => [] } as unknown as Config;
+      await expect(
+        createProductionDispatch(config)('check', { extensions: [name] }),
+      ).rejects.toThrow(/expected 1 to 16 unique/);
+      expect(created).toHaveLength(0);
+    },
+  );
+
+  it('validates extension names without invoking caller array methods', async () => {
+    const extensions = ['\u001b[31mEVIL\u001b[0m', 'x'.repeat(300)];
+    Object.defineProperties(extensions, {
+      some: { value: () => false },
+      map: { value: () => ['0', '1'] },
+    });
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    await expect(
+      createProductionDispatch(config)('check', { extensions }),
+    ).rejects.toThrow(/expected 1 to 16 unique/);
+    expect(created).toHaveLength(0);
+  });
+
+  it.each([' invalid ', 'a\u202eb', 'x'.repeat(257)])(
+    'refuses an invalid stepId at the host dispatch boundary',
+    async (stepId) => {
+      const config = {} as Config;
+      await expect(
+        createProductionDispatch(config)('check', { stepId }),
+      ).rejects.toThrow(/stepId.*non-empty string/);
+      expect(created).toHaveLength(0);
+    },
+  );
+
+  it.each([false, true])(
+    'does not start a leaf when its extension is disabled or unreadable (active=%s)',
+    async (isActive) => {
+      const root = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'workflow-missing-extension-'),
+      );
+      const extension: Extension = {
+        id: 'expert',
+        name: 'expert',
+        version: '1',
+        isActive,
+        path: root,
+        config: { name: 'expert', version: '1' },
+        contextFiles: [path.join(root, 'missing.md')],
+      };
+      const config = {
+        getActiveExtensions: () => [extension],
+      } as unknown as Config;
+      try {
+        await expect(
+          createProductionDispatch(config)('check', { extensions: ['expert'] }),
+        ).rejects.toThrow(
+          isActive ? /Unreadable extension context/ : /active extension/,
+        );
+        expect(created).toHaveLength(0);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('records unavailable extensions as a failed dispatch rather than successful prose', async () => {
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    const orchestrator = new WorkflowOrchestrator(
+      createProductionDispatch(config),
+    );
+    const settled: Array<{ id: string; error?: string }> = [];
+    const outcome = await orchestrator.run({
+      script: 'return await agent("check", { extensions: ["missing"] });',
+      args: undefined,
+      emitter: {
+        dispatchSettled: (id, error) => settled.push({ id, error }),
+      },
+    });
+    expect(outcome.result).toBeNull();
+    expect(created).toHaveLength(0);
+    expect(settled).toEqual([
+      expect.objectContaining({
+        error: expect.stringMatching(
+          /active extension 'missing' was not found/,
+        ),
+      }),
+    ]);
+  });
+
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     const result = await dispatch('hello', { label: 'h1' });
@@ -3419,6 +3677,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
+    prompt?: string;
     runtimeContextSame: boolean;
     /** The exact Config the dispatch handed to the runtime agent. */
     runtimeContext: Config;
@@ -3521,6 +3780,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        convertToRuntimeConfig: async (subagentConfig: {
+          tools?: string[];
+          disallowedTools?: string[];
+        }) => {
+          const normalize = (name: string) =>
+            name === 'Skill' ? 'skill' : name;
+          const hasToolPolicy =
+            (subagentConfig.tools?.length ?? 0) > 0 ||
+            (subagentConfig.disallowedTools?.length ?? 0) > 0;
+          return {
+            promptConfig: {},
+            modelConfig: {},
+            runConfig: {},
+            toolConfig: hasToolPolicy
+              ? {
+                  tools: (subagentConfig.tools ?? ['*']).map(normalize),
+                  disallowedTools:
+                    subagentConfig.disallowedTools?.map(normalize),
+                }
+              : undefined,
+          };
+        },
         createAgentHeadless: async (
           subagentConfig: {
             name?: string;
@@ -3562,13 +3843,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           return {
             subagent: {
               execute: async (
-                _ctx: unknown,
+                ctx: { get: (key: string) => unknown },
                 signal?: AbortSignal,
               ): Promise<void> => {
                 const { getCurrentAgentId } = await import(
                   './agent-context.js'
                 );
                 call.executeAgentId = getCurrentAgentId();
+                call.prompt = String(ctx.get('task_prompt'));
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   await outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -3621,6 +3903,126 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       disposed: number;
     };
   }
+
+  const extensionWithSkill = {
+    id: 'data-expert',
+    name: 'data-expert',
+    version: '1',
+    isActive: true,
+    path: '/data-expert',
+    config: { name: 'data-expert', version: '1' },
+    contextFiles: [],
+    skills: [
+      {
+        name: 'schema-audit',
+        description: 'Audit a schema',
+        level: 'extension',
+        filePath: '/data-expert/skills/schema-audit/SKILL.md',
+        body: 'Audit the schema.',
+      },
+    ],
+  } as Extension;
+
+  it.each([
+    { tools: ['read_file'], advertised: false },
+    { tools: ['skill'], advertised: true },
+    { tools: ['Skill'], advertised: true },
+    { tools: ['*'], advertised: true },
+    { tools: [], advertised: true },
+  ])(
+    'matches the normalized Skill tool policy for tools=$tools',
+    async ({ tools, advertised }) => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'restricted',
+          description: 'restricted',
+          systemPrompt: 'restricted',
+          level: 'project',
+          tools,
+        }),
+        onCreate: async () => ({
+          finalText: 'done',
+          terminateMode: 'GOAL',
+        }),
+      });
+      Object.assign(config, {
+        getActiveExtensions: () => [extensionWithSkill],
+        getContextFilePaths: () => [],
+      });
+      await createProductionDispatch(config)('check', {
+        agentType: 'restricted',
+        extensions: ['data-expert'],
+      });
+      expect(calls[0].prompt).toContain('- Skills: data-expert:schema-audit');
+      const instruction =
+        'Invoke listed Skills through the Skill tool using the exact skill name';
+      if (advertised) expect(calls[0].prompt).toContain(instruction);
+      else expect(calls[0].prompt).not.toContain(instruction);
+      expect(calls[0].options?.taskName).toBe('check');
+    },
+  );
+
+  it('does not advertise the Skill tool when the agent disallows it', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'restricted',
+        description: 'restricted',
+        systemPrompt: 'restricted',
+        level: 'project',
+        tools: ['*'],
+        disallowedTools: ['skill'],
+      }),
+      onCreate: async () => ({
+        finalText: 'done',
+        terminateMode: 'GOAL',
+      }),
+    });
+    Object.assign(config, {
+      getActiveExtensions: () => [extensionWithSkill],
+      getContextFilePaths: () => [],
+    });
+    await createProductionDispatch(config)('check', {
+      agentType: 'restricted',
+      extensions: ['data-expert'],
+    });
+    expect(calls[0].prompt).toContain('- Skills: data-expert:schema-audit');
+    expect(calls[0].prompt).not.toContain(
+      'Invoke listed Skills through the Skill tool',
+    );
+  });
+
+  it('tells the agent to reveal a deferred Skill tool before invoking it', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'restricted',
+        description: 'restricted',
+        systemPrompt: 'restricted',
+        level: 'project',
+        tools: ['*'],
+      }),
+      onCreate: async () => ({
+        finalText: 'done',
+        terminateMode: 'GOAL',
+      }),
+    });
+    Object.assign(config, {
+      getActiveExtensions: () => [extensionWithSkill],
+      getContextFilePaths: () => [],
+      getVisibleTools: () => new Set<string>(),
+      getToolRegistry: () => ({
+        isPermissionDeferred: (name: string) => name === 'skill',
+        isDeferredToolRevealed: () => false,
+      }),
+    });
+    await createProductionDispatch(config)('check', {
+      agentType: 'restricted',
+      extensions: ['data-expert'],
+    });
+    expect(calls[0].prompt).not.toContain(
+      'Invoke listed Skills through the Skill tool using the exact skill name',
+    );
+    expect(calls[0].prompt).toContain('reveal it with ToolSearch first');
+  });
 
   it.each([
     { label: 'plain', options: {}, tokenLimit: null },

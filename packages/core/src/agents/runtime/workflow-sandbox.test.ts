@@ -1703,6 +1703,193 @@ describe('createWorkflowSandbox security', () => {
     );
   });
 
+  it.each([
+    '',
+    ' ',
+    ' step',
+    'step ',
+    'x'.repeat(257),
+    1,
+    null,
+    'a\nb',
+    'a\u007fb',
+    'a\u0085b',
+    'a\u009bb',
+    'a\u061cb',
+    'a\u202eb',
+    'a\u2066b',
+  ])('rejects invalid stepId %j before dispatch', async (stepId) => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`return agent("x", { stepId: ${JSON.stringify(stepId)} });`),
+    ).rejects.toThrow(/stepId.*non-empty string/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it.each(['() => "step"', 'Symbol("step")'])(
+    'rejects non-JSON stepId %s before serialization can drop it',
+    async (expression) => {
+      const dispatch = vi.fn(async () => 'unused');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("x", { stepId: ${expression} });`),
+      ).rejects.toThrow(/stepId.*non-empty string/);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('validates stepId after copying script-controlled options', async () => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`
+      const opts = Object.create({ toJSON() { return { stepId: 7 }; } });
+      opts.stepId = 'valid';
+      return agent('check', opts);
+    `),
+    ).rejects.toThrow(/stepId.*non-empty string/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('accepts bounded stepId without widening the option allowlist', async () => {
+    const dispatch = vi.fn(async () => 'done');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`return agent("x", { stepId: "${'s'.repeat(256)}" });`),
+    ).resolves.toBe('done');
+    expect(dispatch).toHaveBeenCalledWith('x', { stepId: 's'.repeat(256) });
+    await expect(
+      sandbox.run(`return agent("x", { stepId: "step", stepID: "typo" });`),
+    ).rejects.toThrow(/stepID.*unknown option/);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    null,
+    'expert',
+    [],
+    [''],
+    [' expert'],
+    [1],
+    ['a', 'A'],
+    ['x'.repeat(129)],
+    ['a\u0085b'],
+    ['a\u009bb'],
+    ['a\u061cb'],
+    ['a\u202eb'],
+    ['a\u2066b'],
+    Array.from({ length: 17 }, (_, index) => `ext-${index}`),
+  ])('rejects invalid extension selection %j', async (extensions) => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(
+        `return agent('check', { extensions: ${JSON.stringify(extensions)} });`,
+      ),
+    ).rejects.toThrow(/extensions.*array/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('copies valid extension names into dispatch and rejects serialization-time changes', async () => {
+    const dispatch = vi.fn(async () => 'ok');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run('return agent("check", { extensions: ["data-expert"] });'),
+    ).resolves.toBe('ok');
+    expect(dispatch).toHaveBeenCalledWith('check', {
+      extensions: ['data-expert'],
+    });
+    await expect(
+      sandbox.run(`
+      const opts = Object.create({ toJSON() { return { extensions: [7] }; } });
+      opts.extensions = ['data-expert'];
+      return agent('check', opts);
+    `),
+    ).rejects.toThrow(/extensions.*array/);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates extension names without invoking script-realm array methods', async () => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`
+        Array.prototype.some = function () { return false; };
+        Array.prototype.map = function () {
+          const indexes = [];
+          for (let i = 0; i < this.length; i++) indexes[i] = String(i);
+          return indexes;
+        };
+        return agent('check', {
+          extensions: ['\\u001b[31mEVIL\\u001b[0m', 'x'.repeat(300)],
+        });
+      `),
+    ).rejects.toThrow(/extensions.*array/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('validates stepId without invoking script-realm mutable methods', async () => {
+    const dispatch = vi.fn(async () => 'unused');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`
+        String.prototype.trim = function () { return String(this); };
+        Array.from = function () { return []; };
+        Array.prototype.some = function () { return false; };
+        return agent('check', { stepId: '\\u001b[31mEVIL\\u202e' });
+      `),
+    ).rejects.toThrow(/stepId.*non-empty string/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('captures JSON intrinsics and revives agent opts in the host realm', async () => {
+    const dispatch = vi.fn(async (_prompt, opts) => {
+      expect(Object.getPrototypeOf(opts)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(opts.extensions)).toBe(Array.prototype);
+      expect(opts).toEqual({
+        stepId: 'validated',
+        extensions: ['data-expert'],
+      });
+      return 'ok';
+    });
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+
+    await expect(
+      sandbox.run(`
+        let parseCalls = 0;
+        let stringifyCalls = 0;
+        JSON.parse = function () {
+          parseCalls++;
+          let reads = 0;
+          return Object.defineProperties({}, {
+            stepId: {
+              enumerable: true,
+              get() {
+                reads++;
+                return reads <= 8 ? 'validated' : 'swapped';
+              },
+            },
+            extensions: {
+              enumerable: true,
+              value: ['data-expert'],
+            },
+          });
+        };
+        JSON.stringify = function () {
+          stringifyCalls++;
+          return '{"stepId":"swapped","extensions":["swapped"]}';
+        };
+        const result = await agent('check', {
+          stepId: 'validated',
+          extensions: ['data-expert'],
+        });
+        return result + ':' + parseCalls + ':' + stringifyCalls;
+      `),
+    ).resolves.toBe('ok:0:0');
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
   it('agent({workingDir}) is passed through to dispatch', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
