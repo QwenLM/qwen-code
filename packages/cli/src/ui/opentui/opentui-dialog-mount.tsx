@@ -22,7 +22,7 @@
  * handling is per-case.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type {
   ApprovalMode,
@@ -34,12 +34,19 @@ import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { toOriginalKey } from './key-map.js';
+import { t } from '../../i18n/index.js';
+import { MessageType } from '../types.js';
 import { HelpOverlay } from './help-overlay.js';
 import {
+  buildHelpCommandsLines,
+  buildHelpCustomCommandLines,
   computeHelpBodyRows,
+  helpCommandWindowRows,
+  helpScrollMax,
   HELP_TABS,
   type HelpTab,
 } from './help-content.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 import {
   applyThemeSelection,
   applyMcpServerAction,
@@ -239,30 +246,58 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
 
   // --- model dialog error (kept open on failed selection) -----------------
   const [modelError, setModelError] = useState<string | null>(null);
+  // ink ModelDialog's three guards: `committed` keeps a successful pick from
+  // also announcing the model that survived, and from starting a second switch,
+  // while the latch plus in-flight flag keep a second Escape — or a second
+  // Enter landing mid-apply — from doing either again. None resets: this mount
+  // unmounts when the dialog closes.
+  const modelSelectionCommittedRef = useRef(false);
+  const modelCloseLatchRef = useRef(false);
+  const modelSelectionInFlightRef = useRef(false);
 
   // --- help overlay interaction -------------------------------------------
-  const [helpTab, setHelpTab] = useState<HelpTab>('commands');
+  const [helpTab, setHelpTab] = useState<HelpTab>('general');
   const [helpScroll, setHelpScroll] = useState(0);
+  const dialogWidth = dialogAreaWidth(dimensions.width);
+  const helpBodyRows = computeHelpBodyRows(dimensions.height);
+  const helpWindowRows = helpCommandWindowRows(helpBodyRows);
+  // Only the two command tabs have a scrollable window, and its bound is that
+  // tab's line count. Clamping here rather than leaving it to the render keeps
+  // a held ↓ from running the offset past the end, where ↑ would then appear
+  // dead until it climbed back down to the last window that actually moved.
+  const helpMaxScroll = useMemo(() => {
+    if (helpTab === 'general') return 0;
+    const lines =
+      helpTab === 'custom-commands'
+        ? buildHelpCustomCommandLines(commands, dialogWidth)
+        : buildHelpCommandsLines(commands, dialogWidth);
+    return helpScrollMax(lines, helpWindowRows);
+  }, [helpTab, commands, dialogWidth, helpWindowRows]);
 
   useKeyboard((key) => {
     if (!isHelp) return;
-    const { name } = toOriginalKey(key);
-    if (name === 'escape' || name === 'q') {
+    const { name, shift } = toOriginalKey(key);
+    if (name === 'escape') {
       onClose();
       return;
     }
     const tabCount = HELP_TABS.length;
     const activeIndex = HELP_TABS.findIndex((entry) => entry.tab === helpTab);
-    if (name === 'tab' || name === 'right') {
-      setHelpTab(HELP_TABS[(activeIndex + 1) % tabCount]!.tab);
+    if (name === 'tab') {
+      const step = shift ? -1 : 1;
+      setHelpTab(HELP_TABS[(activeIndex + step + tabCount) % tabCount]!.tab);
       setHelpScroll(0);
-    } else if (name === 'left') {
-      setHelpTab(HELP_TABS[(activeIndex - 1 + tabCount) % tabCount]!.tab);
-      setHelpScroll(0);
-    } else if (name === 'down' || name === 'j') {
-      setHelpScroll((prev) => prev + 1);
-    } else if (name === 'up' || name === 'k') {
+      return;
+    }
+    if (helpTab === 'general') return;
+    if (name === 'down') {
+      setHelpScroll((prev) => Math.min(helpMaxScroll, prev + 1));
+    } else if (name === 'up') {
       setHelpScroll((prev) => Math.max(0, prev - 1));
+    } else if (name === 'pagedown') {
+      setHelpScroll((prev) => Math.min(helpMaxScroll, prev + helpWindowRows));
+    } else if (name === 'pageup') {
+      setHelpScroll((prev) => Math.max(0, prev - helpWindowRows));
     }
   });
 
@@ -270,14 +305,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
 
   switch (request.dialog) {
     case 'help': {
-      const bodyRows = computeHelpBodyRows(dimensions.height);
       return (
         <HelpOverlay
           commands={commands}
           tab={helpTab}
-          scroll={Math.max(0, helpScroll)}
-          bodyRows={bodyRows}
-          width={dimensions.width}
+          scroll={helpScroll}
+          bodyRows={helpBodyRows}
+          width={dialogWidth}
         />
       );
     }
@@ -552,6 +586,11 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         entries,
         mode: request.mode,
       });
+      // ink writes all three model outcomes to the transcript — a pick, an
+      // escape, an auxiliary pick — so the row outlives the dialog. The shell's
+      // notify slot is transient and closes with it.
+      const reportModel = (text: string) =>
+        host.addItem({ type: MessageType.INFO, text }, Date.now());
       return (
         <OpenTuiModelDialog
           entries={entries}
@@ -560,8 +599,42 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           initialKey={initialKey}
           errorMessage={modelError}
           availableTerminalHeight={props.availableTerminalHeight}
-          onClose={onClose}
+          onClose={() => {
+            if (
+              modelCloseLatchRef.current ||
+              modelSelectionInFlightRef.current
+            ) {
+              return;
+            }
+            modelCloseLatchRef.current = true;
+            // ink ModelDialog.closeWithoutSelection: escaping the primary
+            // picker reports the model that survived. The auxiliary pickers
+            // stay silent there too.
+            if (
+              request.mode === 'primary' &&
+              !modelSelectionCommittedRef.current
+            ) {
+              reportModel(
+                t('Kept model as {{model}}', {
+                  model:
+                    config.getActiveRuntimeModelSnapshot?.()?.modelId ||
+                    config.getModel(),
+                }),
+              );
+            }
+            onClose();
+          }}
           onSelect={(selectionKey) => {
+            // ink ModelDialog.handleSelect: a pick already applying — or one
+            // that landed — must not start another, or two switches race and
+            // both report.
+            if (
+              modelSelectionInFlightRef.current ||
+              modelSelectionCommittedRef.current
+            ) {
+              return;
+            }
+            modelSelectionInFlightRef.current = true;
             void applyModelSelection({
               config,
               settings,
@@ -569,15 +642,21 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
               mode: request.mode,
               selectionKey,
               persistScope: request.persistScope,
-            }).then((outcome) => {
-              if (outcome.ok) {
-                setModelError(null);
-                if (outcome.message) notify(outcome.message);
-                onClose();
-              } else {
-                setModelError(outcome.error);
-              }
-            });
+            })
+              .then((outcome) => {
+                if (outcome.ok) {
+                  modelSelectionCommittedRef.current = true;
+                  modelCloseLatchRef.current = true;
+                  setModelError(null);
+                  if (outcome.message) reportModel(outcome.message);
+                  onClose();
+                } else {
+                  setModelError(outcome.error);
+                }
+              })
+              .finally(() => {
+                modelSelectionInFlightRef.current = false;
+              });
           }}
         />
       );

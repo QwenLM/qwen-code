@@ -9,9 +9,31 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TaskUpdateTool } from './task-update.js';
-import { createTask, getTask } from '../agents/team/tasks.js';
+import { createTask, getTask, updateTask } from '../agents/team/tasks.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+
+type UpdateTask = (typeof import('../agents/team/tasks.js'))['updateTask'];
+
+const taskUpdateMock = vi.hoisted(() => ({
+  beforeUpdate: undefined as
+    | ((updateTask: UpdateTask) => Promise<void>)
+    | undefined,
+}));
+
+vi.mock('../agents/team/tasks.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../agents/team/tasks.js')>();
+  return {
+    ...original,
+    updateTask: async (...args: Parameters<UpdateTask>) => {
+      const beforeUpdate = taskUpdateMock.beforeUpdate;
+      taskUpdateMock.beforeUpdate = undefined;
+      if (beforeUpdate) await beforeUpdate(original.updateTask);
+      return original.updateTask(...args);
+    },
+  };
+});
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -34,10 +56,11 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 let tmpDir: string;
 const TEAM = 'test-team';
 
-function makeConfig(approvalMode = DEFAULT_MODE) {
+function makeConfig(approvalMode = DEFAULT_MODE, teamManager: unknown = null) {
   return {
     getTeamContext: () => ({ teamName: TEAM }),
     getApprovalMode: () => approvalMode,
+    getTeamManager: () => teamManager,
   } as unknown as Config;
 }
 
@@ -47,6 +70,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  taskUpdateMock.beforeUpdate = undefined;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -208,6 +232,201 @@ describe('TaskUpdateTool', () => {
     expect(result.llmContent).toContain('unowned pending task');
     const reloaded = await getTask(TEAM, task.id);
     expect(reloaded?.status).toBe('completed');
+  });
+
+  it('allows sequential reassignment while the current owner is active', async () => {
+    const dispatchedOwners: string[] = [];
+    const teamManager = {
+      validateTaskOwner: () => undefined,
+      dispatchAssignedTask: vi.fn(async (task: { owner?: string }) => {
+        if (task.owner) dispatchedOwners.push(task.owner);
+        return true;
+      }),
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Assigned',
+      description: 'desc',
+      owner: 'alice',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(dispatchedOwners).toEqual(['bob']);
+    expect((await getTask(TEAM, task.id))?.owner).toBe('bob');
+  });
+
+  it('reassigns without consulting the previous owner activity', async () => {
+    const dispatchedOwners: string[] = [];
+    const validateTaskOwner = vi.fn(() => undefined);
+    const teamManager = {
+      validateTaskOwner,
+      dispatchAssignedTask: vi.fn(async (task: { owner?: string }) => {
+        if (task.owner) dispatchedOwners.push(task.owner);
+        return true;
+      }),
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Recovery',
+      description: 'desc',
+      owner: 'alice',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(validateTaskOwner).toHaveBeenCalledWith('bob');
+    expect(validateTaskOwner).not.toHaveBeenCalledWith('alice');
+    expect(dispatchedOwners).toEqual(['bob']);
+    expect((await getTask(TEAM, task.id))?.owner).toBe('bob');
+  });
+
+  it('rejects an owner update from a stale unowned snapshot', async () => {
+    const dispatchAssignedTask = vi.fn(async () => true);
+    const teamManager = {
+      validateTaskOwner: vi.fn(() => undefined),
+      dispatchAssignedTask,
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Pending',
+      description: 'desc',
+    });
+    taskUpdateMock.beforeUpdate = async (realUpdateTask) => {
+      await realUpdateTask(
+        TEAM,
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+    };
+
+    const result = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('owner changed');
+    expect(result.error?.message).toContain('content-only task_update');
+    expect(result.error?.message).toContain(
+      'without re-delivering the assignment',
+    );
+    expect(dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(await getTask(TEAM, task.id)).toMatchObject({
+      status: 'in_progress',
+      owner: 'alice',
+    });
+  });
+
+  it('rejects an assignment from a stale status snapshot', async () => {
+    const dispatchAssignedTask = vi.fn(async () => true);
+    const teamManager = {
+      validateTaskOwner: vi.fn(() => undefined),
+      dispatchAssignedTask,
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Assigned',
+      description: 'desc',
+      owner: 'alice',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+    taskUpdateMock.beforeUpdate = async (realUpdateTask) => {
+      await realUpdateTask(
+        TEAM,
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+    };
+
+    const result = await tool
+      .build({ taskId: task.id, status: 'in_progress', owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('status changed');
+    expect(dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(await getTask(TEAM, task.id)).toMatchObject({
+      status: 'completed',
+      owner: 'alice',
+    });
+  });
+
+  it('rejects a status-only update from a stale snapshot', async () => {
+    const dispatchAssignedTask = vi.fn(async () => true);
+    const teamManager = {
+      validateTaskOwner: vi.fn(() => undefined),
+      dispatchAssignedTask,
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Pending',
+      description: 'desc',
+    });
+    taskUpdateMock.beforeUpdate = async (realUpdateTask) => {
+      await realUpdateTask(
+        TEAM,
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+    };
+
+    const result = await tool
+      .build({ taskId: task.id, status: 'completed' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('owner changed');
+    expect(result.error?.message).toContain('status changed');
+    expect(result.error?.message).not.toContain('without re-delivering');
+    expect(dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(await getTask(TEAM, task.id)).toMatchObject({
+      status: 'in_progress',
+      owner: 'alice',
+    });
+  });
+
+  it('does not dispatch during a stale content-only update', async () => {
+    const dispatchAssignedTask = vi.fn(async () => true);
+    const teamManager = {
+      validateTaskOwner: vi.fn(() => undefined),
+      dispatchAssignedTask,
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Pending',
+      description: 'desc',
+    });
+    taskUpdateMock.beforeUpdate = async (realUpdateTask) => {
+      await realUpdateTask(
+        TEAM,
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+    };
+
+    const result = await tool
+      .build({ taskId: task.id, subject: 'New title' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(await getTask(TEAM, task.id)).toMatchObject({
+      subject: 'New title',
+      status: 'in_progress',
+      owner: 'alice',
+    });
   });
 
   it('validates required taskId', () => {

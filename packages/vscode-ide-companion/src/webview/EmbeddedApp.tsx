@@ -40,6 +40,7 @@ import { isDiscontinuedModel } from './utils/discontinuedModel.js';
 
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
+type SessionHistorySource = 'vscode' | 'default';
 
 /**
  * Bounds for the legacy-conversation scan: the allowlisted sessions sit in
@@ -270,6 +271,7 @@ interface RuntimeConfig {
    */
   editorWorkspaceCwd?: string;
   sessionId?: string;
+  sessionHistorySource?: SessionHistorySource;
   hostKind?: 'view' | 'panel';
   /**
    * Ids of conversations the pre-cutover companion recorded in VS Code
@@ -297,6 +299,12 @@ function readRuntimeConfig(): RuntimeConfig | null {
           ? 'view'
           : undefined,
   };
+}
+
+function historySourceForRuntime(
+  runtime: RuntimeConfig | null,
+): SessionHistorySource {
+  return runtime?.sessionHistorySource === 'default' ? 'default' : 'vscode';
 }
 
 interface ActiveFileContext {
@@ -386,6 +394,12 @@ export function EmbeddedApp() {
   const [includeActiveFile, setIncludeActiveFile] = useState(true);
   const [sessionTitle, setSessionTitle] = useState(() => t('session.new'));
   const [sessionHistoryOpen, setSessionHistoryOpen] = useState(false);
+  const [sessionHistorySource, setSessionHistorySource] =
+    useState<SessionHistorySource>(VSCODE_SESSION_SOURCE_TYPE);
+  const [activeSessionHistorySource, setActiveSessionHistorySource] =
+    useState<SessionHistorySource>(() =>
+      historySourceForRuntime(initialRuntime),
+    );
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [sessionCursor, setSessionCursor] = useState<string>();
@@ -402,11 +416,11 @@ export function EmbeddedApp() {
     | undefined
   >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
-  // The legacy allowlist is fixed at bootstrap, and a session claimed by a
-  // restore leaves the unattributed catalog for good — so the first
-  // successful scan has converged and the scan must not re-page the default
-  // catalog on every dropdown open. A fresh bootstrap resets it.
+  // The allowlist is fixed for one bootstrap, so one successful scan is
+  // enough until the host supplies a fresh list.
   const legacyScanDoneRef = useRef(false);
+  const legacySessionsRef = useRef<DaemonSessionSummary[]>([]);
+  const sessionHistoryRequestRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
@@ -416,6 +430,11 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  // The request whose host-owned diff the user closed without voting. While it
+  // is set, the host does not reopen that diff and hands the edit preview back
+  // to the web shell, which renders it inline (#10557).
+  const dismissedPermissionDiffIdRef = useRef<string | undefined>(undefined);
+  const [hostOwnsEditDiffPreview, setHostOwnsEditDiffPreview] = useState(true);
   const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
@@ -443,6 +462,7 @@ export function EmbeddedApp() {
   // A re-bootstrap delivers a fresh allowlist — reopen the scan for it.
   useEffect(() => {
     legacyScanDoneRef.current = false;
+    legacySessionsRef.current = [];
   }, [runtime?.legacyConversationIds]);
 
   useEffect(
@@ -486,8 +506,18 @@ export function EmbeddedApp() {
   }, [switchingSessionId, creatingSession, t]);
 
   const loadSessionHistory = useCallback(
-    async (cursor?: string) => {
-      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) return;
+    async (
+      cursor?: string,
+      source: SessionHistorySource = sessionHistorySource,
+    ) => {
+      if (
+        !daemonClient ||
+        !runtime?.workspaceCwd ||
+        (sessionListLoading && source === sessionHistorySource)
+      ) {
+        return;
+      }
+      const requestId = ++sessionHistoryRequestRef.current;
       setSessionListLoading(true);
       setSessionListError(undefined);
       try {
@@ -497,22 +527,28 @@ export function EmbeddedApp() {
             pageSize: 20,
             cursor,
             archiveState: 'active',
-            // Only conversations started from VS Code. The daemon is shared
-            // with the CLI and the browser Web Shell for this workspace, so an
-            // unfiltered page lists sessions the user never opened here.
-            sourceType: VSCODE_SESSION_SOURCE_TYPE,
+            sourceType: source,
           });
-        const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
+        const legacyIds = runtime.legacyConversationIds;
+        const pageSessions = (
+          Array.isArray(page.sessions) ? page.sessions : []
+        ).filter(
+          (session) =>
+            source !== 'default' || !legacyIds?.includes(session.sessionId),
+        );
         // First page only, once per bootstrap: recover the pre-cutover
         // conversations the daemon files as unattributed. Restoring one
         // stamps it `vscode` (the daemon fills missing attribution on
         // restore), so later loads surface it through the ordinary query
         // above. A scan failure must not take the ordinary history list down
         // with it — fail open and retry on a later open.
-        const legacyIds = runtime.legacyConversationIds;
-        let legacySessions: DaemonSessionSummary[] = [];
+        let legacySessions =
+          source === VSCODE_SESSION_SOURCE_TYPE
+            ? legacySessionsRef.current
+            : [];
         if (
           cursor === undefined &&
+          source === VSCODE_SESSION_SOURCE_TYPE &&
           !legacyScanDoneRef.current &&
           legacyIds !== undefined &&
           legacyIds.length > 0
@@ -523,11 +559,14 @@ export function EmbeddedApp() {
               runtime.workspaceCwd,
               legacyIds,
             );
+            if (requestId !== sessionHistoryRequestRef.current) return;
+            legacySessionsRef.current = legacySessions;
             legacyScanDoneRef.current = true;
           } catch {
             legacySessions = [];
           }
         }
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),
@@ -541,6 +580,7 @@ export function EmbeddedApp() {
             }
           }
           if (
+            source === activeSessionHistorySource &&
             runtime.sessionId &&
             !merged.has(runtime.sessionId) &&
             runtime.workspaceCwd
@@ -555,18 +595,23 @@ export function EmbeddedApp() {
         });
         setSessionCursor(page.nextCursor);
       } catch (error) {
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),
         );
       } finally {
-        setSessionListLoading(false);
+        if (requestId === sessionHistoryRequestRef.current) {
+          setSessionListLoading(false);
+        }
       }
     },
     [
       daemonClient,
+      activeSessionHistorySource,
       runtime?.sessionId,
       runtime?.workspaceCwd,
       runtime?.legacyConversationIds,
+      sessionHistorySource,
       sessionListLoading,
       sessionTitle,
       t,
@@ -608,6 +653,8 @@ export function EmbeddedApp() {
       vscode.postMessage({ type: 'closeDiff', data: { path, requestId } });
     }
     openPermissionDiffsRef.current.clear();
+    dismissedPermissionDiffIdRef.current = undefined;
+    setHostOwnsEditDiffPreview(true);
     if (webShellPermissionRequestIdRef.current) {
       webShellPermissionRequestIdRef.current = undefined;
       vscode.postMessage({
@@ -634,7 +681,8 @@ export function EmbeddedApp() {
           const { path, oldText, newText } = diff;
           pendingIds.add(pendingPermission.requestId);
           if (
-            !openPermissionDiffsRef.current.has(pendingPermission.requestId)
+            !openPermissionDiffsRef.current.has(pendingPermission.requestId) &&
+            dismissedPermissionDiffIdRef.current !== pendingPermission.requestId
           ) {
             openPermissionDiffsRef.current.set(
               pendingPermission.requestId,
@@ -660,6 +708,13 @@ export function EmbeddedApp() {
           type: 'closeDiff',
           data: { path, requestId },
         });
+      }
+      if (
+        dismissedPermissionDiffIdRef.current !== undefined &&
+        dismissedPermissionDiffIdRef.current !== permissionToFocus
+      ) {
+        dismissedPermissionDiffIdRef.current = undefined;
+        setHostOwnsEditDiffPreview(true);
       }
       const pendingDiffRequestId = pendingIds.values().next().value as
         | string
@@ -779,9 +834,11 @@ export function EmbeddedApp() {
         message.type === 'webShellBootstrap' &&
         typeof message.data?.baseUrl === 'string'
       ) {
-        setRuntime(
-          message.data as NonNullable<ReturnType<typeof readRuntimeConfig>>,
-        );
+        const nextRuntime = message.data as NonNullable<
+          ReturnType<typeof readRuntimeConfig>
+        >;
+        setActiveSessionHistorySource(historySourceForRuntime(nextRuntime));
+        setRuntime(nextRuntime);
       } else if (message.type === 'webShellBootstrapError') {
         const errorMessage = (message.data as { message?: unknown } | null)
           ?.message;
@@ -792,6 +849,20 @@ export function EmbeddedApp() {
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'permissionDiffClosed') {
+        const requestId = (message.data as { requestId?: unknown } | null)
+          ?.requestId;
+        // Same source gate as the decision handler below: MCP apps and artifact
+        // previews run in scriptable sandboxed iframes inside this webview and
+        // can postMessage here. This is not a vote, but it does flip who owns
+        // the edit preview, so only the preload parent frame may send it.
+        if (typeof requestId === 'string' && event.source === window.parent) {
+          openPermissionDiffsRef.current.delete(requestId);
+          if (webShellPermissionRequestIdRef.current === requestId) {
+            dismissedPermissionDiffIdRef.current = requestId;
+            setHostOwnsEditDiffPreview(false);
+          }
+        }
       } else if (message.type === 'webShellPermissionDecision') {
         const decisionData = message.data as {
           decision?: unknown;
@@ -1052,18 +1123,31 @@ export function EmbeddedApp() {
       <style>{VSCODE_EMBEDDED_CSS}</style>
       {sessionHistoryOpen && (
         <SessionHistoryDropdown
+          key={sessionHistorySource}
           t={t}
           sessions={sessions}
           currentSessionId={runtime.sessionId}
           searchQuery={sessionSearchQuery}
+          source={sessionHistorySource}
+          editable={sessionHistorySource === VSCODE_SESSION_SOURCE_TYPE}
           loading={sessionListLoading}
           hasMore={Boolean(sessionCursor)}
           error={sessionListError}
           onSearchChange={setSessionSearchQuery}
+          onSourceChange={(source) => {
+            if (source === sessionHistorySource) return;
+            setSessionHistorySource(source);
+            setSessionSearchQuery('');
+            setSessions([]);
+            setSessionCursor(undefined);
+            setSessionListError(undefined);
+            void loadSessionHistory(undefined, source);
+          }}
           onClose={closeSessionHistory}
           onLoadMore={() => void loadSessionHistory(sessionCursor)}
           onSelect={(session) => {
             if (session.sessionId === runtime.sessionId) return;
+            setActiveSessionHistorySource(sessionHistorySource);
             closeOpenPermissionDiffs();
             clearInsight();
             closeSessionHistory();
@@ -1081,7 +1165,13 @@ export function EmbeddedApp() {
             });
           }}
           onRename={async (session, title) => {
-            if (!daemonClient || !runtime.workspaceCwd) return;
+            if (
+              sessionHistorySource !== VSCODE_SESSION_SOURCE_TYPE ||
+              !daemonClient ||
+              !runtime.workspaceCwd
+            ) {
+              return;
+            }
             setSessionListError(undefined);
             try {
               const result = await daemonClient
@@ -1090,6 +1180,12 @@ export function EmbeddedApp() {
                   displayName: title,
                 });
               const displayName = result.displayName || title;
+              legacySessionsRef.current = legacySessionsRef.current.map(
+                (entry) =>
+                  entry.sessionId === session.sessionId
+                    ? { ...entry, displayName }
+                    : entry,
+              );
               setSessions((current) =>
                 current.map((entry) =>
                   entry.sessionId === session.sessionId
@@ -1116,6 +1212,7 @@ export function EmbeddedApp() {
           }}
           onDelete={async (session) => {
             if (
+              sessionHistorySource !== VSCODE_SESSION_SOURCE_TYPE ||
               !daemonClient ||
               !runtime.workspaceCwd ||
               !session.sessionId ||
@@ -1128,6 +1225,9 @@ export function EmbeddedApp() {
               await daemonClient
                 .workspaceByCwd(runtime.workspaceCwd)
                 .deleteSessionsData([session.sessionId]);
+              legacySessionsRef.current = legacySessionsRef.current.filter(
+                (entry) => entry.sessionId !== session.sessionId,
+              );
               setSessions((current) =>
                 current.filter(
                   (entry) => entry.sessionId !== session.sessionId,
@@ -1478,17 +1578,28 @@ export function EmbeddedApp() {
           style={SHELL_STYLE}
           theme={theme}
           language={language}
-          sessionSourceType={VSCODE_SESSION_SOURCE_TYPE}
+          sessionSourceType={
+            activeSessionHistorySource === VSCODE_SESSION_SOURCE_TYPE
+              ? VSCODE_SESSION_SOURCE_TYPE
+              : undefined
+          }
           shellRef={shellRef}
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            if (sessionId === undefined) {
+              setActiveSessionHistorySource(VSCODE_SESSION_SOURCE_TYPE);
+            }
             webShellPermissionRequestIdRef.current = undefined;
             clearInsight();
             setEditingMessage(undefined);
             vscode.postMessage({
               type: 'webShellSessionChanged',
-              data: { sessionId, workspaceCwd: runtime.workspaceCwd },
+              data: {
+                sessionId,
+                workspaceCwd: runtime.workspaceCwd,
+                historySource: activeSessionHistorySource,
+              },
             });
             setRuntime((current) =>
               current && current.sessionId !== sessionId
@@ -1526,7 +1637,7 @@ export function EmbeddedApp() {
           sidebar={false}
           compactThinking
           collapseCompletedTurns
-          hostOwnsEditDiffPreview
+          hostOwnsEditDiffPreview={hostOwnsEditDiffPreview}
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
@@ -1608,8 +1719,15 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               const snapshot =
                 editingMessage.turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
@@ -1625,10 +1743,14 @@ export function EmbeddedApp() {
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
+              try {
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  clientId: runtime.clientId,
+                  rewindFiles: false,
+                });
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               setEditingMessage(undefined);
               clearInsight();
             }
