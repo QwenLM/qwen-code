@@ -744,16 +744,16 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * one DashScope serves itself, so an explicit `enableRequestMetadata` wins in
    * both directions: `true` restores the field for a non-qwen model served
    * first-party whose tracing still matters, `false` suppresses it everywhere.
-   * The provider's own config is consulted first: a side-model generator is
-   * built with its own per-model config but shares the session `Config`, so
-   * reading the session alone would let the main model's value override a
-   * per-model opt-out. On the main route both are the same object, and the
-   * qwen-oauth hot switch mutates it in place, so nothing is latched here.
+   * Read only from the provider's own config, never the session's. A
+   * side-model generator is built with its own per-model config but shares
+   * the session `Config`, and a cross-provider agent config deliberately
+   * clears this field, so any session fallback would let the main model's
+   * value decide a different model's request. On the main route the provider
+   * config is the same object the qwen-oauth hot switch mutates in place, so
+   * nothing is latched here.
    */
   private shouldSendRequestMetadata(model: string | undefined): boolean {
-    const configured =
-      this.contentGeneratorConfig.enableRequestMetadata ??
-      this.cliConfig.getContentGeneratorConfig?.()?.enableRequestMetadata;
+    const configured = this.contentGeneratorConfig.enableRequestMetadata;
     if (typeof configured === 'boolean') {
       return configured;
     }
