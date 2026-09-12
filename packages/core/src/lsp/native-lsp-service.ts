@@ -96,6 +96,12 @@ interface DocumentSnapshot {
   readonly version: number;
 }
 
+interface DocumentLifecycle {
+  version: number;
+  pendingClose?: { error: unknown };
+  readFailures?: number;
+}
+
 interface CallHierarchyRevision {
   checkpoint(): void;
   sign(item: LspCallHierarchyItem): string | undefined;
@@ -113,14 +119,14 @@ export class NativeLspService {
   private openedDocuments = new Map<string, Map<string, DocumentSnapshot>>();
   private documentLifecycles = new Map<
     string,
-    Map<string, { version: number; pendingClose?: { error: unknown } }>
+    Map<string, DocumentLifecycle>
   >();
   private workspaceSymbolFiles = new WeakMap<LspConnectionInterface, string>();
   private snapshotDigests = new WeakMap<DocumentSnapshot, string>();
   private callHierarchySecrets = new WeakMap<LspConnectionInterface, Buffer>();
   private lastConnections = new Map<string, LspConnectionInterface>();
-  // URIs to re-deliver after an in-place connection swap. openedDocuments is the
-  // didOpen/didChange selector and must be wiped when the connection changes; this
+  // URIs to re-deliver after a connection swap or synchronization failure.
+  // openedDocuments selects didOpen/didChange and is wiped on connection changes; this
   // set survives that wipe so a later workspaceDiagnostics can still replay them.
   private replayUris = new Map<string, Set<string>>();
   private reinitializeQueue: Promise<unknown> = Promise.resolve();
@@ -579,6 +585,7 @@ export class NativeLspService {
       // Preserve the replay obligation across the connection change: openedDocuments
       // must not retain stale entries (the new connection never saw them).
       this.parkTrackedUris(serverName);
+      this.lastConnections.set(serverName, handle.connection);
     }
 
     const documents =
@@ -586,7 +593,7 @@ export class NativeLspService {
       new Map<string, DocumentSnapshot>();
     const lifecycles =
       this.documentLifecycles.get(serverName) ??
-      new Map<string, { version: number; pendingClose?: { error: unknown } }>();
+      new Map<string, DocumentLifecycle>();
     this.documentLifecycles.set(serverName, lifecycles);
     const lifecycle = lifecycles.get(uri);
     if (lifecycle?.pendingClose) {
@@ -614,21 +621,25 @@ export class NativeLspService {
       filePath = fileURLToPath(uri);
       text = fs.readFileSync(filePath, 'utf-8');
     } catch (error) {
-      if (previous) {
+      const replay = this.replayUris.get(serverName) ?? new Set<string>();
+      if (previous || replay.has(uri)) {
+        const readFailures = (lifecycle?.readFailures ?? 0) + 1;
         lifecycles.set(uri, {
-          version: previous.version,
-          pendingClose: { error },
+          version: previous?.version ?? lifecycle?.version ?? 0,
+          readFailures,
+          ...(previous ? { pendingClose: { error } } : {}),
         });
-        documents.delete(uri);
-        this.closeUnsynchronizableDocument(serverName, handle, uri);
-      } else {
-        // Unreadable and never delivered on this connection: it can never be
-        // delivered, and a retained entry rejects every later sweep before the
-        // request. A URI whose send threw is not evicted here and stays parked.
-        this.replayUris.get(serverName)?.delete(uri);
+        if (readFailures < 2) replay.add(uri);
+        else replay.delete(uri);
+        this.replayUris.set(serverName, replay);
+        if (previous) {
+          documents.delete(uri);
+          this.closeUnsynchronizableDocument(serverName, handle, uri);
+        }
       }
       throw error;
     }
+    if (lifecycle) delete lifecycle.readFailures;
     if (previous?.text === text && !force) {
       return { sent: false, opened: false };
     }
@@ -660,6 +671,9 @@ export class NativeLspService {
           pendingClose: { error },
         });
         documents.delete(uri);
+        const replay = this.replayUris.get(serverName) ?? new Set<string>();
+        replay.add(uri);
+        this.replayUris.set(serverName, replay);
         this.closeUnsynchronizableDocument(serverName, handle, uri);
         throw error;
       }
@@ -689,7 +703,6 @@ export class NativeLspService {
     documents.set(uri, { text, version });
     lifecycles.set(uri, { version });
     this.openedDocuments.set(serverName, documents);
-    this.lastConnections.set(serverName, handle.connection);
     return { sent: true, opened: !previous && openClose };
   }
 
@@ -1366,7 +1379,6 @@ export class NativeLspService {
     name: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
-    observeSignedTargets = false,
   ): CallHierarchyRevision {
     const connection = handle.connection;
     const assertActive = () => {
@@ -1450,13 +1462,6 @@ export class NativeLspService {
       sign: (item) => {
         assertActive();
         if (!item.uri.startsWith('file://')) return undefined;
-        if (observeSignedTargets && !snapshots.has(item.uri)) {
-          // Signing is synchronous after the response, so a prepare result in a
-          // file this connection never delivered can still be observed here.
-          const text = readText(item.uri);
-          observations.set(item.uri, text);
-          if (text !== undefined) snapshots.set(item.uri, { text, version: 0 });
-        }
         if (!isFresh(item.uri)) {
           if (item.uri === uri) throw new StaleCallHierarchyItemError();
           return undefined;
@@ -1495,7 +1500,7 @@ export class NativeLspService {
       !item.documentRevision ||
       item.documentRevision !== revision.sign(item)
     ) {
-      throw new StaleCallHierarchyItemError();
+      throw new StaleCallHierarchyItemError(item.uri);
     }
   }
 
@@ -1561,7 +1566,6 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
-          true,
         );
         let response = await connection.request(
           'textDocument/prepareCallHierarchy',
@@ -1838,8 +1842,8 @@ export class NativeLspService {
         // Isolate per URI so one unreadable tracked file still lets the survivors
         // re-deliver before the call rejects; a survivor stranded behind a throw
         // would leave the connection queried with zero documents and report clean.
-        // Eviction of a never-delivered, unreadable URI happens where its read
-        // failed; a URI whose send threw stays parked for the next sweep.
+        // The shared helper bounds consecutive read failures; a URI whose send
+        // threw stays parked for the next sweep.
         try {
           openedAny =
             this.synchronizeDocument(name, handle, uri).opened || openedAny;

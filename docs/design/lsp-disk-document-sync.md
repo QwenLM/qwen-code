@@ -25,8 +25,9 @@ neither `didOpen` nor orphan `didChange`; it retains ownership of disk loading
 and remains queryable after edits. If a client-opened file changes without change
 support, synchronization raises an unsupported-sync error and skips the request.
 Read and unsupported-change failures close the opened document, release its text,
-and fail the observing call. A failed close retains only a pending-close error and
-version; subsequent synchronization (including workspace diagnostics) retries the
+and fail the observing call. Unsupported changes park the URI for a later reopen
+with current disk text. A failed close retains a pending-close error, version and
+read-failure count; subsequent synchronization (including workspace diagnostics) retries the
 close before any reopen. A successful close allows later calls to recover. Versions
 remain monotonic across same-connection close/reopen, including identical text.
 Only connection replacement resets versions. Ordinary thrown change sends retain
@@ -56,14 +57,16 @@ accepted regardless of key order while changed values remain invalid. A `WeakMap
 holds one random secret per connection, not an issued-item registry. The client
 field is never forwarded to the language server. Captured pre-request snapshots
 are checked against disk, delivered version, active handle and connection before
-signing results; sibling synchronization or replacement cannot certify an old
-response as new. Incoming/outgoing calls validate before and after warmup and
+signing results; for these pre-request snapshots, sibling synchronization or
+replacement cannot certify an old response as new. Incoming/outgoing calls validate before and after warmup and
 again after the request. Stale, missing, modified or unknown provenance rejects
 with an actionable “prepare call hierarchy again” tool failure, never “no calls”.
-Fresh cross-file prepare results are certified by observing their own file inside
-the synchronous signing loop, where no await separates the response from the
-observation; an unreadable result file stays unsigned. Certifying a result's own
-file sends no notification and issues no supplemental request. The query target is
+Cross-file prepare results are certified only when their file already has a
+pre-request snapshot that remains fresh. Otherwise they stay unsigned, even when
+readable after the response: a post-response read cannot establish which text the
+server used. Traversal of an unsigned item names its own URI and requires prepare
+at a current location there. Signing sends no notification and issues no
+supplemental request. The query target is
 still snapshotted before its request and bound to the original handle/connection
 across awaits.
 Returned offsets are never used for automatic prepare, nor are names guessed.
@@ -84,7 +87,7 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   synchronize already tracked documents for each queried server, inside the
   result-limited loop (default limit 100). They neither discover more documents
   nor synchronize servers skipped after the limit. Tracked means delivered on this
-  connection or parked by an earlier connection change; the reload snapshot and the
+  connection or parked by an earlier connection change or recoverable synchronization failure; the reload snapshot and the
   sweep use the same union, and the reload's clear consumes the parked set.
   Reconnection resync opens every
   tracked URI, then settles once on new opens only (no delay for didChange).
@@ -100,10 +103,18 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   an earlier server returned diagnostics. Workspace synchronization failures
   (unreadable/deleted tracked files, thrown sends, or unsupported changes) escape
   the ordinary pull-request catch; no empty or partial success is returned. A
-  tracked URI that is unreadable and was never delivered on the current connection
-  is dropped from the parked set before the rejection, so one permanently
-  unreadable file cannot wedge later sweeps; a URI whose send threw stays parked
-  for retry. The manager catches internal TypeScript
+  tracked URI remains parked after its first failed read, including ENOENT. Its
+  second consecutive failed read drops only that URI from the parked set; both
+  observing diagnostic calls reject. The shared synchronization helper applies
+  this bound to ordinary queries, warmup and sweeps, counting
+  actual reads rather than calls. A successful read resets the count, and a new
+  connection resets counts and versions. An untracked, unreadable first query
+  does not create a replay obligation. After eviction, later sweeps can proceed;
+  a successful document-targeted query is needed to track the restored file again.
+  Eviction retains the same-connection version and any pending close. Unsupported
+  changes and thrown sends do not consume read retries. Configuration-reload
+  replay still consumes the parked set before delivery; retaining failed reload
+  deliveries remains deferred. The manager catches internal TypeScript
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty

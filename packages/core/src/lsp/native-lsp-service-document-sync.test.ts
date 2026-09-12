@@ -518,7 +518,7 @@ describe('NativeLspService disk document synchronization', () => {
     // Close main.ts via a read failure, then restore it byte-identical: the
     // lifecycle retains version 1 but the document is no longer open.
     fs.unlinkSync(file);
-    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     fs.writeFileSync(file, 'old');
     connection.request.mockClear();
     // Traversing directly with the original token (no hover, no re-prepare) must
@@ -1311,6 +1311,174 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
+  it.each(['EBUSY', 'ENOENT', 'unsupported change'])(
+    'reopens a document after %s before reporting workspace diagnostics',
+    async (failure) => {
+      if (failure === 'unsupported change')
+        handle.textDocumentSync = { openClose: true, change: 0 };
+      let serverText: string | undefined;
+      connection.send.mockImplementation((message) => {
+        const document = (message.params as { textDocument: { text?: string } })
+          .textDocument;
+        if (message.method === 'textDocument/didOpen')
+          serverText = document.text;
+        if (message.method === 'textDocument/didClose') serverText = undefined;
+        connection.events.push(message.method!);
+      });
+      connection.request.mockImplementation(async (method) => {
+        connection.events.push(method);
+        return method === 'workspace/diagnostic'
+          ? {
+              items:
+                serverText === undefined
+                  ? []
+                  : [
+                      {
+                        uri,
+                        kind: 'full',
+                        items: [
+                          {
+                            range,
+                            severity: 1,
+                            message: `error in ${serverText}`,
+                          },
+                        ],
+                      },
+                    ],
+            }
+          : { contents: serverText };
+      });
+      await run(service.hover({ uri, range }));
+      const read = vi.spyOn(fs, 'readFileSync');
+      if (failure === 'EBUSY')
+        read.mockImplementationOnce(() => {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        });
+      else if (failure === 'ENOENT') fs.unlinkSync(file);
+      else fs.writeFileSync(file, 'new');
+      try {
+        const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+        expect(result.llmContent).toContain(
+          'LSP workspace diagnostics failed:',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      } finally {
+        read.mockRestore();
+      }
+      expect(serverText).toBeUndefined();
+      expect(connection.send).toHaveBeenLastCalledWith(
+        expect.objectContaining({ method: 'textDocument/didClose' }),
+      );
+      fs.writeFileSync(file, 'new');
+      connection.events.length = 0;
+      const recovered = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(recovered.llmContent).toContain('error in new');
+      expect(connection.events).toEqual([
+        'textDocument/didOpen',
+        'workspace/diagnostic',
+      ]);
+      expect(connection.send).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          params: {
+            textDocument: {
+              uri,
+              languageId: 'typescript',
+              version: 2,
+              text: 'new',
+            },
+          },
+        }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'bounds consecutive read failures and preserves siblings after connection replacement: %s',
+    async (replace) => {
+      const other = path.join(directory, 'other.ts');
+      const otherUri = pathToFileURL(other).toString();
+      fs.writeFileSync(other, 'other');
+      await run(service.hover({ uri, range }));
+      await run(service.hover({ uri: otherUri, range }));
+      const active = replace ? createConnection() : connection;
+      handle.connection = active;
+      fs.unlinkSync(file);
+      await expect(run(service.diagnostics(uri))).rejects.toThrow('ENOENT');
+      await expect(run(service.diagnostics(uri))).rejects.toThrow('ENOENT');
+      await run(service.workspaceDiagnostics());
+      expect(
+        active.requests.some(({ method }) => method === 'workspace/diagnostic'),
+      ).toBe(true);
+      expect(active.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: {
+              uri: otherUri,
+              languageId: 'typescript',
+              version: 1,
+              text: 'other',
+            },
+          },
+        }),
+      );
+      fs.writeFileSync(file, 'restored');
+      active.send.mockClear();
+      await run(service.workspaceDiagnostics());
+      expect(active.send).not.toHaveBeenCalled();
+      await run(service.diagnostics(uri));
+      expect(active.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: {
+              uri,
+              languageId: 'typescript',
+              version: replace ? 1 : 2,
+              text: 'restored',
+            },
+          },
+        }),
+      );
+    },
+  );
+
+  it('does not track an unreadable first query', async () => {
+    fs.unlinkSync(file);
+    await expect(run(service.diagnostics(uri))).rejects.toThrow('ENOENT');
+    await run(service.workspaceDiagnostics());
+    expect(connection.send).not.toHaveBeenCalled();
+  });
+
+  it('resets read failures after a successful read even when the reopen send fails', async () => {
+    await run(service.hover({ uri, range }));
+    fs.unlinkSync(file);
+    await expect(run(service.diagnostics(uri))).rejects.toThrow('ENOENT');
+    fs.writeFileSync(file, 'restored');
+    connection.send.mockImplementationOnce(() => {
+      throw new Error('send failed');
+    });
+    await expect(run(service.diagnostics(uri))).rejects.toThrow('send failed');
+    fs.unlinkSync(file);
+    await expect(run(service.diagnostics(uri))).rejects.toThrow('ENOENT');
+    fs.writeFileSync(file, 'restored');
+    connection.send.mockClear();
+    await run(service.workspaceDiagnostics());
+    expect(connection.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri,
+            languageId: 'typescript',
+            version: 2,
+            text: 'restored',
+          },
+        },
+      }),
+    );
+  });
+
   it.each([
     { items: [] },
     { items: [{ range, severity: 1, message: 'first server diagnostic' }] },
@@ -1399,16 +1567,15 @@ describe('NativeLspService disk document synchronization', () => {
           }
 
           await expect(
-            new NativeLspClient(service).workspaceDiagnostics(),
+            run(new NativeLspClient(service).workspaceDiagnostics()),
           ).rejects.toThrow(message);
           // Recreate the failure for the tool after checking recovery independently.
           if (failure !== 'notification failure') {
+            if (failure === 'deleted file') fs.writeFileSync(file, 'new');
             await run(service.workspaceDiagnostics());
             expect(connection.request).toHaveBeenCalledOnce();
-            fs.writeFileSync(file, 'old');
-            await run(service.hover({ uri, range }, 'test'));
             if (failure === 'deleted file') fs.unlinkSync(file);
-            else fs.writeFileSync(file, 'new');
+            else fs.writeFileSync(file, 'another edit');
             connection.request.mockClear();
           }
           const result = await run(
@@ -1535,11 +1702,14 @@ describe('NativeLspService disk document synchronization', () => {
   });
 
   it.each(['incomingCalls', 'outgoingCalls'] as const)(
-    'signs fresh cross-file prepare for %s without a supplemental request',
+    'signs previously delivered cross-file prepare for %s without a supplemental request',
     async (method) => {
       const second = path.join(directory, 'decl.ts');
       fs.writeFileSync(second, 'declaration');
       const secondUri = pathToFileURL(second).toString();
+      await run(service.hover({ uri: secondUri, range }));
+      connection.send.mockClear();
+      connection.request.mockClear();
       connection.request.mockImplementation(async (name) =>
         name === 'textDocument/prepareCallHierarchy'
           ? [
@@ -1578,6 +1748,63 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
+  it.each(['incomingCalls', 'outgoingCalls'] as const)(
+    'leaves an unobserved cross-file response unsigned and guides %s recovery',
+    async (method) => {
+      const decl = path.join(directory, 'decl.ts');
+      const declUri = pathToFileURL(decl).toString();
+      fs.writeFileSync(decl, '\n\nfunction current() {}');
+      connection.request.mockImplementation(async (name, params) =>
+        name === 'textDocument/prepareCallHierarchy'
+          ? [
+              {
+                name:
+                  (params as { textDocument: { uri: string } }).textDocument
+                    .uri === declUri
+                    ? 'current'
+                    : 'old',
+                kind: 12,
+                uri: declUri,
+                range,
+                selectionRange: range,
+              },
+            ]
+          : [],
+      );
+      const [item] = await run(service.prepareCallHierarchy({ uri, range }));
+      expect(item?.documentRevision).toBeUndefined();
+      expect(connection.send).toHaveBeenCalledOnce();
+      expect(connection.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: {
+              uri,
+              languageId: 'typescript',
+              text: 'old',
+              version: 1,
+            },
+          },
+        }),
+      );
+      expect(connection.request).toHaveBeenCalledOnce();
+      connection.request.mockClear();
+      await expect(run<unknown>(service[method](item!))).rejects.toThrow(
+        declUri,
+      );
+      expect(connection.request).not.toHaveBeenCalled();
+      const [fresh] = await run(
+        service.prepareCallHierarchy({ uri: declUri, range }),
+      );
+      expect(fresh?.documentRevision).toEqual(expect.any(String));
+      await run<unknown>(service[method](fresh!));
+      expect(connection.request).toHaveBeenLastCalledWith(
+        `callHierarchy/${method}`,
+        expect.any(Object),
+      );
+    },
+  );
+
   it('names the unobserved file for a delivered-then-closed cross-file item', async () => {
     const decl = path.join(directory, 'decl.ts');
     fs.writeFileSync(decl, 'declaration');
@@ -1586,7 +1813,7 @@ describe('NativeLspService disk document synchronization', () => {
     // retaining its lifecycle version, then restore it byte-identical.
     await run(service.hover({ uri: declUri, range }));
     fs.unlinkSync(decl);
-    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     fs.writeFileSync(decl, 'declaration');
     // A prepare rooted at main.ts returns a cross-file item pointing at decl.ts.
     connection.request.mockImplementation(async (name) =>
@@ -1943,13 +2170,12 @@ describe('NativeLspService disk document synchronization', () => {
       const [item] = await run(service.prepareCallHierarchy({ uri, range }));
       if (failure === 'read') fs.unlinkSync(file);
       else fs.writeFileSync(file, 'changed');
-      await expect(service.workspaceDiagnostics()).rejects.toThrow();
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow();
       expect(connection.send).toHaveBeenLastCalledWith({
         jsonrpc: '2.0',
         method: 'textDocument/didClose',
         params: { textDocument: { uri } },
       });
-      await run(service.workspaceDiagnostics());
       fs.writeFileSync(file, 'old');
       const [fresh] = await run(service.prepareCallHierarchy({ uri, range }));
       expect(fresh?.documentRevision).not.toBe(item?.documentRevision);
@@ -1984,9 +2210,11 @@ describe('NativeLspService disk document synchronization', () => {
           throw new Error('close failed');
         send(message);
       });
-      await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+        'ENOENT',
+      );
       fs.writeFileSync(file, 'old');
-      await expect(service.workspaceDiagnostics()).rejects.toThrow(
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
         /still cannot close/,
       );
       expect(await run(service.hover({ uri, range }))).toBeNull();
@@ -2059,7 +2287,7 @@ describe('NativeLspService disk document synchronization', () => {
     fs.unlinkSync(file);
     const replacement = createConnection();
     handle.connection = replacement;
-    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     // The survivor must still reach the replacement connection even though the
     // first-tracked file aborted its own sync; without per-URI isolation the
     // throw strands every URI queued behind it and the sweep reports clean.
@@ -2070,6 +2298,7 @@ describe('NativeLspService disk document synchronization', () => {
       ]),
     ).toEqual([['textDocument/didOpen', otherUri]]);
     // A second sweep must still track the survivor rather than strand it.
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     await run(service.workspaceDiagnostics());
     const internals = service as unknown as {
       openedDocuments: Map<string, Map<string, unknown>>;
@@ -2150,7 +2379,9 @@ describe('NativeLspService disk document synchronization', () => {
     replacement.send.mockImplementationOnce(() => {
       throw new Error('write EPIPE');
     });
-    await expect(service.workspaceDiagnostics()).rejects.toThrow('write EPIPE');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+      'write EPIPE',
+    );
     const afterFirst = replacement.send.mock.calls.length;
     await run(service.workspaceDiagnostics());
     expect(
@@ -2176,7 +2407,8 @@ describe('NativeLspService disk document synchronization', () => {
     // delivered; the unreadable one must be evicted instead of wedging every sweep.
     await run(service.hover({ uri: otherUri, range }));
     fs.unlinkSync(file);
-    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     await run(service.workspaceDiagnostics());
     expect(replacement.requests.map(({ method }) => method)).toContain(
       'workspace/diagnostic',
@@ -2262,7 +2494,9 @@ describe('NativeLspService disk document synchronization', () => {
       const pending = service[method](item!).catch((error: unknown) => error);
       await vi.runAllTimersAsync();
       fs.unlinkSync(file);
-      await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+        'ENOENT',
+      );
       fs.writeFileSync(file, 'old');
       await run(service.hover({ uri, range }));
       respond([]);
@@ -2321,10 +2555,11 @@ describe('NativeLspService disk document synchronization', () => {
     await run(service.hover({ uri: otherUri, range }, 'test'));
     await run(service.hover({ uri: otherUri, range }, 'second'));
     fs.unlinkSync(file);
-    await expect(service.workspaceDiagnostics('test')).rejects.toThrow(
+    await expect(run(service.workspaceDiagnostics('test'))).rejects.toThrow(
       'ENOENT',
     );
     fs.writeFileSync(other, 'changed');
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow('ENOENT');
     await run(service.workspaceDiagnostics());
     for (const target of [connection, second])
       expect(target.send).toHaveBeenLastCalledWith(

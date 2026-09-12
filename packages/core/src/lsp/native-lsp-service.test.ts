@@ -607,7 +607,10 @@ describe('NativeLspService', () => {
       await expect(reinitialize).resolves.toBeDefined();
 
       expect(firstConnection.send).toHaveBeenCalledOnce();
-      expect(internals.lastConnections.has('typescript-language-server')).toBe(
+      expect(internals.lastConnections.get('typescript-language-server')).toBe(
+        firstConnection,
+      );
+      expect(internals.openedDocuments.has('typescript-language-server')).toBe(
         false,
       );
       expect(internals.lastConnections.get('pyright-langserver')).toBe(
