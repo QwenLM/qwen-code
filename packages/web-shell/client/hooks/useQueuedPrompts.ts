@@ -941,7 +941,12 @@ export function useQueuedPrompts({
       // attachment-only message as its text. That placeholder is not user
       // content, so it never becomes a caption: the attachments it stands for
       // speak for it, and with none of them left there is nothing to echo.
-      const caption = prompt.text === IMAGE_ONLY_PROMPT_TEXT ? '' : prompt.text;
+      // Only a row that actually carries media can have got the text from the
+      // daemon — for any other row it is what the user typed.
+      const hasMedia =
+        (prompt.images?.length ?? 0) > 0 || (prompt.files?.length ?? 0) > 0;
+      const caption =
+        hasMedia && prompt.text === IMAGE_ONLY_PROMPT_TEXT ? '' : prompt.text;
       if (
         displayedServerPromptIdsRef.current.has(promptId) ||
         prompt.payloadCompleteness === 'summary-only' ||
@@ -1087,6 +1092,16 @@ export function useQueuedPrompts({
         pendingStartedByPromptIdRef.current.delete(promptId);
         if (!returnedUnboundPromptIdsRef.current.has(promptId)) {
           appendedBeforeResponsePromptIdsRef.current.add(promptId);
+          // A body that returned bound never re-reads this, so the entry
+          // would otherwise outlive the session's prompts one string at a
+          // time: bound it like every sibling collection here.
+          while (appendedBeforeResponsePromptIdsRef.current.size > 200) {
+            const oldestAppended = appendedBeforeResponsePromptIdsRef.current
+              .values()
+              .next().value;
+            if (typeof oldestAppended !== 'string') break;
+            appendedBeforeResponsePromptIdsRef.current.delete(oldestAppended);
+          }
         }
       }
       // A settled prompt will never start, so no echo is owed for it and its

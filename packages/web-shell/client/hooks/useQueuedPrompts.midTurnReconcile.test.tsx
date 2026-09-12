@@ -15619,4 +15619,54 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+  it('echoes a message whose whole text is the placeholder the daemon renders', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('[image]');
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      // The user really typed the seven characters the daemon renders an
+      // attachment-only message as, and sent no attachment: the start beats
+      // the admission response and matches the still-unbound row.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: '[image]',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        '[image]',
+        undefined,
+        { promptId: 'prompt-1' },
+        undefined,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
 });
