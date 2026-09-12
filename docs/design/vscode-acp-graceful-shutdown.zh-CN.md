@@ -24,7 +24,7 @@ companion 首先关闭 ACP 子进程的 stdin。CLI 将传输关闭作为正常�
 ## 验证
 
 - 断开连接时先关闭 stdin，不立即强制终止。
-- POSIX 与 Windows 的升级路径都覆盖完整子进程树。
+- POSIX 升级路径针对 ACP 子进程所在的进程组；Windows 升级路径通过 `taskkill /f /t` 针对进程树，taskkill 失败时退化为只终止直接子进程。
 - 子进程正常退出后取消升级计时器。
 - 已退役子进程的退出或响应不能清理或更新替代连接。
 - EOF 与信号重叠时每个清理阶段只执行一次，且所有 SessionEnd hooks 都在共享时限内启动。

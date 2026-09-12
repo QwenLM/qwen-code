@@ -24,7 +24,7 @@ This change covers ACP process teardown and the connection races introduced by g
 ## Verification
 
 - Disconnect closes stdin before any forced termination.
-- POSIX and Windows escalation target the complete child tree.
+- POSIX escalation targets the ACP child's process group; Windows escalation targets the process tree via `taskkill /f /t`, degrading to the direct child if taskkill fails.
 - A normal child exit cancels escalation.
 - A retired child or response cannot clear or update its replacement.
 - EOF and signal shutdown execute each cleanup phase once, and all SessionEnd hooks begin within the shared deadline.
