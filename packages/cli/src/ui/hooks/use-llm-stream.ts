@@ -1664,7 +1664,6 @@ export const useLlmStream = (
         // cancel restore can re-arm what the display form hides.
         const adoptedReminders =
           trimmedSubmittedPrompt !== undefined &&
-          trimmedSubmittedPrompt !== trimmedQuery &&
           producerReminders !== undefined &&
           omitSystemReminderBlocks(trimmedQuery, producerReminders) ===
             trimmedSubmittedPrompt
