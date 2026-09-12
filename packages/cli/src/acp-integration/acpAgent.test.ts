@@ -1683,6 +1683,44 @@ describe('runAcpAgent shutdown cleanup', () => {
     await agentPromise;
   });
 
+  it('shares in-flight cleanup when SIGTERM overlaps an IDE close', async () => {
+    let resolveHook!: () => void;
+    const fireSessionEndEvent = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveHook = resolve;
+        }),
+    );
+    mockConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionEndEvent,
+    });
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    expect(agent).toBeDefined();
+    const shutdownMcpPool = vi.fn().mockResolvedValue(undefined);
+    const disposeSessions = vi.fn().mockResolvedValue(undefined);
+    Object.assign(agent!, { shutdownMcpPool, disposeSessions });
+
+    mockConnectionState.resolve();
+    await vi.waitFor(() => {
+      expect(fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.PromptInputExit,
+        expect.any(AbortSignal),
+      );
+    });
+    sigTermListeners[0]('SIGTERM');
+    await flushImmediate();
+    expect(disposeSessions).not.toHaveBeenCalled();
+
+    resolveHook();
+    await agentPromise;
+    await vi.waitFor(() => expect(processExitSpy).toHaveBeenCalledWith(0));
+
+    expect(fireSessionEndEvent).toHaveBeenCalledTimes(1);
+    expect(shutdownMcpPool).toHaveBeenCalledTimes(1);
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+  });
+
   it('still exits even if runExitCleanup throws', async () => {
     mockRunExitCleanup.mockRejectedValueOnce(new Error('cleanup failed'));
 
@@ -1956,6 +1994,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -1975,6 +2014,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -1991,6 +2031,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.PromptInputExit,
+        expect.any(AbortSignal),
       );
     });
 
@@ -2054,6 +2095,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     await vi.waitFor(() => {
       expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        expect.any(AbortSignal),
       );
     });
 
@@ -2065,6 +2107,36 @@ describe('runAcpAgent SessionEnd hooks', () => {
 
     // SessionEnd should have been called exactly once
     expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a SessionEnd hook after the shutdown budget', async () => {
+    mockHookSystem.fireSessionEndEvent.mockImplementation(
+      (_reason: SessionEndReason, signal?: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        }),
+    );
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(sigTermListeners.length).toBeGreaterThan(0));
+
+    vi.useFakeTimers();
+    try {
+      sigTermListeners[0]('SIGTERM');
+      await Promise.resolve();
+      expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Other,
+        expect.any(AbortSignal),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => {
+        expect(mockRunExitCleanup).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 });
 
@@ -21397,8 +21469,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mockImplementation((event: string) => event === 'SessionEnd');
 
     const innerConfigA = await setupSessionMocks('session-end-a');
+    let resolveSessionEndA!: () => void;
     const sessionHookSystemA = {
-      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+      fireSessionEndEvent: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveSessionEndA = resolve;
+          }),
+      ),
       fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
     };
     innerConfigA.getHookSystem = vi.fn().mockReturnValue(sessionHookSystemA);
@@ -21463,16 +21541,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
     mockConnectionState.resolve();
+    await vi.waitFor(() => {
+      expect(sessionHookSystemA.fireSessionEndEvent).toHaveBeenCalled();
+      expect(sessionHookSystemB.fireSessionEndEvent).toHaveBeenCalled();
+    });
+    resolveSessionEndA();
     await agentPromise;
 
     expect(bootstrapHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
     expect(sessionHookSystemA.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
     expect(sessionHookSystemB.fireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.PromptInputExit,
+      expect.any(AbortSignal),
     );
   });
 
