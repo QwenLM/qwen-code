@@ -72,12 +72,12 @@ describe('HookRunner', () => {
     // executable === 'powershell' and this matches that contract. Tests
     // that exercise the probe priority (pwsh vs powershell, both
     // missing, etc.) override the spy in their own setup.
-    vi.spyOn(shellUtils, 'resolveCommandPath').mockImplementation(
-      ((name: string) => {
-        if (name === 'powershell') return { path: 'powershell' };
-        return { path: null };
-      }) as never,
-    );
+    vi.spyOn(shellUtils, 'resolveCommandPath').mockImplementation(((
+      name: string,
+    ) => {
+      if (name === 'powershell') return { path: 'powershell' };
+      return { path: null };
+    }) as never);
     // Reset the module-level probe cache so the default mock above
     // applies on the first probe call.
     __resetPowerShellCache();
@@ -1017,7 +1017,6 @@ describe('HookRunner', () => {
       expect(result.stdout?.length).toBe(1024 * 1024);
     });
   });
-
 
   describe('convertPlainTextToHookOutput', () => {
     it('should convert plain text to allow output on success', async () => {
@@ -2782,20 +2781,15 @@ describe('HookRunner', () => {
     });
 
     it.each([
-      ['bare-quoted .cmd path at start', '"C:\\Program Files\\My App\\hook.cmd"'],
+      [
+        'bare-quoted .cmd path at start',
+        '"C:\\Program Files\\My App\\hook.cmd"',
+      ],
       [
         'bare-quoted .bat path with arguments',
         '"C:\\Scripts\\setup.bat" arg1 arg2',
       ],
-      [
-        'bare-quoted .exe path at start',
-        '"C:\\Windows\\notepad.exe"',
-      ],
-      [
-        'multi-statement with bare-quoted .cmd',
-        'cmd1; "foo.cmd"',
-      ],
-      ['bare-quoted .bat after comment line', '# my hook\n"foo.bat"'],
+      ['bare-quoted .exe path at start', '"C:\\Windows\\notepad.exe"'],
       ['single-quoted .exe', "'C:\\foo.exe'"],
       [
         'bare-quoted path carrying terminal escapes',
@@ -2825,6 +2819,22 @@ describe('HookRunner', () => {
       ['bare-quoted .ps1 not in cmd-regression class', '"C:\\foo.ps1"'],
       ['bare-quoted .ps1 with arguments', '"C:\\foo.ps1" arg1 arg2'],
       ['bare-quoted no-extension command', '"foo"'],
+      [
+        'multi-line array of paths with bare-quoted .cmd',
+        '"C:\\path1.cmd"\n"C:\\path2.cmd"\n"C:\\path3.cmd"',
+      ],
+      [
+        'backtick-continued quoted path as argument',
+        'Get-Process "C:\\long `\n` path\\app.cmd"',
+      ],
+      [
+        'bare-quoted path whose name merely contains .exe / .cmd',
+        '"C:\\build\\app.exe.log" | Get-Content',
+      ],
+      [
+        'bare-quoted path whose name merely contains .cmd',
+        '"C:\\Scripts\\deploy.cmd.old" | Remove-Item',
+      ],
     ])(
       'does not throw for a PowerShell command that is %s',
       async (_label, command) => {
@@ -2861,7 +2871,9 @@ describe('HookRunner', () => {
       );
       const spawnArgs = mockSpawn.mock.calls[0];
       // bash command passes through verbatim - no Set-StrictMode prefix.
-      expect(spawnArgs[1][spawnArgs[1].length - 1]).toBe('echo $CLAUDE_PROJECT_DIR');
+      expect(spawnArgs[1][spawnArgs[1].length - 1]).toBe(
+        'echo $CLAUDE_PROJECT_DIR',
+      );
     });
 
     it('surfaces VariableIsUndefined as systemMessage when $VAR is undefined', async () => {
@@ -2871,7 +2883,7 @@ describe('HookRunner', () => {
         createMockProcess(
           1,
           '',
-          'The variable \'$CLAUDE_PROJECT_DIR\' cannot be retrieved because it has not been set.\n' +
+          "The variable '$CLAUDE_PROJECT_DIR' cannot be retrieved because it has not been set.\n" +
             'At line:1 char:1\n' +
             '+ $CLAUDE_PROJECT_DIR\n' +
             '+ ~~~~~~~~~~~~~~~~~~~\n' +
@@ -2900,10 +2912,15 @@ describe('HookRunner', () => {
       expect(result.exitCode).toBe(1);
       // The PowerShell error reaches the caller through systemMessage so the
       // user can see the exact $VAR that failed.
-      const output = result.output as { systemMessage?: string; reason?: string };
+      const output = result.output as {
+        systemMessage?: string;
+        reason?: string;
+      };
       expect(output.systemMessage).toBeDefined();
       expect(output.systemMessage).toContain('CLAUDE_PROJECT_DIR');
-      expect(output.systemMessage).toMatch(/cannot be retrieved|VariableIsUndefined/);
+      expect(output.systemMessage).toMatch(
+        /cannot be retrieved|VariableIsUndefined/,
+      );
     });
   });
 

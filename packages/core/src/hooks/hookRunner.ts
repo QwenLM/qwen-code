@@ -1243,7 +1243,7 @@ export class HookRunner {
       // surfacing.
       if (
         shellConfig.shell === 'powershell' &&
-        /(?:^|[\n;])\s*["'][^"']*\.(?:cmd|bat|exe)\b/i.test(
+        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe)(?![\w.\n])(?![\s\S]*\n)/i.test(
           hookConfig.command,
         )
       ) {

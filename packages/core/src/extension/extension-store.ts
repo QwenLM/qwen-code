@@ -212,6 +212,17 @@ function assertIdentity(identity: ExtensionIdentity): void {
   }
 }
 
+// Shared by the reader (parseState) and the writer (commitArtifact): a value one
+// side accepts and the other rejects makes state.json permanently unreadable.
+export function isStorableLinkedSource(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    // eslint-disable-next-line no-control-regex -- explicit rejection of hostile linkedSource
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
 function setLegacyPathActivation(
   policy: ExtensionPolicy,
   scopePath: string,
@@ -297,9 +308,7 @@ function parseState(
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
       (parsed.linkedSource === undefined ||
-        (typeof parsed.linkedSource === 'string' &&
-          parsed.linkedSource.length > 0 &&
-          !/[\u0000-\u001f\u007f]/.test(parsed.linkedSource))) &&
+        isStorableLinkedSource(parsed.linkedSource)) &&
       (parsed.declarationOnly === undefined ||
         parsed.declarationOnly === true) &&
       (parsed.preserveActivationOnNextInstall === undefined ||
@@ -659,6 +668,14 @@ export class ExtensionStore {
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(input.identity);
     this.assertArtifactPaths(input);
+    if (
+      input.linkedSource !== undefined &&
+      !isStorableLinkedSource(input.linkedSource)
+    ) {
+      throw new Error(
+        `Invalid linkedSource for extension "${input.identity.name}".`,
+      );
+    }
     return await this.withLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();

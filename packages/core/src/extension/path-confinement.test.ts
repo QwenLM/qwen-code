@@ -55,31 +55,37 @@ describe('realPathWithin', () => {
     }
   });
 
-  it.runIf(process.platform !== 'win32')('returns false for a broken symlink', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    try {
-      const link = path.join(dir, 'dangling');
-      fs.symlinkSync(path.join(dir, 'missing'), link);
-      expect(realPathWithin(link, dir)).toBe(false);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'returns false for a broken symlink',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      try {
+        const link = path.join(dir, 'dangling');
+        fs.symlinkSync(path.join(dir, 'missing'), link);
+        expect(realPathWithin(link, dir)).toBe(false);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it.runIf(process.platform !== 'win32')('returns true for a symlink whose realpath stays inside root', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    try {
-      const target = path.join(dir, 'base.md');
-      fs.writeFileSync(target, 'x', 'utf-8');
-      const link = path.join(dir, 'link.md');
-      fs.symlinkSync(target, link);
-      // Legitimate in-package symlinks (git preserves them) must be accepted,
-      // not blanket-rejected — the escape tests cover only the rejection side.
-      expect(realPathWithin(link, dir)).toBe(true);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'returns true for a symlink whose realpath stays inside root',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      try {
+        const target = path.join(dir, 'base.md');
+        fs.writeFileSync(target, 'x', 'utf-8');
+        const link = path.join(dir, 'link.md');
+        fs.symlinkSync(target, link);
+        // Legitimate in-package symlinks (git preserves them) must be accepted,
+        // not blanket-rejected — the escape tests cover only the rejection side.
+        expect(realPathWithin(link, dir)).toBe(true);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('readExtensionManifest', () => {
@@ -104,65 +110,71 @@ describe('readExtensionManifest', () => {
     }
   });
 
-  it.runIf(process.platform !== 'win32')('throws for a manifest symlinked outside the package', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    try {
-      const secret = path.join(outside, 'plugin.json');
-      fs.writeFileSync(secret, '{"name":"x"}', 'utf-8');
-      fs.symlinkSync(secret, path.join(dir, 'plugin.json'));
-      expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
-        /resolves through a symlink outside the package/,
-      );
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'throws for a manifest symlinked outside the package',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+      try {
+        const secret = path.join(outside, 'plugin.json');
+        fs.writeFileSync(secret, '{"name":"x"}', 'utf-8');
+        fs.symlinkSync(secret, path.join(dir, 'plugin.json'));
+        expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
+          /resolves through a symlink outside the package/,
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it.runIf(process.platform !== 'win32')('reads a symlinked manifest when trustSymlinks is set', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    try {
-      fs.writeFileSync(
-        path.join(outside, 'plugin.json'),
-        JSON.stringify({ name: 'shared', version: '1.0.0' }),
-        'utf-8',
-      );
-      fs.symlinkSync(
-        path.join(outside, 'plugin.json'),
-        path.join(dir, 'plugin.json'),
-      );
-      // Link-mode installs read the user's own dev tree; the escaping symlink
-      // is followed instead of rejected. (The default strict rejection is
-      // covered by 'throws for a manifest symlinked outside the package'.)
-      expect(readExtensionManifest(dir, 'plugin.json', true)).toEqual({
-        name: 'shared',
-        version: '1.0.0',
-      });
-      // Legitimate in-package symlinks (e.g. git's link farm) must be accepted by strict mode.
-      const inPkgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-in-'));
+  it.runIf(process.platform !== 'win32')(
+    'reads a symlinked manifest when trustSymlinks is set',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
       try {
         fs.writeFileSync(
-          path.join(inPkgDir, 'plugin.real.json'),
-          '{"name":"linked"}',
+          path.join(outside, 'plugin.json'),
+          JSON.stringify({ name: 'shared', version: '1.0.0' }),
           'utf-8',
         );
         fs.symlinkSync(
-          path.join(inPkgDir, 'plugin.real.json'),
-          path.join(inPkgDir, 'plugin.json'),
+          path.join(outside, 'plugin.json'),
+          path.join(dir, 'plugin.json'),
         );
-        expect(readExtensionManifest(inPkgDir, 'plugin.json')).toEqual({
-          name: 'linked',
+        // Link-mode installs read the user's own dev tree; the escaping symlink
+        // is followed instead of rejected. (The default strict rejection is
+        // covered by 'throws for a manifest symlinked outside the package'.)
+        expect(readExtensionManifest(dir, 'plugin.json', true)).toEqual({
+          name: 'shared',
+          version: '1.0.0',
         });
+        // Legitimate in-package symlinks (e.g. git's link farm) must be accepted by strict mode.
+        const inPkgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-in-'));
+        try {
+          fs.writeFileSync(
+            path.join(inPkgDir, 'plugin.real.json'),
+            '{"name":"linked"}',
+            'utf-8',
+          );
+          fs.symlinkSync(
+            path.join(inPkgDir, 'plugin.real.json'),
+            path.join(inPkgDir, 'plugin.json'),
+          );
+          expect(readExtensionManifest(inPkgDir, 'plugin.json')).toEqual({
+            name: 'linked',
+          });
+        } finally {
+          fs.rmSync(inPkgDir, { recursive: true, force: true });
+        }
       } finally {
-        fs.rmSync(inPkgDir, { recursive: true, force: true });
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
       }
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it('reads a valid manifest', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
@@ -253,19 +265,22 @@ describe('resolvePluginRelativeFile', () => {
     expect(resolvePluginRelativeFile('/pkg', '../outside')).toBeNull();
   });
 
-  it.runIf(process.platform !== 'win32')('rejects a symlink escaping the plugin', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    try {
-      const secret = path.join(outside, 'secret.json');
-      fs.writeFileSync(secret, '{}', 'utf-8');
-      fs.symlinkSync(secret, path.join(dir, 'leak'));
-      expect(resolvePluginRelativeFile(dir, './leak')).toBeNull();
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlink escaping the plugin',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+      try {
+        const secret = path.join(outside, 'secret.json');
+        fs.writeFileSync(secret, '{}', 'utf-8');
+        fs.symlinkSync(secret, path.join(dir, 'leak'));
+        expect(resolvePluginRelativeFile(dir, './leak')).toBeNull();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('resolvePathWithin', () => {
@@ -293,21 +308,24 @@ describe('resolvePathWithin', () => {
     );
   });
 
-  it.runIf(process.platform !== 'win32')('throws a symlink-escape violation', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    try {
-      const secret = path.join(outside, 'secret.json');
-      fs.writeFileSync(secret, '{}', 'utf-8');
-      fs.symlinkSync(secret, path.join(dir, 'leak'));
-      expect(() => resolvePathWithin(dir, './leak', describeErr)).toThrow(
-        'violation:symlink-escape',
-      );
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'throws a symlink-escape violation',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+      try {
+        const secret = path.join(outside, 'secret.json');
+        fs.writeFileSync(secret, '{}', 'utf-8');
+        fs.symlinkSync(secret, path.join(dir, 'leak'));
+        expect(() => resolvePathWithin(dir, './leak', describeErr)).toThrow(
+          'violation:symlink-escape',
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('readExtraJsonFile', () => {
@@ -440,25 +458,28 @@ describe('readExtraJsonFile', () => {
     }
   });
 
-  it.runIf(process.platform !== 'win32')('returns null for a symlink escaping the extension', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    try {
-      const secret = path.join(outside, 'hooks.json');
-      fs.writeFileSync(secret, '{}', 'utf-8');
-      fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
-      const reasons: string[] = [];
-      expect(
-        readExtraJsonFile(dir, 'hooks.json', false, (reason) =>
-          reasons.push(reason),
-        ),
-      ).toBeNull();
-      expect(reasons).toEqual(['confinement-threw']);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'returns null for a symlink escaping the extension',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+      try {
+        const secret = path.join(outside, 'hooks.json');
+        fs.writeFileSync(secret, '{}', 'utf-8');
+        fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
+        const reasons: string[] = [];
+        expect(
+          readExtraJsonFile(dir, 'hooks.json', false, (reason) =>
+            reasons.push(reason),
+          ),
+        ).toBeNull();
+        expect(reasons).toEqual(['confinement-threw']);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   // A symlink that stays INSIDE the package is legitimate and must be read
   // under strict confinement too — only links escaping the package are
@@ -484,35 +505,38 @@ describe('readExtraJsonFile', () => {
     },
   );
 
-  it.runIf(process.platform !== 'win32')('reads a symlinked auxiliary file when trustSymlinks is set', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
-    const siblingName = path.basename(outside);
-    try {
-      const secret = path.join(outside, 'hooks.json');
-      fs.writeFileSync(secret, JSON.stringify({ hooks: {} }), 'utf-8');
-      fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
-      // Link mode follows user's own symlinks AND literal `..` — both
-      // reach the developer's own data. Strict-mode `..` rejection is
-      // covered by 'returns null for a relative path escaping the extension'.
-      expect(readExtraJsonFile(dir, 'hooks.json', true)).toEqual({
-        hooks: {},
-      });
-      expect(
-        readExtraJsonFile(dir, path.join(outside, 'hooks.json'), true),
-      ).toEqual({ hooks: {} });
-      expect(
-        readExtraJsonFile(
-          dir,
-          path.join('..', siblingName, 'hooks.json'),
-          true,
-        ),
-      ).toEqual({ hooks: {} });
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'reads a symlinked auxiliary file when trustSymlinks is set',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+      const siblingName = path.basename(outside);
+      try {
+        const secret = path.join(outside, 'hooks.json');
+        fs.writeFileSync(secret, JSON.stringify({ hooks: {} }), 'utf-8');
+        fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
+        // Link mode follows user's own symlinks AND literal `..` — both
+        // reach the developer's own data. Strict-mode `..` rejection is
+        // covered by 'returns null for a relative path escaping the extension'.
+        expect(readExtraJsonFile(dir, 'hooks.json', true)).toEqual({
+          hooks: {},
+        });
+        expect(
+          readExtraJsonFile(dir, path.join(outside, 'hooks.json'), true),
+        ).toEqual({ hooks: {} });
+        expect(
+          readExtraJsonFile(
+            dir,
+            path.join('..', siblingName, 'hooks.json'),
+            true,
+          ),
+        ).toEqual({ hooks: {} });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('returns null (missing) for a link-mode .. path that points at no file', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));

@@ -563,82 +563,91 @@ describe('extension tests', () => {
       );
     }
 
-    it.runIf(process.platform !== 'win32')('installs an Agent Plugin without converting package files', async () => {
-      const sourcePath = path.join(tempWorkspaceDir, 'portable-source');
-      createAgentPlugin(sourcePath);
-      for (const component of ['commands', 'agents', 'hooks']) {
-        fs.mkdirSync(path.join(sourcePath, component));
-        fs.writeFileSync(path.join(sourcePath, component, 'ignored.md'), 'no');
-      }
-      fs.writeFileSync(path.join(sourcePath, 'QWEN.md'), 'ignored context');
-      const sourceContents = new Map(
-        [
-          'plugin.json',
-          'mcp.json',
-          path.join('skills', 'direct', 'SKILL.md'),
-          path.join('bin', 'server'),
-        ].map((file) => [file, fs.readFileSync(path.join(sourcePath, file))]),
-      );
-      const outside = path.join(tempWorkspaceDir, 'outside.txt');
-      fs.writeFileSync(outside, 'outside');
-      if (process.platform !== 'win32') {
-        fs.symlinkSync(outside, path.join(sourcePath, 'outside-link'));
-      }
-
-      const requestConsent = vi.fn(async () => {});
-      const manager = createExtensionManager();
-      await manager.refreshCache();
-      const extension = await manager.installExtension(
-        { type: 'local', source: sourcePath },
-        requestConsent,
-      );
-
-      expect(extension.version).toBe('1.0.0');
-      expect(extension.format).toBe('agent-plugins-v1');
-      expect(extension.installMetadata?.originSource).toBe('AgentPlugins');
-      expect(extension.skills?.map((skill) => skill.name)).toEqual(['direct']);
-      expect(extension.skills?.[0]?.allowedTools).toBeUndefined();
-      expect(extension.commands).toEqual([]);
-      expect(extension.agents).toEqual([]);
-      expect(extension.contextFiles).toEqual([]);
-      expect(extension.hooks).toBeUndefined();
-      expect(extension.settings).toBeUndefined();
-      expect(extension.channels).toBeUndefined();
-      expect(Object.keys(extension.mcpServers ?? {})).toEqual([
-        'local',
-        'remote',
-      ]);
-      expect(extension.mcpServers?.['local']?.agentPluginV1).toBe(true);
-      expect(extension.mcpServers?.['remote']?.agentPluginV1).toBe(true);
-      expect(requestConsent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          originSource: 'AgentPlugins',
-          commands: [],
-          subagents: [],
-          skills: [expect.objectContaining({ name: 'direct' })],
-        }),
-      );
-
-      for (const [file, contents] of sourceContents) {
-        expect(fs.readFileSync(path.join(extension.path, file))).toEqual(
-          contents,
+    it.runIf(process.platform !== 'win32')(
+      'installs an Agent Plugin without converting package files',
+      async () => {
+        const sourcePath = path.join(tempWorkspaceDir, 'portable-source');
+        createAgentPlugin(sourcePath);
+        for (const component of ['commands', 'agents', 'hooks']) {
+          fs.mkdirSync(path.join(sourcePath, component));
+          fs.writeFileSync(
+            path.join(sourcePath, component, 'ignored.md'),
+            'no',
+          );
+        }
+        fs.writeFileSync(path.join(sourcePath, 'QWEN.md'), 'ignored context');
+        const sourceContents = new Map(
+          [
+            'plugin.json',
+            'mcp.json',
+            path.join('skills', 'direct', 'SKILL.md'),
+            path.join('bin', 'server'),
+          ].map((file) => [file, fs.readFileSync(path.join(sourcePath, file))]),
         );
-      }
-      expect(
-        fs.existsSync(path.join(extension.path, EXTENSIONS_CONFIG_FILENAME)),
-      ).toBe(false);
-      expect(
-        fs.existsSync(path.join(extension.path, INSTALL_METADATA_FILENAME)),
-      ).toBe(true);
-      if (process.platform !== 'win32') {
-        expect(fs.existsSync(path.join(extension.path, 'outside-link'))).toBe(
-          false,
+        const outside = path.join(tempWorkspaceDir, 'outside.txt');
+        fs.writeFileSync(outside, 'outside');
+        if (process.platform !== 'win32') {
+          fs.symlinkSync(outside, path.join(sourcePath, 'outside-link'));
+        }
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
         );
-      }
-      const pluginData = extension.mcpServers?.['local']?.env?.['PLUGIN_DATA'];
-      expect(pluginData).toBeDefined();
-      expect(fs.statSync(pluginData!).isDirectory()).toBe(true);
-    });
+
+        expect(extension.version).toBe('1.0.0');
+        expect(extension.format).toBe('agent-plugins-v1');
+        expect(extension.installMetadata?.originSource).toBe('AgentPlugins');
+        expect(extension.skills?.map((skill) => skill.name)).toEqual([
+          'direct',
+        ]);
+        expect(extension.skills?.[0]?.allowedTools).toBeUndefined();
+        expect(extension.commands).toEqual([]);
+        expect(extension.agents).toEqual([]);
+        expect(extension.contextFiles).toEqual([]);
+        expect(extension.hooks).toBeUndefined();
+        expect(extension.settings).toBeUndefined();
+        expect(extension.channels).toBeUndefined();
+        expect(Object.keys(extension.mcpServers ?? {})).toEqual([
+          'local',
+          'remote',
+        ]);
+        expect(extension.mcpServers?.['local']?.agentPluginV1).toBe(true);
+        expect(extension.mcpServers?.['remote']?.agentPluginV1).toBe(true);
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            originSource: 'AgentPlugins',
+            commands: [],
+            subagents: [],
+            skills: [expect.objectContaining({ name: 'direct' })],
+          }),
+        );
+
+        for (const [file, contents] of sourceContents) {
+          expect(fs.readFileSync(path.join(extension.path, file))).toEqual(
+            contents,
+          );
+        }
+        expect(
+          fs.existsSync(path.join(extension.path, EXTENSIONS_CONFIG_FILENAME)),
+        ).toBe(false);
+        expect(
+          fs.existsSync(path.join(extension.path, INSTALL_METADATA_FILENAME)),
+        ).toBe(true);
+        if (process.platform !== 'win32') {
+          expect(fs.existsSync(path.join(extension.path, 'outside-link'))).toBe(
+            false,
+          );
+        }
+        const pluginData =
+          extension.mcpServers?.['local']?.env?.['PLUGIN_DATA'];
+        expect(pluginData).toBeDefined();
+        expect(fs.statSync(pluginData!).isDirectory()).toBe(true);
+      },
+    );
 
     it.runIf(process.platform !== 'win32')(
       'installs an Agent Plugin through a symlinked source root',
@@ -714,6 +723,23 @@ describe('extension tests', () => {
       expect(fs.readFileSync(path.join(pluginData!, 'state.txt'), 'utf8')).toBe(
         'persistent',
       );
+    });
+
+    it('refuses to link a source path containing control characters', async () => {
+      const sourcePath = path.join(tempWorkspaceDir, 'linked-source');
+      createAgentPlugin(sourcePath, {
+        name: 'linked-plugin',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          { type: 'link', source: sourcePath + String.fromCharCode(1) },
+          async () => {},
+        ),
+      ).rejects.toThrow('the path contains control characters');
     });
 
     it('links an Agent Plugin and fingerprints its native manifest', async () => {
@@ -926,8 +952,10 @@ describe('extension tests', () => {
         .getLoadedExtensions()
         .find((ext) => ext.config.name === extName);
       expect(extension).toBeUndefined();
-      const warnText = (mockExtMgrDebugLogger.warn as ReturnType<typeof vi.fn>)
-        .mock.calls.map((c: unknown[]) => String(c[0]))
+      const warnText = (
+        mockExtMgrDebugLogger.warn as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map((c: unknown[]) => String(c[0]))
         .join(' ');
       expect(warnText).toContain('Refusing extension');
       expect(warnText).not.toContain('\u001b');
@@ -5090,26 +5118,32 @@ describe('extension tests', () => {
       });
     });
 
-    it.runIf(process.platform !== 'win32')('rejects a qwen-extension.json that is a symlink escaping the extension', async () => {
-      // A symlinked manifest to a host file must not be read or hydrated.
-      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-secret-'));
-      const secretFile = path.join(secretDir, 'config.json');
-      fs.writeFileSync(
-        secretFile,
-        JSON.stringify({ name: 'malicious', version: '1.0.0' }),
-        'utf-8',
-      );
-      const extDir = path.join(userExtensionsDir, 'symlink-manifest');
-      fs.mkdirSync(extDir, { recursive: true });
-      fs.symlinkSync(secretFile, path.join(extDir, EXTENSIONS_CONFIG_FILENAME));
+    it.runIf(process.platform !== 'win32')(
+      'rejects a qwen-extension.json that is a symlink escaping the extension',
+      async () => {
+        // A symlinked manifest to a host file must not be read or hydrated.
+        const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-secret-'));
+        const secretFile = path.join(secretDir, 'config.json');
+        fs.writeFileSync(
+          secretFile,
+          JSON.stringify({ name: 'malicious', version: '1.0.0' }),
+          'utf-8',
+        );
+        const extDir = path.join(userExtensionsDir, 'symlink-manifest');
+        fs.mkdirSync(extDir, { recursive: true });
+        fs.symlinkSync(
+          secretFile,
+          path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+        );
 
-      const manager = createExtensionManager();
-      await manager.refreshCache();
-      const extensions = manager.getLoadedExtensions();
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
 
-      expect(extensions.some((e) => e.name === 'malicious')).toBe(false);
-      fs.rmSync(secretDir, { recursive: true, force: true });
-    });
+        expect(extensions.some((e) => e.name === 'malicious')).toBe(false);
+        fs.rmSync(secretDir, { recursive: true, force: true });
+      },
+    );
     // config.hooks fallback ternary (extensionManager.ts:1532). Mutation:
     // change the default 'hooks/hooks.json' to 'WRONG' → hooks undefined.
     it('falls back to hooks/hooks.json when config.hooks string is missing', async () => {
@@ -5679,49 +5713,54 @@ describe('extension tests', () => {
       ).toBe(`${extensionDir}/scripts/setup.sh`);
     });
 
-    it.runIf(process.platform !== 'win32')('drops a default hooks/hooks.json that is a symlink escaping the extension', async () => {
-      const extensionDir = path.join(
-        userExtensionsDir,
-        'hooks-default-symlink-escape',
-      );
-      fs.mkdirSync(extensionDir, { recursive: true });
+    it.runIf(process.platform !== 'win32')(
+      'drops a default hooks/hooks.json that is a symlink escaping the extension',
+      async () => {
+        const extensionDir = path.join(
+          userExtensionsDir,
+          'hooks-default-symlink-escape',
+        );
+        fs.mkdirSync(extensionDir, { recursive: true });
 
-      // qwen-extension.json with no config.hooks → loads via default hooks/hooks.json.
-      fs.writeFileSync(
-        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
-        JSON.stringify({
-          name: 'hooks-default-symlink-escape',
-          version: '1.0.0',
-        }),
-      );
+        // qwen-extension.json with no config.hooks → loads via default hooks/hooks.json.
+        fs.writeFileSync(
+          path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'hooks-default-symlink-escape',
+            version: '1.0.0',
+          }),
+        );
 
-      // Default hooks/hooks.json is a symlink to a host file; an untrusted
-      // extension must not be able to execute hooks from outside its own
-      // directory by pointing the default route at a host path.
-      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-secret-'));
-      const secretHooks = path.join(secretDir, 'hooks.json');
-      fs.writeFileSync(
-        secretHooks,
-        JSON.stringify({
-          SessionStart: [
-            {
-              hooks: [{ type: 'command', command: 'echo PWNED-FROM-HOST' }],
-            },
-          ],
-        }),
-        'utf-8',
-      );
-      const hooksDir = path.join(extensionDir, 'hooks');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      fs.symlinkSync(secretHooks, path.join(hooksDir, 'hooks.json'));
+        // Default hooks/hooks.json is a symlink to a host file; an untrusted
+        // extension must not be able to execute hooks from outside its own
+        // directory by pointing the default route at a host path.
+        const secretDir = fs.mkdtempSync(
+          path.join(os.tmpdir(), 'hooks-secret-'),
+        );
+        const secretHooks = path.join(secretDir, 'hooks.json');
+        fs.writeFileSync(
+          secretHooks,
+          JSON.stringify({
+            SessionStart: [
+              {
+                hooks: [{ type: 'command', command: 'echo PWNED-FROM-HOST' }],
+              },
+            ],
+          }),
+          'utf-8',
+        );
+        const hooksDir = path.join(extensionDir, 'hooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        fs.symlinkSync(secretHooks, path.join(hooksDir, 'hooks.json'));
 
-      const manager = createExtensionManager();
-      await manager.refreshCache();
-      const extensions = manager.getLoadedExtensions();
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
 
-      expect(extensions).toHaveLength(1);
-      expect(extensions[0].hooks).toBeUndefined();
-      fs.rmSync(secretDir, { recursive: true, force: true });
-    });
+        expect(extensions).toHaveLength(1);
+        expect(extensions[0].hooks).toBeUndefined();
+        fs.rmSync(secretDir, { recursive: true, force: true });
+      },
+    );
   });
 });

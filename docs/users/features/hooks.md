@@ -70,7 +70,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh\"",
             "shell": "bash",
             "name": "security-check",
             "timeout": 10
@@ -82,7 +82,9 @@ Command hooks execute commands via child processes. Input JSON is passed through
 }
 ```
 
-> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR` directly. For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- an undefined `$VAR` fails the hook with the variable name in the error.
+> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR`, wrapped in double quotes wherever one forms part of a path (e.g. `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`). For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- an undefined `$VAR` fails the hook with the variable name in the error.
+
+> **Migration:** hook commands are no longer pre-expanded before being passed to the shell, so the shell's own rules now apply. A bare `$CLAUDE_PROJECT_DIR` word-splits when the project path contains spaces, and a single-quoted `'$CLAUDE_PROJECT_DIR'` no longer expands at all. Both forms worked in earlier releases; double-quoting the reference is correct in every case.
 
 > **PowerShell command syntax:** A quoted Windows path used as a command must be prefixed with the call operator `& ` (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- otherwise PowerShell echoes it instead of executing it.
 
@@ -1383,7 +1385,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
             "async": true,
             "timeout": 300
           }

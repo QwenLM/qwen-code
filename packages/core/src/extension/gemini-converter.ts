@@ -210,7 +210,9 @@ export async function copyDirectory(
 
 // The stack-scoped cycle guard leaves mutually-interlinked directories legal
 // (~e*k! copy entries for k of them), so bound the total instead of letting the
-// conversion fill the disk.
+// conversion fill the disk. One unit is one directory recursion, counting symlink
+// targets as well as real subdirectories, so it bounds neither files nor unique
+// directories.
 const MAX_CONVERT_DIRS = 1000;
 
 /**
@@ -248,9 +250,12 @@ async function copyDirectoryRecursive(
         await copyDirectoryRecursive(sourcePath, destPath, root, stack, budget);
       } else if (entry.isSymbolicLink()) {
         // Resolve symlink and copy the target content, but only when the target
-        // stays inside the package root.
+        // stays inside the package root. The recursion and copy run outside
+        // the try so the budget abort and real I/O errors propagate.
+        let realPath: string;
+        let targetStat: fs.Stats;
         try {
-          const realPath = fs.realpathSync(sourcePath);
+          realPath = fs.realpathSync(sourcePath);
           if (!isPathWithin(realPath, root)) {
             debugLogger.warn(
               `Skipping symlink that escapes the package: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
@@ -265,22 +270,17 @@ async function copyDirectoryRecursive(
             );
             continue;
           }
-          const targetStat = fs.statSync(realPath);
-          if (targetStat.isDirectory()) {
-            await copyDirectoryRecursive(
-              realPath,
-              destPath,
-              root,
-              stack,
-              budget,
-            );
-          } else if (targetStat.isFile()) {
-            fs.copyFileSync(realPath, destPath);
-          }
-          // Skip sockets, FIFOs, etc.
+          targetStat = fs.statSync(realPath);
         } catch {
           // Skip broken symlinks
+          continue;
         }
+        if (targetStat.isDirectory()) {
+          await copyDirectoryRecursive(realPath, destPath, root, stack, budget);
+        } else if (targetStat.isFile()) {
+          fs.copyFileSync(realPath, destPath);
+        }
+        // Skip sockets, FIFOs, etc.
       } else if (entry.isFile()) {
         fs.copyFileSync(sourcePath, destPath);
       }

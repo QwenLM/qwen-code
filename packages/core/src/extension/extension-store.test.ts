@@ -2120,6 +2120,28 @@ describe('ExtensionStore', () => {
     ).resolves.toBe('new artifact');
   });
 
+  it('refuses to persist a linkedSource the reader would reject', async () => {
+    const store = makeStore();
+    const identity = { id: '9d'.repeat(32), name: 'hostile-link' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'one');
+
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity,
+        stagingDirectory: staging,
+        destinationDirectory: destination,
+        initialActivation: { scope: 'user' },
+        linkedSource: extensionsDir + String.fromCharCode(1),
+      }),
+    ).rejects.toThrow('Invalid linkedSource');
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      extensions: {},
+    });
+  });
+
   it('preserves batch activation declared after an artifact disappears', async () => {
     const store = makeStore();
     const identity = { id: '9b'.repeat(32), name: 'retained-policy' };

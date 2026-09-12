@@ -107,11 +107,7 @@ function loadMcpServersFile(
       ? null
       : (_reason, ctx) => {
           throw new Error(
-            explicitMcpFailureMessage(
-              _reason,
-              ctx.safeFileRef,
-              ctx.cause,
-            ),
+            explicitMcpFailureMessage(_reason, ctx.safeFileRef, ctx.cause),
           );
         },
   );

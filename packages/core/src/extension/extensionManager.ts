@@ -111,6 +111,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 import {
   ExtensionStore,
+  isStorableLinkedSource,
   type ExtensionActivation,
   type ExtensionActivationResult,
   type ExtensionIdentity,
@@ -1463,8 +1464,12 @@ export class ExtensionManager {
       return 'dir:-';
     }
     // Match loadExtension: use the store grant, not in-band installMetadata.
+    // Both callers reach this outside the store lock, so readSnapshot() is safe
+    // here and is the recovery-capable read: a corrupt-but-repairable store gets
+    // healed before the fingerprint is taken, instead of being fingerprinted
+    // against an empty grant map.
     const linkedSources = this.linkedSourcesByDirectory(
-      await this.extensionStore.peekSnapshot(),
+      await this.extensionStore.readSnapshot(),
     );
     const parts: string[] = [];
     for (const entry of entries) {
@@ -1726,7 +1731,9 @@ export class ExtensionManager {
         config,
         settings: config.settings,
         contextFiles: [],
-        trustedLinkSource: trustSymlinks ? context.trustedLinkSource : undefined,
+        trustedLinkSource: trustSymlinks
+          ? context.trustedLinkSource
+          : undefined,
       };
 
       if (config.mcpServers) {
@@ -2199,6 +2206,18 @@ export class ExtensionManager {
       throw new Error('A local source path requires a local install.');
     }
     installMetadata = this.withNetworkPolicy(installMetadata)!;
+    // Fail before any artifact is written: a link source the store would refuse
+    // to read back would brick state.json for every later snapshot.
+    if (
+      installMetadata.type === 'link' &&
+      !isStorableLinkedSource(installMetadata.source)
+    ) {
+      throw new Error(
+        `Cannot link an extension from "${stripAnsiAndControl(
+          installMetadata.source,
+        )}": the path contains control characters.`,
+      );
+    }
     const remoteGitInstall =
       installMetadata.type === 'git' ||
       installMetadata.type === 'github-release';
