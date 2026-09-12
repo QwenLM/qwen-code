@@ -12,7 +12,11 @@ import {
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
-import { loadSettings, saveSettings } from '../config/settings.js';
+import {
+  loadSettings,
+  saveSettings,
+  type SettingsFile,
+} from '../config/settings.js';
 
 export type ChannelSecretUpdate =
   | { operation: 'preserve' }
@@ -437,35 +441,76 @@ export function assertValidChannelSecretUpdates(
   }
 }
 
-function workspaceValues(workspaceCwd: string): {
-  channels: Record<string, Record<string, unknown>>;
-  startupNames: string[];
-} {
-  const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true })
-    .workspace.settings;
-  const rawChannels = isRecord(settings.channels) ? settings.channels : {};
+/**
+ * Resolve the settings scope that owns channel configs for a workspace.
+ *
+ * When the workspace directory is the user's home directory, the settings
+ * loader disables the workspace scope and attributes the shared settings file
+ * to the user scope. Reads and writes must resolve the same scope: otherwise a
+ * redirected `QWEN_HOME` makes reads come from the user file while writes land
+ * in `<workspace>/.qwen/settings.json`, a file no scope reads.
+ */
+function channelSettingsScope(workspaceCwd: string): SettingsFile {
+  const loaded = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
+  return loaded.workspaceSettingsActive ? loaded.workspace : loaded.user;
+}
+
+function channelRecordMap(
+  value: unknown,
+): Record<string, Record<string, unknown>> {
+  const rawChannels = isRecord(value) ? value : {};
   const channels: Record<string, Record<string, unknown>> = {};
   for (const [name, config] of Object.entries(rawChannels)) {
+    // A settings file keeps these keys as own keys through JSON.parse, and
+    // assigning them here would set this map's prototype (`__proto__`) or list
+    // a planted channel the read view never validated and hash it into the
+    // revision (`constructor`/`prototype`). The write path already rejects
+    // these names, so the read side skips the same set.
+    if (UNSAFE_OBJECT_KEYS.has(name)) continue;
     if (isRecord(config)) channels[name] = config;
   }
+  return channels;
+}
+
+function snapshotFrom(values: {
+  channels: Record<string, Record<string, unknown>>;
+  startupNames: string[];
+}): ChannelSettingsSnapshot {
+  return {
+    revision: revisionOf(values.channels, values.startupNames),
+    channels: { ...values.channels },
+    startupNames: [...values.startupNames],
+  };
+}
+
+function workspaceValues(workspaceCwd: string): {
+  channels: Record<string, Record<string, unknown>>;
+  storedChannels: Record<string, Record<string, unknown>>;
+  startupNames: string[];
+} {
+  const scope = channelSettingsScope(workspaceCwd);
+  const settings = scope.settings;
   const startupNames = Array.isArray(settings.serve?.channels)
     ? settings.serve.channels.filter(
         (name): name is string => typeof name === 'string',
       )
     : [];
-  return { channels, startupNames };
+  return {
+    channels: channelRecordMap(settings.channels),
+    // A save replaces the whole `channels` subtree, so the write set has to be
+    // built from the stored form. `settings` is env-resolved: deriving the
+    // write set from it rewrites every untouched channel's `$VAR` reference as
+    // the resolved literal, materializing secrets in plaintext on disk.
+    storedChannels: channelRecordMap(scope.originalSettings.channels),
+    startupNames,
+  };
 }
 
 export class WorkspaceChannelSettingsStore {
   constructor(private readonly workspaceCwd: string) {}
 
   snapshot(): ChannelSettingsSnapshot {
-    const { channels, startupNames } = workspaceValues(this.workspaceCwd);
-    return {
-      revision: revisionOf(channels, startupNames),
-      channels: { ...channels },
-      startupNames: [...startupNames],
-    };
+    return snapshotFrom(workspaceValues(this.workspaceCwd));
   }
 
   async upsert(
@@ -488,6 +533,15 @@ export class WorkspaceChannelSettingsStore {
         .filter((field) => field.kind === 'secret')
         .map((field) => field.key),
     );
+    // Restoring a stored `$VAR` reference is only legal on a descriptor that
+    // declares `envResolvable`: `assertDescriptorValue` rejects a bare reference
+    // on any other field, and the restore below runs after that check, so
+    // restoring one would persist a value the daemon refuses to read back.
+    const envResolvableKeys = new Set(
+      plugin.management.fields
+        .filter((field) => field.envResolvable)
+        .map((field) => field.key),
+    );
     for (const key of Object.keys(secretUpdates)) {
       if (!secretKeys.has(key)) {
         throw invalidSecret(
@@ -503,15 +557,57 @@ export class WorkspaceChannelSettingsStore {
       }
     }
 
-    const current = this.assertRevision(options.expectedRevision);
+    const { current, storedChannels } = this.assertRevision(
+      options.expectedRevision,
+    );
     const storedPrevious = current.channels[name] ?? {};
-    const previous =
-      storedPrevious['type'] === options.config.type ? storedPrevious : {};
+    // Decide the type match once, from the env-resolved stored config: a stored
+    // `type` that is itself an environment reference never equals the resolved
+    // type the request carries, so gating the stored-form lookup below on the
+    // raw value would disagree with this gate, skip the restore, and persist
+    // the resolved secret in plaintext. The gate itself has to stay — on a
+    // genuine type change the previous type's stored secret must not carry over.
+    const hasPreviousOfType = storedPrevious['type'] === options.config.type;
+    const previous = hasPreviousOfType ? storedPrevious : {};
+    // The same config as it is stored on disk, without env resolution.
+    const storedOnDisk = storedChannels[name] ?? {};
+    const previousOnDisk = hasPreviousOfType ? storedOnDisk : {};
     const nextConfig: Record<string, unknown> = { ...options.config };
+    const storedReferences: Record<string, unknown> = {};
     for (const key of secretKeys) {
       const update = secretUpdates[key] ?? { operation: 'preserve' };
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
+      // Validation below runs against the resolved value; what gets persisted
+      // keeps the stored reference, so preserving a secret does not bake the
+      // resolved literal into the settings file. A field that does not declare
+      // `envResolvable` is left out: a hand-written reference there is a value
+      // this store's own validator rejects, and writing it back would make
+      // every later upsert of the channel fail on a field the caller never sent.
+      if (
+        update.operation === 'preserve' &&
+        previousOnDisk[key] !== undefined &&
+        envResolvableKeys.has(key)
+      ) {
+        storedReferences[key] = previousOnDisk[key];
+      }
+    }
+    // The same restore for the edited channel's non-secret environment
+    // references. `GET channels` hands the editor the env-resolved snapshot, so
+    // a client can only echo the resolved literal back; without this pass,
+    // saving any unrelated field would replace the user's `$VAR` with that
+    // literal for this channel while sibling channels keep theirs. Only a value
+    // the client returned unchanged is restored, so a deliberate edit still
+    // persists what was submitted.
+    for (const field of plugin.management.fields) {
+      const key = field.key;
+      if (!field.envResolvable || secretKeys.has(key)) continue;
+      const onDisk = previousOnDisk[key];
+      if (typeof onDisk !== 'string' || !isEnvironmentReference(onDisk)) {
+        continue;
+      }
+      if (nextConfig[key] !== previous[key]) continue;
+      storedReferences[key] = onDisk;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
     const multiSessionError = multiSessionCompatibilityError(name, {
@@ -552,13 +648,16 @@ export class WorkspaceChannelSettingsStore {
       );
     }
 
-    const channels = { ...current.channels, [name]: nextConfig };
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
-    saveSettings(workspaceFile, { channels }, ['channels'], {
-      throwOnWriteFailure: true,
-    });
+    const channels = {
+      ...storedChannels,
+      [name]: { ...nextConfig, ...storedReferences },
+    };
+    saveSettings(
+      channelSettingsScope(this.workspaceCwd),
+      { channels },
+      ['channels'],
+      { throwOnWriteFailure: true },
+    );
     return this.snapshot();
   }
 
@@ -567,8 +666,10 @@ export class WorkspaceChannelSettingsStore {
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot> {
     assertSafeChannelName(name);
-    const current = this.assertRevision(options.expectedRevision);
-    const channels = { ...current.channels };
+    const { current, storedChannels } = this.assertRevision(
+      options.expectedRevision,
+    );
+    const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);
     const startupNames = hasAllSentinel
@@ -578,11 +679,8 @@ export class WorkspaceChannelSettingsStore {
         ? ['all']
         : []
       : current.startupNames.filter((startupName) => startupName !== name);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { channels, serve: { channels: startupNames } },
       ['channels'],
       { throwOnWriteFailure: true },
@@ -598,11 +696,8 @@ export class WorkspaceChannelSettingsStore {
       assertSafeChannelName(name);
     }
     this.assertRevision(options.expectedRevision);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { serve: { channels: [...names] } },
       ['serve', 'channels'],
       { throwOnWriteFailure: true },
@@ -610,14 +705,18 @@ export class WorkspaceChannelSettingsStore {
     return this.snapshot();
   }
 
-  private assertRevision(expectedRevision: string): ChannelSettingsSnapshot {
-    const current = this.snapshot();
+  private assertRevision(expectedRevision: string): {
+    current: ChannelSettingsSnapshot;
+    storedChannels: Record<string, Record<string, unknown>>;
+  } {
+    const values = workspaceValues(this.workspaceCwd);
+    const current = snapshotFrom(values);
     if (current.revision !== expectedRevision) {
       throw new ChannelSettingsError(
         'channel_settings_conflict',
         'Channel settings changed; reload before trying again.',
       );
     }
-    return current;
+    return { current, storedChannels: values.storedChannels };
   }
 }
