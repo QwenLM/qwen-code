@@ -32,6 +32,7 @@ import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   containsXmlToolCalls,
+  markdownFenceRanges,
   tryRecoverXmlToolCalls,
 } from './xml-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -1128,15 +1129,6 @@ function buildRecoveryMessageFromText(lead: string, previousText: string) {
   );
 }
 
-function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
-  return buildRecoveryMessageFromText(
-    OUTPUT_RECOVERY_MESSAGE,
-    previousModelTurn?.role === 'model'
-      ? getPlainTextFromParts(previousModelTurn.parts)
-      : '',
-  );
-}
-
 /**
  * Coalesce a recovery continuation turn into the preceding (truncated) model
  * turn, dropping any replayed overlap.
@@ -1652,9 +1644,95 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
+const LEAKED_TOOL_CALL_TAGS = /<\/parameter>\s*<\/(function|invoke)>/iy;
+const STRICT_JSON_TOOL_CALL_LEAK =
+  /[}\]]\s*<\/parameter>\s*<\/(function|invoke)>/iy;
+const TOOL_CALL_OPEN_TAG =
+  /<(?:(invoke)\s+name=["'][^"']+["'][^<>]*|(function)=[^\s<>]+(?:\s+[^<>]*)?|(function)\s+name=["'][^"']+["'][^<>]*)>/iy;
+const TOOL_CALL_CLOSE_TAG = /<\/(function|invoke)>/iy;
+const PARAMETER_OPEN_TAG = /<parameter\b[^>]*>/iy;
+const PARAMETER_CLOSE_TAG = /<\/parameter>/iy;
+const TOOL_CALL_BLOCK =
+  /<invoke\s+name=["'][^"']+["'][^<>]*>[\s\S]*?<\/invoke>|<function(?:=[^\s<>]+(?:\s+[^<>]*)?|\s+name=["'][^"']+["'][^<>]*)>[\s\S]*?<\/function>/gi;
 
-function hasLeakedToolCallTags(text: string): boolean {
+interface OpenToolCallTag {
+  tag: string;
+  parameterDepth: number;
+}
+
+interface ToolCallLeakScanResult {
+  leaked: boolean;
+  openToolCallTags: OpenToolCallTag[];
+}
+
+function countBackticks(text: string, start: number): number {
+  let end = start;
+  while (text[end] === '`') end++;
+  return end - start;
+}
+
+function hasClosingBacktickRun(
+  text: string,
+  start: number,
+  ticks: number,
+  fencedRanges: Array<[number, number]>,
+): boolean {
+  const nextFenceStart =
+    fencedRanges.find(([rangeStart]) => rangeStart > start)?.[0] ?? text.length;
+  const nextLineBreak = text.indexOf('\n', start + ticks);
+  const searchEnd = Math.min(
+    nextFenceStart,
+    nextLineBreak === -1 ? text.length : nextLineBreak,
+  );
+  for (let i = start + ticks; i < searchEnd; i++) {
+    if (text[i] !== '`') continue;
+    const closingTicks = countBackticks(text, i);
+    if (closingTicks === ticks) return true;
+    i += closingTicks - 1;
+  }
+  return false;
+}
+
+function computeToolCallBlockRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  TOOL_CALL_BLOCK.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = TOOL_CALL_BLOCK.exec(text)) !== null) {
+    if (!/<parameter\b[^>]*>/i.test(match[0])) continue;
+    ranges.push([match.index, match.index + match[0].length]);
+  }
+  return ranges;
+}
+
+function markdownFenceRangesForToolCallLeak(
+  text: string,
+): Array<[number, number]> {
+  return markdownFenceRanges(text, computeToolCallBlockRanges(text));
+}
+
+function markdownIndentedCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let lineStart = 0;
+  for (const line of text.split('\n')) {
+    const lineEnd = lineStart + line.length;
+    if (/^(?: {4}|\t)/.test(line)) {
+      ranges.push([lineStart, lineEnd]);
+    }
+    lineStart = lineEnd + 1;
+  }
+  return ranges;
+}
+
+function markdownCodeRangesForToolCallLeak(
+  text: string,
+): Array<[number, number]> {
+  return [
+    ...markdownFenceRangesForToolCallLeak(text),
+    ...markdownIndentedCodeRanges(text),
+  ].sort(([leftStart], [rightStart]) => leftStart - rightStart);
+}
+
+function hasJsonBufferToolCallLeak(text: string): boolean {
   let inString = false;
   let escaped = false;
   for (let i = 0; i < text.length; i++) {
@@ -1663,14 +1741,173 @@ function hasLeakedToolCallTags(text: string): boolean {
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
       else if (char === '"') inString = false;
-    } else if (char === '"') {
-      inString = true;
-    } else if (char === '}' || char === ']') {
-      LEAKED_TOOL_CALL_TAGS.lastIndex = i;
-      if (LEAKED_TOOL_CALL_TAGS.test(text)) return true;
+      continue;
     }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char !== '}' && char !== ']') continue;
+    STRICT_JSON_TOOL_CALL_LEAK.lastIndex = i;
+    if (STRICT_JSON_TOOL_CALL_LEAK.exec(text)) return true;
   }
   return false;
+}
+
+function previousNonWhitespace(
+  text: string,
+  start: number,
+): string | undefined {
+  for (let i = start - 1; i >= 0; i--) {
+    if (!/\s/.test(text[i]!)) return text[i];
+  }
+  return undefined;
+}
+
+function findJsonStringEnd(text: string, start: number): number | undefined {
+  let escaped = false;
+  for (let i = start + 1; i < text.length; i++) {
+    const char = text[i];
+    if (char === '\n' || char === '\r') return undefined;
+    if (escaped) {
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === '"') {
+      return i;
+    }
+  }
+  return undefined;
+}
+
+function isJsonStringStart(text: string, index: number): boolean {
+  const previous = previousNonWhitespace(text, index);
+  return (
+    previous === undefined ||
+    previous === '{' ||
+    previous === '[' ||
+    previous === ':' ||
+    previous === ','
+  );
+}
+
+function scanToolCallTagLeaks(
+  text: string,
+  initialOpenToolCallTags: OpenToolCallTag[] = [],
+): ToolCallLeakScanResult {
+  let jsonDepth = 0;
+  let inlineCodeTicks = 0;
+  const openToolCallTags = initialOpenToolCallTags.map((tag) => ({ ...tag }));
+  const codeRanges = markdownCodeRangesForToolCallLeak(text);
+  let codeRangeIndex = 0;
+  for (let i = 0; i < text.length; i++) {
+    while (
+      codeRangeIndex < codeRanges.length &&
+      i > codeRanges[codeRangeIndex]![1]
+    ) {
+      codeRangeIndex++;
+    }
+    if (
+      openToolCallTags.length === 0 &&
+      codeRangeIndex < codeRanges.length &&
+      i >= codeRanges[codeRangeIndex]![0]
+    ) {
+      jsonDepth = 0;
+      inlineCodeTicks = 0;
+      i = codeRanges[codeRangeIndex]![1];
+      continue;
+    }
+    const char = text[i];
+    if (inlineCodeTicks > 0) {
+      if (char === '\n' || char === '\r') {
+        inlineCodeTicks = 0;
+      } else if (char === '`') {
+        const ticks = countBackticks(text, i);
+        if (ticks === inlineCodeTicks) inlineCodeTicks = 0;
+        i += ticks - 1;
+      }
+      continue;
+    }
+    if (jsonDepth > 0 && char === '"' && isJsonStringStart(text, i)) {
+      const stringEnd = findJsonStringEnd(text, i);
+      if (stringEnd !== undefined) {
+        i = stringEnd;
+      }
+    } else if (char === '{' || char === '[') {
+      jsonDepth++;
+    } else if ((char === '}' || char === ']') && jsonDepth > 0) {
+      jsonDepth--;
+    } else if (char === '`') {
+      const ticks = countBackticks(text, i);
+      if (hasClosingBacktickRun(text, i, ticks, codeRanges)) {
+        inlineCodeTicks = ticks;
+      }
+      i += ticks - 1;
+    } else if (char === '<') {
+      LEAKED_TOOL_CALL_TAGS.lastIndex = i;
+      const leakMatch = LEAKED_TOOL_CALL_TAGS.exec(text);
+      const enclosingTag = openToolCallTags.at(-1);
+      if (leakMatch) {
+        if (
+          !enclosingTag ||
+          enclosingTag.tag !== leakMatch[1] ||
+          enclosingTag.parameterDepth === 0
+        ) {
+          return { leaked: true, openToolCallTags };
+        }
+        enclosingTag.parameterDepth--;
+        openToolCallTags.pop();
+        i = LEAKED_TOOL_CALL_TAGS.lastIndex - 1;
+        continue;
+      }
+      PARAMETER_OPEN_TAG.lastIndex = i;
+      const parameterOpenMatch = PARAMETER_OPEN_TAG.exec(text);
+      if (parameterOpenMatch && enclosingTag) {
+        if (!/\/\s*>$/.test(parameterOpenMatch[0])) {
+          enclosingTag.parameterDepth++;
+        }
+        i = PARAMETER_OPEN_TAG.lastIndex - 1;
+        continue;
+      }
+      PARAMETER_CLOSE_TAG.lastIndex = i;
+      const parameterCloseMatch = PARAMETER_CLOSE_TAG.exec(text);
+      if (parameterCloseMatch && enclosingTag?.parameterDepth) {
+        enclosingTag.parameterDepth--;
+        i = PARAMETER_CLOSE_TAG.lastIndex - 1;
+        continue;
+      }
+      TOOL_CALL_OPEN_TAG.lastIndex = i;
+      const openMatch = TOOL_CALL_OPEN_TAG.exec(text);
+      if (openMatch) {
+        if (!/\/\s*>$/.test(openMatch[0])) {
+          openToolCallTags.push({
+            tag: (openMatch[1] ?? openMatch[2] ?? openMatch[3])!,
+            parameterDepth: 0,
+          });
+        }
+        i = TOOL_CALL_OPEN_TAG.lastIndex - 1;
+        continue;
+      }
+      TOOL_CALL_CLOSE_TAG.lastIndex = i;
+      const closeMatch = TOOL_CALL_CLOSE_TAG.exec(text);
+      if (closeMatch && enclosingTag?.tag === closeMatch[1]) {
+        openToolCallTags.pop();
+        i = TOOL_CALL_CLOSE_TAG.lastIndex - 1;
+      }
+    }
+  }
+  return { leaked: false, openToolCallTags };
+}
+
+function hasLeakedToolCallTags(
+  text: string,
+  initialOpenToolCallTags?: OpenToolCallTag[],
+): boolean {
+  return scanToolCallTagLeaks(text, initialOpenToolCallTags).leaked;
+}
+
+function getOpenToolCallTagsForContinuation(text: string): OpenToolCallTag[] {
+  return scanToolCallTagLeaks(text).openToolCallTags;
 }
 
 class LeadingProtocolTagLeakDetector {
@@ -1717,7 +1954,7 @@ class LeadingProtocolTagLeakDetector {
 
   finish(): string {
     if (this.state === 'json') {
-      if (hasLeakedToolCallTags(this.buffer)) {
+      if (hasJsonBufferToolCallLeak(this.buffer)) {
         this.state = 'leaked';
         this.buffer = '';
         return '';
@@ -4265,6 +4502,7 @@ export class LlmChat {
             requestContents: Content[];
             params: SendMessageParameters;
             rollback: () => void;
+            validationContinuationPrefix?: string;
           },
           retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
             type: StreamEventType.RETRY,
@@ -4289,6 +4527,7 @@ export class LlmChat {
                 turnGoalContext,
                 undefined,
                 acceptQuietToolResultCompletion,
+                attemptState.validationContinuationPrefix,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -4413,6 +4652,7 @@ export class LlmChat {
           // response in history and inject a recovery message so the model can
           // continue from where it left off.
           let recoveryCount = 0;
+          let recoveryValidationPrefix = '';
           while (
             recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
@@ -4442,8 +4682,20 @@ export class LlmChat {
             // The partial model response is already in history
             // (pushed by processStreamResponse). Push a recovery user
             // message so the model sees its partial output and continues.
+            const recoveryPrefix =
+              lastEntry?.role === 'model'
+                ? getPlainTextFromParts(lastEntry.parts)
+                : '';
+            if (!recoveryValidationPrefix) {
+              recoveryValidationPrefix = recoveryPrefix;
+            }
             const recoveryUserContent = createUserContent([
-              { text: buildOutputRecoveryMessage(lastEntry) },
+              {
+                text: buildRecoveryMessageFromText(
+                  OUTPUT_RECOVERY_MESSAGE,
+                  recoveryPrefix,
+                ),
+              },
             ]);
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
@@ -4527,6 +4779,8 @@ export class LlmChat {
                     ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
+                    validationContinuationPrefix:
+                      recoveryValidationPrefix || recoveryPrefix,
                   };
                 },
                 { type: StreamEventType.RETRY, isContinuation: true },
@@ -4542,6 +4796,13 @@ export class LlmChat {
               // Iteration fully succeeded: both the user recovery turn and
               // the model continuation turn are now in history and can be
               // coalesced back into the preceding model entry after the loop.
+              const recoveryEntry = self.history.at(-1);
+              if (recoveryEntry?.role === 'model') {
+                recoveryValidationPrefix = mergeDeliveredPrefix(
+                  recoveryValidationPrefix || recoveryPrefix,
+                  getPlainTextFromParts(recoveryEntry.parts),
+                );
+              }
               successfulRecoveries++;
               activeRecoveryUser = undefined;
             } catch (recoveryError) {
@@ -4916,6 +5177,7 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
+    validationContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -5012,6 +5274,7 @@ export class LlmChat {
       transportContinuationPrefix,
       acceptQuietToolResultCompletion,
       params.config?.abortSignal,
+      validationContinuationPrefix,
     );
   }
 
@@ -5549,6 +5812,9 @@ export class LlmChat {
    *   before either durable write, so the JSONL transcript and in-memory
    *   history carry the same merged turn (issue #8094). Undefined on every
    *   non-continuation send.
+   * @param validationContinuationPrefix - Text a previous MAX_TOKENS recovery
+   *   turn already recorded in history. Only used for protocol-leak
+   *   validation; history is merged later by `coalesceRecoveryPairs`.
    */
   private async *processStreamResponse(
     model: string,
@@ -5558,6 +5824,7 @@ export class LlmChat {
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
     abortSignal?: AbortSignal,
+    validationContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -5578,6 +5845,10 @@ export class LlmChat {
     let hasToolCall = false;
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    const validationOpenToolCallTags =
+      validationContinuationPrefix !== undefined
+        ? getOpenToolCallTagsForContinuation(validationContinuationPrefix)
+        : undefined;
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
       const parts = pendingProtocolParts;
@@ -5815,12 +6086,30 @@ export class LlmChat {
           }
         }
 
-        if (
+        const shouldYieldChunk =
           !chunk.candidates?.length ||
           preparations.length > 0 ||
           !protocolTextWasSuppressed ||
-          !protocolTagDetector.blockingOutput
-        ) {
+          !protocolTagDetector.blockingOutput;
+        if (shouldYieldChunk) {
+          if (validationContinuationPrefix !== undefined) {
+            const contentTextForValidation = mergeDeliveredPrefix(
+              validationContinuationPrefix,
+              getPlainTextFromParts(allModelParts),
+            );
+            if (
+              contentTextForValidation &&
+              hasLeakedToolCallTags(
+                contentTextForValidation,
+                validationOpenToolCallTags,
+              )
+            ) {
+              throw new InvalidStreamError(
+                'Model response contained leaked protocol tags.',
+                'PROTOCOL_TAG_LEAK',
+              );
+            }
+          }
           yield chunk;
         }
       }
@@ -5925,8 +6214,8 @@ export class LlmChat {
     // the recovered functionCall. Intentionally looser than
     // isValidNonThoughtTextPart: hasAnyContent below must keep treating such
     // a part as visible text, not silently empty.
-    const isVisibleTextPart = (part: Part): boolean =>
-      Boolean(part.text) && !part.thought;
+    const isVisibleTextPart = (part: Part): part is Part & { text: string } =>
+      typeof part.text === 'string' && part.text.length > 0 && !part.thought;
 
     const thoughtText = consolidatedHistoryParts
       .filter((part) => part.thought)
@@ -5939,11 +6228,15 @@ export class LlmChat {
       .map((part) => part.text)
       .join('')
       .trim();
+    const contentTextForValidation = transportContinuationPrefix
+      ? mergeDeliveredPrefix(transportContinuationPrefix, contentText)
+      : contentText;
 
     // Deferred until after the throw sites below so a protocol-tag leak
     // or stream-validation failure cannot dispatch a recovered call that
     // the retry path would then execute a second time.
     let recoveredChunk: GenerateContentResponse | null = null;
+    let recoveredXmlToolCall = false;
 
     // XML tool call fallback: some models (e.g. qwen3.8-max-preview in very
     // long contexts) occasionally emit tool calls as raw XML in the content
@@ -5990,6 +6283,7 @@ export class LlmChat {
             lastPartBeforeRemoval.text &&
             !lastPartBeforeRemoval.thoughtSignature,
         );
+        recoveredXmlToolCall = true;
         const textIndices: number[] = [];
         for (let i = 0; i < consolidatedHistoryParts.length; i++) {
           if (isVisibleTextPart(consolidatedHistoryParts[i]!))
@@ -6064,11 +6358,21 @@ export class LlmChat {
       }
     }
 
-    if (streamError === null && protocolTagDetector.leaked && !hasToolCall) {
-      throw new InvalidStreamError(
-        'Model response started with leaked protocol tags.',
-        'PROTOCOL_TAG_LEAK',
-      );
+    if (streamError === null && (!hasToolCall || recoveredXmlToolCall)) {
+      const hasProtocolTagLeak =
+        protocolTagDetector.leaked ||
+        (contentTextForValidation
+          ? hasLeakedToolCallTags(
+              contentTextForValidation,
+              validationOpenToolCallTags,
+            )
+          : false);
+      if (hasProtocolTagLeak) {
+        throw new InvalidStreamError(
+          'Model response contained leaked protocol tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
     }
 
     // Stream validation logic: A stream is considered successful if:
@@ -6308,8 +6612,8 @@ export class LlmChat {
       role: 'model',
       parts: acceptedTurnParts,
     });
-    // Persist before these synthetic yields: the consumer may cancel and
-    // close the generator immediately after receiving a tool call.
+    // Persist before synthetic yields: the consumer may cancel and close the
+    // generator immediately after receiving a tool call.
     if (pendingProtocolChunk) yield pendingProtocolChunk;
     if (recoveredChunk) yield recoveredChunk;
     abortSignal?.throwIfAborted();
