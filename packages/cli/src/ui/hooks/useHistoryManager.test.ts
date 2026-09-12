@@ -125,6 +125,26 @@ describe('useHistoryManager', () => {
     expect(minted).toBeGreaterThan(5003);
   });
 
+  it('resets the id floor in clearItems so post-clear ids restart from the base', () => {
+    const { result } = renderHook(() => useHistory());
+    act(() => {
+      result.current.addItem({ type: 'user', text: 'a' }, 5000);
+      result.current.addItem({ type: 'user', text: 'b' }, 9000);
+    });
+    act(() => {
+      result.current.clearItems();
+    });
+
+    let minted = 0;
+    act(() => {
+      minted = result.current.addItem({ type: 'user', text: 'c' }, 1000);
+    });
+
+    // With a stale floor this would mint 9003 (lastId + 1); after the reset
+    // the id is base + counter again.
+    expect(minted).toBe(1001);
+  });
+
   it('replaces earlier findings displays when a new report_findings group commits', () => {
     // A delivered findings list REPLACES the session's earlier one: the
     // previous group's display collapses to the marker at commit time, so
