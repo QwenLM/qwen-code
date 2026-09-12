@@ -597,30 +597,129 @@ pub fn front_process_matches(target_pid: libc::pid_t, target_wid: u32) -> Option
 /// This notification precedes input; it must never replay an unconfirmed action.
 pub(crate) fn prepare_background_keyboard(pid: pid_t, window_id: u32) -> anyhow::Result<()> {
     crate::ax::exact_target::validate_keyboard_target(pid, window_id)?;
-    if front_process_matches(pid, window_id) == Some(true) {
-        return Ok(());
-    }
-    let post = post_to_pid_fn()
-        .ok_or_else(|| anyhow::anyhow!("background application activation is unavailable"))?;
-    objc2::rc::autoreleasepool(|_| unsafe {
-        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-        let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-            NSEventType::AppKitDefined,
-            objc2_foundation::NSPoint::new(0.0, 0.0),
-            NSEventModifierFlags::empty(),
-            0.0, 0, None, 1, 0, 0,
-        ).ok_or_else(|| anyhow::anyhow!("could not construct background application activation"))?;
-        let cg_event: *mut c_void = objc2::msg_send![&*event, CGEvent];
-        if cg_event.is_null() {
-            anyhow::bail!("background application activation has no CGEvent");
-        }
-        post(pid, cg_event);
-        Ok(())
+    let sent = super::app_focus::prepare(pid, window_id, |preparation| {
+        post_focus_preparation(pid, window_id, preparation)
     })?;
     // PID posts are asynchronous. Let AppKit consume the notification before
     // validating its current first responder and sending the requested keys.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    if sent {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     crate::ax::exact_target::validate_keyboard_target(pid, window_id)
+}
+
+pub(crate) fn prepare_background_pointer(pid: pid_t, window_id: u32) -> anyhow::Result<()> {
+    use cua_driver_core::background_input::{
+        decide_background_input, BackgroundAction, BackgroundInputDecision, ExactWindowTarget,
+    };
+    let validate = || -> anyhow::Result<()> {
+        match decide_background_input(
+            ExactWindowTarget { pid, window_id },
+            &crate::ax::exact_target::gather_background_facts(pid, window_id, None),
+            BackgroundAction::WindowPointer,
+        ) {
+            BackgroundInputDecision::Execute { .. } => Ok(()),
+            BackgroundInputDecision::Refuse(refusal) => {
+                anyhow::bail!("{}: {}", refusal.code, refusal.reason)
+            }
+        }
+    };
+    validate()?;
+    if super::app_focus::prepare(pid, window_id, |preparation| {
+        post_focus_preparation(pid, window_id, preparation)
+    })? {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    validate()
+}
+
+pub(super) fn key_focus_matches(pid: pid_t, window_id: u32) -> Option<bool> {
+    type GetKeyFocus = unsafe extern "C" fn(*mut c_void, *mut u8) -> i32;
+    static GET: OnceLock<Option<GetKeyFocus>> = OnceLock::new();
+    let get =
+        (*GET.get_or_init(|| find_sym(b"SLPSGetKeyFocusProcess\0").map(|p| unsafe { as_fn(p) })))?;
+    let mut target = [0u8; 8];
+    let mut focused = [0u8; 8];
+    let mut flag = 0u8;
+    if !get_process_psn_for_window(window_id, pid, &mut target)
+        || unsafe { get(focused.as_mut_ptr() as *mut c_void, &mut flag) } != 0
+    {
+        return None;
+    }
+    Some(focused == target)
+}
+
+fn post_focus_preparation(
+    pid: pid_t,
+    window_id: u32,
+    preparation: super::app_focus::Preparation,
+) -> anyhow::Result<()> {
+    let point = if preparation == super::app_focus::Preparation::Activate {
+        window_activation_point(pid, window_id)
+    } else {
+        None
+    };
+    let events = super::app_pointer::focus_events(preparation, window_id, point)?;
+    for event in &events {
+        super::app_pointer::post(pid, event);
+    }
+    Ok(())
+}
+
+fn window_activation_point(pid: pid_t, window_id: u32) -> Option<((f64, f64), (f64, f64))> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        let mut target = None;
+        for candidate in copy_ax_windows(app) {
+            if target.is_none() && ax_get_window_id(candidate) == Some(window_id) {
+                target = Some(candidate);
+            } else {
+                CFRelease(candidate as CFTypeRef);
+            }
+        }
+        CFRelease(app as CFTypeRef);
+        let window = target?;
+        let frame = element_screen_rect(window);
+        let mut value: CFTypeRef = std::ptr::null();
+        let status = AXUIElementCopyAttributeValue(
+            window,
+            CFString::new("AXActivationPoint").as_concrete_TypeRef(),
+            &mut value,
+        );
+        CFRelease(window as CFTypeRef);
+        if value.is_null() {
+            return None;
+        }
+        let mut point = core_graphics::geometry::CGPoint::new(0.0, 0.0);
+        let valid = status == kAXErrorSuccess
+            && CFGetTypeID(value) == AXValueGetTypeID()
+            && AXValueGetType(value as AXValueRef) == kAXValueCGPointType
+            && AXValueGetValue(
+                value as AXValueRef,
+                kAXValueCGPointType,
+                &mut point as *mut _ as *mut c_void,
+            );
+        CFRelease(value);
+        let [x, y, width, height] = frame?;
+        if !valid
+            || ![point.x, point.y, x, y, width, height]
+                .iter()
+                .all(|v| v.is_finite())
+            || point.x < x
+            || point.x > x + width
+            || point.y < y
+            || point.y > y + height
+        {
+            return None;
+        }
+        Some(((point.x, point.y), (point.x - x, point.y - y)))
+    }
 }
 
 /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them

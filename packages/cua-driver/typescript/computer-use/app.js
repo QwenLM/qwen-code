@@ -225,7 +225,7 @@ export class ComputerUseApp {
         }
         const semantic = method === "setValue" || method === "performSecondaryAction";
         address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "background" }) };
-        if (method === "drag") address.appContext = true;
+        if (["click", "doubleClick", "rightClick", "drag", "typeText"].includes(method)) address.appContext = true;
         const result = await this.#computer[method](address);
         const nativeEffects = ["confirmed", "partial", "unverifiable", "suspected_noop", "refused"];
         const nativeEffect = result.action?.effect;

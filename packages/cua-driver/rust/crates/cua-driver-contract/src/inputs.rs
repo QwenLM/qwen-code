@@ -746,6 +746,8 @@ impl ToolInput for ClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct WindowClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -778,6 +780,8 @@ impl ToolInput for WindowClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct DoubleClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -804,6 +808,8 @@ impl ToolInput for DoubleClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct RightClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1011,6 +1017,8 @@ pub struct WindowTypeTextInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "delivery_mode_schema")]
     pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u64>,

@@ -1021,6 +1021,7 @@ export class ComputerUse {
 
   async click(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     const { button, count, signal } = options ?? {};
     if (button !== undefined) input.button = this.#clickButton(button);
     if (count !== undefined) input.count = requireIntegerRange("count", count, 1, 3);
@@ -1030,6 +1031,7 @@ export class ComputerUse {
 
   async doubleClick(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     input.deliveryMode = this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("doubleClick", input, {
@@ -1040,6 +1042,7 @@ export class ComputerUse {
 
   async rightClick(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     if (options?.modifier !== undefined) {
       input.modifier = requireStringList("modifier", options.modifier);
     }
@@ -1122,6 +1125,7 @@ export class ComputerUse {
   async typeText(options) {
     const input = this.#windowAddress(options, { coordinates: false });
     if (typeof options?.text !== "string") throw new ComputerUseError("text must be a string");
+    if (options?.appContext === true) input.appContext = true;
     input.text = options.text;
     if (options.delayMs !== undefined) {
       input.delayMs = BigInt(

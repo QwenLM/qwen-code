@@ -89,6 +89,9 @@ unsafe fn is_app_menu(
     {
         return false;
     }
+    if super::menu::contains(pid, element) {
+        return true;
+    }
     let Some(bar) = copy_element_attr(app, "AXMenuBar") else {
         return false;
     };

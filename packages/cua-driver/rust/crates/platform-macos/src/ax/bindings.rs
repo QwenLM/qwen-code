@@ -745,6 +745,19 @@ pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
 /// The returned menu-bar item owns its retain. Only an explicitly selected
 /// item establishes menu context; cached children of a closed menu do not.
 pub unsafe fn copy_open_menu_context(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
+    let (bar, complete) = copy_selected_menu_bar_item(app);
+    if bar.is_some() || !complete {
+        return (bar, complete);
+    }
+    let mut pid = 0;
+    if AXUIElementGetPid(app, &mut pid) == kAXErrorSuccess {
+        (super::menu::copy_current(pid), true)
+    } else {
+        (None, false)
+    }
+}
+
+unsafe fn copy_selected_menu_bar_item(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
     let bar = copy_element_attr_with_status(app, "AXMenuBar");
     let Some(bar_element) = bar.value else {
         return (None, bar.complete);

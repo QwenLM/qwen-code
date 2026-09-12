@@ -206,6 +206,12 @@ pub fn begin_suppression_allowing(
     FocusStealPreventer::begin_suppression_allowing(allowed_pid, restore_to, origin)
 }
 
+pub(crate) fn allow_user_activation(pid: i32) {
+    FocusStealPreventer::shared()
+        .dispatcher
+        .allow_user_activation(pid);
+}
+
 /// RAII lease. `Drop` ends the entry synchronously, so the entry is
 /// removed even if a future is cancelled mid-await.
 pub struct SuppressionLease {
@@ -349,6 +355,17 @@ impl Dispatcher {
             })
             .map(|e| e.restore_to)
             .collect()
+    }
+
+    fn allow_user_activation(&self, pid: i32) {
+        // A proven user click takes priority over the action's reactive leases.
+        // Permission lasts only for these existing, bounded leases; future
+        // background actions establish their own suppression independently.
+        for entry in self.entries.lock().unwrap().values_mut() {
+            if entry.target_pid.is_none() || entry.target_pid == Some(pid) {
+                entry.allowed_pid = Some(pid);
+            }
+        }
     }
 
     /// Number of entries (for tests).
@@ -541,6 +558,20 @@ fn restore_focus(pid: i32) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn user_click_wins_over_current_targeted_and_wildcard_leases_only() {
+        let d = Arc::new(Dispatcher::new());
+        let targeted = d.add(Some(42), 7, "test.targeted");
+        let wildcard = d.add(None, 7, "test.wildcard");
+        d.allow_user_activation(42);
+        assert!(d.snapshot_matches(42).is_empty());
+        assert_eq!(d.snapshot_matches(99), vec![7]);
+        d.remove(targeted);
+        d.remove(wildcard);
+        d.add(Some(42), 7, "test.later");
+        assert_eq!(d.snapshot_matches(42), vec![7]);
+    }
 
     /// Dispatcher::add returns a handle, the entry is reachable by
     /// match, and remove() drops it.
