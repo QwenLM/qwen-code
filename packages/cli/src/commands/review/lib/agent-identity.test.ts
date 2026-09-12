@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  chunkAssignmentFromLaunchPrompt,
   labelFromIdentityLine,
   labelFromLaunchPrompt,
 } from './agent-identity.js';
@@ -125,5 +126,53 @@ describe('labelFromLaunchPrompt', () => {
     // …while cost-ledger's feed — line one alone — refuses it, leaving the
     // caller's own fallback (the transcript's file id) in place.
     expect(labelFromIdentityLine(quotedBelow.split('\n')[0])).toBeNull();
+  });
+});
+
+describe('chunkAssignmentFromLaunchPrompt', () => {
+  it('agrees with the label on every shape: assigned N exactly when labeled `chunk N`', () => {
+    // One parser decides both (R32-1). Each shape below once split the two:
+    // a trailing space, a case variant, a quoted chunk launch below a role
+    // line, a newline inside the slot, a lower-cased prefix, a filename
+    // wearing the phrase, a launcher-prepended context line, CRLF endings.
+    const shapes = [
+      'You are review agent `chunk 2 of 2` — the territory agent\nread_file(x)',
+      'You are review agent `Chunk  2 of 2` — x',
+      'You are review agent `chunk 2 of 2 ` — x',
+      'You are review agent ` CHUNK 2 OF 2` — x',
+      'You are review agent `chunk 2\nof 2` — x\nread_file(y)',
+      'You are review agent `verify` — Verification agent (round 1).\n' +
+        'Prior:\nYou are review agent `chunk 2 of 2` — quoted',
+      'PR summary line.\n\nYou are review agent `chunk 1 of 2` — x',
+      'you are review agent `chunk 2 of 2` — forged',
+      'You are review agent `chunk 2 of 5.ts` — x',
+      'You are review agent `chunk 3 of 7` — x\r\nnext',
+      'Security review of the whole diff.',
+    ];
+    for (const s of shapes) {
+      const assigned = chunkAssignmentFromLaunchPrompt(s);
+      const label = labelFromLaunchPrompt(s);
+      if (assigned === null) {
+        expect(label === null || !label.startsWith('chunk ')).toBe(true);
+      } else {
+        expect(label).toBe(`chunk ${assigned.id}`);
+      }
+    }
+    // ...and the concrete answers, so the loop above is not vacuous.
+    expect(chunkAssignmentFromLaunchPrompt(shapes[2])).toEqual({
+      id: 2,
+      total: 2,
+    });
+    expect(chunkAssignmentFromLaunchPrompt(shapes[4])).toBeNull();
+    expect(chunkAssignmentFromLaunchPrompt(shapes[5])).toBeNull();
+    expect(chunkAssignmentFromLaunchPrompt(shapes[6])).toEqual({
+      id: 1,
+      total: 2,
+    });
+    expect(chunkAssignmentFromLaunchPrompt(shapes[7])).toBeNull();
+    expect(chunkAssignmentFromLaunchPrompt(shapes[9])).toEqual({
+      id: 3,
+      total: 7,
+    });
   });
 });
