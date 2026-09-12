@@ -920,6 +920,8 @@ export class BridgeClient implements Client {
      */
     private readonly onGoalTurnEnded?: (sessionId: string) => void,
     private readonly onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler,
+    /** Owner-scoped runtime recycle; wired only by the managed daemon bridge. */
+    private readonly onRuntimeRecycle?: (sessionId: string) => Promise<void>,
   ) {}
 
   async requestPermission(
@@ -1319,7 +1321,9 @@ export class BridgeClient implements Client {
    * `qwen/control/client_mcp/message` (reverse tool channel),
    * `qwen/control/create-sub-session` (the `create_sub_session` tool → daemon
    * spawns a sub-session and, for `'first-turn'`, returns its first-turn
-   * result), and `craft/drainMidTurnQueue`: the ACP child calls the last one
+   * result), `qwen/control/session/runtime/recycle` (trusted owner-generation
+   * recycle after an Agent ignores abort), and `craft/drainMidTurnQueue`: the
+   * ACP child calls the last one
    * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
@@ -1333,6 +1337,23 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (method === SERVE_CONTROL_EXT_METHODS.sessionRuntimeRecycle) {
+      if (!this.onRuntimeRecycle) throw RequestError.methodNotFound(method);
+      const sessionId = params['sessionId'];
+      if (
+        typeof sessionId !== 'string' ||
+        !this.ownsSession(sessionId) ||
+        !this.resolveEntry(sessionId) ||
+        params['reason'] !== 'unresponsive_agent'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid unresponsive Agent runtime recycle request.',
+        );
+      }
+      await this.onRuntimeRecycle(sessionId);
+      return { accepted: true };
+    }
     // Reverse tool channel (issue #5626, Phase 2): the child's session
     // `McpClientManager` routes a client-hosted MCP server's
     // `sendSdkMcpMessage` UP to the parent through this method. We hand the

@@ -38,6 +38,7 @@ import type {
   AgentExternalInput,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { getAgentProgressTimeout } from './agent-progress-watchdog.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../../telemetry/types.js';
 import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
@@ -390,10 +391,20 @@ export class AgentHeadless implements SubagentExecutor {
           },
         );
 
-        this.finalText = result.text;
         this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
+        this.finalText =
+          result.text ||
+          (this.terminateMode === AgentTerminateMode.TIMEOUT
+            ? (getAgentProgressTimeout(abortController.signal)?.message ?? '')
+            : '');
         this.loopType = result.loopType ?? null;
       } catch (error) {
+        const progressTimeout = getAgentProgressTimeout(abortController.signal);
+        if (progressTimeout) {
+          this.finalText = progressTimeout.message;
+          this.terminateMode = AgentTerminateMode.TIMEOUT;
+          return;
+        }
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
         this.core.eventEmitter?.emit(AgentEventType.ERROR, {

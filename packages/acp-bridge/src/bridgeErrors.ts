@@ -673,6 +673,17 @@ export class BridgeChannelQuarantinedError extends Error {
   }
 }
 
+export class BridgeRuntimeRecyclingError extends Error {
+  readonly code = 'runtime_recycling';
+
+  constructor() {
+    super(
+      'The ACP runtime is recycling; retry after an older generation exits',
+    );
+    this.name = 'BridgeRuntimeRecyclingError';
+  }
+}
+
 export class InvalidRewindTargetError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string, message?: string) {

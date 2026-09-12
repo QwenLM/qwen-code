@@ -41,6 +41,7 @@ import {
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
+  BridgeRuntimeRecyclingError,
   BridgeTimeoutError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
@@ -911,6 +912,19 @@ export function toRpcError(err: unknown): {
           retryable: true,
           reason: unavailableError.reason,
           retryAfterSeconds: unavailableError.retryAfterSeconds,
+        },
+      };
+    }
+    case 'BridgeRuntimeRecyclingError': {
+      const recyclingError = err as BridgeRuntimeRecyclingError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: recyclingError.message,
+        data: {
+          code: recyclingError.code,
+          errorKind: recyclingError.code,
+          httpStatus: 503,
+          retryable: true,
         },
       };
     }

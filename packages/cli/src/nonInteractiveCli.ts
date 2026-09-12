@@ -879,6 +879,7 @@ export async function runNonInteractive(
       sendMessageType: SendMessageType;
       todoWorkChainId?: string;
       monitorId?: string;
+      recordOnly?: true;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -1513,7 +1514,7 @@ export async function runNonInteractive(
       // tool-call chain can push completions onto the queue.
       const registry = config.getBackgroundTaskRegistry();
       registry.setNotificationCallback((displayText, modelText, meta) => {
-        localQueue.push({
+        const item: LocalQueueItem = {
           displayText,
           modelText,
           sendMessageType: SendMessageType.Notification,
@@ -1530,7 +1531,12 @@ export async function runNonInteractive(
                 }
               : undefined,
           },
-        });
+        };
+        if (meta.recordOnly) {
+          localQueue.push({ ...item, recordOnly: true });
+          return;
+        }
+        localQueue.push(item);
       });
 
       registry.setRegisterCallback((entry) => {
@@ -2800,11 +2806,14 @@ export async function runNonInteractive(
               emitNotificationToSdk(queueItem);
             }
 
+            const modelBatch = batch.filter((item) => !item.recordOnly);
+            if (modelBatch.length === 0) return;
+
             const item = {
-              displayText: batch.map((i) => i.displayText).join('; '),
-              modelText: batch.map((i) => i.modelText).join('\n\n'),
+              displayText: modelBatch.map((i) => i.displayText).join('; '),
+              modelText: modelBatch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
-              todoWorkChainId: batch[0]?.todoWorkChainId,
+              todoWorkChainId: modelBatch[0]?.todoWorkChainId,
             };
 
             turnCount++;

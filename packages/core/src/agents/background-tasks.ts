@@ -368,6 +368,8 @@ export interface AgentTask extends TaskBase {
    * `running` so `/resume` can recover the work later.
    */
   persistedCancellationStatus?: Extract<TaskStatus, 'running' | 'cancelled'>;
+  /** The underlying run ignored abort and still occupies a physical slot. */
+  retainsPhysicalSlot?: true;
 }
 
 /**
@@ -398,6 +400,7 @@ export interface NotificationMeta {
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
+  recordOnly?: true;
 }
 
 export type BackgroundNotificationCallback = (
@@ -914,6 +917,52 @@ export class BackgroundTaskRegistry {
     this.drainWaitQueue();
   }
 
+  // Deliberately NOT gated on `entry.notified`. The cancel-grace timer
+  // (`CANCEL_GRACE_MS`) can finalize the cancellation — and emit the terminal
+  // "was cancelled" notification, setting `notified` — *before* this
+  // escalation lands: the escalation timer is drift-guarded and re-arms
+  // instead of firing when the event loop runs more than a second past its
+  // due time, while the cancel grace timer is a bare `setTimeout`, so a single
+  // stall is enough for the cancel side to win. Reaching this method at all
+  // proves the execution is still alive (the watchdog is detached once it
+  // settles), so the physical slot must still be retained and the entry
+  // settled — otherwise `getRunningBackgroundCount` and `hasRunningTasks()`
+  // free a concurrency slot that is still occupied, and `/clear`, `/resume`,
+  // `/branch` and session switches all proceed over live work. Only the
+  // notification is suppressed, and `emitNotification` is itself idempotent
+  // (`if (entry.notified) return`), so the already-delivered terminal
+  // notification is never re-fired.
+  failUnresponsive(agentId: string, error: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+
+    entry.status = 'failed';
+    entry.endTime = Date.now();
+    entry.error = error;
+    entry.retainsPhysicalSlot = true;
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        status: 'failed',
+        lastUpdatedAt: new Date().toISOString(),
+        lastError: error,
+      });
+    }
+    this.releaseFinishingWaiters(agentId, true);
+    this.rejectPendingApprovals(entry);
+    this.emitNotification(entry, true);
+    this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
+  }
+
+  releaseRetainedPhysicalSlot(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry?.retainsPhysicalSlot) return;
+    delete entry.retainsPhysicalSlot;
+    this.emitStatusChange(entry);
+    this.drainWaitQueue();
+  }
+
   // Cancellation aborts the signal and marks the entry as cancelled, but
   // does *not* emit the terminal notification immediately. The natural
   // completion path (bgBody) fires complete()/fail()/finalizeCancelled()
@@ -1286,16 +1335,17 @@ export class BackgroundTaskRegistry {
     return Array.from(this.agents.values());
   }
 
-  // Counts backgrounded agents that still occupy a slot: running, or
-  // cancelled-but-not-yet-finalized. When `model` is given, only agents on
-  // that model are counted (per-model cap); otherwise all of them (global).
+  // Counts backgrounded agents that still occupy a slot: running,
+  // cancelled-but-not-yet-finalized, or watchdog-terminal but not physically
+  // settled. When `model` is given, only agents on that model are counted.
   private getRunningBackgroundCount(model?: string): number {
     let count = 0;
     for (const entry of this.agents.values()) {
       const occupiesSlot =
         entry.isBackgrounded &&
         (entry.status === 'running' ||
-          (entry.status === 'cancelled' && !entry.notified));
+          (entry.status === 'cancelled' && !entry.notified) ||
+          entry.retainsPhysicalSlot === true);
       if (!occupiesSlot) {
         continue;
       }
@@ -1451,13 +1501,15 @@ export class BackgroundTaskRegistry {
    * registry right after passing the gate, which suppresses that very
    * notification, so blocking on it made the command silently no-op
    * when the user cleared immediately after cancelling (issue #5949).
+   * A watchdog-terminal run still counts while its underlying execution holds
+   * a physical slot, so session reset cannot erase the only remaining owner.
    * Headless holdback loops must keep using `hasUnfinalizedTasks()` so
    * every task_started still pairs with a task_notification.
    */
   hasRunningTasks(): boolean {
     for (const entry of this.agents.values()) {
       if (!entry.isBackgrounded) continue;
-      if (entry.status === 'running') return true;
+      if (entry.status === 'running' || entry.retainsPhysicalSlot) return true;
     }
     return false;
   }
@@ -1694,7 +1746,7 @@ export class BackgroundTaskRegistry {
     return buildBackgroundEntryLabel(entry);
   }
 
-  private emitNotification(entry: AgentTask): void {
+  private emitNotification(entry: AgentTask, recordOnly = false): void {
     // Mark notified *before* invoking the callback so that a re-entrant
     // terminal call inside the callback chain (cancel → complete race)
     // sees the flag and short-circuits, rather than firing twice.
@@ -1773,6 +1825,7 @@ export class BackgroundTaskRegistry {
       stats: entry.stats,
       toolUseId: entry.toolUseId,
       todoWorkChainId: entry.todoWorkChainId,
+      ...(recordOnly ? { recordOnly: true } : {}),
       label: buildBackgroundEntryLabel(entry, { includePrefix: false }),
     };
 
@@ -1834,6 +1887,7 @@ export class BackgroundTaskRegistry {
   private pruneTerminalEntries(): void {
     const evictable = Array.from(this.agents.values())
       .filter((entry) => entry.notified === true)
+      .filter((entry) => !entry.retainsPhysicalSlot)
       .sort(
         (a, b) =>
           (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||

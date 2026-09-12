@@ -38,10 +38,12 @@ export type AgentEvent =
   | 'round_end'
   | 'round_text'
   | 'stream_text'
+  | 'model_retry'
   | 'tool_call'
   | 'tool_result'
   | 'tool_responses_finalized'
   | 'tool_output_update'
+  | 'tool_progress'
   | 'tool_waiting_approval'
   | 'usage_metadata'
   | 'external_message'
@@ -56,10 +58,12 @@ export enum AgentEventType {
   /** Complete round text, emitted once after streaming before tool calls. */
   ROUND_TEXT = 'round_text',
   STREAM_TEXT = 'stream_text',
+  MODEL_RETRY = 'model_retry',
   TOOL_CALL = 'tool_call',
   TOOL_RESULT = 'tool_result',
   TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
+  TOOL_PROGRESS = 'tool_progress',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
   /** External user message injected mid-run (e.g. via send_message). */
@@ -83,6 +87,9 @@ export interface AgentRoundEvent {
   subagentId: string;
   round: number;
   promptId: string;
+  waitingForExternalInput?: true;
+  /** Expected model backoff before the next attempt starts. */
+  retryDelayMs?: number;
   timestamp: number;
 }
 
@@ -171,6 +178,21 @@ export interface AgentToolOutputUpdateEvent {
   timestamp: number;
 }
 
+export interface AgentToolProgressEvent {
+  subagentId: string;
+  round: number;
+  callId: string;
+  /** Clears the call's watchdog deadline before batch finalization finishes. */
+  settled?: true;
+  /** Suspends the call's watchdog deadline while nested work is parked on
+      Monitor-owned external input. */
+  waitingForExternalInput?: true;
+  /** Suspends the call's watchdog deadline while nested work is parked on a
+      user approval (approval waits must not cause false watchdog failures). */
+  awaitingApproval?: true;
+  timestamp: number;
+}
+
 export interface AgentApprovalRequestEvent {
   subagentId: string;
   round: number;
@@ -247,10 +269,12 @@ export interface AgentEventMap {
   [AgentEventType.ROUND_END]: AgentRoundEvent;
   [AgentEventType.ROUND_TEXT]: AgentRoundTextEvent;
   [AgentEventType.STREAM_TEXT]: AgentStreamTextEvent;
+  [AgentEventType.MODEL_RETRY]: AgentRoundEvent;
   [AgentEventType.TOOL_CALL]: AgentToolCallEvent;
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
   [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
+  [AgentEventType.TOOL_PROGRESS]: AgentToolProgressEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;

@@ -560,6 +560,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Reports retry backoff so background-agent liveness can extend its deadline. */
+  onRetry?: (delayMs: number) => void;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -3578,6 +3580,7 @@ export class LlmChat {
                 ? transportContinuationPrefix
                 : undefined,
               acceptQuietToolResultCompletion,
+              options?.onRetry,
             );
             streamEstablished = true;
 
@@ -4289,6 +4292,7 @@ export class LlmChat {
                 turnGoalContext,
                 undefined,
                 acceptQuietToolResultCompletion,
+                options?.onRetry,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -4721,6 +4725,7 @@ export class LlmChat {
                     fallbackRetryErrorCodes,
                     requestRouteKey,
                     turnGoalContext,
+                    options?.onRetry,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -4916,6 +4921,7 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
+    onRetry?: (delayMs: number) => void,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -4989,6 +4995,7 @@ export class LlmChat {
           }
         : {}),
       onRetry: (info) => {
+        onRetry?.(info.delayMs);
         logApiRetry(
           this.config,
           new ApiRetryEvent({
@@ -5025,6 +5032,7 @@ export class LlmChat {
     retryErrorCodes?: readonly number[],
     routeKey?: string,
     goalContext?: GoalTurnPermit,
+    onRetry?: (delayMs: number) => void,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -5034,6 +5042,9 @@ export class LlmChat {
       { contentGenerator, retryAuthType, retryErrorCodes },
       routeKey,
       goalContext,
+      undefined,
+      false,
+      onRetry,
     );
 
     for await (const chunk of stream) {
