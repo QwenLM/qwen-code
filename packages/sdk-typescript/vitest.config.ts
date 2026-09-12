@@ -25,11 +25,15 @@ export default defineConfig({
         branches: 75,
         statements: 80,
       },
+      // retaining vitest v1 defaults until reviewed for v3 changes
+      ignoreEmptyLines: false,
     },
     include: ['test/**/*.test.ts'],
     exclude: ['node_modules/', 'dist/'],
     retry: 2,
     fileParallelism: true,
+    // retaining vitest v1 default usage until reviewed for v3 changes
+    pool: 'threads',
     poolOptions: {
       threads: {
         minThreads: 2,
