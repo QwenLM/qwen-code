@@ -12322,93 +12322,117 @@ describe('LlmChat', async () => {
         }
       });
 
-      it('hands a trailing failure on a quiet tool-result close to the retry that owns it', async () => {
-        // R15-2, and the with-error sibling of the no-error case above. Any
-        // agentic tool-loop turn is exposed: the history tail carries a
-        // functionResponse, so every attempt of the send is a tool-result
-        // continuation. Attempt 2 is the quiet post-tool-result close that
-        // #7039 exists to retry — thought only, plus STOP — and the gateway
-        // then pushes a status-less frame in the usage tail. Three things line
-        // up: the acceptance gate declines on a progress term measured against
-        // the *attempt's* empty text rather than the turn's delivered prefix;
-        // the validation block that would throw NO_TOOL_RESULT_PROGRESS and
-        // ride the #7039 budget is guarded on `streamError === null`, so it is
-        // skipped; and the veto reads the close off the mirror and refuses the
-        // continuation. Replay is shut by the delivered prose, so no arm owns
-        // the turn: it dies on a transport artefact, leaving a dangling
-        // functionResponse with no model turn — which is what `--resume`
-        // rehydrates. Without the trailing error the identical attempt
-        // recovers on the third call, so the frame alone decides the outcome.
-        vi.useFakeTimers();
-        try {
-          const recordAssistantTurn = vi.fn();
-          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
-          const upstreamError = Object.assign(new Error("'id'"), {
-            code: 'KeyError',
-            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
-          });
+      it.each([
+        {
+          label: 'status-less frame',
+          trailing: () =>
+            Object.assign(new Error("'id'"), {
+              code: 'KeyError',
+              requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            }),
+        },
+        { label: 'socket cut', trailing: () => socketCut() },
+      ] as const)(
+        'continues past a trailing $label on a quiet tool-result close',
+        async ({ trailing }) => {
+          // R17-1. A tool-result continuation attempt that closes carrying
+          // only a thought part plus STOP, then takes a trailing failure where
+          // the usage tail belonged. The continuation arm owns this shape: the
+          // closed-finish veto is scoped to an attempt that produced output of
+          // its own, and a thought-only attempt never trips it, so the cut is
+          // continuable and the prefix the caller watched stream is folded into
+          // the resumed answer. The acceptance gate must therefore decline
+          // here, on its attempt-local progress term. Accepting instead nulls
+          // the error, the empty-response validation throws
+          // NO_TOOL_RESULT_PROGRESS, and the invalid-stream arm's fresh restart
+          // calls resetTransportContinuation — the prose is then lost from both
+          // durable layers and the whole answer is regenerated. Both classes
+          // the gate admits take the same path through that conjunct, so the
+          // shape is pinned for each.
+          vi.useFakeTimers();
+          try {
+            const recordAssistantTurn = vi.fn();
+            const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+            const trailingError = trailing();
 
-          vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(
-              cutAfter([textChunk('Let me read that file. ')]),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield {
-                  candidates: [
-                    {
-                      content: {
-                        role: 'model',
-                        parts: [{ text: 'Reconsidering.', thought: true }],
+            vi.mocked(mockContentGenerator.generateContentStream)
+              .mockResolvedValueOnce(
+                cutAfter([textChunk('Let me read that file. ')]),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield {
+                    candidates: [
+                      {
+                        content: {
+                          role: 'model',
+                          parts: [{ text: 'Reconsidering.', thought: true }],
+                        },
+                        finishReason: 'STOP',
                       },
-                      finishReason: 'STOP',
+                    ],
+                  } as unknown as GenerateContentResponse;
+                  throw trailingError;
+                })(),
+              )
+              .mockResolvedValueOnce(
+                (async function* () {
+                  yield textChunk('the recovered answer', 'STOP');
+                })(),
+              );
+
+            const stream = await chatWithRecording.sendMessageStream(
+              'test-model',
+              {
+                message: [
+                  {
+                    functionResponse: {
+                      id: 'call_quiet_close_with_frame',
+                      name: 'read_file',
+                      response: { output: 'file contents' },
                     },
-                  ],
-                } as unknown as GenerateContentResponse;
-                throw upstreamError;
-              })(),
-            )
-            .mockResolvedValueOnce(
-              (async function* () {
-                yield textChunk('the recovered answer', 'STOP');
-              })(),
+                  },
+                ],
+              },
+              'prompt-quiet-tool-result-close-with-trailing-failure',
             );
 
-          const stream = await chatWithRecording.sendMessageStream(
-            'test-model',
-            {
-              message: [
-                {
-                  functionResponse: {
-                    id: 'call_quiet_close_with_frame',
-                    name: 'read_file',
-                    response: { output: 'file contents' },
-                  },
-                },
-              ],
-            },
-            'prompt-quiet-tool-result-close-with-frame',
-          );
+            const collecting = drainCollecting(stream);
+            await vi.advanceTimersByTimeAsync(0);
+            await vi.advanceTimersByTimeAsync(60_000);
+            const { events, caughtError } = await collecting;
 
-          const collecting = drainCollecting(stream);
-          await vi.advanceTimersByTimeAsync(0);
-          await vi.advanceTimersByTimeAsync(60_000);
-          const { caughtError } = await collecting;
-
-          // The trailing frame no longer decides the turn's fate: #7039 owns
-          // the quiet close exactly as it does one frame earlier.
-          expect(caughtError).toBeUndefined();
-          expect(
-            mockContentGenerator.generateContentStream,
-          ).toHaveBeenCalledTimes(3);
-          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-          expect(recordedText(recordAssistantTurn)).toBe(
-            'the recovered answer',
-          );
-        } finally {
-          vi.useRealTimers();
-        }
-      });
+            expect(caughtError).toBeUndefined();
+            expect(
+              mockContentGenerator.generateContentStream,
+            ).toHaveBeenCalledTimes(3);
+            // Continuations, not fresh restarts: that is what keeps the prefix.
+            const retries = events.filter(
+              (event) => event.type === StreamEventType.RETRY,
+            );
+            expect(retries).toHaveLength(2);
+            expect(
+              retries.every(
+                (event) =>
+                  event.type === StreamEventType.RETRY && event.isContinuation,
+              ),
+            ).toBe(true);
+            // The prose the caller watched stream is folded into the resumed
+            // answer in both durable layers, and the gate did not certify the
+            // trailing failure as a completion.
+            expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+            expect(recordedText(recordAssistantTurn)).toBe(
+              'Let me read that file. the recovered answer',
+            );
+            expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+              'Accepting completed answer despite trailing stream failure.',
+              expect.anything(),
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
 
       it('does not schedule a continuation over a closed finish reason on a tool-result send', async () => {
         // With a user[functionResponse] history tail every attempt is a

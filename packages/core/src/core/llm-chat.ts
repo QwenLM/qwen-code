@@ -6105,31 +6105,16 @@ export class LlmChat {
         : contentText;
     // `hasAnyContent` is shared with the stream-validation block below, hoisted
     // rather than duplicated so the two reads cannot drift.
-    // `lacksVisibleToolResultProgress` is deliberately not what the acceptance
-    // gate reads: it must stay attempt-local, because it is what makes a quiet
-    // post-tool-result close an invalid stream. The gate uses the turn-scoped
-    // sibling declared below, whose comment gives the reasoning. `contentText`
-    // cannot change between the two reads on any path where that block still
-    // runs — its only reassignment below sits inside the XML tool-call
-    // recovery, which sets `hasToolCall` and so skips the block.
+    // `lacksVisibleToolResultProgress` is attempt-local: it measures what this
+    // attempt delivered, not what the turn accumulated. The acceptance gate
+    // reads it directly — a continuation attempt that closed with only a
+    // thought part after a tool result has no visible progress of its own, so
+    // the gate declines and the continuation arm owns the shape. The validation
+    // block below reads the same binding for the same reason.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
-    // This gate's own progress term is turn-scoped, unlike the binding above
-    // that the validation block reads. A continuation attempt closing quietly
-    // after a tool result has no text of its own, but the turn does have
-    // delivered text, and declining on the attempt's measure leaves that shape
-    // owned by nothing: the validation block which would throw
-    // NO_TOOL_RESULT_PROGRESS and ride the #7039 retry is guarded on
-    // `streamError === null`, so it is skipped while the error stands, and
-    // replay is shut by the delivered prose. Accepting hands the turn to that
-    // block — the same outcome as one frame earlier, when no trailing error
-    // arrives. The hoisted binding must stay attempt-local: it is what makes
-    // the quiet close an invalid stream in the first place.
-    const lacksVisibleToolResultProgressForTrailingGate =
-      isToolResultContinuation &&
-      (!completedText || completedText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
 
     // A failure that lands after the model already closed its answer —
     // typically a gateway error frame pushed into an already-200 stream
@@ -6147,7 +6132,7 @@ export class LlmChat {
       closedFinishReason !== undefined &&
       completedText &&
       hasAnyContent &&
-      !lacksVisibleToolResultProgressForTrailingGate
+      !lacksVisibleToolResultProgress
     ) {
       // Two failure classes can be swallowed here: a curated socket-level cut,
       // and a status-less upstream frame the provider traced with its own

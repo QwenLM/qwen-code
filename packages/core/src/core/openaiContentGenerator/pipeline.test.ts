@@ -6143,6 +6143,98 @@ describe('ContentGenerationPipeline', () => {
         resultGenerator.throw!(new Error('consumer threw into the generator')),
       ).rejects.toThrow('consumer threw into the generator');
     });
+
+    it('does not flush a parked tool-call finish into a cancelled turn', async () => {
+      // R17-2. The flush synthesises a delivery on the error path, so it needs
+      // the abort guard every other synthesis branch in this catch carries
+      // (the PROTOCOL_TAG_LEAK throw below spells it
+      // `request.config?.abortSignal?.aborted !== true`). Without it a user
+      // cancellation hands over a parked functionCall the caller was never
+      // shown: LlmChat folds it into the turn's parts before the AbortError
+      // lands, and cancellation persistence then writes a model[functionCall]
+      // turn into history and the JSONL record for a call the turn driver
+      // never dispatched — the transcript asserts a tool call in a turn the
+      // user cancelled. Guarded on the signal rather than the error's
+      // identity, because `isAbortError` is not imported here and two branches
+      // of one catch must not disagree about what "aborted" means.
+      const abortController = new AbortController();
+      const abortError = new Error('Aborted');
+      abortError.name = 'AbortError';
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'prose-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me read that file. ' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          // The usage tail never arrives: the user pressed Esc first.
+          abortController.abort();
+          throw abortError;
+        },
+      };
+      const proseResponse = new GenerateContentResponse();
+      proseResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me read that file. ' }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(proseResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results: GenerateContentResponse[] = [];
+      let caught: unknown;
+      try {
+        for await (const result of resultGenerator) results.push(result);
+      } catch (error) {
+        caught = error;
+      }
+
+      // The prose the caller was shown survives; the parked call does not.
+      expect(results).toEqual([proseResponse]);
+      expect(
+        results.some((response) =>
+          response.candidates?.some((candidate) =>
+            candidate.content?.parts?.some((part) => part.functionCall),
+          ),
+        ),
+      ).toBe(false);
+      expect(caught).toBe(abortError);
+    });
   });
 
   describe('buildResponseFormat endpoint gate', () => {

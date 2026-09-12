@@ -813,6 +813,12 @@ export class ContentGenerationPipeline {
       if (
         pendingFinishResponse &&
         !finishYielded &&
+        // A cancellation is not a stream failure to recover from: synthesising
+        // a delivery here hands the consumer a finish it was never shown, and
+        // cancellation persistence keeps whatever the consumer received.
+        // Spelled exactly as the PROTOCOL_TAG_LEAK branch below spells it, so
+        // one catch does not hold two notions of "aborted".
+        request.config?.abortSignal?.aborted !== true &&
         (!parkedHasToolCall || contentYielded)
       ) {
         logPendingProtocolTagSanitized(
