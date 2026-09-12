@@ -167,6 +167,42 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   promptId?: string;
   /**
+   * Marks a restored-from-checkpoint item whose `promptId` is a
+   * file-history key only. `/restore` loads a JSON checkpoint, so the
+   * model-facing history it restores cannot carry the Symbol prompt marks;
+   * the item keeps its `promptId` because file restore and turn-diff
+   * previews key on it, but rewind mapping must never resolve the id —
+   * a later prompt can re-mint it, and a unique mark match would then
+   * point at the wrong model entry (R24-1). `computeApiTruncationIndex`
+   * skips the identity shortcut for these items and maps them
+   * positionally.
+   */
+  promptIdFileKeyOnly?: boolean;
+  /**
+   * The model-facing text of this turn, when it differs from `text`.
+   *
+   * The rewind ownership proof checks that the entry wearing the target's
+   * `promptId` carries the target's text, which keeps a re-minted twin from
+   * resolving onto the wrong entry. `text` is DISPLAY text, though, and the
+   * resume builder substitutes synthetic strings for it — most visibly
+   * `'[User message with attachments]'` — so the proof compared two strings
+   * that never match and the identity gate silently never fired for those
+   * turns. Set this to the text the model actually received so the proof has
+   * something real to compare, while `text` stays what the UI renders.
+   */
+  promptOwnerText?: string;
+  /**
+   * `false` when this turn's record carried no model-facing text part — a
+   * resumed attachment-only prompt displayed as the synthetic
+   * `'[User message with attachments]'`. The rewind ordinal proof counts
+   * user prompts on both sides of the UI/API boundary and must count the
+   * same population on each: the API side never counts such a turn (its
+   * entry has no text part), so the UI side must not count it either.
+   * Absent on the live path, where a real turn's text is what the model
+   * received.
+   */
+  promptHasModelText?: boolean;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

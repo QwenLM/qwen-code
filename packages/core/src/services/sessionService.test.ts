@@ -34,6 +34,8 @@ import {
   SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
+  getApiHistoryPromptId,
+  isApiHistoryNotification,
   normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
@@ -4589,10 +4591,14 @@ describe('SessionService', () => {
 
   describe('buildApiHistoryFromConversation', () => {
     it('should return linear messages when no compression checkpoint exists', () => {
+      const identifiedUser: ChatRecord = {
+        ...recordA1,
+        promptId: 'prompt-1',
+      };
       const assistantA1: ChatRecord = {
         ...recordB2,
         sessionId: sessionIdA,
-        parentUuid: recordA1.uuid,
+        parentUuid: identifiedUser.uuid,
       };
 
       const conversation: ConversationRecord = {
@@ -4600,12 +4606,72 @@ describe('SessionService', () => {
         projectHash: 'test-project-hash',
         startTime: '2024-01-01T00:00:00Z',
         lastUpdated: '2024-01-01T00:00:00Z',
-        messages: [recordA1, assistantA1],
+        messages: [identifiedUser, assistantA1],
       };
 
       const history = buildApiHistoryFromConversation(conversation);
 
-      expect(history).toEqual([recordA1.message, assistantA1.message]);
+      expect(
+        history.map((content) => ({
+          role: content.role,
+          parts: content.parts,
+        })),
+      ).toEqual([
+        {
+          role: identifiedUser.message!.role,
+          parts: identifiedUser.message!.parts,
+        },
+        {
+          role: assistantA1.message!.role,
+          parts: assistantA1.message!.parts,
+        },
+      ]);
+      expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
+      expect(JSON.stringify(history[0])).not.toContain('prompt-1');
+    });
+
+    it('marks rebuilt entries with notification provenance from the record subtype', () => {
+      // The rewind census pairs UI notification items against entries
+      // carrying notification provenance (R40-3). The live send attaches it
+      // directly; the resume rebuild re-attaches it from the record's
+      // subtype — a cron fire's raw prompt carries no envelope to recognize.
+      const cronRecord: ChatRecord = {
+        ...recordA1,
+        uuid: 'cron-1',
+        subtype: 'cron',
+        message: { role: 'user', parts: [{ text: 'Run the nightly job' }] },
+      };
+      const notificationRecord: ChatRecord = {
+        ...recordA1,
+        uuid: 'notif-1',
+        subtype: 'notification',
+        message: {
+          role: 'user',
+          parts: [{ text: '<task-notification>done</task-notification>' }],
+        },
+      };
+      const plainUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'user-1',
+        parentUuid: notificationRecord.uuid,
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [cronRecord, notificationRecord, plainUser],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(isApiHistoryNotification(history[0]!)).toBe(true);
+      expect(isApiHistoryNotification(history[1]!)).toBe(true);
+      expect(isApiHistoryNotification(history[2]!)).toBe(false);
+      expect(JSON.stringify(history[0])).not.toContain(
+        'apiHistoryNotification',
+      );
     });
 
     it('keeps Realtime dialogue out of backend model history', () => {
@@ -5310,6 +5376,99 @@ describe('SessionService', () => {
       expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
         `${newId}#Explore#0`,
       );
+    });
+
+    it('remaps record and chat_compression promptIds into the fork (R42-2)', async () => {
+      // parseSessionPromptTurn keys claims on the exact
+      // `${sessionId}########` prefix, so unremapped record ids are
+      // invisible to the fork's prompt-count seed and the next live mint
+      // collides with an inherited snapshot id. The record side must follow
+      // the snapshot side's rule.
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const userRecord = {
+        ...(lines[0] as Record<string, unknown>),
+        promptId: `${oldId}########0`,
+      };
+      fs.writeFileSync(
+        file,
+        [
+          userRecord,
+          lines[1]!,
+          {
+            uuid: 'compression-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'chat_compression',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 40,
+                compressionStatus: 'compressed',
+              },
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+              ],
+              promptIds: [`${oldId}########0`, null],
+            },
+          },
+          {
+            uuid: 'snapshot-1',
+            parentUuid: 'compression-1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'file_history_snapshot',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `${oldId}########0`,
+                  timestamp: '2026-04-22T00:00:03.000Z',
+                  trackedFileBackups: {},
+                },
+              ],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      const copiedUser = written.find((record) => record.uuid === 'u1');
+      expect(copiedUser.promptId).toBe(`${newId}########0`);
+
+      const copiedCompression = written.find(
+        (record) => record.subtype === 'chat_compression',
+      );
+      expect(copiedCompression.systemPayload.promptIds).toEqual([
+        `${newId}########0`,
+        null,
+      ]);
+
+      const copiedSnapshot = written.find(
+        (record) => record.subtype === 'file_history_snapshot',
+      );
+      const snapshotIds = copiedSnapshot.systemPayload.snapshots.map(
+        (snapshot: { promptId: string }) => snapshot.promptId,
+      );
+      expect(snapshotIds).toContain(`${newId}########0`);
+      // The remapped record id matches the remapped snapshot id, so the
+      // fork's seed sees the claim.
+      expect(copiedUser.promptId).toBe(snapshotIds[0]);
     });
 
     it('does not copy source turn_result identities into a fork', async () => {

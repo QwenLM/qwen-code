@@ -131,6 +131,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
+import { mintLivePromptId } from '../utils/prompt-count-floor.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import {
@@ -1417,7 +1418,7 @@ export const useLlmStream = (
     config.getArenaAgentClient()?.reportCancelled();
 
     // Log API cancellation
-    const prompt_id = config.getSessionId() + '########' + getPromptCount();
+    const prompt_id = mintLivePromptId(config, getPromptCount);
     const cancellationEvent = new ApiCancelEvent(
       modelOverrideRef.current ?? config.getModel(),
       prompt_id,
@@ -3743,7 +3744,7 @@ export const useLlmStream = (
       }
 
       if (!prompt_id) {
-        prompt_id = config.getSessionId() + '########' + getPromptCount();
+        prompt_id = mintLivePromptId(config, getPromptCount);
       }
       if (!allowConcurrentBtwDuringResponse) {
         activeInteractionPromptIdRef.current = prompt_id;

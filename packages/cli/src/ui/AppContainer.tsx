@@ -88,6 +88,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -1207,16 +1208,15 @@ export const AppContainer = (props: AppContainerProps) => {
         loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
-        }
+        // promptIds don't collide with restored file history snapshots
+        // (R37-31). The same seed runs on the in-session /resume and
+        // /branch entrances (R38-1); monotonic, so 0 is a no-op.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1873,6 +1873,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1883,6 +1884,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -4204,7 +4206,33 @@ export const AppContainer = (props: AppContainerProps) => {
         let hasRestoreFailure = false;
         if (option === 'code' || option === 'both') {
           const promptId = (userItem as HistoryItemUser).promptId;
-          if (promptId) {
+          // A session whose counter restarted on resume can hold TWO live
+          // items wearing the same promptId (a surviving resumed turn and
+          // its live re-mint). The file consumer resolves a shared key by
+          // last occurrence — the wrong turn's snapshot — then prunes the
+          // newer snapshots and permanently deletes their backups (R36-1).
+          // Refuse loudly, as the resume-side census does for the
+          // duplicates it can see. The ambiguity lives in the snapshot
+          // array, not the UI items: a conversation-only rewind drops the
+          // twin's UI item while both snapshots survive, so the snapshot
+          // census must stand on its own (R38-3).
+          const promptIdIsShared = promptId
+            ? config
+                .getFileHistoryService()
+                .getSnapshots()
+                .filter((s) => s.promptId === promptId).length > 1 ||
+              historyManager.history.some(
+                (item) =>
+                  item.id !== userItem.id &&
+                  (item as HistoryItemUser).promptId === promptId,
+              )
+            : false;
+          if (promptId && promptIdIsShared) {
+            hasRestoreFailure = true;
+            fileRestoreError = t(
+              'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+            );
+          } else if (promptId) {
             try {
               const truncateHistory =
                 option === 'both' && !!llmClient && apiTruncateIndex >= 0;

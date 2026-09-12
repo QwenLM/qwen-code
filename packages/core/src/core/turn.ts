@@ -646,6 +646,8 @@ export class Turn {
     private readonly chat: LlmChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
+    private readonly promptIdentity?: string,
+    private readonly notificationSubmitted?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -668,6 +670,14 @@ export class Turn {
         },
         this.prompt_id,
         this.goalContext,
+        this.promptIdentity || this.notificationSubmitted
+          ? {
+              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+              ...(this.notificationSubmitted
+                ? { notificationSubmitted: true }
+                : {}),
+            }
+          : undefined,
       );
 
       for await (const streamEvent of responseStream) {

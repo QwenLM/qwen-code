@@ -37,6 +37,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import {
   buildBackgroundWorkBlockedMessage,
@@ -45,6 +46,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 import { resumeEventsFromSession } from './resume-session.js';
+import { seedLivePromptCount } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** The UI surfaces a session switch touches (backend-provided). */
@@ -169,6 +171,19 @@ export async function handleResumeSession(
     resetBackgroundStateForSessionSwitch(config);
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
+    // Seed the live prompt counter past the ids the resumed transcript
+    // claims NOW — before the awaits below: the submit gate is open across
+    // them (the picker path holds no busy latch), and a mint inside that
+    // window would use the unseeded counter, re-minting an id a resumed
+    // turn still wears (R39-2). Placed after coreSwapped = true so a throw
+    // still takes the rollback branch; monotonic, so the early seed cannot
+    // lower a counter an earlier session left higher.
+    seedLivePromptCount(
+      computeResumedPromptCountSeed(
+        sessionData.conversation.messages,
+        sessionId,
+      ),
+    );
     await waitForGoalRuntime(config);
     // Rebuild turn boundary tracking so rewind works within resumed sessions.
     config
@@ -352,6 +367,16 @@ export async function handleBranchSession(
     // 7. Core swap first.
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
+    // Seed the live prompt counter past the ids the forked transcript
+    // claims NOW — before the awaits below, for the same open-window reason
+    // as handleResumeSession (R39-2). The fork remapped record ids to the
+    // new session id, so the seed keys on newSessionId.
+    seedLivePromptCount(
+      computeResumedPromptCountSeed(
+        resumed.conversation.messages,
+        newSessionId,
+      ),
+    );
     await waitForGoalRuntime(config);
     await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 

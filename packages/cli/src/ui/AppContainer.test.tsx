@@ -737,6 +737,7 @@ describe('AppContainer State Management', () => {
     noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
+    snapshots?: Array<{ promptId: string }>;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -806,7 +807,7 @@ describe('AppContainer State Management', () => {
         },
       );
     }
-    const snapshots = [
+    const snapshots = options.snapshots ?? [
       { promptId: 'prompt-1' },
       { promptId: 'prompt-2' },
       { promptId: 'prompt-3' },
@@ -7006,6 +7007,69 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('refuses file restore when another history item wears the same prompt id', async () => {
+      // R36-1: a session whose counter restarted on resume re-mints ids the
+      // surviving transcript still wears, so two live UI items share one
+      // promptId. The file consumer resolves a shared key by last
+      // occurrence — the wrong turn's snapshot — then prunes the newer
+      // snapshots and deletes their backups. The rewind-time refusal
+      // mirrors the resume-side census's loud stop, and 'both' must not
+      // truncate the conversation either (no inconsistent state).
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'resumed turn five', 'prompt-5'),
+        { id: 2, type: 'gemini', text: 'first response' },
+        rewindUserItem(3, 're-minted live turn', 'prompt-5'),
+        { id: 4, type: 'gemini', text: 'second response' },
+      ];
+      const harness = renderRewindHarness({ history });
+
+      await runRewind(history[0]!, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses file restore when two snapshots share the prompt id (R38-3)', async () => {
+      // A conversation-only rewind drops UI items without touching the
+      // snapshot array, so the UI-item census goes blind to a duplicated
+      // key that fhs.rewind() would still resolve by last occurrence and
+      // then destructively prune. The census must cover the snapshot array
+      // itself.
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'resumed turn five', 'prompt-5'),
+        { id: 2, type: 'gemini', text: 'first response' },
+      ];
+      const harness = renderRewindHarness({
+        history,
+        snapshots: [
+          { promptId: 'prompt-5' },
+          { promptId: 'prompt-5' },
+          { promptId: 'prompt-9' },
+        ],
+      });
+
+      await runRewind(history[0]!, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('truncates conversation when both-mode file restore succeeds', async () => {
       const harness = renderRewindHarness();
 
@@ -7686,6 +7750,58 @@ describe('AppContainer State Management', () => {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('seeds the prompt counter past ACP-minted promptIds on resume (R37-31)', async () => {
+      // ACP and headless mint `sessionId########<n>` 1-based and skip
+      // turns that write no record, while the TUI mint is pre-increment.
+      // Seeding the resume from a bare user-message count therefore
+      // re-mints the id the last resumed turn wears; the seed must come
+      // from the highest claimed turn (+1 for the pre-increment mint).
+      const sessionId = mockConfig.getSessionId();
+      const seedPromptCount = vi.fn();
+      mockedUseSessionStats.mockReturnValue({
+        stats: {},
+        seedPromptCount,
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId,
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:03Z',
+          messages: [1, 2, 3].map((turn) => ({
+            uuid: `u${turn}`,
+            parentUuid: null,
+            sessionId,
+            timestamp: `2024-01-01T00:00:0${turn}Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+            cwd: '/test/workspace',
+            version: '1.0.0',
+            promptId: `${sessionId}########${turn}`,
+          })),
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u3',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Seed 4, not the record count 3: the next pre-increment mint is
+      // then `${sessionId}########4`, above every id the transcript wears.
+      await vi.waitFor(() => {
+        expect(seedPromptCount).toHaveBeenCalledWith(4);
+      });
     });
 
     it('does not consume the latch on a whitespace-only prompt', () => {

@@ -82,8 +82,11 @@ import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import {
+  resumeEventsFromConfig,
+  seedLivePromptCountFromResume,
+} from './resume-session.js';
 import { Command, matchesCommand } from './key-map.js';
-import { resumeEventsFromConfig } from './resume-session.js';
 import {
   armCapturedInputInjection,
   drainCapturedInputAsText,
@@ -154,6 +157,9 @@ function OpenTuiEntryApp({
 
   // --- startup warnings + resume replay --------------------------------------
   useEffect(() => {
+    // Seed before the replay (and before any submit can mint): the startup
+    // resume path never passes through a session switch (R39-1).
+    seedLivePromptCountFromResume(config);
     const resumeEvents = resumeEventsFromConfig(config);
     if (resumeEvents) resetTranscript(resumeEvents);
     for (const warning of startupWarnings) {

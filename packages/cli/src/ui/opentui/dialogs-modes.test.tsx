@@ -282,6 +282,11 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
 
     await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    // The mocked useKeyboard invokes the handler directly, bypassing React's
+    // flush of pending passive effects before the next discrete input; settle
+    // first so the catalog load's selection effect cannot clobber the
+    // navigation below.
+    await act(async () => {});
     press('down');
     press('return');
 
@@ -476,6 +481,11 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
 
     await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    // The mocked useKeyboard invokes the handler directly, bypassing React's
+    // flush of pending passive effects before the next discrete input; settle
+    // first so the catalog load's selection effect cannot clobber the
+    // navigation below.
+    await act(async () => {});
     press('down');
     expect(screen.getByText('Concise').parentElement?.textContent).toContain(
       '› Concise',

@@ -9,6 +9,7 @@ import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
   ConversationRecord,
+  ChatRecord,
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
@@ -23,6 +24,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  computeInitialTurnFromHistory,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -193,6 +195,25 @@ function convertToHistoryItems(
   let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
   let lastGoalStateCause: GoalStateCause | undefined;
 
+  // Two turns in one transcript can share a re-minted promptId — a headless
+  // `-p --resume S` mints `S########0` unconditionally, colliding with the
+  // interactive turn that already wore it. Attaching a shared id to both
+  // resumed items hands the file-rewind consumer a key that resolves the
+  // LAST snapshot wearing it — the wrong turn's — while the conversation
+  // truncates at the selected turn (R34-1). Such ids are withheld below, so
+  // an ambiguous turn keeps the loud 'created before file checkpointing'
+  // refusal it had before ids were persisted. Unique ids stay attached —
+  // /restore-style flagging is not wanted here because the ids are the
+  // rewind identity gate's input.
+  const promptIdRecordCount = new Map<string, number>();
+  for (const record of conversation.messages) {
+    if (record.type !== 'user' || record.subtype) continue;
+    const id = record.promptId;
+    if (typeof id === 'string' && id.length > 0) {
+      promptIdRecordCount.set(id, (promptIdRecordCount.get(id) ?? 0) + 1);
+    }
+  }
+
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
     string,
@@ -265,7 +286,28 @@ function convertToHistoryItems(
     });
   };
 
+  // The rewind ownership proof compares the UI item against the model-facing
+  // entry built from this same record, so capture that text whenever the
+  // displayed string differs from it (synthetic placeholders, at-command raw
+  // text). `undefined` when they already agree — no field, no behavior change.
+  const modelFacingText = (record: ChatRecord): string | undefined => {
+    const parts = record.message?.parts;
+    if (!Array.isArray(parts)) return undefined;
+    for (const part of parts) {
+      if (typeof part.text === 'string' && part.text.length > 0) {
+        return part.text;
+      }
+    }
+    return undefined;
+  };
+
   for (const record of conversation.messages) {
+    const promptId =
+      typeof record.promptId === 'string' &&
+      record.promptId.length > 0 &&
+      promptIdRecordCount.get(record.promptId) === 1
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -419,7 +461,16 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            items.push({ type: 'user', text });
+            const ownerText = modelFacingText(record);
+            items.push({
+              type: 'user',
+              text,
+              ...(promptId ? { promptId } : {}),
+              ...(promptId && ownerText && ownerText !== text
+                ? { promptOwnerText: ownerText }
+                : {}),
+              ...(ownerText === undefined ? { promptHasModelText: false } : {}),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -453,7 +504,16 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          items.push({ type: 'user', text });
+          const ownerText = modelFacingText(record);
+          items.push({
+            type: 'user',
+            text,
+            ...(promptId ? { promptId } : {}),
+            ...(promptId && ownerText && ownerText !== text
+              ? { promptOwnerText: ownerText }
+              : {}),
+            ...(ownerText === undefined ? { promptHasModelText: false } : {}),
+          });
         }
         break;
       }
@@ -723,6 +783,38 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
     ...item,
     display: Object.keys(rest).length > 0 ? rest : undefined,
   };
+}
+
+/**
+ * Prompt-counter seed for an entrance that just loaded resumed or restored
+ * history (startup --resume, in-session /resume, /branch, session switch).
+ * The counter must restart past every identity the transcript claims —
+ * re-minting an id a surviving resumed turn still wears collapses the
+ * rewind identity resolution to a duplicate (R37-31, R38-1). ACP and
+ * headless mint `sessionId########<n>` 1-based and skip turns that write no
+ * record, so the highest claimed turn sits above the record count; the TUI
+ * mints pre-increment, hence the +1. Floored at the user-turn count for
+ * transcripts whose records predate claims. Returns 0 when the transcript
+ * holds no user turns — a no-op for the monotonic seed consumers, so
+ * callers pass the result through unconditionally.
+ */
+export function computeResumedPromptCountSeed(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): number {
+  const userTurnCount = records.filter(
+    (m) =>
+      m.type === 'user' &&
+      m.subtype !== 'mid_turn_user_message' &&
+      m.subtype !== 'realtime_message',
+  ).length;
+  if (userTurnCount === 0) {
+    return 0;
+  }
+  return Math.max(
+    userTurnCount,
+    computeInitialTurnFromHistory(records, sessionId) + 1,
+  );
 }
 
 /**

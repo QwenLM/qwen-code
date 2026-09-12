@@ -65,6 +65,7 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -332,6 +333,8 @@ export interface ChatRecord {
   version: string;
   /** Current git branch, if available */
   gitBranch?: string;
+  /** Stable identity shared with the visible user turn and API history. */
+  promptId?: string;
 
   // Content field - raw API format for history reconstruction
 
@@ -510,6 +513,8 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  /** Prompt identities parallel to compressedHistory. */
+  promptIds?: Array<string | null>;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1892,11 +1897,18 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    * @param goalContext Goal identity and turn that own this message
    * @param promptPayload User-authored display text and hook-context provenance
+   * @param promptId Identity of the turn this message opens. Rewind anchors
+   *   API-history entries to it (see `session-api-history.ts`), so it is the
+   *   caller's own prompt id rather than anything a transport supplied.
+   * @param daemonPromptId The daemon's prompt id from the invocation context,
+   *   which transcript replay hands back to it as `extra.promptId`. A daemon
+   *   turn carries both, and the two values are not the same.
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    promptId?: string,
     daemonPromptId?: string,
   ): void {
     try {
@@ -1908,6 +1920,7 @@ export class ChatRecordingService {
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
+        ...(promptId ? { promptId } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
@@ -2439,11 +2452,27 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
+      // Freeze the array: two of the three call sites hand over the array
+      // that setHistory installs as the live, in-place-mutated chat
+      // history, while the deferred writer serializes the record only after
+      // later same-turn mutations (the send's tail push, the
+      // orphaned-tool-use repair's mid-array splices). The resume side
+      // re-attaches identities positionally, so the persisted array's order
+      // must stay paired with the eagerly derived promptIds — keep null
+      // slots, copy the container.
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: payload,
+        systemPayload: {
+          ...payload,
+          compressedHistory,
+          ...(promptIds.some(Boolean) ? { promptIds } : {}),
+        },
       };
 
       this.appendRecord(record);

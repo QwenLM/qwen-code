@@ -10,6 +10,8 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryNotification,
+  markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -83,6 +85,29 @@ function compressionItem(
 // ---------------------------------------------------------------------------
 
 describe('computeApiTruncationIndex', () => {
+  it('uses prompt identity when content shape cannot align the histories', () => {
+    const placeholder = '[Old inline media cleared: image/png]';
+    const target = userItem(3, 'target') as HistoryItem & {
+      promptId: string;
+    };
+    target.promptId = 'prompt-3';
+    const targetContent = userContent('target');
+    markApiHistoryPrompt(targetContent, target.promptId);
+
+    expect(
+      computeApiTruncationIndex(
+        [userItem(1, placeholder), llmItem(2), target, llmItem(4)],
+        target.id,
+        [
+          userContent(placeholder),
+          modelContent('response 1'),
+          targetContent,
+          modelContent('response 2'),
+        ],
+      ),
+    ).toBe(2);
+  });
+
   it('returns 0 for empty API history', () => {
     const ui: HistoryItem[] = [userItem(1)];
     const api: Content[] = [];
@@ -368,6 +393,127 @@ describe('computeApiTruncationIndex', () => {
         modelContent('Got it. Thanks for the additional context!'),
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+
+    it('still fails loud when a post-prefix survivor re-minted the first turn id', () => {
+      // Entrances mint `sessionId########<n>` from counters that restart
+      // independently, so two headless runs against one session write twins
+      // sharing an id. If marker-less compression absorbs the first twin's
+      // entry while the second survives (still marked with the shared id),
+      // the identity shortcut must not resolve the absorbed first turn onto
+      // the surviving twin — the entrance-3 refusal above must win (R25-1).
+      const firstTurn = userItem(1, 'pre 1') as HistoryItem & {
+        promptId: string;
+      };
+      firstTurn.promptId = 'session########1';
+      const twinTurn = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [firstTurn, llmItem(2), twinTurn, llmItem(4)];
+      const survivingTwin = userContent('pre 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+      // The surviving twin itself still maps (identity resolves it exactly
+      // where the positional walk cannot reach post-compression).
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('fails loud when a non-first-turn target was absorbed and its twin re-minted the id', () => {
+      // R26-1: the R25-1 hazard for non-first turns. A's own entry was
+      // absorbed by marker-less compression (no UI marker, so
+      // compressionIndex === -1 while the API history carries the prefix);
+      // a later entrance re-minted the same id onto B, whose entry survives
+      // post-prefix as the UNIQUE match for that id. The identity shortcut
+      // must not resolve the absorbed A onto B's twin entry — rewinding
+      // would truncate at B's boundary and silently keep the prompt+response
+      // the UI deleted, where the positional walk refuses loudly (-1).
+      const absorbedTurn = userItem(3, 'run 2, prompt 1') as HistoryItem & {
+        promptId: string;
+      };
+      absorbedTurn.promptId = 'session########1';
+      const twinTurn = userItem(5, 'run 3, prompt 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'run 1, prompt 1'),
+        llmItem(2),
+        absorbedTurn,
+        llmItem(4),
+        twinTurn,
+        llmItem(6),
+      ];
+      const survivingTwin = userContent('run 3, prompt 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      // The surviving twin itself still maps: no later turn claims its id,
+      // so the unique post-prefix match is its own entry (guard must not
+      // over-refuse this case).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(3);
+    });
+
+    it('fails loud when the only identity match sits inside the compressed prefix', () => {
+      // recordChatCompression persists promptIds for absorbed turns, so on
+      // resume the compressed prefix entries themselves carry identity marks.
+      // If the target turn's own API entry is unmarked while an entry INSIDE
+      // the prefix shares its id, the identity lookup must not resolve below
+      // the prefix: truncating at the prefix entry would silently drop the
+      // summary and every real turn where the positional walk refuses (-1).
+      const target = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      target.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        llmItem(2),
+        target,
+        llmItem(4),
+      ];
+      const prefixSummary = userContent(
+        '<state_snapshot>summary\n\nResume the prior task...',
+      );
+      markApiHistoryPrompt(prefixSummary, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        prefixSummary,
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('pre 2'),
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+
+      // The bound must not over-refuse: when the target's own post-prefix
+      // entry carries the shared id, it resolves exactly even though the
+      // prefix also carries a mark with that id.
+      const markedSurvivor = userContent('pre 2');
+      markApiHistoryPrompt(markedSurvivor, 'session########1');
+      expect(
+        computeApiTruncationIndex(ui, 3, [
+          startupEntry(),
+          prefixSummary,
+          modelContent('Got it. Thanks for the additional context!'),
+          markedSurvivor,
+          modelContent('response 2'),
+        ]),
+      ).toBe(3);
     });
   });
 
@@ -797,6 +943,1784 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
     });
+  });
+});
+
+describe('positional fallback when identity does not resolve', () => {
+  // `promptId` is minted as `sessionId########<counter>` by several
+  // entrances whose counters restart independently, so an identity can be
+  // missing from model history or present twice. Neither is allowed to turn
+  // into a refusal: the mapping falls back to the positional walk, which is
+  // exactly what shipped before identities existed.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('resolves unmarked turns positionally once later sends are marked', () => {
+    // A retried turn re-enters model history unmarked while its UI item
+    // keeps the original id; the next ordinary prompt is marked again.
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########3');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'earlier one', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'earlier two', 'session########2'),
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('earlier one'), // unmarked
+      modelContent('response 1'),
+      userContent('earlier two'), // unmarked
+      modelContent('response 2'),
+      freshContent, // marked
+      modelContent('response 3'),
+    ];
+
+    // Rewinding to either unmarked turn maps positionally.
+    expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // NOTE: deliberately no assertion on the marked turn 5 here. The walk and
+    // the identity gate agree on it (both give 4), so it would pin nothing.
+    // Identity acceptance is pinned where the two DISAGREE: the round-28
+    // absorbed-turn tests and the headline reproduction below.
+  });
+
+  it('falls back positionally instead of refusing on a duplicated identity', () => {
+    // Two entrances re-minted the same id. Before identities existed this
+    // session rewound positionally; failing closed here would be a
+    // regression against that behavior, so the duplicate is simply ignored.
+    //
+    // The target must NOT be the first UI turn: `uiUserTurnCount === 0`
+    // returns startIndex before the identity gate runs, so a first-turn
+    // fixture pins nothing about duplicate handling.
+    const first = userContent('one');
+    const second = userContent('two');
+    markApiHistoryPrompt(first, 'dup-id');
+    markApiHistoryPrompt(second, 'dup-id');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'zero', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'one', 'dup-id'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      userContent('zero'),
+      modelContent('r0'),
+      first,
+      modelContent('r1'),
+      second,
+      modelContent('r2'),
+    ];
+    // Ambiguous id -> the walk, which lands on the target's own entry (2).
+    // A fail-closed gate would return -1 here, which is the regression this
+    // pins against.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('falls back positionally when the target identity reaches no entry', () => {
+    const markedOther = userContent('claimed by another id');
+    markApiHistoryPrompt(markedOther, 'other-id');
+
+    // First-turn branch.
+    const uiFirst: HistoryItem[] = [
+      userItemWithPromptId(1, 'lost mark', 'lost-id'),
+      llmItem(2),
+    ];
+    expect(
+      computeApiTruncationIndex(uiFirst, 1, [markedOther, modelContent('r')]),
+    ).toBe(0);
+
+    // Walk branch.
+    const uiMid: HistoryItem[] = [
+      userItemWithPromptId(1, 'a', 'id-a'),
+      llmItem(2),
+      userItemWithPromptId(3, 'b', 'id-b'),
+      llmItem(4),
+    ];
+    expect(
+      computeApiTruncationIndex(uiMid, 3, [
+        userContent('a'),
+        modelContent('r1'),
+        markedOther,
+        modelContent('r2'),
+      ]),
+    ).toBe(2);
+  });
+
+  it('maps file-key-only restored turns positionally despite a twin match', () => {
+    // /restore keeps `promptId` on restored items (the file-history rewind
+    // key) but flags it file-key-only: the checkpoint's `clientHistory`
+    // cannot carry the Symbol marks, so the id must never resolve. Here a
+    // later prompt re-mints `session########1` and its marked entry is the
+    // only match for the restored turn's id; resolving it would keep model
+    // entries the UI deleted (R24-1).
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########1');
+    const restored = userItemWithPromptId(
+      3,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'restored first', 'session########0'),
+      llmItem(2),
+      restored,
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('restored first'), // unmarked: restored from JSON
+      modelContent('response 1'),
+      userContent('restored turn'), // unmarked: restored from JSON
+      modelContent('response 2'),
+      freshContent, // marked with the SAME id as the restored turn
+      modelContent('response 3'),
+    ];
+
+    // Positional outcome: one real user turn precedes the restored turn.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // The fresh turn still resolves through identity.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('maps an unmarked non-first target positionally when an earlier twin holds the mark (R27-1)', () => {
+    // Two entrances re-minted the same id, so both P and Q carry it in the
+    // UI. Retrying Q re-pushes Q's own entry UNMARKED while P's entry keeps
+    // the mark. Rewinding to Q must map positionally onto Q's own boundary
+    // (2), not resolve onto P's marked twin entry (0). The ownership proof
+    // is what catches it: P's entry carries P's text, not Q's.
+    const pEntry = userContent('p');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'p', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'q', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('q'), // Q's own entry, re-pushed unmarked by the retry
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+});
+
+describe('ownership gate: shapes a UI-claimant whitelist got wrong', () => {
+  // The round-27 fix whitelisted the identity lookup by scanning the UI
+  // history for twin claimants and preferring the positional walk. The
+  // round-28 review showed that cascade still resolved a target onto a
+  // boundary that is not its own whenever the positional walk could not land
+  // (or landed late) while an impostor entry wore the target's promptId.
+  // The structural close is an ownership gate: an identity match is trusted
+  // only when the matched entry's user text equals the target's text (the
+  // target's own entry); every impostor carries a different prompt. Each of
+  // these tests is RED against the round-27 whitelist and GREEN under the
+  // ownership gate, while the R27-1 positional pin above stays green.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('refuses (-1) when the target entry never landed but an earlier twin keeps the mark', () => {
+    // Entrance 1: the target's own entry never reached model history (a
+    // setup-error rollback or the oversized-prompt rescue throwing before the
+    // push) while an earlier twin's entry keeps the shared mark. The
+    // positional walk cannot land (one prompt short), and the unique marked
+    // match is the TWIN's entry. The whitelist fallback returned the twin's
+    // boundary; the pre-identity code refused loudly (-1). Ownership gate:
+    // the twin's text differs from the target's, so the match is unowned ->
+    // positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'twin prompt', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      twinEntry, // twin's entry, marked, present
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when a placeholder collision desyncs the walk and an earlier twin keeps the mark', () => {
+    // Entrance 2: a genuine prompt whose entire text equals a generated
+    // microcompaction placeholder is counted by the UI but excluded from the
+    // API prompt count, so the positional walk falls one short and cannot
+    // land. The earlier twin keeps the mark; the whitelist fallback returned
+    // the twin's boundary. Ownership gate: the twin's text differs -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const collidingEntry = userContent(PLACEHOLDER); // excluded from the walk
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, PLACEHOLDER, 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      collidingEntry, // counted by the UI, excluded by the API walk
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when an absorbed turn desyncs the walk and the target entry is present-but-unmarked', () => {
+    // Entrance 3: an absorbed turn (its API entry removed without a UI
+    // marker) leaves the positional walk one short, while the target's own
+    // entry is present but UNMARKED and an earlier twin keeps the mark. The
+    // whitelist fallback's "surviving twin" premise is falsified and it
+    // returned the twin's boundary. Ownership gate: the twin's text differs
+    // -> positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      userContent('target prompt'), // target's own entry, present but UNMARKED
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('prefers the ownership-proven identity over a positional walk that lands one turn late', () => {
+    // Entrance 4: an absorbed turn desyncs the positional walk so it lands
+    // one turn LATE (keeping the deleted turn's prompt+response in model
+    // context), while the target's own entry is marked and ownership-proven
+    // at the exact boundary. The whitelist preferred positional (late).
+    // Ownership gate: identity is owned -> exact index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'), // twin, unmarked entry
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      userContent('twin prompt'), // twin's entry, UNMARKED
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+
+  it('resolves an ownership-proven identity despite a file-key-only restored item sharing the id', () => {
+    // Entrance 6: a promptIdFileKeyOnly restored item shares the target's
+    // promptId but can never own a marked entry. The whitelist claimant scan
+    // counted it as a twin and demoted the unambiguous identity resolution
+    // onto a positional walk that lands late. The ownership gate ignores UI
+    // claimants: the target's own marked entry is ownership-proven -> exact
+    // index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const restored = userItemWithPromptId(
+      1,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      restored,
+      llmItem(2),
+      userItemWithPromptId(3, 'absorbed turn', 'session########0'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      userContent('restored turn'), // unmarked: restored from JSON
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+
+  it('resolves by identity when a wrapped memory recall precedes the prompt part', () => {
+    // Managed auto memory prepends a `## Relevant memory` block into the
+    // marked user Content (client.ts unshifts it into the turn's
+    // systemReminders). Wrapped as a system reminder, the ownership proof
+    // skips it and still finds the prompt part; unwrapped it would occupy
+    // the prompt-part slot and identity resolution would silently fall
+    // back to the positional walk for every memory-injected turn (R33-3).
+    // Here the walk cannot land at all (an absorbed turn leaves it one
+    // short), so only identity can resolve — change the fixture's first
+    // part to the bare block and this goes red with -1.
+    const targetEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: `${SYSTEM_REMINDER_OPEN}\n## Relevant memory\n\nUser prefers terse responses.\n${SYSTEM_REMINDER_CLOSE}`,
+        } as Part,
+        { text: 'target prompt' } as Part,
+      ],
+    };
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked, memory part wrapped
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(0);
+  });
+
+  it('resolves by identity when an IDE editor-context prefix merges into the prompt part (R42-1)', () => {
+    // IDE mode concatenates the editor-context reminder INTO the prompt's
+    // own text part rather than wrapping it as a separate part, so the part
+    // is not wholly a reminder: it is selected as the prompt part and the
+    // exact text match never fires. Identity then degrades to the
+    // positional walk, which lands one turn late here (3 — the absorbed
+    // turn's entry is absent) and keeps the deleted turn's prompt+response
+    // in model context. The stripped comparison recovers the exact
+    // boundary.
+    const targetEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: `${SYSTEM_REMINDER_OPEN}\nActive file: src/app.ts (lines 10-20)\n${SYSTEM_REMINDER_CLOSE}\n\ntarget prompt`,
+        } as Part,
+      ],
+    };
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const laterEntry = userContent('later prompt');
+    markApiHistoryPrompt(laterEntry, 'session########2');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'later prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      startupEntry(),
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked, IDE prefix merged in
+      modelContent('r1'),
+      laterEntry,
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(1);
+  });
+});
+
+describe('round-29: same-text twins defeat the text ownership proof', () => {
+  // The round-28 ownership gate proves an identity match by comparing the
+  // matched entry's user text against the target's text, on the premise
+  // that every impostor carries a DIFFERENT prompt. Cron/duplicate
+  // re-sends and re-minted twins re-send the SAME prompt text, so an
+  // impostor's entry passes the text proof and the resolution lands on a
+  // boundary that is not the target's own. The gate must demote to the
+  // positional walk whenever the text proof is not unique to the target.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('maps a same-text twin positionally when its entry re-pushed unmarked (R27-1 same-text)', () => {
+    // Same shape as the R27-1 pin above, but P and Q share one prompt text
+    // in addition to the id. P's entry keeps the mark; the retry re-pushes
+    // Q's own entry unmarked. The text proof passes on P's entry (same
+    // text), so the shortcut resolves Q onto P's boundary 0 — silently
+    // dropping P's prompt+response from model context while the UI still
+    // shows P — where the positional walk lands correctly at 2.
+    const pEntry = userContent('run tests');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('run tests'), // Q's own entry, re-pushed unmarked
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('resolves a repeated prompt text whose twin entry carries a different id', () => {
+    // R33-4: the census must not count an entry that is provably ANOTHER
+    // turn's own — one marked with a different promptId. The user sent
+    // "run tests" twice; both entries are marked, each with its own id, and
+    // an attachment-only turn desyncs the walk. Counting the first twin
+    // against uniqueness demoted the proof, and the desynced walk landed on
+    // the NEXT turn's boundary (6), keeping the selected prompt and its
+    // response in model context.
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'run tests', 'session########2'),
+      llmItem(6),
+      userItemWithPromptId(7, 'later prompt', 'session########3'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      markedUser('run tests', 'session########0'), // first twin's own entry
+      modelContent('r0'),
+      attachmentEntry, // attachment-only turn's entry: no text part
+      modelContent('r1'),
+      markedUser('run tests', 'session########2'), // the target's own entry
+      modelContent('r2'),
+      markedUser('later prompt', 'session########3'),
+      modelContent('r3'),
+    ];
+
+    // The target's own entry sits at index 4.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('refuses (-1) a same-text absorbed target instead of resolving onto the surviving twin (R26-1 same-text)', () => {
+    // Same state as the R26-1 pin above, but the absorbed turn and its
+    // re-minted twin share one prompt text. The surviving twin's entry is
+    // the unique post-prefix match and its text equals the absorbed
+    // target's text, so the text proof passes and the shortcut resolves
+    // the absorbed target onto the twin's boundary 3 — keeping the
+    // prompt+response the UI deleted — where the positional walk refuses
+    // loudly (-1).
+    const absorbedTurn = userItemWithPromptId(
+      3,
+      'run tests',
+      'session########1',
+    );
+    const twinTurn = userItemWithPromptId(5, 'run tests', 'session########1');
+    const ui: HistoryItem[] = [
+      userItem(1, 'run 1, prompt 1'),
+      llmItem(2),
+      absorbedTurn,
+      llmItem(4),
+      twinTurn,
+      llmItem(6),
+    ];
+    const survivingTwin = userContent('run tests');
+    markApiHistoryPrompt(survivingTwin, 'session########1');
+    const api: Content[] = [
+      startupEntry(),
+      userContent('<state_snapshot>summary\n\nResume the prior task...'),
+      modelContent('Got it. Thanks for the additional context!'),
+      survivingTwin,
+      modelContent('response 2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    // The same-text surviving twin demotes too: the absorbed turn claims
+    // its id with its text, so the proof is not unique and the desynced
+    // positional walk cannot land — a loud refusal, never a silent
+    // resolution, until per-entry provenance exists.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+});
+
+describe('same-text impostors the text proof alone cannot reject', () => {
+  // Round-29 demotes the text proof whenever the same text is in play
+  // twice, but the gate still accepts a same-text impostor whenever the
+  // proof cannot distinguish the target from it: a claimant-less re-send
+  // (the claimant scan only sees UI items) and a placeholder-collision
+  // re-mint (the text proof certifies the cleared-media entry itself) each
+  // pass both uniqueness conjuncts with exactly one same-text entry in
+  // play. The backstop is a demotion to the positional walk whenever the
+  // proof cannot establish ownership, never a seventh gate condition.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('demotes a claimant-less same-text impostor to the positional boundary', () => {
+    // Probe 1: the target's own entry never landed, and a re-send wearing
+    // the target's promptId+text landed later with NO UI entry. Both
+    // uniqueness conjuncts pass — the claimant scan only sees UI items and
+    // the same-text count sees exactly one entry, the impostor itself — so
+    // the gate resolves onto the impostor's boundary 4, silently keeping
+    // the prompt+response of the turn the UI deleted (entry at index 2).
+    // The positional walk is in sync and lands on the correct boundary 2.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r1'),
+      userContent('deleted turn prompt'), // UI deleted the turn; its entry survived
+      modelContent('r2'),
+      impostor, // claimant-less re-send wearing the target's id+text
+      modelContent('r3'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('refuses (-1) when a placeholder-shaped prompt re-mints a cleared-media mark', () => {
+    // Probe 2: a cleared-media placeholder entry keeps its mark through
+    // microcompaction, and a genuine prompt whose ENTIRE text equals the
+    // placeholder shape re-mints the same id with its own entry absent.
+    // The text proof passes (identical text — the documented exact-match
+    // collision) and both uniqueness conjuncts pass, so the gate resolves
+    // onto the placeholder entry at 0 and silently truncates everything
+    // after it, where the pre-identity positional walk refuses loudly
+    // (-1): the placeholder is excluded from the count and no later
+    // counted prompt exists.
+    const firstEntry = userContent('hello');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const clearedMedia = userContent(PLACEHOLDER); // media-only entry, cleared; mark survived
+    markApiHistoryPrompt(clearedMedia, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      clearedMedia,
+      modelContent('r1'),
+      // the target's own entry never landed
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('demotes to the walk when a second API entry carries the target text unmarked', () => {
+    // The API-side same-text census (ownership uniqueness): the marked match
+    // cannot be the target's own when ANOTHER entry carries the same text —
+    // the target's own entry, which never got marked. The census is the only
+    // conjunct that sees it here: no UI twin claims the id, and the walk
+    // lands at the own entry (not earlier), so the backstop does not fire.
+    // Without the census the gate resolves onto the impostor's boundary (0)
+    // and the rewind silently drops the target's own prompt+response.
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ownEntry = userContent('run tests'); // target's own, never marked
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      impostor, // claimant-less re-send wearing the target's id+text
+      modelContent('r1'),
+      ownEntry,
+      modelContent('r2'),
+    ];
+    // The walk's answer: truncate right before the target's own entry.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('demotes a UI twin that shares the id and the model-facing text but not the display text', () => {
+    // The claimant census must compare like with like: the twin's
+    // `promptOwnerText` (its model-facing text), not its display string. Two
+    // resumed turns can share a promptId and the text the model saw while
+    // rendering different display strings (e.g. one carried attachments);
+    // keyed on display text the census would see no twin and resolve onto
+    // the twin's entry (0), truncating the target's own turn away.
+    const twinEntry = userContent('run tests');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const withOwnerText = (
+      id: number,
+      displayText: string,
+      promptId: string,
+      ownerText: string,
+    ): HistoryItem => {
+      const item = userItem(id, displayText) as HistoryItem & {
+        promptId: string;
+        promptOwnerText?: string;
+      };
+      item.promptId = promptId;
+      item.promptOwnerText = ownerText;
+      return item;
+    };
+    const ui: HistoryItem[] = [
+      withOwnerText(1, 'display A', 'session########1', 'run tests'),
+      llmItem(2),
+      withOwnerText(3, 'display B', 'session########1', 'run tests'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      twinEntry, // the twin's entry; the target's own never landed
+      modelContent('r1'),
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+});
+
+describe('early-walk demotion with drained notification entries', () => {
+  // A drained background-agent/cron notification submits a real user-role
+  // entry — counted by the walk — while its display item is a
+  // `{type: 'notification'}` item, never a UI user turn. Comparing the
+  // walk against the UI user-turn count alone made the walk land one entry
+  // EARLY here, and the demotion then discarded an ownership-proven,
+  // unique identity match onto the notification's boundary — truncating at
+  // 2 and silently dropping a turn the transcript still displays. The
+  // demotion must weigh only entries the UI cannot account for.
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('keeps the ownership-proven match when a notification entry precedes it', () => {
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const notificationEntry = userContent(
+      '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
+    );
+    // The drain records the turn as a notification, so the entry carries
+    // notification provenance (live mark / record subtype on resume).
+    markApiHistoryNotification(notificationEntry);
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      {
+        type: 'notification',
+        id: 3,
+        text: 'Background agent completed: task 7',
+      } as HistoryItem,
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      notificationEntry, // drained notification: counted, no UI user turn
+      modelContent('r1'),
+      targetEntry, // the target's own entry, marked
+      modelContent('r2'),
+    ];
+
+    // The target's own boundary is 4; the walk alone lands at the
+    // notification's entry (2).
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('keeps the placeholder-texted match when a notification entry precedes it', () => {
+    // R35-2: the ordinal census must count the same owners on both sides.
+    // The API side counts the drained notification's entry, so the UI side
+    // must count the notification item — mirrored from the demotion census.
+    // With the item uncounted the aligned counts disagree and the target's
+    // own marked, text-matching entry is discarded for the walk, which
+    // lands on the notification's boundary (2), one turn further back.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const notificationEntry = userContent(
+      '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
+    );
+    // The drain records the turn as a notification, so the entry carries
+    // notification provenance (live mark / record subtype on resume).
+    markApiHistoryNotification(notificationEntry);
+    const targetEntry = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      {
+        type: 'notification',
+        id: 3,
+        text: 'Background agent completed: task 7',
+      } as HistoryItem,
+      llmItem(4),
+      userItemWithPromptId(5, PLACEHOLDER, 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      notificationEntry, // drained notification: counted, no UI user turn
+      modelContent('r1'),
+      targetEntry, // the target's own entry, marked
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('demotes when a drained batch renders two notification items for one entry (R42-3)', () => {
+    // One submitQuery serves the whole drained batch, so two notification
+    // items pair with ONE entry. Counting both items lets the unowned item
+    // cancel the deleted turn's surviving entry in the demotion census
+    // (owned === counted), suppressing the demotion and resolving the
+    // target onto the re-minted impostor at 6 where the honest boundary is
+    // the walk's 2 (its own entry never landed).
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const batchEntry = userContent(
+      '<task-notification>\nBackground agent completed: tasks 1 and 2\n</task-notification>',
+    );
+    markApiHistoryNotification(batchEntry);
+    const impostor = userContent('target prompt');
+    markApiHistoryPrompt(impostor, 'session########1');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      {
+        type: 'notification',
+        id: 3,
+        text: 'Background agent completed: task 1',
+      } as HistoryItem,
+      {
+        type: 'notification',
+        id: 4,
+        text: 'Background agent completed: task 2',
+      } as HistoryItem,
+      llmItem(5),
+      userItemWithPromptId(6, 'target prompt', 'session########1'),
+      llmItem(7),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      batchEntry, // one entry owns both notification items
+      modelContent('r1'),
+      userContent('deleted turn prompt'), // UI deleted the turn; entry survived
+      modelContent('r2'),
+      impostor, // re-minted impostor wearing the id+text; own entry absent
+      modelContent('r3'),
+    ];
+
+    // The walk lands at the batch entry (2); pairing the batch's items
+    // against its single entry leaves the deleted turn's entry unexplained,
+    // so the demotion prefers the walk over the impostor's boundary (6).
+    expect(computeApiTruncationIndex(ui, 6, api)).toBe(2);
+  });
+
+  it('refuses (-1) when an unowned notification item cancels the ordinal mismatch (R42-3)', () => {
+    // A tool-round-boundary notification whose envelope merged into a
+    // functionResponse entry owns NO counted entry. Counting the item
+    // inflates expected to match counted at the impostor — a cleared
+    // media-only entry wearing the target's re-minted mark — while two
+    // attachment-only turns keep the walk from landing at all. Pairing the
+    // item off leaves the ordinal mismatched and the refusal is loud.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const attachmentEntry = (promptId: string): Content => {
+      const content: Content = {
+        role: 'user',
+        parts: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          } as unknown as Part,
+        ],
+      };
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########3');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      attachmentOnlyItem(5, 'session########2'),
+      llmItem(6),
+      {
+        type: 'notification',
+        id: 7,
+        text: 'tool round boundary notice',
+      } as HistoryItem,
+      llmItem(8),
+      userItemWithPromptId(9, PLACEHOLDER, 'session########3'),
+      llmItem(10),
+    ];
+    const api: Content[] = [
+      markedUser('first prompt', 'session########0'),
+      modelContent('r0'),
+      attachmentEntry('session########1'), // attachment-only turn's entry: no text part
+      modelContent('r1'),
+      attachmentEntry('session########2'), // second attachment-only entry
+      modelContent('r2'),
+      userContent('goal continuation'), // claimant-less entry; no UI item
+      modelContent('r3'),
+      impostor, // re-minted placeholder impostor; target's own entry absent
+      modelContent('r4'),
+    ];
+
+    // uiUserTurnCount is 3 but only three counted entries exist, so the
+    // walk cannot land; the unpaired notification item must not inflate
+    // expected into admitting the impostor (returned 8 before the pairing).
+    expect(computeApiTruncationIndex(ui, 9, api)).toBe(-1);
+  });
+});
+
+describe('owner-paired censuses close the unpaired-producer class (R40-3)', () => {
+  // The censuses used to compare independently-built populations, so every
+  // new producer of a UI-item/API-entry mismatch was a new entrance. The
+  // pairing is now authoritative: the API side counts entries carrying
+  // notification PROVENANCE (attached by the submit path, restored from the
+  // record's subtype), the absolute backstop credits the items paired with
+  // those entries, and the demotion fires only when its cut drops no entry
+  // a still-displayed turn owns. Each case below went red against the
+  // previous censuses.
+  //
+  // Three producers the gate comment names cannot build a red case, so they
+  // are documented here rather than pinned vacuously: a model-fallback
+  // notice and a functionResponse-merged envelope own no entry, and every
+  // drain batch renders at least one item per entry, so the items side
+  // never trails the entries side and the min() pairing is unchanged with
+  // or without them; a realtime_message record produces no API entry at all
+  // and its UI item is `sentToModel: false`, so neither side counts it.
+  function withPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+  const notificationItem = (id: number, text: string): HistoryItem =>
+    ({ type: 'notification', id, text }) as HistoryItem;
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('refuses (-1) when a drained notification pair inflates the unpaired absolute backstop', () => {
+    // One attachment-only turn whose own entry sits AFTER the match keeps
+    // the walk from landing, and one drained notification pair precedes the
+    // match. The unpaired backstop counted the notification entry on its
+    // left side while uiUserTurnCount never counts the item, so the proof
+    // agreed trivially and the gate resolved the placeholder impostor at 2
+    // — truncating the still-displayed attachment-only turn's own entry
+    // (index 4) out of model context — where the pre-identity walk refuses
+    // (-1). The paired backstop credits the item for its entry and the
+    // disagreement is restored.
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const notificationEntry = userContent(
+      '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
+    );
+    markApiHistoryNotification(notificationEntry);
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########1');
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########0');
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Background agent completed: task 7'),
+      llmItem(4),
+      withPromptId(5, PLACEHOLDER, 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      notificationEntry, // the drained pair's entry
+      modelContent('r0'),
+      impostor, // cleared media-only entry wearing the target's re-minted mark; the target's own entry never landed
+      modelContent('r1'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when a cron fire submits its raw prompt', () => {
+    // A cron fire displays as a notification item but submits job.prompt
+    // with no <task-notification> envelope, so the rendered-text pairing
+    // credited nothing for it and the demotion discarded the target's
+    // unique, ownership-proven match onto the cron entry's boundary (2) —
+    // truncating the cron turn's entry out of model context while its item
+    // stays displayed. (Wrapping the same entry in the envelope returned 4,
+    // the text-shape dependence this closes.) Notification provenance pairs
+    // the entry with its item and the demotion sees no excess.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const cronEntry = userContent('Run the nightly report'); // no envelope
+    markApiHistoryNotification(cronEntry);
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Cron job fired'),
+      llmItem(4),
+      withPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      cronEntry,
+      modelContent('r1'),
+      targetEntry, // the target's own entry sits at index 4
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
+
+  it('keeps the ownership-proven match when a Goal continuation inflates the walk onto a displayed turn', () => {
+    // A Goal continuation submits a claimant-less user-role entry the walk
+    // counts. The demotion weighed only the excess, so it discarded the
+    // target's unique, ownership-proven match (6) onto the walk's boundary
+    // (4) — truncating a still-displayed turn's own marked entry out of
+    // model context while the UI keeps showing the turn. The demotion now
+    // also requires the cut to drop nothing a displayed turn owns.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const shownEntry = userContent('shown turn');
+    markApiHistoryPrompt(shownEntry, 'session########1');
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########2');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      withPromptId(3, 'shown turn', 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'target prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      userContent('goal continuation'), // claimant-less; no UI item
+      modelContent('r1'),
+      shownEntry, // a still-displayed turn's own entry, marked
+      modelContent('r2'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+  });
+
+  it('refuses (-1) a placeholder impostor behind a batch-of-2 drain', () => {
+    // Two drained tasks render two notification items but submit ONE entry.
+    // The unpaired backstop counted that entry while uiUserTurnCount counted
+    // neither item, supplying the position unit that admitted a cleared
+    // media-only impostor wearing the target's re-minted mark; the target's
+    // own entry never landed and the walk cannot land, so the refusal must
+    // be loud.
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const batchEntry = userContent(
+      '<task-notification>\nBackground agent completed: tasks 1 and 2\n</task-notification>',
+    );
+    markApiHistoryNotification(batchEntry);
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########1');
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########0');
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      notificationItem(3, 'Background agent completed: task 1'),
+      notificationItem(4, 'Background agent completed: task 2'),
+      llmItem(5),
+      withPromptId(6, PLACEHOLDER, 'session########1'),
+      llmItem(7),
+    ];
+    const api: Content[] = [
+      batchEntry, // one entry owns both notification items
+      modelContent('r0'),
+      impostor, // the target's own entry never landed
+      modelContent('r1'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 6, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when a submit_prompt turn inflates the walk', () => {
+    // A slash-command submit_prompt turn sends its expanded content with a
+    // promptId minted like any first-party prompt, but its UI item is the
+    // command invocation, not a real user turn — a marked, ownable entry no
+    // real UI turn claims. The demotion weighed only the excess, so it
+    // discarded the target's proven match (6) onto the walk's boundary (4),
+    // truncating a still-displayed turn's own entry out of model context.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const submitPromptEntry = userContent('expanded submit_prompt content');
+    // No real UI turn wears this id: the invocation item renders the
+    // command text, which isRealUserTurn excludes as a slash command.
+    markApiHistoryPrompt(submitPromptEntry, 'session########1');
+    const shownEntry = userContent('shown turn');
+    markApiHistoryPrompt(shownEntry, 'session########2');
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########3');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItem(3, '/review'), // the submit_prompt invocation item
+      llmItem(4),
+      withPromptId(5, 'shown turn', 'session########2'),
+      llmItem(6),
+      withPromptId(7, 'target prompt', 'session########3'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      submitPromptEntry,
+      modelContent('r1'),
+      shownEntry, // a still-displayed turn's own entry, marked
+      modelContent('r2'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(6);
+  });
+});
+
+describe('promptIdFileKeyOnly guards', () => {
+  // `/restore` keeps `promptId` on restored UI items because it doubles as
+  // the file-history snapshot key, and flags them `promptIdFileKeyOnly`: the
+  // checkpoint's `clientHistory` is JSON and carries no Symbol marks, so
+  // those ids must never resolve a model entry. Two guards enforce that, and
+  // neither had a test that fails when it is deleted.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+    fileKeyOnly?: boolean,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & {
+      promptId: string;
+      promptIdFileKeyOnly?: boolean;
+    };
+    item.promptId = promptId;
+    if (fileKeyOnly) item.promptIdFileKeyOnly = true;
+    return item;
+  }
+
+  it('never resolves a file-key-only target through identity', () => {
+    // Guard 1 (gate entry). An unrelated earlier entry wears the restored
+    // turn's id AND its text — the only entry with that text, and no UI turn
+    // claims it — so every other conjunct of the ownership proof passes.
+    // Only the gate-entry guard stops the resolution; without it the boundary
+    // collapses to 0 and silently truncates everything after it.
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'hello', 'session########0', true),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1', true),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      impostor,
+      modelContent('r0'),
+      userContent('unrelated later entry'),
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('ignores a file-key-only twin when proving ownership', () => {
+    // Guard 2 (claimant scan). A restored item shares BOTH the target's id
+    // and its text. It can never own a marked entry, so it must not count as
+    // a twin claimant; without the guard the proof is demoted as ambiguous
+    // and the exact boundary (0) degrades to the walk's answer (2).
+    const targetEntry = userContent('run tests');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########1', true),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      targetEntry,
+      modelContent('r0'),
+      userContent('later turn'),
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(0);
+  });
+});
+
+describe("this PR's own headline reproduction (#9437)", () => {
+  // The Reviewer Test Plan in the PR body, as a permanent pin:
+  //
+  //   1. Start an interactive session with at least three prompts, using
+  //      `[Old inline media cleared: image/png]` as the middle prompt.
+  //   2. Rewind to that exact middle prompt.
+  //   3. The selected prompt and its following assistant response must both
+  //      be absent from the model-bound history.
+  //
+  // This is the collision #9437 was filed for and the one the PR's A/B
+  // evidence measures, so it is pinned here directly rather than only
+  // through the gate's component conditions.
+  //
+  // It regressed once already: round 30 refused the ownership proof for any
+  // placeholder-texted target, which sent this turn to the positional walk —
+  // and that walk excludes placeholders from its count, so it landed one
+  // turn late (4 where the boundary is 2), leaving the selected prompt and
+  // its response in model context. The refusal is now scoped to targets
+  // whose ordinal also disagrees; see `matchOrdinalAgrees`.
+  it('removes the selected turn when its text equals the cleared-media placeholder', () => {
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // Truncating at 2 keeps [hello, response 1]. Truncating at 4 keeps the
+    // selected prompt and its response — the regression this pins.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('resolves the placeholder target when an unrelated cleared entry precedes it', () => {
+    // R32-1: the ordinal proof must count the same population on both sides
+    // of the UI/API boundary. An unrelated media-only turn whose API entry
+    // was cleared to a placeholder never had a UI turn, so it must not
+    // offset the API-side count: with the unfiltered classifier it does,
+    // the counts disagree, and the target's own marked, text-matching entry
+    // is refused — the walk then lands one turn late (6), keeping the
+    // selected prompt and its response.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      {
+        role: 'user',
+        parts: [{ text: '[Old inline media cleared: image/jpeg]' } as Part],
+      }, // unrelated cleared media-only turn; no UI turn
+      modelContent('response media'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // The target's own entry sits at index 4.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+  });
+
+  it('resolves the placeholder target when the unrelated cleared entry shares its mime', () => {
+    // R33-2: the same-text census must count the walk's own filtered
+    // population. Same shape as the image/jpeg sibling above, but the
+    // unrelated cleared entry shares the target's mime, so its placeholder
+    // text is byte-identical to the target's. That entry never had a UI
+    // turn and is excluded from the walk, yet the census counted it against
+    // uniqueness and vetoed the ownership proof — the walk then landed one
+    // turn late (6), keeping the selected prompt and its response in model
+    // context.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      {
+        role: 'user',
+        parts: [{ text: PLACEHOLDER } as Part],
+      }, // unrelated cleared media-only turn, same mime; no UI turn
+      modelContent('response media'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // The target's own entry sits at index 4.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+  });
+
+  it('resolves the placeholder target when a preceding attachment-only entry was cleared (R43-2)', () => {
+    // A resumed attachment-only turn owns a UI turn and a text-less entry,
+    // so the absolute backstop counts it. Microcompaction clears the media
+    // in place — the entry gains a placeholder text part and keeps its
+    // mark — and the text-less clause drops it from the backstop while its
+    // UI turn stays counted: the proof then refuses the target's own
+    // unique, ownership-proven match and the walk lands a turn late,
+    // keeping the deleted turn's prompt+response in model context. The
+    // claimed-mark clause keeps the cleared entry in the backstop.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const clearedAttachment = userContent(PLACEHOLDER); // media cleared in place
+    markApiHistoryPrompt(clearedAttachment, 'session########0'); // mark survived
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      clearedAttachment, // the attachment-only turn's entry, cleared
+      modelContent('r0'),
+      markedUser(PLACEHOLDER, 'session########1'), // the target's own entry
+      modelContent('r1'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('r2'),
+    ];
+
+    // The target's own entry sits at index 2; without the claimed-mark
+    // clause the backstop refuses and the walk answers 4.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('matches an entry by its own prompt part, not by a cleared sibling part', () => {
+    // R33-3: microcompaction rewrites a single media part in place and
+    // leaves the entry's own prompt text beside it, so an unrelated turn
+    // ("analyze" with a pasted image/png) becomes
+    // [{text:'analyze'},{text:PLACEHOLDER}]. Matching the target text
+    // against ANY text part counts each such sibling as carrying the
+    // target's text; with TWO of them the census vetoes the ownership
+    // proof even though the target's own entry is the only one whose
+    // PROMPT is the placeholder, and the placeholder-blind walk lands one
+    // turn late (8), keeping the selected prompt and its response in model
+    // context. The entry's own prompt part — its first non-empty,
+    // non-reminder text part — is 'analyze a'/'analyze b', so the sibling
+    // placeholders stay invisible. The siblings are UNMARKED on purpose:
+    // a marked sibling is already census-invisible (its id differs), and
+    // one sibling alone cannot veto (the placeholder census filter skips
+    // the target's own entry, so uniqueness survives at 1) — two unmarked
+    // siblings are the shape that isolates this rule.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const unmarkedMixedSibling = (prompt: string): Content => ({
+      role: 'user',
+      parts: [{ text: prompt } as Part, { text: PLACEHOLDER } as Part],
+    });
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      userItem(3, 'analyze a'),
+      llmItem(4),
+      userItem(5, 'analyze b'),
+      llmItem(6),
+      withPromptId(7, PLACEHOLDER, 'session########1'),
+      llmItem(8),
+      withPromptId(9, 'later prompt', 'session########2'),
+      llmItem(10),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      unmarkedMixedSibling('analyze a'), // image cleared in place, unmarked
+      modelContent('response a'),
+      unmarkedMixedSibling('analyze b'), // image cleared in place, unmarked
+      modelContent('response b'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('later prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // The target's own entry sits at index 6.
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(6);
+  });
+
+  it('refuses (-1) a placeholder impostor admitted by a cancelled ordinal mismatch', () => {
+    // R32-1's witness shape. One attachment-only UI turn (no API text part,
+    // so the API count runs one BEHIND) and two cleared media-only entries
+    // (no UI turns, so the unfiltered API count runs two AHEAD) sit before
+    // the target. Under the pre-fix unfiltered count the two divergences
+    // cancel — 3 === uiUserTurnCount — at an entry that is NOT the target's
+    // own: a cleared placeholder entry wearing the target's re-minted mark,
+    // sitting one real prompt EARLY. Resolving it truncates away the still
+    // displayed 'visible later prompt' turn with no error and no -1.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const clearedEntry = (mime: string): Content => ({
+      role: 'user',
+      parts: [{ text: `[Old inline media cleared: ${mime}]` } as Part],
+    });
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'visible later prompt', 'session########2'),
+      llmItem(6),
+      withPromptId(7, PLACEHOLDER, 'session########3'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('r0'),
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          } as unknown as Part,
+        ],
+      }, // the attachment-only turn's entry: no text part
+      modelContent('r1'),
+      clearedEntry('image/jpeg'), // cleared media-only entry; no UI turn
+      modelContent('r2'),
+      clearedEntry('image/gif'), // second cleared entry; no UI turn
+      modelContent('r3'),
+      markedUser(PLACEHOLDER, 'session########3'), // impostor wearing the re-minted mark
+      modelContent('r4'),
+      markedUser('visible later prompt', 'session########2'),
+      modelContent('r5'),
+    ];
+
+    // Pre-fix the cancelled counts admitted the impostor at 8, dropping the
+    // still-displayed turn. The walk cannot land (the target's own entry is
+    // absent), so the refusal is loud.
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(-1);
+  });
+
+  it('refuses (-1) a re-minted placeholder impostor the aligned ordinal accepts trivially', () => {
+    // R32-1 (absolute position): with both sides of the ordinal proof
+    // skipping an attachment-only turn, the counts drop TOGETHER and agree
+    // trivially at an entry that is not the target's own — here a cleared
+    // placeholder entry wearing the target's re-minted mark, with the
+    // target's own entry absent. The ordinal must also tie the match to its
+    // absolute position: cleared and media-only entries still occupy
+    // positions even though the filtered count skips them, so at least
+    // `uiUserTurnCount` user-role, non-tool-result entries must precede the
+    // match. Here they do not (the impostor is first), and the walk cannot
+    // land, so the refusal is loud.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########1');
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########0');
+
+    const ui: HistoryItem[] = [
+      attachmentOnlyItem(1, 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      impostor, // cleared media-only entry wearing the target's re-minted id
+      modelContent('r0'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r1'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when a structural reminder inflates the absolute backstop', () => {
+    // R35-4: the absolute backstop must count only entries that can own a
+    // UI turn. A mid-history structural reminder (the MCP added-tools
+    // notice) is a user-role entry with no functionResponse part, so the
+    // unfiltered backstop counted it — supplying the position unit that
+    // admits a re-minted placeholder impostor the aligned counts accept
+    // trivially. Same impostor shape as the pin above with one structural
+    // reminder entry inserted before the match: with the reminder counted
+    // the gate resolves the impostor's boundary where the walk refuses.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########1');
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########2');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      withPromptId(5, PLACEHOLDER, 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      userContent(
+        `${SYSTEM_REMINDER_OPEN}\nThe following tools were added or updated:\n- tool_x\n${SYSTEM_REMINDER_CLOSE}`,
+      ), // structural mid-history reminder; owns no UI turn
+      impostor, // cleared media-only entry wearing the target's re-minted id
+      modelContent('r0'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r1'),
+    ];
+
+    // uiUserTurnCount is 2 (hello + the attachment-only turn). The reminder
+    // must not supply the second backstop position: pre-fix the gate
+    // resolved the impostor at 2; the walk cannot land, so the refusal is
+    // loud.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('refuses (-1) an attachment-only target that carries no promptId', () => {
+    // R35-1: the attachment-only refusal must hold for every such target,
+    // not only the id-ful ones the identity gate admits. An id-less
+    // attachment-only target skips the gate and falls to the positional
+    // walk, which skips its text-less entry and lands on the NEXT turn's
+    // boundary (4) — silently keeping this turn's prompt+response in model
+    // context while the UI deletes the turn.
+    const attachmentOnlyItem = (id: number): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptHasModelText?: boolean };
+      item.promptHasModelText = false;
+      return item;
+    };
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+
+    const ui: HistoryItem[] = [
+      userItem(1, 'hello'),
+      llmItem(2),
+      attachmentOnlyItem(3),
+      llmItem(4),
+      userItem(5, 'later prompt'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('hello'),
+      modelContent('r0'),
+      attachmentEntry, // the target's entry: no text part
+      modelContent('r1'),
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
   });
 });
 

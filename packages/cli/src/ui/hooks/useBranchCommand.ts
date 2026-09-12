@@ -17,7 +17,9 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
+import { recordPromptCountFloor } from '../utils/prompt-count-floor.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
@@ -70,6 +72,11 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  /**
+   * Seeds the UI prompt counter past the ids the forked transcript claims.
+   * Must run AFTER startNewSession (the reset would erase an earlier seed).
+   */
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -100,6 +107,7 @@ export function useBranchCommand(
     config,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -248,7 +256,15 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
-        //    client.ts).
+        //    client.ts). Record the branch's prompt-count floor first for
+        //    the same open-window reason as handleResume (R43-1).
+        recordPromptCountFloor(
+          newSessionId,
+          computeResumedPromptCountSeed(
+            resumed.conversation.messages,
+            newSessionId,
+          ),
+        );
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -274,6 +290,18 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        // Seed the prompt counter past the ids the forked transcript
+        // claims before any new prompt can mint one (R38-1): the reset
+        // above reinstalls promptCount 0, and the seed is monotonic (0 is
+        // a no-op), so this ordering is load-bearing. forkSession remaps
+        // record promptIds to the new session id, so the seed keys on
+        // newSessionId.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumed.conversation.messages,
+            newSessionId,
+          ),
+        );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
         clearPendingState?.();
@@ -379,6 +407,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

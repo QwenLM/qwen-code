@@ -1651,7 +1651,13 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // Read through the shallow accessor: getHistory()'s structuredClone
+    // drops the Symbol-keyed prompt identities (R38-4), and the setHistory
+    // below would reinstall the live history unmarked. Both switched sites
+    // only read the container/part structure, honoring getHistoryShallow's
+    // no-leaf-mutation contract.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     const startupLength = getStartupContextLength(currentHistory);
     if (startupLength === 0) {
       return;
@@ -1692,7 +1698,10 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // Shallow read for the same reason as refreshStartupContextReminder:
+    // the in-flight turn's prompt identity must survive this reinstall.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     if (getStartupContextLength(currentHistory) !== 0) {
       return;
     }
@@ -3625,15 +3634,12 @@ export class LlmClient {
             );
         } else {
           const recorder = this.config.getChatRecordingService();
-          if (userPromptRecordPayload) {
-            recorder?.recordUserMessage(
-              request,
-              goalPermit,
-              userPromptRecordPayload,
-            );
-          } else {
-            recorder?.recordUserMessage(request, goalPermit);
-          }
+          recorder?.recordUserMessage(
+            request,
+            goalPermit,
+            userPromptRecordPayload,
+            prompt_id,
+          );
         }
       }
 
@@ -3883,7 +3889,24 @@ export class LlmClient {
         }
       }
 
-      const turn = new Turn(this.getChat(), prompt_id, goalPermit);
+      const turn = new Turn(
+        this.getChat(),
+        prompt_id,
+        goalPermit,
+        // Only a first-party user prompt owns its identity in model history.
+        // Every other send (retry, continuation, tool result, cron) leaves
+        // the entry unmarked and stays on the positional rewind path.
+        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Notification-style turns (drained background-agent notification,
+        // cron fire, teammate envelope) display as `notification` items, so
+        // their model-facing entry carries the notification provenance the
+        // rewind census pairs against notification items — the rendered text
+        // cannot carry it (a cron fire submits the raw job prompt), and the
+        // recorded subtype restores it on resume (R40-3).
+        messageType === SendMessageType.Notification ||
+          messageType === SendMessageType.Cron ||
+          messageType === SendMessageType.Teammate,
+      );
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -3969,7 +3992,12 @@ export class LlmClient {
           // the very start of the system-reminder block keeps it close to
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
-          systemReminders.unshift(userQueryMemory.prompt);
+          // The recall prompt is bare markdown (`## Relevant memory…`), so
+          // wrap it like every other reminder: the rewind ownership proof
+          // picks the entry's first NON-reminder text part as the prompt,
+          // and an unwrapped memory block would occupy that slot and
+          // silently disable identity resolution for the turn.
+          systemReminders.unshift(wrapSystemReminder(userQueryMemory.prompt));
         }
 
         requestToSend = [...systemReminders, ...requestToSend];

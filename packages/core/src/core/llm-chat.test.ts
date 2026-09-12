@@ -30,6 +30,13 @@ import {
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  buildApiHistoryFromConversation,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+  isApiHistoryNotification,
+} from '../services/session-api-history.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
@@ -538,6 +545,76 @@ describe('LlmChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks the pushed user entry with the send promptId', async () => {
+      // The single hop that makes rewind identity work in a live session:
+      // the mark goes on the entry at push time, and must survive the
+      // accessor the rewind path actually reads (`getHistoryShallow`, see
+      // AppContainer's handleRewindConfirm).
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const send = async (options?: { promptId?: string }) => {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          'prompt-id-mark',
+          undefined,
+          options,
+        );
+        for await (const _ of stream) {
+          /* consume stream */
+        }
+        return chat
+          .getHistoryShallow()
+          .filter((entry) => entry.role === 'user')
+          .at(-1)!;
+      };
+
+      expect(
+        getApiHistoryPromptId(await send({ promptId: 'session########7' })),
+      ).toBe('session########7');
+      // No identity supplied (retry, continuation, tool result): unmarked, so
+      // rewind stays on the positional path for that turn.
+      expect(getApiHistoryPromptId(await send())).toBeUndefined();
+    });
+
+    it('marks the pushed user entry as a notification turn when the send says so', async () => {
+      // The rewind census pairs UI notification items against entries
+      // carrying notification provenance (R40-3). The submit path knows the
+      // turn displays as a notification item, but the rendered text cannot
+      // carry the fact — a cron fire submits the raw job prompt with no
+      // <task-notification> envelope — so the send option puts it on the
+      // entry directly.
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const send = async (options?: { notificationSubmitted?: boolean }) => {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          'prompt-id-notification-mark',
+          undefined,
+          options,
+        );
+        for await (const _ of stream) {
+          /* consume stream */
+        }
+        return chat
+          .getHistoryShallow()
+          .filter((entry) => entry.role === 'user')
+          .at(-1)!;
+      };
+
+      expect(
+        isApiHistoryNotification(await send({ notificationSubmitted: true })),
+      ).toBe(true);
+      // Ordinary sends stay unmarked, so the census never pairs a user turn's
+      // entry against a notification item.
+      expect(isApiHistoryNotification(await send())).toBe(false);
     });
 
     describe('manual plan-exit notices', () => {
@@ -5612,6 +5689,117 @@ describe('LlmChat', async () => {
       ).toBe(200);
     });
 
+    it('persists the in-flight user turn in the in-send compression snapshot (R38-2 follow-up)', async () => {
+      // The in-send auto-compaction runs BEFORE the turn's user content is
+      // pushed, and the resume side replaces history wholesale at the
+      // compression record: a snapshot recorded without the pending turn
+      // resurrects the model's answer with its question gone.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'COMPACTION_SUMMARY' }] },
+        { role: 'model', parts: [{ text: 'ACK' }] },
+      ];
+      // The real service derives promptIds EAGERLY at record time
+      // (chatRecordingService.recordChatCompression maps the frozen copy
+      // synchronously); derive inside the mock so a mark landing after the
+      // record is not visible to this test.
+      const recordedPromptIds: Array<Array<string | null>> = [];
+      const recordChatCompression = vi.fn(
+        (payload: { compressedHistory: Content[] }) => {
+          recordedPromptIds.push(
+            payload.compressedHistory.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            ),
+          );
+        },
+      );
+      const chatWithRecording = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn: vi.fn(),
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
+        uiTelemetryService,
+      );
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: compressedHistory,
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 40_000,
+          newTokenCountIsEstimated: true,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('ANSWER_TO_P'),
+      );
+
+      const promptId = 'probe-session########7';
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'QUESTION_P' },
+        'prompt-id-in-send-compaction-roundtrip',
+        undefined,
+        { promptId },
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(recordChatCompression).toHaveBeenCalledTimes(1);
+      const recordPayload = recordChatCompression.mock.calls[0][0] as {
+        compressedHistory: Content[];
+      };
+      expect(
+        recordPayload.compressedHistory.map((content) =>
+          content.parts?.map((part) => part.text).join(''),
+        ),
+      ).toEqual(['COMPACTION_SUMMARY', 'ACK', 'QUESTION_P']);
+      // The mark must already be on the recorded copy: the recording
+      // service derives promptIds eagerly at record time and the resume
+      // side re-attaches them positionally.
+      const promptIds = recordedPromptIds[0]!;
+      expect(promptIds).toEqual([null, null, promptId]);
+
+      // Round-trip the persisted transcript shape — the turn's own user
+      // record, then the compression record, then the model answer —
+      // through the resume builder.
+      const resumed = buildApiHistoryFromConversation({
+        messages: [
+          {
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'QUESTION_P' }] },
+            promptId,
+          },
+          {
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: { ...recordPayload, promptIds },
+          },
+          {
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'ANSWER_TO_P' }] },
+          },
+        ] as unknown as ChatRecord[],
+      });
+      expect(resumed.map((content) => content.role)).toEqual([
+        'user',
+        'model',
+        'user',
+        'model',
+      ]);
+      expect(
+        resumed.map((content) =>
+          content.parts?.map((part) => part.text).join(''),
+        ),
+      ).toEqual(['COMPACTION_SUMMARY', 'ACK', 'QUESTION_P', 'ANSWER_TO_P']);
+      expect(findApiHistoryPromptIndex(resumed, promptId)).toBe(2);
+    });
+
     it('forwards the pending user message and request config to compression', async () => {
       // The cheap-gate inside ChatCompressionService.compress uses
       // estimatePromptTokens(history, pendingUserMessage, lastPromptTokenCount)
@@ -6467,9 +6655,13 @@ describe('LlmChat', async () => {
         }),
       );
       expect(recordPayload.info.newTokenCountIsEstimated).toBe(true);
+      // The snapshot carries the pending turn the compression belongs to:
+      // resume replaces history wholesale at the compression record, so a
+      // snapshot without it would resurrect the answer with no question.
       expect(recordPayload.compressedHistory).toEqual([
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: userMessage }] },
       ]);
     });
 
