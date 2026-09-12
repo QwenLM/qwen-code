@@ -58,6 +58,8 @@ describe('AppContainer controls-height measurement wiring', () => {
     expect(deps).toContain('stickyTodosLayoutKey');
     // The fix: dropping this entry re-introduces the non-VP overflow flicker.
     expect(deps).toContain('liveAgentPanelLayoutKey');
+    // R3-1 fix: re-measure when height-constrained dialogs change their inner row counts
+    expect(deps).toContain('dialogLayoutKey');
   });
 
   it('computes liveAgentPanelLayoutKey from the live agent roster', () => {
@@ -65,6 +67,16 @@ describe('AppContainer controls-height measurement wiring', () => {
     // whitespace-tolerantly so prettier reformatting can't break the guard.
     expect(source).toMatch(
       /liveAgentPanelLayoutKey\s*=\s*getLiveAgentPanelLayoutKey\(\s*bgTaskEntries\s*,\s*bgLivePanelFocused\s*,?\s*\)/,
+    );
+  });
+
+  it('computes dialogLayoutKey capturing shell commands to ensure re-bounds', () => {
+    expect(source).toMatch(
+      /shellConfirmationRequest\?\.commands\.join\(',',?\)/,
+    );
+    // Escape string matching to verify the mcpApprovalRemaining part of the layout key
+    expect(source).toContain(
+      'mcp:${mcpApprovalRemaining}:${currentMcpApproval?.name',
     );
   });
 });

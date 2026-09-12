@@ -180,6 +180,26 @@ describe('ScreenReaderAppLayout', () => {
     expect(output).not.toContain('DialogManager 20');
   });
 
+  it('keeps a short dialog at its natural height', () => {
+    const constrained = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+      staticExtraHeight: 3,
+    });
+    const unconstrained = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+      staticExtraHeight: 3,
+      constrainHeight: false,
+    });
+
+    expect(frameHeight(constrained.lastFrame() ?? '')).toBe(
+      frameHeight(unconstrained.lastFrame() ?? ''),
+    );
+  });
+
   it('does not cap a tall dialog when height constraints are disabled', () => {
     dialogManagerMockState.lineCount = 20;
     const terminalHeight = 8;
