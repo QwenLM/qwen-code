@@ -66,6 +66,23 @@ function writeFixture(rel, contents) {
   writeFileSync(join(fixtureRoot, rel), contents);
 }
 
+// The pin under test, read from the real root manifest instead of repeated as
+// a literal: a hardcoded version turns the next Playwright bump into a dozen
+// fixture failures that all look like the check itself broke.
+const PINNED = (() => {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  return pkg.devDependencies?.playwright ?? pkg.dependencies?.playwright;
+})();
+
+// `String.replace` no-ops on a miss, and an unperturbed fixture then asserts
+// against the committed tree — loudly, but for the wrong reason. Every
+// perturbation proves it landed.
+function replaced(text, from, to) {
+  const patched = text.replace(from, to);
+  expect(patched).not.toBe(text);
+  return patched;
+}
+
 function perturbNpmLockfile(mutate) {
   const lockfile = JSON.parse(
     readFileSync(join(fixtureRoot, 'package-lock.json'), 'utf8'),
@@ -81,11 +98,11 @@ function perturbPnpmWebShell(field, value) {
   const start = text.indexOf('  packages/web-shell:');
   expect(start).toBeGreaterThan(-1);
   const block = text.slice(start);
-  const target = `      '@playwright/test':\n        specifier: 1.61.1\n        version: 1.61.1\n`;
+  const target = `      '@playwright/test':\n        specifier: ${PINNED}\n        version: ${PINNED}\n`;
   expect(block).toContain(target);
   const patched = block.replace(
     target,
-    target.replace(`${field}: 1.61.1`, `${field}: ${value}`),
+    target.replace(`${field}: ${PINNED}`, `${field}: ${value}`),
   );
   writeFixture('pnpm-lock.yaml', text.slice(0, start) + patched);
 }
@@ -127,8 +144,9 @@ describe('check-lockfile Playwright parity', () => {
     try {
       writeFixture(
         'packages/web-shell/package.json',
-        saved['packages/web-shell/package.json'].replace(
-          '"@playwright/test": "1.61.1"',
+        replaced(
+          saved['packages/web-shell/package.json'],
+          `"@playwright/test": "${PINNED}"`,
           '"@playwright/test": "1.62.0"',
         ),
       );
@@ -149,8 +167,9 @@ describe('check-lockfile Playwright parity', () => {
       // apart in the first place.
       writeFixture(
         'packages/web-shell/package.json',
-        saved['packages/web-shell/package.json'].replace(
-          '"@playwright/test": "1.61.1"',
+        replaced(
+          saved['packages/web-shell/package.json'],
+          `"@playwright/test": "${PINNED}"`,
           '"@playwright/test": "^1.57.0"',
         ),
       );
@@ -173,7 +192,7 @@ describe('check-lockfile Playwright parity', () => {
       const { status, out } = runCheck();
 
       expect(parityLines(out)).toContain(
-        'resolves node_modules/playwright to 1.58.2 instead of 1.61.1',
+        `resolves node_modules/playwright to 1.58.2 instead of ${PINNED}`,
       );
       expect(status).toBe(1);
     } finally {
@@ -225,10 +244,9 @@ describe('check-lockfile Playwright parity', () => {
       // so it must not be reported as one.
       perturbNpmLockfile((packages) => {
         packages['node_modules/@playwright/test/node_modules/playwright'] = {
-          version: '1.61.1',
+          version: PINNED,
           dev: true,
-          resolved:
-            'https://registry.npmjs.org/playwright/-/playwright-1.61.1.tgz',
+          resolved: `https://registry.npmjs.org/playwright/-/playwright-${PINNED}.tgz`,
           integrity: 'sha512-fixture=',
         };
       });
@@ -266,7 +284,7 @@ describe('check-lockfile Playwright parity', () => {
       const { status, out } = runCheck();
 
       expect(parityLines(out)).toContain(
-        'resolves @playwright/test in "packages/web-shell" to 1.62.0 instead of 1.61.1',
+        `resolves @playwright/test in "packages/web-shell" to 1.62.0 instead of ${PINNED}`,
       );
       expect(status).toBe(1);
     } finally {
@@ -280,7 +298,7 @@ describe('check-lockfile Playwright parity', () => {
       const start = text.indexOf('  packages/web-shell:');
       expect(start).toBeGreaterThan(-1);
       const block = text.slice(start);
-      const target = `      '@playwright/test':\n        specifier: 1.61.1\n        version: 1.61.1\n`;
+      const target = `      '@playwright/test':\n        specifier: ${PINNED}\n        version: ${PINNED}\n`;
       expect(block).toContain(target);
       writeFixture(
         'pnpm-lock.yaml',
@@ -326,10 +344,11 @@ describe('check-lockfile Playwright parity', () => {
       );
       writeFixture(
         'scripts/check-lockfile.js',
-        readFileSync(
-          join(fixtureRoot, 'scripts', 'check-lockfile.js'),
-          'utf8',
-        ).replace(
+        replaced(
+          readFileSync(
+            join(fixtureRoot, 'scripts', 'check-lockfile.js'),
+            'utf8',
+          ),
           "  { manifest: 'packages/web-shell/package.json', name: '@playwright/test' },",
           "  { manifest: 'packages/web-shell/package.json', name: '@playwright/test' },\n" +
             `  { manifest: '${thirdManifest}', name: 'playwright' },`,
@@ -339,7 +358,7 @@ describe('check-lockfile Playwright parity', () => {
       const { out } = runCheck();
 
       expect(parityLines(out)).toContain(
-        'playwright 1.61.1 (package.json) and playwright 1.62.0 (integration-tests/terminal-capture/package.json) must declare the same version',
+        `playwright ${PINNED} (package.json) and playwright 1.62.0 (integration-tests/terminal-capture/package.json) must declare the same version`,
       );
     } finally {
       cpSync(script, join(fixtureRoot, 'scripts', 'check-lockfile.js'));
@@ -347,6 +366,81 @@ describe('check-lockfile Playwright parity', () => {
         recursive: true,
         force: true,
       });
+      restore();
+    }
+  });
+
+  it('rejects a range on the pin entry itself', () => {
+    try {
+      // Every other arm perturbs the second manifest. The pin entry carries the
+      // exactness check the whole invariant hangs from, and `pinEntry.exact ===
+      // false` also skips the resolved-version block, so this is the only arm
+      // that reaches either path from the first entry.
+      writeFixture(
+        'package.json',
+        replaced(
+          saved['package.json'],
+          `"playwright": "${PINNED}"`,
+          `"playwright": "^${PINNED}"`,
+        ),
+      );
+
+      const { status, out } = runCheck();
+
+      expect(parityLines(out)).toContain(
+        `package.json declares playwright as "^${PINNED}"; expected an exact version`,
+      );
+      expect(status).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('rejects a nested copy in the other direction too', () => {
+    try {
+      // The nested candidates are derived from the manifest list, so the pair
+      // is checked both ways: an @playwright/test nested under the hoisted
+      // playwright splits the chromium revision exactly as the reverse does.
+      perturbNpmLockfile((packages) => {
+        packages['node_modules/playwright/node_modules/@playwright/test'] = {
+          version: '1.62.0',
+          dev: true,
+          resolved:
+            'https://registry.npmjs.org/@playwright/test/-/test-1.62.0.tgz',
+          integrity: 'sha512-fixture=',
+        };
+      });
+
+      const { status, out } = runCheck();
+
+      expect(parityLines(out)).toContain(
+        'nests node_modules/playwright/node_modules/@playwright/test at 1.62.0',
+      );
+      expect(status).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('diagnoses a dropped declaration once, not three times', () => {
+    try {
+      // Every remedy the pnpm block offers — regenerate, check the importer is
+      // listed, an overrides entry decides the value — presupposes a
+      // declaration to compare against. Running them on an absent one
+      // interpolated the string "null" as the manifest's spec and diagnosed the
+      // same absence twice more.
+      const manifest = JSON.parse(saved['package.json']);
+      delete manifest.devDependencies.playwright;
+      writeFixture('package.json', `${JSON.stringify(manifest, null, 2)}\n`);
+
+      const { status, out } = runCheck();
+      const parity = parityLines(out);
+
+      expect(parity).toContain('package.json does not declare playwright');
+      expect(parity.match(/does not declare playwright/g)).toHaveLength(1);
+      expect(parity).not.toContain('declares "null"');
+      expect(status).toBe(1);
+    } finally {
       restore();
     }
   });

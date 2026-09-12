@@ -139,7 +139,12 @@ console.log('Checking Playwright parity...');
 //     the invariant takes three steps, not one: pin it exact, list the directory
 //     in BOTH the root `workspaces` and `pnpm-workspace.yaml`'s `packages:`
 //     (scripts/tests/package-scripts.test.js asserts the two lists are equal),
-//     then append it below and regenerate both lockfiles.
+//     then append it below and regenerate both lockfiles. Two test-side edits
+//     ride with the append: `scripts/tests/check-lockfile.test.js` copies only
+//     the manifests its fixtures perturb, so the new one joins its `FILES`, and
+//     its third-manifest arm builds a third entry by rewriting a literal copy
+//     of the list below — with a real third entry present that arm asserts on a
+//     list the file no longer has, so retire it or repoint it at a fourth.
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[\w.-]+)?$/;
 const playwrightManifests = [
   { manifest: 'package.json', name: 'playwright' },
@@ -194,17 +199,29 @@ if (pinEntry.exact) {
       );
     } else if (actual !== pinned) {
       parityErrors.push(
-        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it then a manifest range is resolving above the pin — packages/mobile-mcp's @playwright/test is the only in-workspace one`,
+        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it then something is rewriting the resolved version — a manifest range resolving above the pin (packages/mobile-mcp's @playwright/test is the only in-workspace one) or the root package.json \`overrides:\` block, which carries no Playwright entry today`,
       );
     }
   }
   // A nested copy at the pinned version is a redundant install, not a split
-  // revision, so only a differing one is an error.
-  const nested = 'node_modules/@playwright/test/node_modules/playwright';
-  if (packages[nested] && packages[nested].version !== pinned) {
-    parityErrors.push(
-      `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate the lockfile`,
-    );
+  // revision, so only a differing one is an error. Derived from the manifest
+  // list in both directions, so an entry appended above is covered by this
+  // check as well as by the two over it — a split revision is the failure this
+  // whole block exists to own, and it is the one check a hardcoded path would
+  // silently stop applying to a third manifest.
+  const pinnedNames = playwrightSpecs.map(({ name }) => name);
+  for (const outer of pinnedNames) {
+    for (const inner of pinnedNames) {
+      if (outer === inner) {
+        continue;
+      }
+      const nested = `node_modules/${outer}/node_modules/${inner}`;
+      if (packages[nested] && packages[nested].version !== pinned) {
+        parityErrors.push(
+          `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate the lockfile`,
+        );
+      }
+    }
   }
 }
 
@@ -219,6 +236,14 @@ if (pinEntry.exact) {
 // a no-op when one of them is what decides the value.
 const pnpmImporters = pnpmLockfile?.importers ?? {};
 for (const { manifest, name, spec, exact } of playwrightSpecs) {
+  // A declaration that is simply gone is already an error above, and every
+  // remedy this block offers — regenerate, check the importer is listed, an
+  // overrides entry decides the value — presupposes the manifest still
+  // declares the package. Running them anyway diagnoses one absence three
+  // times and interpolates the missing spec as the string "null".
+  if (spec === null) {
+    continue;
+  }
   const importer = dirname(manifest);
   const entry =
     pnpmImporters[importer]?.devDependencies?.[name] ??
