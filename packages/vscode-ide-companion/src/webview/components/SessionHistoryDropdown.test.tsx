@@ -33,8 +33,9 @@ function makeSession(
 
 const mounted: Array<{ container: HTMLElement; root: Root }> = [];
 
-async function renderDropdown() {
+async function renderDropdown(hasMore = false) {
   const onClose = vi.fn();
+  const onLoadMore = vi.fn();
   const onSelect = vi.fn();
   const onRename = vi.fn(async () => {});
   const container = document.createElement('div');
@@ -48,19 +49,19 @@ async function renderDropdown() {
         currentSessionId="s1"
         searchQuery=""
         loading={false}
-        hasMore={false}
+        hasMore={hasMore}
         onSearchChange={() => {}}
         onSelect={onSelect}
         onRename={onRename}
         onDelete={async () => {}}
-        onLoadMore={() => {}}
+        onLoadMore={onLoadMore}
         onClose={onClose}
       />,
     );
     await Promise.resolve();
   });
   mounted.push({ container, root });
-  return { container, onClose };
+  return { container, onClose, onLoadMore };
 }
 
 afterEach(() => {
@@ -158,5 +159,20 @@ describe('SessionHistoryDropdown focus management', () => {
     const dialog = document.getElementById('qwen-session-history');
     expect(dialog?.contains(document.activeElement)).toBe(true);
     outside.remove();
+  });
+});
+
+describe('SessionHistoryDropdown pagination', () => {
+  it('offers a focusable load-more control without requiring scroll overflow', async () => {
+    const { container, onLoadMore } = await renderDropdown(true);
+    expect(container.querySelector('[data-session-source]')).toBeNull();
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === t('session.loadMore'),
+    );
+    expect(loadMore).toBeDefined();
+    loadMore!.focus();
+    expect(document.activeElement).toBe(loadMore);
+    await act(async () => loadMore!.click());
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 });
