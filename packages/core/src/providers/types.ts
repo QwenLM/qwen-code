@@ -25,6 +25,7 @@ export interface ModelSpec {
   capabilities?: ModelCapabilities;
   contextWindowSize?: number;
   enableThinking?: boolean;
+  adaptiveThinking?: boolean;
   thinkingMandatory?: boolean;
   modalities?: InputModalities;
   description?: string;
@@ -36,6 +37,7 @@ export interface BaseUrlOption {
   id: string;
   label: string;
   url: string;
+  protocol?: AuthType;
   documentationUrl?: string;
   apiKeyUrl?: string;
 }

@@ -164,6 +164,8 @@ export type ContentGeneratorConfig = {
   // When true, the model rejects enable_thinking=false with a 400 error
   // (e.g. qwen3.8-max-preview), so thinking must never be disabled on the wire.
   thinkingMandatory?: boolean;
+  // When true, the active transport uses adaptive thinking.
+  adaptiveThinking?: boolean;
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
