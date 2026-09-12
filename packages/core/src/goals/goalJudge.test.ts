@@ -746,29 +746,35 @@ describe('judgeGoal', () => {
     expect(verdict.kind).toBe('met');
   });
 
-  it('returns an error for an opening fence that never closes', { timeout: 5_000 }, async () => {
-    // A degenerate reply — an opening fence followed by a long whitespace run
-    // and no closing fence. The old fence regex backtracked super-linearly on
-    // this shape (~49 s for 5 000 spaces, measured locally); the index-scan
-    // unwrap must return it unchanged so the judge fails fast instead of
-    // freezing the event loop. The trailing `{` keeps the whitespace run
-    // internal, so `extractText`'s `.trim()` cannot collapse it away before
-    // `parseJudgeReply` sees it. The per-test timeout pins the guard
-    // independently of the runner's global testTimeout; the stage assertion
-    // confirms the reply actually reached `parseJudgeReply` (the `parse`
-    // failure path) rather than failing on an earlier stage.
-    const client = makeMockClient({
-      reply: '```json\n' + ' '.repeat(5_000) + '{',
-    });
-    const config = makeConfig({ client });
-    const verdict = await judgeGoal(config, {
-      condition: 'x',
-      lastAssistantText: 'y',
-      signal: new AbortController().signal,
-    });
-    expect(verdict.kind).toBe('error');
-    expect(reportErrorMock.mock.calls[0][2]).toMatchObject({ stage: 'parse' });
-  });
+  it(
+    'returns an error for an opening fence that never closes',
+    { timeout: 5_000 },
+    async () => {
+      // A degenerate reply — an opening fence followed by a long whitespace run
+      // and no closing fence. The old fence regex backtracked super-linearly on
+      // this shape (~49 s for 5 000 spaces, measured locally); the index-scan
+      // unwrap must return it unchanged so the judge fails fast instead of
+      // freezing the event loop. The trailing `{` keeps the whitespace run
+      // internal, so `extractText`'s `.trim()` cannot collapse it away before
+      // `parseJudgeReply` sees it. The per-test timeout pins the guard
+      // independently of the runner's global testTimeout; the stage assertion
+      // confirms the reply actually reached `parseJudgeReply` (the `parse`
+      // failure path) rather than failing on an earlier stage.
+      const client = makeMockClient({
+        reply: '```json\n' + ' '.repeat(5_000) + '{',
+      });
+      const config = makeConfig({ client });
+      const verdict = await judgeGoal(config, {
+        condition: 'x',
+        lastAssistantText: 'y',
+        signal: new AbortController().signal,
+      });
+      expect(verdict.kind).toBe('error');
+      expect(reportErrorMock.mock.calls[0][2]).toMatchObject({
+        stage: 'parse',
+      });
+    },
+  );
 
   it('returns an error when reply is not JSON', async () => {
     const client = makeMockClient({ reply: 'I have no idea sorry' });
