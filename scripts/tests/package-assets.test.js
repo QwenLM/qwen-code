@@ -596,6 +596,7 @@ describe('package asset scripts', () => {
     );
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
+    expect(distPackageJson.files).toContain('execution-worker.js');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -634,32 +635,35 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it('fails packaging when the published stylesheet is missing', () => {
-    const rootDir = createFixtureRoot();
-    createBundleArtifacts(rootDir);
-    rmSync(path.join(rootDir, 'dist', 'export-transcript-document.css'));
-    stubConsole();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-    // throw, so the exit has to become one to keep the rest of the suite alive.
-    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit(1)');
-    });
+  it.each(['execution-worker.js', 'export-transcript-document.css'])(
+    'fails packaging when the published %s is missing',
+    (missingArtifact) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist', missingArtifact));
+      stubConsole();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+      // throw, so the exit has to become one to keep the rest of the suite alive.
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit(1)');
+      });
 
-    expect(() =>
-      preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow('process.exit(1)');
-    expect(exit).toHaveBeenCalledWith(1);
-    expect(
-      console.error.mock.calls
-        .map(([message]) => String(message))
-        .some(
-          (message) =>
-            message.includes('Required package artifact not found') &&
-            message.includes('export-transcript-document.css'),
-        ),
-    ).toBe(true);
-  });
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(
+        console.error.mock.calls
+          .map(([message]) => String(message))
+          .some(
+            (message) =>
+              message.includes('Required package artifact not found') &&
+              message.includes(missingArtifact),
+          ),
+      ).toBe(true);
+    },
+  );
 
   it('copies bundled skill scripts and references into the runtime dist', () => {
     const rootDir = createFixtureRoot();
@@ -1396,6 +1400,7 @@ describe('package asset scripts', () => {
 
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
+    writeFile(rootDir, 'dist/execution-worker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
