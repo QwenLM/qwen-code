@@ -18,6 +18,7 @@ type App = {
   getState: (options?: {
     disableDiff?: boolean;
     includeScreenshot?: boolean;
+    maxTextChars?: number;
   }) => Promise<State>;
   click: (
     point: Point,
@@ -99,6 +100,13 @@ need a full replacement, use `disableDiff: true` only when the previous state
 is unavailable or no longer useful. Do not disregard the text and then assume
 that a subsequent diff will reproduce the information you skipped.
 
+Returned text defaults to at most 12,000 characters. Set `maxTextChars` (minimum 512) to adjust the limit. A truncation notice means some captured rows were
+omitted; request `app.getState({ disableDiff: true, maxTextChars: 24000 })` when
+you need more full text. An omitted row does not prove an element is absent.
+Traversal-limited captures cover only the captured nodes: identical captures
+can return no-change, while changes return full captured state. Use current
+captured IDs; after a read failure, use only IDs from the latest observation.
+
 ### 2. Actions using app
 
 After performing one or more UI actions, call `app.getState()` before deciding
@@ -123,7 +131,7 @@ Use the actual ID from your observation; `37` is only an example.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the platform's appropriate shortcut.
 - App input activates the exact target internally for one dispatch and restores the previous foreground app. There is no delivery-mode choice and no automatic replay after an uncertain result.
 - Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
-- If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Incomplete observations do not authorize element actions.
+- If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
 
 ## Paste and select text
 

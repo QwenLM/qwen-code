@@ -217,10 +217,12 @@ pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
     pub complete: bool,
+    /// All attempted AX reads succeeded, even if traversal reached a budget.
+    pub read_complete: bool,
     /// Bounded trace naming why `complete` is false (attribute + AX error),
     /// drained from the walk's thread-local recorder. Empty on complete walks.
     pub incomplete_notes: Vec<String>,
-    /// True when the walk was cut short by the MAX_ELEMENTS cap.
+    /// True when the walk was cut short by the node or depth cap.
     pub truncated: bool,
     /// Whether the requested `window_id` actually resolved to an AX surface,
     /// and if not, why. `None` when no `window_id` was requested.
@@ -318,6 +320,7 @@ pub(crate) fn walk_tree_with_context(
             return TreeWalkResult {
                 tree_markdown: String::new(),
                 nodes,
+                read_complete: false,
                 complete: false,
                 incomplete_notes: super::bindings::take_incomplete_notes(),
                 truncated: false,
@@ -516,7 +519,7 @@ pub(crate) fn walk_tree_with_context(
 
     if truncated_flag {
         tree_markdown.push_str(&format!(
-            "\n⚠️  AX tree truncated at {max_elements} nodes \
+            "\n⚠️  AX tree truncated by traversal limits ({max_elements} nodes, depth {max_depth}) \
              (app has a very large accessibility tree — Arc, Electron, or similar). \
              Element indices above are still valid. Use pixel clicks for elements \
              not visible in this partial tree."
@@ -527,6 +530,7 @@ pub(crate) fn walk_tree_with_context(
         tree_markdown,
         nodes,
         complete: complete && !truncated_flag,
+        read_complete: complete,
         incomplete_notes: super::bindings::take_incomplete_notes(),
         truncated: truncated_flag,
         window_scope,
@@ -594,7 +598,7 @@ unsafe fn walk_element_contents(
 ) {
     if depth > max_depth {
         super::bindings::note_incomplete("walk", "max_depth exceeded");
-        *complete = false;
+        *truncated = true;
         return;
     }
     // Enforce total-node cap — mirrors Swift's maxElements guard.
@@ -602,7 +606,6 @@ unsafe fn walk_element_contents(
     if *visited_count >= max_elements {
         super::bindings::note_incomplete("walk", "max_elements truncated");
         *truncated = true;
-        *complete = false;
         return;
     }
     *visited_count += 1;
@@ -1228,6 +1231,37 @@ fn leading_indent_depth(line: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn traversal_limits_do_not_hide_read_failures() {
+        for (depth, visited) in [(26, 0), (0, 2000)] {
+            for reads_ok in [true, false] {
+                let mut complete = reads_ok;
+                let mut truncated = false;
+                let mut visited = visited;
+                unsafe {
+                    walk_element_contents(
+                        std::ptr::null_mut(),
+                        depth,
+                        None,
+                        false,
+                        WalkMode::Legacy,
+                        &mut HashSet::new(),
+                        &mut Vec::new(),
+                        &mut Vec::new(),
+                        &mut 0,
+                        &mut visited,
+                        &mut truncated,
+                        &mut complete,
+                        2000,
+                        25,
+                    );
+                }
+                assert!(truncated);
+                assert_eq!(complete, reads_ok);
+            }
+        }
+    }
+
     use super::*;
     use std::cell::Cell;
 

@@ -1733,6 +1733,7 @@ mod tests {
             tree_markdown: String::new(),
             nodes,
             complete: true,
+            read_complete: true,
             truncated: false,
             window_scope: Some(crate::ax::WindowScope::Matched),
         }
@@ -1863,6 +1864,7 @@ mod tests {
             tree_markdown: String::new(),
             nodes: Vec::new(),
             complete: false,
+            read_complete: true,
             truncated: true,
             window_scope: Some(crate::ax::WindowScope::Matched),
         };

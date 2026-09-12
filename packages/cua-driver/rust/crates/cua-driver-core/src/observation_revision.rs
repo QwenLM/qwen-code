@@ -524,6 +524,24 @@ where
         self.observe_inner(captured, base_revision_id, force_full_reason, true, true)
     }
 
+    /// A budget omission cannot prove deletion. Only identical bounded captures
+    /// may omit their full state; changed captures replace the captured view.
+    pub fn observe_bounded(
+        &mut self,
+        captured: Vec<CapturedNode<I>>,
+        base_revision_id: Option<&str>,
+        force_full_reason: Option<FullResyncReason>,
+    ) -> Result<ObservationRevisionResult, ObservationRevisionError> {
+        let mut result = self.observe_with_reason(captured, base_revision_id, force_full_reason)?;
+        if result.mode == ObservationMode::Diff {
+            result.mode = ObservationMode::Full;
+            result.base_revision_id = None;
+            result.full_resync_reason = Some(FullResyncReason::CaptureIncomplete);
+            result.text.clone_from(&result.full_text);
+        }
+        Ok(result)
+    }
+
     pub fn observe_unretained_full(
         &mut self,
         captured: Vec<CapturedNode<I>>,
@@ -1282,6 +1300,78 @@ mod tests {
             Some(FullResyncReason::DiffNotSmaller)
         );
         assert_eq!(second.text, second.full_text);
+    }
+
+    #[test]
+    fn bounded_captures_only_omit_identical_state() {
+        let mut lineage = lineage(4);
+        let initial = padded(vec![node("field", 1, "text value=one", Some(0))]);
+        let first = lineage
+            .observe_bounded(initial.clone(), None, None)
+            .unwrap();
+        let same = lineage
+            .observe_bounded(initial, Some(&first.revision_id), None)
+            .unwrap();
+        assert_eq!(same.mode, ObservationMode::NoChange);
+        assert_eq!(same.nodes, first.nodes);
+        assert!(same.stable_element_ids);
+
+        let changed = lineage
+            .observe_bounded(
+                padded(vec![node("field", 1, "text value=two", Some(0))]),
+                Some(&same.revision_id),
+                None,
+            )
+            .unwrap();
+        assert_eq!(changed.mode, ObservationMode::Full);
+        assert_eq!(changed.text, changed.full_text);
+        assert!(changed.base_revision_id.is_none());
+        assert_eq!(changed.nodes[1].element_id, first.nodes[1].element_id);
+
+        let omitted = lineage
+            .observe_bounded(padded(Vec::new()), Some(&changed.revision_id), None)
+            .unwrap();
+        assert_eq!(omitted.mode, ObservationMode::Full);
+        assert!(!omitted.text.contains("REMOVED"));
+        assert!(lineage.resolve_current(first.nodes[1].element_id).is_none());
+        let forced = lineage
+            .observe_bounded(
+                padded(Vec::new()),
+                Some(&omitted.revision_id),
+                Some(FullResyncReason::Requested),
+            )
+            .unwrap();
+        assert_eq!(forced.mode, ObservationMode::Full);
+        assert_eq!(forced.full_resync_reason, Some(FullResyncReason::Requested));
+    }
+
+    #[test]
+    fn bounded_app_captures_preserve_short_ids_without_private_tokens() {
+        let mut lineage = lineage(4).for_app();
+        let initial = padded(vec![node("field", 1, "TextField value=one", Some(0))]);
+        let first = lineage
+            .observe_bounded(initial.clone(), None, None)
+            .unwrap();
+        let same = lineage
+            .observe_bounded(initial, Some(&first.revision_id), None)
+            .unwrap();
+        assert_eq!(same.mode, ObservationMode::NoChange);
+        assert_eq!(same.text, "No accessibility changes.");
+        assert_eq!(same.nodes, first.nodes);
+        let changed = lineage
+            .observe_bounded(
+                padded(vec![node("field", 1, "TextField value=two", Some(0))]),
+                Some(&same.revision_id),
+                None,
+            )
+            .unwrap();
+        assert_eq!(changed.mode, ObservationMode::Full);
+        assert_eq!(changed.nodes[1].element_id, first.nodes[1].element_id);
+        assert_eq!(changed.nodes[1].actionable_index, Some(0));
+        for observation in [first, same, changed] {
+            assert!(observation.stable_element_ids);
+            assert!(!observation.text.contains("element_token="));
+        }
     }
 
     #[test]

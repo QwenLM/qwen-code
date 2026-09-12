@@ -68,6 +68,9 @@ describe('bundled computer-use skill', () => {
     expect(body).toContain('Prefer this default diff output');
     expect(body).toContain('disableDiff: true');
     expect(body).toMatch(/window or session changes/);
+    expect(body).toContain('maxTextChars?: number');
+    expect(body).toContain('12,000 characters');
+    expect(body).toContain('Only currently captured actionable IDs');
     expect(body).toMatch(
       /Partial, unconfirmed or cancelled actions must not be blindly repeated/,
     );
@@ -110,6 +113,8 @@ describe('bundled computer-use skill', () => {
     expect(legacy).toContain('computer.observeWindow(target)');
     expect(legacy).toContain('windowId: selectedWindowId');
     expect(legacy).toContain('elementToken: string');
+    expect(legacy).toContain('maxTextChars?: number');
+    expect(legacy).toContain('12,000 characters');
     expect(legacy).toContain(
       'the first entry is not necessarily the task window',
     );
