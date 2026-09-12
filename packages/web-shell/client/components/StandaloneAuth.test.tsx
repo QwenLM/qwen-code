@@ -5,10 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { StandaloneAuth } from './StandaloneAuth';
 import AppStyles from '../App.module.css';
 import { getDaemonToken, persistDaemonToken } from '../config/daemon';
-import {
-  isKnownDaemonTarget,
-  readWorkspaceHosts,
-} from '../config/workspace-hosts';
+import { confirmDaemonTarget, isKnownDaemonTarget } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
 import type { WebShellTheme } from '../themeContext';
 
@@ -691,16 +688,12 @@ it('lets a manual retry supersede an armed auto-retry', async () => {
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
-it('remembers a successfully connected host without mounting the sidebar', async () => {
+it('remembers the confirmed target for a reload without mounting the sidebar', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue(stubResponse({ status: 200 })),
   );
   await mount();
-  expect(readWorkspaceHosts()).toContainEqual({
-    origin: 'http://daemon.test',
-    workspaces: [],
-  });
   expect(isKnownDaemonTarget('http://daemon.test')).toBe(true);
 });
 
@@ -741,4 +734,16 @@ it('offers cross-origin diagnostics without treating network failures as permane
   expect(container.textContent).toContain('network');
   await act(async () => vi.advanceTimersByTimeAsync(2_000));
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers only the selected daemon in the current tab across reload checks', async () => {
+  sessionStorage.clear();
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  confirmDaemonTarget('https://remote.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://other.example')).toBe(false);
+  confirmDaemonTarget('https://other.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  sessionStorage.clear();
 });

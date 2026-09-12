@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type Root } from 'react';
 import { createRoot } from 'react-dom/client';
+import { StandaloneContext } from '../../config/standalone';
 import type { WebShellSidebarFooterItem } from './WebShellSidebar';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
@@ -29,6 +30,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
         capabilities: undefined,
       },
       workspace: {
+        baseUrl: '',
         capabilities: undefined,
         client: {
           workspaceByCwd: vi.fn(() => ({
@@ -122,28 +124,33 @@ const LOCAL_FILES_LABEL = 'Local files';
 let root: Root;
 let container: HTMLDivElement;
 
-function renderSidebar(footer?: {
-  items: readonly WebShellSidebarFooterItem[];
-}) {
+function renderSidebar(
+  footer?: {
+    items: readonly WebShellSidebarFooterItem[];
+  },
+  standalone = false,
+) {
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenWorkflows={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={vi.fn()}
-          onError={() => {}}
-          footer={footer}
-        />
-      </I18nProvider>,
+      <StandaloneContext.Provider value={standalone}>
+        <I18nProvider language="en">
+          <WebShellSidebar
+            collapsed={false}
+            onCollapsedChange={() => {}}
+            onOpenSettings={() => {}}
+            onOpenDaemonStatus={() => {}}
+            onOpenScheduledTasks={() => {}}
+            onOpenWorkflows={() => {}}
+            onOpenGoals={() => {}}
+            onOpenSessions={() => {}}
+            onOpenSplitView={() => {}}
+            onNewSession={() => false}
+            onLoadSession={vi.fn()}
+            onError={() => {}}
+            footer={footer}
+          />
+        </I18nProvider>
+      </StandaloneContext.Provider>,
     );
   });
 }
@@ -163,6 +170,7 @@ function setDesktopShell(enabled: boolean) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  workspace.baseUrl = window.location.origin;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -194,4 +202,15 @@ describe('local files footer entry', () => {
     renderSidebar({ items: ['localFiles'] });
     expect(localFilesTrigger()).not.toBeNull();
   });
+});
+
+it('withholds browser-local files on a standalone remote connection without changing embedded hosts', () => {
+  workspace.baseUrl = 'https://remote.example';
+  renderSidebar(undefined, true);
+  expect(localFilesTrigger()).toBeNull();
+  renderSidebar();
+  expect(localFilesTrigger()).not.toBeNull();
+  workspace.baseUrl = window.location.origin;
+  renderSidebar(undefined, true);
+  expect(localFilesTrigger()).not.toBeNull();
 });

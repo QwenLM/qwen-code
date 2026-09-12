@@ -13,11 +13,6 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  OtherHostProjects,
-  WorkspaceHostHeading,
-} from '../workspaces/WorkspaceHostProjects';
-import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
-import {
   useActions,
   useChannels,
   useConnection,
@@ -149,6 +144,7 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
+import { StandaloneContext } from '../../config/standalone';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 
@@ -981,6 +977,7 @@ export function WebShellSidebar({
   onLoadStandaloneSession,
   onStandaloneNotice,
 }: WebShellSidebarProps) {
+  const standalone = useContext(StandaloneContext);
   const { t } = useI18n();
   const brand = useBrand();
   const brandName = useBrandName();
@@ -988,7 +985,6 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const hostedWorkspaces = useContext(WorkspaceHostsEnabled);
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -5859,7 +5855,6 @@ export function WebShellSidebar({
               </div>
             )}
             <div hidden={!projectsExpanded}>
-              {!hideProjectHeader && <WorkspaceHostHeading />}
               <div className={styles.workspacePicker}>
                 <div className={styles.workspaceList}>
                   {standaloneSessionsVisible &&
@@ -6161,9 +6156,7 @@ export function WebShellSidebar({
                                     }
                                     style={{
                                       visibility:
-                                        hostedWorkspaces ||
-                                        visible ||
-                                        openWorkspaceMenuId === ws.id
+                                        visible || openWorkspaceMenuId === ws.id
                                           ? 'visible'
                                           : 'hidden',
                                     }}
@@ -6276,7 +6269,6 @@ export function WebShellSidebar({
                     </Fragment>
                   ))}
                 </div>
-                {!hideProjectHeader && <OtherHostProjects />}
               </div>
             </div>
             {archivedSection}
@@ -6400,12 +6392,17 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                (!standalone ||
+                  new URL(
+                    workspace.baseUrl || window.location.origin,
+                    window.location.origin,
+                  ).origin === window.location.origin) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

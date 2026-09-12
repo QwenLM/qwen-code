@@ -216,7 +216,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
-const { WorkspaceHostsEnabled } = await import('../../config/workspace-hosts');
+const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
@@ -224,18 +224,18 @@ let root: Root | null = null;
 function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
-  hostsEnabled = true,
+  standalone = true,
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <WorkspaceHostsEnabled.Provider value={hostsEnabled}>
+      <StandaloneContext.Provider value={standalone}>
         <I18nProvider language={language}>
           <DaemonStatusDialog onChangeTarget={onChangeTarget} />
         </I18nProvider>
-      </WorkspaceHostsEnabled.Provider>,
+      </StandaloneContext.Provider>,
     );
   });
 }

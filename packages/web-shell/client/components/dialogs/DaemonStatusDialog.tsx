@@ -7,7 +7,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
+import { StandaloneContext } from '../../config/standalone';
 import {
   useStatusReport,
   useWorkspace,
@@ -630,7 +630,7 @@ function DaemonStatusDialogInner({
   const workspace = useWorkspace();
   // Switching targets navigates the page, which only the standalone shell
   // owns; embedders keep a read-only view of the connection.
-  const hostsEnabled = useContext(WorkspaceHostsEnabled);
+  const standalone = useContext(StandaloneContext);
   const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
@@ -831,7 +831,7 @@ function DaemonStatusDialogInner({
               label={t('daemon.connection.state')}
               value={t(CONNECTION_STATUS_KEYS[workspace.status])}
             />
-            {hostsEnabled && (
+            {standalone && (
               <form
                 className="mt-3 flex flex-col gap-2"
                 onSubmit={(event) => {

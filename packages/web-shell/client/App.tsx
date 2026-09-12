@@ -1,10 +1,4 @@
 import './styles/globals.css';
-import {
-  WorkspaceHostsEnabled,
-  rememberWorkspaceHost,
-} from './config/workspace-hosts';
-import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
-import { AddHostedWorkspaceDialog } from './components/dialogs/AddHostedWorkspaceDialog';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
@@ -3523,21 +3517,6 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
-  const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
-  useEffect(() => {
-    if (!workspaceHostsEnabled || !workspace.capabilities?.workspaces) return;
-    rememberWorkspaceHost(
-      new URL(
-        workspace.baseUrl || window.location.origin,
-        window.location.origin,
-      ).origin,
-      workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
-    );
-  }, [
-    workspaceHostsEnabled,
-    workspace.baseUrl,
-    workspace.capabilities?.workspaces,
-  ]);
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -3577,11 +3556,7 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
-    () =>
-      workspaceHostsEnabled &&
-      new URLSearchParams(window.location.search).has('addWorkspace'),
-  );
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -8540,7 +8515,7 @@ export function App({
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
     if (!projectFeaturesAvailable) setShowMemoryDialog(false);
-    if (!workspaceHostsEnabled) setShowAddWorkspaceDialog(false);
+    setShowAddWorkspaceDialog(false);
     setGitDialog(undefined);
     if (
       !projectFeaturesAvailable &&
@@ -8565,7 +8540,6 @@ export function App({
     modelDialogMode,
     projectFeaturesAvailable,
     workspaceContextActive,
-    workspaceHostsEnabled,
   ]);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -17461,17 +17435,10 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && workspaceHostsEnabled && (
-            <AddHostedWorkspaceDialog
-              onClose={() => setShowAddWorkspaceDialog(false)}
-              onAddCurrent={handleAddWorkspace}
-            />
-          )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && !workspaceHostsEnabled && (
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
-              daemonAddress={workspace.baseUrl || window.location.origin}
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
                 nativeDirectoryPickerSupported &&
@@ -17758,16 +17725,6 @@ export function App({
                 .join(' ')}
               aria-hidden={artifactPanelFullscreen || undefined}
             >
-              {workspaceHostsEnabled &&
-                !activePanel &&
-                mainView === 'chat' &&
-                (!chatHeaderEnabled || isChatEmptyState) && (
-                  // With a chat header the label sits beside its actions; the
-                  // empty state has none, so it gets a slim row of its own.
-                  <div className="flex px-4 pt-3 empty:hidden">
-                    <WorkspaceLocation cwd={connection.workspaceCwd} />
-                  </div>
-                )}
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
@@ -17839,11 +17796,6 @@ export function App({
                     </div>
                   ) : (
                     <ChatContextHeader
-                      location={
-                        workspaceHostsEnabled && mainView === 'chat' ? (
-                          <WorkspaceLocation cwd={connection.workspaceCwd} />
-                        ) : undefined
-                      }
                       content={
                         titleHeaderItemVisible
                           ? (sessionDisplayName ?? t('session.new'))

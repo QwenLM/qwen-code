@@ -13,7 +13,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
-import { ArrowLeftIcon, CornerLeftUpIcon, FolderOpenIcon } from 'lucide-react';
+import { FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -28,13 +28,9 @@ export interface WorkspacePathSuggestions {
 }
 
 interface AddWorkspaceDialogProps {
-  browseDirectories?: boolean;
-  onBack?: () => void;
-  initialPath?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
-  daemonAddress?: string;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -55,19 +51,15 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
-  browseDirectories = false,
-  onBack,
-  initialPath = '',
   onClose,
   onAdd,
   displayNameEnabled = false,
-  daemonAddress,
   onSuggest,
   onPick,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
-  const [path, setPath] = useState(initialPath);
+  const [path, setPath] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -245,19 +237,9 @@ export function AddWorkspaceDialog({
         // Enter accepts the highlighted directory instead of submitting.
         event.preventDefault();
         acceptSuggestion(suggestions[highlight]);
-        return;
-      }
-      // While browsing, the path field navigates and only the add button adds,
-      // so a stray Enter cannot register a half-typed folder.
-      if (
-        event.key === 'Enter' &&
-        browseDirectories &&
-        !event.nativeEvent.isComposing
-      ) {
-        event.preventDefault();
       }
     },
-    [listOpen, suggestions, highlight, acceptSuggestion, browseDirectories],
+    [listOpen, suggestions, highlight, acceptSuggestion],
   );
 
   const handleSubmit = useCallback(
@@ -302,7 +284,7 @@ export function AddWorkspaceDialog({
     ],
   );
 
-  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
+  const showList = listOpen && suggestions.length > 0;
 
   return (
     <DialogShell
@@ -331,7 +313,6 @@ export function AddWorkspaceDialog({
                   onKeyDown={handleInputKeyDown}
                   onFocus={cancelBlurDismiss}
                   onBlur={() => {
-                    if (browseDirectories) return;
                     // Delay so a mousedown on a suggestion wins over blur.
                     cancelBlurDismiss();
                     blurTimeoutRef.current = setTimeout(() => {
@@ -363,33 +344,6 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
-                {browseDirectories && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={submitting}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      const trimmed = path.replace(/[\\/]+$/, '');
-                      // A drive root is its own parent; `hostSep` is only
-                      // known once suggestions arrive, so split on either.
-                      if (/^[A-Za-z]:$/.test(trimmed)) {
-                        setPath(`${trimmed}\\`);
-                        return;
-                      }
-                      const index = Math.max(
-                        trimmed.lastIndexOf('/'),
-                        trimmed.lastIndexOf('\\'),
-                      );
-                      setPath(
-                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
-                      );
-                    }}
-                  >
-                    <CornerLeftUpIcon aria-hidden="true" />
-                    {t('workspaceHost.parent')}
-                  </Button>
-                )}
                 {onPick && (
                   <Button
                     type="button"
@@ -408,7 +362,7 @@ export function AddWorkspaceDialog({
                   id={LISTBOX_ID}
                   role="listbox"
                   aria-label={t('sidebar.addWorkspaceSuggestions')}
-                  className={`${browseDirectories ? 'relative' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
+                  className="absolute inset-x-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
                 >
                   {suggestions.map((suggestion, index) => (
                     <li
@@ -429,10 +383,6 @@ export function AddWorkspaceDialog({
                       }}
                       onMouseEnter={() => setHighlight(index)}
                     >
-                      <FolderOpenIcon
-                        className="mr-2 inline size-4"
-                        aria-hidden="true"
-                      />
                       {suggestion.name}
                       <span className="text-muted-foreground">{hostSep}</span>
                     </li>
@@ -441,11 +391,7 @@ export function AddWorkspaceDialog({
               )}
             </div>
             <FieldDescription id={HINT_ID}>
-              {daemonAddress
-                ? t('sidebar.addWorkspaceDaemonHint', {
-                    address: daemonAddress,
-                  })
-                : t('sidebar.addWorkspaceHint')}
+              {t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
@@ -458,11 +404,6 @@ export function AddWorkspaceDialog({
                 id="add-workspace-display-name"
                 type="text"
                 value={displayName}
-                placeholder={
-                  browseDirectories
-                    ? path.split(/[\\/]/).filter(Boolean).pop()
-                    : undefined
-                }
                 onChange={(event) => setDisplayName(event.target.value)}
                 disabled={submitting}
                 maxLength={256}
@@ -493,37 +434,20 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex items-center gap-2">
-          {onBack && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={onBack}
-              disabled={submitting}
-            >
-              <ArrowLeftIcon aria-hidden="true" />
-              {t('workspaceHost.back')}
-            </Button>
-          )}
-          <div className="ml-auto flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onClose}
-              disabled={submitting}
-            >
-              {t('sidebar.addWorkspaceCancel')}
-            </Button>
-            <Button type="submit" disabled={submitting || !path.trim()}>
-              {submitting
-                ? t('sidebar.addWorkspaceAdding')
-                : t(
-                    browseDirectories
-                      ? 'workspaceHost.addFolder'
-                      : 'sidebar.addWorkspaceRegister',
-                  )}
-            </Button>
-          </div>
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            {t('sidebar.addWorkspaceCancel')}
+          </Button>
+          <Button type="submit" disabled={submitting || !path.trim()}>
+            {submitting
+              ? t('sidebar.addWorkspaceAdding')
+              : t('sidebar.addWorkspaceRegister')}
+          </Button>
         </div>
       </form>
     </DialogShell>

@@ -2,7 +2,7 @@
 
 [English](remote-web-shell-daemon.md) | [简体中文](remote-web-shell-daemon.zh-CN.md)
 
-Status: Implemented for [#11475](https://github.com/QwenLM/qwen-code/issues/11475)
+Status: Web Shell milestone for [#11475](https://github.com/QwenLM/qwen-code/issues/11475)
 
 ## Problem
 
@@ -19,7 +19,7 @@ Web Shell already sends workspace, session, file, SSE, and WebSocket requests th
 ## Non-goals
 
 - Desktop integration, managed SSH, daemon installation, discovery, relay, federation, or virtual filesystems.
-- Simultaneous session streams or execution across multiple daemons.
+- Aggregating more than one daemon in a single Web Shell instance.
 - Starting or stopping an externally managed daemon.
 
 ## Design
@@ -30,9 +30,7 @@ The standalone Web Shell reads the `daemon` query parameter and passes that orig
 
 The pre-connection gate always exposes a daemon address and optional token form, including when the URL contains an invalid target. Once connected, the existing Daemon Status overview shows the current target and connection state and provides the same switch controls. Switching performs a full page navigation, clears the selected session, workspace, and context from the URL, and creates a fresh SDK client for the new daemon. It does not probe or fall back to another runtime.
 
-The standalone sidebar keeps a browser-local catalog of local and remote projects, keyed by daemon origin and workspace ID. Only project identity and display names are stored in localStorage, never tokens. Choosing a project navigates to its daemon and workspace; only the active daemon supplies live sessions. Unreachable hosts do not remove the saved projects, and the connection gate offers a return to local or another saved host. Embedded consumers retain their existing single-provider interface.
-
-Adding a workspace starts with a local/remote choice. Local means the daemon serving the page (the local Vite proxy in development), not browser filesystem access. Remote accepts an HTTP(S) origin and an optional origin-scoped token. Changing hosts navigates first, so the new document receives the selected daemon's CSP; an `addWorkspace` continuation flag reopens the directory step after authentication and is then removed. Adding a folder on the daemon the page is already connected to registers it in place through the app's existing workspace flow. Directory suggestions and registration use that daemon. Already-registered directories are selected without duplication; requesting persistence first promotes a temporary registration and verifies that it was saved. Native folder selection is available only for the local target when advertised by its capabilities. Sessions, files, terminals and execution continue through the selected SDK client.
+The existing sidebar remains the workspace and session management UI. Workspace registration uses typed absolute paths and daemon-provided directory suggestions; native folder selection remains hidden for remote daemons. Session discovery, transcript loading, file references, terminal traffic, and execution require no parallel remote-specific implementations because they already use the selected SDK client.
 
 Bearer tokens remain in per-tab `sessionStorage`, but are keyed by daemon origin. The legacy unqualified key is used only for same-origin connections. Selecting a remote daemon never reuses a token stored for the page's own daemon or another remote daemon.
 
@@ -42,12 +40,13 @@ Disconnecting or closing the browser only disposes the client connection. It doe
 
 ## Failure and Security Boundaries
 
-- Browser-local directory grants are stored per daemon origin. A remote daemon never restores a grant saved for the page’s own daemon or another remote host; users must select a directory for that daemon explicitly.
-- Successful connection confirmation is recorded independently of sidebar visibility; project metadata is synchronized by the app lifecycle.
+- An unfamiliar `?daemon=` target waits for explicit confirmation before any probe. Only the last confirmed origin in the current tab is remembered; there is no persistent host or project catalog.
+- Standalone cross-origin connections do not mount the browser-local file bridge. Remote workspace files remain available through the selected daemon. Existing embedded bridge consumers retain their behavior and origin-scoped grants.
+- Switching hosts happens only through the connection gate or Daemon Status, before using the existing add-workspace form. There is no cross-host add continuation or duplicate directory browser.
+
 - Invalid remote addresses are reported by the connection gate and are not contacted.
 - Authentication, Origin, Host, and network failures stay explicit in the existing connection gate; there is no fallback from a valid selected remote daemon to a local runtime.
 - A URL selecting an attacker-controlled daemon cannot cause a token for another daemon to be sent to it.
-- A page load whose `?daemon=` names an origin that is not the page's own daemon, not a host already in the catalog, and not one just chosen in this tab is not probed. The connection gate shows the origin and waits for the user to connect; a token typed there goes only to that origin.
 - A loopback URL selected through `?daemon=` may be an SSH tunnel and is not treated as proof that the daemon host is the browser host.
 - HTTP and HTTPS targets are accepted. HTTPS is recommended outside trusted networks. SSH transport, if desired, is supplied by the user as a loopback tunnel outside Qwen Code.
 
@@ -60,12 +59,9 @@ Disconnecting or closing the browser only disposes the client connection. It doe
 
 ## Acceptance Criteria
 
-The standalone add flow shows a persistent directory list and a parent-folder action. Clicking a folder opens it, Enter in the path field never adds, and only the add button registers the folder shown in the path field. The folder basename is suggested as the display-name placeholder. Supplying a name for an already-registered folder updates its display name before opening it. Cancellation after changing hosts returns to the original same-origin page, including its session and workspace; successful addition does not trigger this cancellation navigation. The sidebar groups projects by host, with the connected host's live list first and saved projects on other hosts below it; remote projects use server icons, project action menus stay discoverable, and the chat header labels the active host, with the working directory in the label's tooltip. Existing removal confirmation continues to explain that files and session history are not deleted.
-
 - A Web Shell page can connect directly to a configured remote daemon origin.
 - An invalid or unavailable target can be replaced from the connection gate, and a connected target can be switched from Daemon Status.
 - Workspace and session discovery and file/terminal operations use the selected daemon through the existing SDK.
 - Credentials are never reused across daemon origins.
 - Remote selection survives navigation and refresh.
-- Adding a remote project keeps local projects available, and both can be selected from the same sidebar.
 - Invalid addresses and daemon policy/authentication failures are explicit and do not fall back to another runtime.

@@ -1,10 +1,8 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
-import {
-  isKnownDaemonTarget,
-  WorkspaceHostsEnabled,
-} from './config/workspace-hosts';
+import { StandaloneContext } from './config/standalone';
+import { isKnownDaemonTarget } from './config/daemon';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -317,7 +315,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         language={language}
         options={{ defaultEnabled: true }}
       >
-        <WorkspaceHostsEnabled.Provider value={true}>
+        <StandaloneContext.Provider value={true}>
           <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
             <WorkspaceSessionProvider
               sessionId={sessionId}
@@ -360,7 +358,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               }}
             />
           </DaemonWorkspaceProvider>
-        </WorkspaceHostsEnabled.Provider>
+        </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
   );

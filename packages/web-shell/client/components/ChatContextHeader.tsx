@@ -11,8 +11,6 @@ import styles from './ChatContextHeader.module.css';
 
 interface ChatContextHeaderProps {
   content: ReactNode;
-  /** Names where the chat runs, beside the actions; hidden when omitted. */
-  location?: ReactNode;
   environmentOpen: boolean;
   environmentAvailable: boolean;
   rightPanelOpen: boolean;
@@ -29,7 +27,6 @@ interface ChatContextHeaderProps {
 
 export function ChatContextHeader({
   content,
-  location,
   environmentOpen,
   environmentAvailable,
   rightPanelOpen,
@@ -45,11 +42,6 @@ export function ChatContextHeader({
   return (
     <header className={styles.header} data-testid="chat-context-header">
       <div className={styles.content}>{content}</div>
-      {location && (
-        <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
-          {location}
-        </div>
-      )}
       <div className={styles.actions}>
         {onOpenLocalControlSettings && (
           <LocalControlQrButton
