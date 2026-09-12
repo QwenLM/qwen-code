@@ -1894,6 +1894,51 @@ describe('tool row rendering', () => {
     }
   });
 
+  it.each(['line', 'summary'] as const)(
+    'keeps the %s unavailable until the subagent session is ready',
+    (mode) => {
+      const onOpen = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const render = (subagentSessionReady: boolean) => {
+        const tool = makeTool({
+          toolName: 'agent',
+          status: 'in_progress',
+          title: undefined,
+          subagentSessionReady,
+        });
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <SubagentDetailsProvider onOpen={onOpen}>
+                {mode === 'line' ? (
+                  <ToolLine tool={tool} />
+                ) : (
+                  <ToolGroup tools={[tool]} />
+                )}
+              </SubagentDetailsProvider>
+            </I18nProvider>,
+          ),
+        );
+        return tool;
+      };
+      render(false);
+      const button = container.querySelector('button')!;
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      expect(button.title).toBe('创建中');
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      act(() => button.click());
+      expect(onOpen).not.toHaveBeenCalled();
+      const ready = render(true);
+      expect(button.hasAttribute('aria-disabled')).toBe(false);
+      act(() => button.click());
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ready);
+    },
+  );
+
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();
     const tool = makeTool({
@@ -2734,6 +2779,51 @@ describe('pending edit approval rows', () => {
     expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
   });
 
+  // R3-11: the approval reaches sub-agent rows through a different path than a
+  // top-level edit — hasSubToolApproval keeps the agent row shown and the panel
+  // only receives the approval while the host owns the diff preview. Neither
+  // half had a witness.
+  it('keeps a sub-agent row open for a nested edit approval the host owns', () => {
+    const tool = makeTool({
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [
+        { callId: 'sub-edit', toolName: 'WriteFile', status: 'pending' },
+      ],
+    });
+    const container = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-edit',
+          toolCallId: 'sub-edit',
+          toolName: 'WriteFile',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+
+    // The approval belongs to a tool call inside the agent, not to the agent's
+    // own launch, so the row must stay open — collapsing it would hide the
+    // edit the user is being asked to approve.
+    expect(container.textContent).toContain('WriteFile');
+
+    // Control: the same agent with nothing pending stays collapsed, so the
+    // assertion above is about the approval and not about agent rows always
+    // rendering their sub-tools.
+    const withoutApproval = renderToolLine(
+      tool,
+      {},
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(withoutApproval.textContent).not.toContain('WriteFile');
+  });
+
   it('keeps pending edit rows expandable when the host does not own the diff', () => {
     const tool = makeTool({
       toolName: 'WriteFile',
@@ -2752,5 +2842,64 @@ describe('pending edit approval rows', () => {
     });
 
     expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+  });
+
+  it('hands a pending bare-write row back to the shell already expanded', () => {
+    const tool = makeTool({
+      toolName: 'write',
+      status: 'in_progress',
+      args: { file_path: 'package.json' },
+      // The hand-back only matters if the edit is on screen again, so the
+      // fixture has to carry the diff the lock presupposes — without content
+      // `extractDiff` returns '' and the expanded card renders empty.
+      content: [
+        {
+          type: 'diff',
+          oldText: 'old content',
+          newText: 'handed back content',
+        },
+      ],
+    });
+
+    // While the host shows the diff natively the row is deliberately locked:
+    // `write` is an edit alias, so the native editor owns the interaction.
+    const hostOwned = renderToolLine(
+      tool,
+      {
+        approval: {
+          id: 'perm-write',
+          toolCallId: tool.callId,
+          toolName: 'write',
+          hasDiffPreview: true,
+          content: [],
+          options: [],
+        },
+      },
+      { hostOwnsEditDiffPreview: true },
+    );
+    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+
+    // Handing the preview back has to unlock *and* auto-expand it, or the user
+    // is left with an approval whose content is nowhere on screen. The expanded
+    // renderer already handles the bare name, so only shouldAutoExpand has to
+    // agree with isEditToolName about it.
+    const handedBack = renderToolLine(tool, {
+      approval: {
+        id: 'perm-write',
+        toolCallId: tool.callId,
+        toolName: 'write',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
+    expect(
+      handedBack.querySelector('[class*="lineExpandable"]'),
+    ).not.toBeNull();
+    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    // ...and the edit itself is lookable again — the whole point of the
+    // hand-back (#10557). Without content in the fixture the expanded card is
+    // empty and the two assertions above pass with nothing on screen.
+    expect(handedBack.textContent).toContain('handed back content');
   });
 });

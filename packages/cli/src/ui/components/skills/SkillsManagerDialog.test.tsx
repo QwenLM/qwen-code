@@ -3,382 +3,365 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
-import { act, type ComponentProps } from 'react';
-import { render } from 'ink-testing-library';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { waitFor } from '@testing-library/react';
 import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
-import { LoadedSettings, SettingScope } from '../../../config/settings.js';
-import { setLanguageAsync } from '../../../i18n/index.js';
-import { KeypressProvider } from '../../contexts/KeypressContext.js';
-import { SkillsManagerDialog } from './SkillsManagerDialog.js';
+import { SettingScope, type LoadedSettings } from '../../../config/settings.js';
+import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  buildHigherDisabled,
+  skillItemValue,
+  skillRowLabel,
+  SkillsManagerDialog,
+} from './SkillsManagerDialog.js';
 
-const lockedSkills: SkillConfig[] = ['one', 'two', 'three', 'four', 'five'].map(
-  (name) => ({
-    name,
-    description: `${name} skill`,
-    level: 'user',
-    filePath: `/skills/${name}/SKILL.md`,
-    body: '',
-  }),
-);
-const mixedSkills: SkillConfig[] = [
-  ...lockedSkills,
-  ...['six', 'seven', 'eight', 'nine', 'ten'].map((name) => ({
-    name,
-    description: `${name} skill`,
-    level: 'user' as const,
-    filePath: `/skills/${name}/SKILL.md`,
-    body: '',
-  })),
-];
-const manyLockedSkills: SkillConfig[] = Array.from({ length: 12 }, (_, i) => {
-  const name = `locked-${String(i + 1).padStart(2, '0')}`;
+/**
+ * The row the dialog renders for a skill the extension authored as `pdf` and
+ * which registers as `demo:pdf`.
+ */
+const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
+
+function fakeSettings(
+  byScope: Partial<Record<SettingScope, unknown>>,
+  defaultsByScope: Partial<Record<SettingScope, unknown>> = {},
+  enabledByScope: Partial<Record<SettingScope, unknown>> = {},
+  isTrusted = true,
+): LoadedSettings {
   return {
-    name,
-    description: `${name} skill`,
-    level: 'user' as const,
-    filePath: `/skills/${name}/SKILL.md`,
-    body: '',
-  };
+    isTrusted,
+    forScope: (scope: SettingScope) => ({
+      settings: {
+        skills: {
+          disabled: byScope[scope],
+          defaultDisabled: defaultsByScope[scope],
+          enabled: enabledByScope[scope],
+        },
+      },
+    }),
+  } as unknown as LoadedSettings;
+}
+
+describe('buildHigherDisabled', () => {
+  it('locks a prefixed skill on the legacy bare entry', () => {
+    // `user: { disabled: ['pdf'] }` predates the prefix. The row must still
+    // render as locked, or the dialog offers a toggle that does nothing.
+    expect(
+      buildHigherDisabled(
+        fakeSettings({ [SettingScope.User]: ['pdf'] }),
+      ).lockedIn(prefixed),
+    ).toBe('User');
+  });
+
+  it('locks a prefixed skill on the registry-name entry', () => {
+    expect(
+      buildHigherDisabled(
+        fakeSettings({ [SettingScope.System]: ['demo:pdf'] }),
+      ).lockedIn(prefixed),
+    ).toBe('System');
+  });
+
+  it('names the highest-precedence scope holding the same entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({
+        [SettingScope.SystemDefaults]: ['pdf'],
+        [SettingScope.User]: ['pdf'],
+        [SettingScope.System]: ['pdf'],
+      }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe('System');
+  });
+
+  it('names System over Workspace when both hold the same defaultDisabled entry', () => {
+    // Workspace inserts below System in merge precedence, so a System entry
+    // must win the label even though the workspace file is the nearer one:
+    // deleting the workspace entry cannot unlock while System holds it.
+    const higher = buildHigherDisabled(
+      fakeSettings(
+        {},
+        {
+          [SettingScope.Workspace]: ['pdf'],
+          [SettingScope.System]: ['pdf'],
+        },
+      ),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (System)",
+    );
+  });
+
+  it('blames the registry-name entry first when scopes hold one spelling each', () => {
+    // Which label a tie between the two spellings reports follows the
+    // lookup's documented registry-first order, not scope precedence. Both
+    // entries lock the row, so only the name the user is pointed at differs.
+    const registryHeld = buildHigherDisabled(
+      fakeSettings({
+        [SettingScope.User]: ['pdf'],
+        [SettingScope.System]: ['demo:pdf'],
+      }),
+    );
+    const legacyHeld = buildHigherDisabled(
+      fakeSettings({
+        [SettingScope.User]: ['demo:pdf'],
+        [SettingScope.System]: ['pdf'],
+      }),
+    );
+
+    expect(registryHeld.lockedIn(prefixed)).toBe('System');
+    expect(legacyHeld.lockedIn(prefixed)).toBe('User');
+  });
+
+  it('does not lock on another extension skill sharing the authored name', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.User]: ['other:pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+    expect(higher.lockedIn({ name: 'review' })).toBeNull();
+  });
+
+  it('locks on a bare workspace defaultDisabled entry the toggle cannot cancel, naming the entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.Workspace]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (Workspace)",
+    );
+  });
+
+  it('does not lock on a registry-spelling defaultDisabled entry the qualified grant cancels', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.Workspace]: ['demo:pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('locks on a bare workspace hard entry, naming the entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf' (Workspace)");
+  });
+
+  it('does not lock on an exact-spelling workspace hard entry the toggle removes', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['demo:pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('does not lock on workspace entries while the workspace is untrusted', () => {
+    // The merge drops an untrusted workspace wholesale, so its stale entries
+    // disable nothing — locking on them would dim rows for live skills.
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['pdf'] }, {}, {}, false),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('does not lock when an identical-spelling grant cancels the defaultDisabled entry', () => {
+    // resolveSkillSettings cancels entry-vs-entry on identical spelling; the
+    // skill stays live and the toggle that could change state must survive.
+    const cancelled = buildHigherDisabled(
+      fakeSettings(
+        {},
+        { [SettingScope.Workspace]: ['pdf'] },
+        { [SettingScope.Workspace]: ['pdf'] },
+      ),
+    );
+
+    expect(cancelled.lockedIn(prefixed)).toBeNull();
+    // A registry-spelling grant does not cancel an authored-spelling entry.
+    const notCancelled = buildHigherDisabled(
+      fakeSettings(
+        {},
+        { [SettingScope.Workspace]: ['pdf'] },
+        { [SettingScope.Workspace]: ['demo:pdf'] },
+      ),
+    );
+
+    expect(notCancelled.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (Workspace)",
+    );
+  });
+
+  it('names the scope holding a higher-scope defaultDisabled entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.User]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (User)",
+    );
+  });
+
+  it('tolerates a malformed list from the settings file', () => {
+    expect(
+      buildHigherDisabled(
+        fakeSettings({ [SettingScope.User]: 'all' }),
+      ).lockedIn(prefixed),
+    ).toBeNull();
+  });
 });
 
-function createConfig(skills: SkillConfig[]): Config {
-  const skillManager = {
-    listSkills: vi.fn().mockResolvedValue(skills),
-    suppressNextSlashReload: vi.fn(),
-    notifyConfigChanged: vi.fn(async () => undefined),
-  };
-  return {
-    getSkillManager: () => skillManager,
-    isSkillEnabled: vi.fn().mockReturnValue(true),
-  } as unknown as Config;
-}
+/**
+ * `handlePick`'s lock guard does not receive a `SkillConfig` — it receives the
+ * MultiSelect row value, which is built separately. Pinning that value's shape
+ * is the only thing standing between the guard and a silently narrower match:
+ * the type system lets a row value without `authoredName` through
+ * `lockedIn({ name, authoredName? })`, and the guard then reads a skill that a
+ * legacy bare entry blocks as pickable — the exact bail this guard exists for.
+ */
+describe('skillItemValue — the shape the pick guard reads', () => {
+  /** What `listSkills()` returns for a skill `demo` authors as `pdf`. */
+  const prefixedSkill: SkillConfig = {
+    name: 'demo:pdf',
+    description: 'Read PDFs',
+    level: 'extension',
+    authoredName: 'pdf',
+  } as SkillConfig;
+  /** A skill with one spelling: `authoredName` is absent, not empty. */
+  const plainSkill: SkillConfig = {
+    name: 'review',
+    description: 'Review code',
+    level: 'user',
+  } as SkillConfig;
 
-function createSettings(
-  disabled = lockedSkills.map((skill) => skill.name),
-): LoadedSettings {
-  return new LoadedSettings(
-    { path: '', settings: {}, originalSettings: {} },
-    { path: '', settings: {}, originalSettings: {} },
-    {
-      path: '',
-      settings: { skills: { disabled } },
-      originalSettings: {},
-    },
-    { path: '', settings: {}, originalSettings: {} },
-    true,
-    new Set(),
-  );
-}
+  it('carries the authored spelling of a prefixed skill', () => {
+    expect(skillItemValue(prefixedSkill)).toStrictEqual({
+      name: 'demo:pdf',
+      description: 'Read PDFs',
+      level: 'extension',
+      authoredName: 'pdf',
+    });
+  });
 
-type DialogProps = ComponentProps<typeof SkillsManagerDialog>;
+  it('agrees with the row classification under both spellings', () => {
+    // The row list and the guard consult the same `lockedIn`; if the row value
+    // lost a spelling they would disagree and the dialog would persist, close,
+    // and prefill `/demo:pdf` for a skill the config already blocks.
+    const legacyEntry = buildHigherDisabled(
+      fakeSettings({ [SettingScope.User]: ['pdf'] }),
+    );
+    const registryEntry = buildHigherDisabled(
+      fakeSettings({ [SettingScope.System]: ['demo:pdf'] }),
+    );
 
-function dialog(overrides: Partial<DialogProps> = {}) {
-  return (
-    <KeypressProvider kittyProtocolEnabled={false}>
+    expect(legacyEntry.lockedIn(skillItemValue(prefixedSkill))).toBe('User');
+    expect(registryEntry.lockedIn(skillItemValue(prefixedSkill))).toBe(
+      'System',
+    );
+    // And it must not invent a block: an entry naming a different extension's
+    // skill leaves the row pickable under either spelling.
+    expect(
+      buildHigherDisabled(
+        fakeSettings({ [SettingScope.User]: ['other:pdf'] }),
+      ).lockedIn(skillItemValue(prefixedSkill)),
+    ).toBeNull();
+  });
+
+  it('stays a single-spelling value for a skill with one spelling', () => {
+    const value = skillItemValue(plainSkill);
+
+    expect(value.authoredName).toBeUndefined();
+    expect(
+      buildHigherDisabled(
+        fakeSettings({ [SettingScope.User]: ['review'] }),
+      ).lockedIn(value),
+    ).toBe('User');
+  });
+});
+
+/**
+ * The row text is what Goal A is made of: a user scanning the dialog has to
+ * see whose skill each row is.
+ */
+describe('skillRowLabel', () => {
+  it('names the owning extension for an extension row', () => {
+    const label = skillRowLabel({
+      name: 'rust:functions',
+      description: 'Rust review',
+      level: 'extension',
+      extensionName: 'rust',
+      extensionDisplayName: 'Rust',
+    } as SkillConfig);
+
+    expect(label).toContain('(Extension: Rust)');
+    expect(label).not.toContain('(Extension)');
+  });
+
+  it('falls back to the extension id when the row has no display name', () => {
+    expect(
+      skillRowLabel({
+        name: 'rust:functions',
+        description: 'Rust review',
+        level: 'extension',
+        extensionName: 'rust',
+      } as SkillConfig),
+    ).toContain('(Extension: rust)');
+  });
+
+  it('keeps the level word on a non-extension row', () => {
+    // There the level is already the whole answer to "where did this come
+    // from", so naming an owner would be noise.
+    expect(
+      skillRowLabel({
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+      } as SkillConfig),
+    ).toContain('(User)');
+  });
+});
+
+/**
+ * The locked section is where naming the owner pays for itself: the user
+ * cannot toggle these rows, so their next action is editing a settings scope
+ * for one specific extension. Rendered, not unit-tested, because the branch
+ * only exists in the JSX — the helpers above never see it.
+ */
+describe('the locked section names the owner', () => {
+  let cleanup: (() => void) | undefined;
+  afterEach(() => cleanup?.());
+
+  it('prints the owning extension on a row the dialog cannot toggle', async () => {
+    // The only skill present, and it is locked at user scope: the MultiSelect
+    // renders no rows, so `(Extension: Rust)` can only come from the locked
+    // row.
+    const rustSkill = {
+      name: 'rust:functions',
+      description: 'Review Rust function signatures',
+      level: 'extension',
+      authoredName: 'functions',
+      extensionName: 'rust',
+      extensionDisplayName: 'Rust',
+    } as SkillConfig;
+    const config = {
+      getSkillManager: () => ({ listSkills: async () => [rustSkill] }),
+      isSkillEnabled: () => true,
+    } as unknown as Config;
+
+    const { lastFrame, cleanup: unmount } = renderWithProviders(
       <SkillsManagerDialog
-        settings={createSettings()}
-        config={createConfig(mixedSkills)}
+        settings={fakeSettings({ [SettingScope.User]: ['rust:functions'] })}
+        config={config}
         addItem={vi.fn()}
         onClose={vi.fn()}
         reloadCommands={vi.fn()}
         setInputBuffer={vi.fn()}
-        {...overrides}
-      />
-    </KeypressProvider>
-  );
-}
-
-function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
-  const ui = dialog(overrides);
-  const result = render(ui);
-  if (columns !== undefined) {
-    Object.defineProperty(result.stdout, 'columns', { value: columns });
-    result.rerender(ui);
-  }
-  return result;
-}
-
-describe('SkillsManagerDialog', () => {
-  it.each([18, 12, 11, 6, 5, 1])(
-    'keeps the interactive list within a %i-row budget',
-    async (availableTerminalHeight) => {
-      const { lastFrame } = renderDialog({ availableTerminalHeight });
-
-      await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
-        availableTerminalHeight,
-      );
-    },
-  );
-
-  it('keeps bare-mode keys active without changing a retained query', async () => {
-    const settings = createSettings([]);
-    const config = createConfig(mixedSkills.slice(5));
-    const onClose = vi.fn();
-    const renderAt = (availableTerminalHeight: number) =>
-      dialog({ settings, config, onClose, availableTerminalHeight });
-    const { stdin, lastFrame, rerender } = render(renderAt(18));
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-    act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('Search: six'));
-
-    rerender(renderAt(5));
-    await vi.waitFor(() => expect(lastFrame()).not.toContain('Search:'));
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
-    expect(lastFrame()).toContain('› [x] eight');
-
-    act(() => {
-      stdin.write('z');
-      stdin.write('\x7f');
-      stdin.write('\x7f');
-    });
-    act(() => stdin.write('j'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] nine'));
-    act(() => stdin.write('k'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
-
-    act(() => stdin.write('\u001B'));
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-
-    rerender(renderAt(18));
-    expect(lastFrame()).toContain('Search: six');
-  });
-
-  it('picks the visibly highlighted skill after entering bare mode', async () => {
-    const settings = createSettings([]);
-    const config = createConfig(mixedSkills.slice(5));
-    const onClose = vi.fn();
-    const setInputBuffer = vi.fn();
-    const renderAt = (availableTerminalHeight: number) =>
-      dialog({
-        settings,
-        config,
-        onClose,
-        setInputBuffer,
-        availableTerminalHeight,
-      });
-    const { stdin, lastFrame, rerender } = render(renderAt(18));
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-    act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('Search: six'));
-
-    rerender(renderAt(5));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
-    act(() => stdin.write('\r'));
-
-    await vi.waitFor(() =>
-      expect(setInputBuffer).toHaveBeenCalledWith('/eight'),
+      />,
     );
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
+    cleanup = unmount;
 
-  it('prioritizes unlocked rows and summarizes locked skills', async () => {
-    const { lastFrame } = renderDialog({ availableTerminalHeight: 18 });
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
-    expect(lastFrame()).toContain('(+5 locked)');
-    expect(lastFrame()).not.toContain('one skill');
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(18);
-  });
-
-  it.each([12, 5, 1])(
-    'uses one locked-count row when every skill is locked at %i rows',
-    async (availableTerminalHeight) => {
-      const { lastFrame } = renderDialog({
-        config: createConfig(lockedSkills),
-        availableTerminalHeight,
-      });
-
-      await vi.waitFor(() => expect(lastFrame()).toContain('(+5 locked)'));
-      expect(lastFrame()).not.toContain('one skill');
-      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
-        availableTerminalHeight,
-      );
-    },
-  );
-
-  it('searches unlocked rows but not hidden locked rows when constrained', async () => {
-    const { stdin, lastFrame } = renderDialog({
-      availableTerminalHeight: 8,
-    });
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-    act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
-    expect(lastFrame()).toContain('1 / 10 skills');
-
-    act(() => stdin.write('\u001B'));
-    await vi.waitFor(() => expect(lastFrame()).not.toContain('Search: six'));
-    act(() => stdin.write('one'));
-    await vi.waitFor(() =>
-      expect(lastFrame()).toContain('No skills match the search.'),
-    );
-    expect(lastFrame()).toContain('0 / 10 skills');
-    expect(lastFrame()).not.toContain('one skill');
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(8);
-  });
-
-  it('shows every locked skill without a height constraint', async () => {
-    const { lastFrame } = renderDialog({
-      settings: createSettings(manyLockedSkills.map((skill) => skill.name)),
-      config: createConfig(manyLockedSkills),
-    });
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('locked-12'));
-    expect(lastFrame()).toContain('locked-01');
-    expect(lastFrame()).toContain(
-      'Locked by higher-scope settings (cannot toggle here):',
-    );
-    expect(lastFrame()).not.toContain('(+12 locked)');
-  });
-
-  it('shows locked-only search results without an empty state', async () => {
-    const { stdin, lastFrame } = renderDialog();
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-    act(() => stdin.write('one'));
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
-    expect(lastFrame()).toContain(
-      'Locked by higher-scope settings (cannot toggle here):',
-    );
-    expect(lastFrame()).not.toContain('No skills match the search.');
-    expect(lastFrame()).not.toContain('[x]');
-  });
-
-  it('persists toggles and refreshes skills on escape', async () => {
-    const settings = createSettings();
-    const setValues = vi
-      .spyOn(settings, 'setValues')
-      .mockImplementation(() => undefined);
-    const config = createConfig(mixedSkills);
-    const skillManager = config.getSkillManager()!;
-    const reloadCommands = vi.fn();
-    const onClose = vi.fn();
-    const { stdin, lastFrame } = renderDialog({
-      settings,
-      config,
-      reloadCommands,
-      onClose,
-    });
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
-    act(() => stdin.write(' '));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [ ] eight'));
-    act(() => stdin.write('\u001B'));
-
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(setValues).toHaveBeenCalledWith([
-      {
-        scope: SettingScope.Workspace,
-        key: 'skills.disabled',
-        value: ['eight'],
-      },
-    ]);
-    expect(reloadCommands).toHaveBeenCalledTimes(1);
-    expect(skillManager.suppressNextSlashReload).toHaveBeenCalledTimes(1);
-    expect(skillManager.notifyConfigChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps the translated title on one row at narrow widths', async () => {
-    await setLanguageAsync('ca');
-    const result = renderDialog({ availableTerminalHeight: 12 }, 26);
-    try {
-      await vi.waitFor(() => expect(result.lastFrame()).toContain('Gestiona'));
-      expect(result.lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
-    } finally {
-      result.unmount();
-      await setLanguageAsync('en');
-    }
-  });
-
-  it('keeps item rows within the height budget at 10 columns', async () => {
-    const { lastFrame } = renderDialog(
-      {
-        settings: createSettings([]),
-        availableTerminalHeight: 16,
-      },
-      10,
-    );
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('[x]'));
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
-  });
-
-  it.each([
-    ['loading', 1, false],
-    ['loading', 6, false],
-    ['loading', 12, false],
-    ['error', 1, true],
-    ['error', 6, true],
-    ['error', 12, true],
-  ])(
-    'keeps %s state within a %i-row budget',
-    async (_state, availableTerminalHeight, rejects) => {
-      const listSkills = rejects
-        ? vi.fn().mockRejectedValue(new Error('load failed'))
-        : vi.fn(() => new Promise<SkillConfig[]>(() => undefined));
-      const config = {
-        getSkillManager: () => ({ listSkills }),
-      } as unknown as Config;
-      const { lastFrame } = renderDialog({
-        config,
-        availableTerminalHeight,
-      });
-
-      await vi.waitFor(() =>
-        expect(lastFrame()).toContain(
-          rejects ? 'Failed to load skills' : 'Loading skills',
-        ),
-      );
-      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
-        availableTerminalHeight,
-      );
-    },
-  );
-
-  it('collapses multi-line descriptions', async () => {
-    const skills: SkillConfig[] = [
-      {
-        name: 'multiline-locked',
-        description: 'first line\nsecond line',
-        level: 'user',
-        filePath: '/skills/multiline-locked/SKILL.md',
-        body: '',
-      },
-      {
-        name: 'multiline',
-        description: 'third line\nfourth line',
-        level: 'user',
-        filePath: '/skills/multiline/SKILL.md',
-        body: '',
-      },
-    ];
-    const { lastFrame } = renderDialog({
-      settings: createSettings(['multiline-locked']),
-      config: createConfig(skills),
-    });
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('multiline'));
-    expect(lastFrame()).toContain('first line second line');
-    expect(lastFrame()).toContain('third line fourth line');
-  });
-
-  it('keeps a long search query within a narrow height budget', async () => {
-    const { stdin, lastFrame } = renderDialog(
-      { availableTerminalHeight: 12 },
-      54,
-    );
-
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
-    act(() => stdin.write('x'.repeat(80)));
-    await vi.waitFor(() =>
-      expect(lastFrame()).toContain('No skills match the search.'),
-    );
-    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
+    await waitFor(() => expect(lastFrame()).toContain('[locked: User]'));
+    expect(lastFrame()).toContain('(Extension: Rust)');
   });
 });

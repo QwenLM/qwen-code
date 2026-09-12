@@ -7,13 +7,12 @@
 import type {
   Config,
   ConfigInitializeOptions,
-} from '@qwen-code/qwen-code-core';
-import {
-  createDebugLogger,
-  buildSessionRecoveryPlanFromApiHistory,
-  SendMessageType,
-  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -79,7 +78,7 @@ class Session {
   private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
-  private promptIdCounter: number = 0;
+  private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
   private controlContext: ControlContext | null = null;
@@ -144,7 +143,36 @@ class Session {
     });
   }
 
+  /**
+   * Mints the next promptId for this process.
+   *
+   * The counter is seeded from the resumed transcript on first use. Without
+   * that seed a `--resume`/`--continue` chain restarts at 1 every process and
+   * re-mints promptIds the previous run already persisted, so one transcript
+   * carries several turns under a single id: the key the rewind mapping from
+   * #9466 anchors on (it fails closed to a positional walk when ids repeat),
+   * and the `prompt_id` on persisted `ui_telemetry` records, which is what
+   * the next resume reads back to seed from. File-history snapshots are not
+   * at stake on this path — checkpointing defaults off outside interactive
+   * sessions, so headless turns write none.
+   *
+   * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
+   * mode seeds too, but by its own inline count of resumed user turns
+   * (`seedPromptCount` in AppContainer), which ignores the turns the
+   * transcript actually claims.
+   *
+   * Seeding is lazy because resumed data only becomes authoritative after
+   * `config.initialize()` re-reads the session file, which this class defers
+   * until the first control request.
+   */
   private getNextPromptId(): string {
+    if (this.promptIdCounter === null) {
+      const records =
+        this.config.getResumedSessionData?.()?.conversation.messages;
+      this.promptIdCounter = records
+        ? computeInitialTurnFromHistory(records, this.sessionId)
+        : 0;
+    }
     this.promptIdCounter++;
     return `${this.sessionId}########${this.promptIdCounter}`;
   }

@@ -138,8 +138,8 @@ export default {
   'type to filter…': 'введите для фильтрации…',
   'No skills are currently available.': 'Сейчас навыков нет.',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
+  'Locked by settings entries you cannot toggle here:':
+    'Заблокированы записями настроек (здесь переключить нельзя):',
   '(+{{count}} locked)': '(+{{count}} заблокировано)',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
@@ -810,8 +810,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция, захваченная на поддерживаемой границе отправки).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':

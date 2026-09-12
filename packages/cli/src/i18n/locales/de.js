@@ -118,8 +118,8 @@ export default {
   'type to filter…': 'Tippen zum Filtern…',
   'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'Locked by settings entries you cannot toggle here:':
+    'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
   '(+{{count}} locked)': '(+{{count}} gesperrt)',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
@@ -797,8 +797,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der Textprojektion der unterstützten interaktiven TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der an einer unterstützten Übermittlungsgrenze erfassten Textprojektion).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':

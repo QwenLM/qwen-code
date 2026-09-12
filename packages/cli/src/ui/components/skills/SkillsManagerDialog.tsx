@@ -30,16 +30,24 @@ import type {
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
 import {
+  buildHigherDisabled,
   computeWorkspaceSkillListUpdates,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
+
 import { t } from '../../../i18n/index.js';
-import { levelLabel } from '../../utils/skill-level-label.js';
+import { MAX_EXTENSION_OWNER_LABEL_WIDTH } from '../../../services/commandMetadata.js';
+import { skillOriginLabel } from '../../utils/skill-level-label.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import { MessageType } from '../../types.js';
 import { MultiSelect, type MultiSelectItem } from '../shared/MultiSelect.js';
+
+// The daemon's toggle routes consult the same lock decision through
+// `skillToggleBlockForName`; the picker's tests pin the labels here.
+export { buildHigherDisabled };
 
 interface SkillsManagerDialogProps {
   settings: LoadedSettings;
@@ -57,6 +65,32 @@ interface SkillsManagerDialogProps {
   availableTerminalHeight?: number;
 }
 
+interface SkillItemValue {
+  name: string;
+  description: string;
+  level: SkillLevel;
+  /**
+   * Carried so `handlePick`'s lock guard can match a restriction against the
+   * authored spelling too. A value without it is tested against the registry
+   * identity only, so a row blocked solely by a legacy bare entry reads as
+   * pickable.
+   */
+  authoredName?: string;
+}
+
+/**
+ * The row value passed by MultiSelect to the pick guard retains the authored
+ * spelling used by lock lookups.
+ */
+export function skillItemValue(skill: SkillConfig): SkillItemValue {
+  return {
+    name: skill.name,
+    description: skill.description,
+    level: skill.level,
+    authoredName: skill.authoredName,
+  };
+}
+
 const LEVEL_ORDER: Record<SkillLevel, number> = {
   project: 0,
   user: 1,
@@ -70,15 +104,28 @@ const NAME_COLUMN = 24;
 // block adds 2 + N rows when present; not counted here.
 const SKILLS_DIALOG_FIXED_ROWS = 11;
 
-function lower(name: string): string {
-  return name.trim().toLowerCase();
-}
+/**
+ * The locked row is clipped rather than wrapped (`wrap="truncate"`), so naming
+ * the owner takes room out of the description: the owner's budget plus the
+ * description's still fill the 60 columns the description used to occupy on
+ * its own, which keeps the composed row no wider than the row already was.
+ */
+const LOCKED_ORIGIN_COLUMN = MAX_EXTENSION_OWNER_LABEL_WIDTH + 2; // `skillOriginLabel`'s parens
+const LOCKED_DESCRIPTION_COLUMN = 60 - LOCKED_ORIGIN_COLUMN;
 
-function normalizeNames(list: readonly string[]): string[] {
-  return list
-    .filter((n): n is string => typeof n === 'string')
-    .map(lower)
-    .filter(Boolean);
+/**
+ * The row text a skill is listed under. Split out from the `items` memo (like
+ * `skillItemValue`) so the label a user reads is testable without rendering.
+ *
+ * Reads the extension fields off the full `SkillConfig`, not off the row
+ * value: `skillItemValue` carries only what the pick guard matches, and the
+ * owner is display-only.
+ */
+export function skillRowLabel(skill: SkillConfig): string {
+  return `${truncateToWidth(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncateToWidth(
+    oneLine(skill.description),
+    80,
+  )}  ${truncateToWidth(skillOriginLabel(skill), LOCKED_ORIGIN_COLUMN)}`;
 }
 
 function namesFromScope(
@@ -87,34 +134,12 @@ function namesFromScope(
 ): string[] {
   // settings.json is user-editable: `disabled` could be a non-array
   // (e.g. `"disabled": "all"`) OR contain non-strings. Guard with
-  // `Array.isArray` BEFORE returning so downstream `.map(lower)` /
-  // `normalizeNames` never see a non-iterable. The element-level
-  // string filter still happens in `normalizeNames`. Mirrors the same
-  // defense in `buildDisabledSkillNamesProvider` (config.ts).
+  // `Array.isArray` BEFORE returning so downstream never sees a
+  // non-iterable; the element-level string filter stays with the
+  // caller. Mirrors the same defense in
+  // `buildDisabledSkillNamesProvider` (config.ts).
   const raw = settings.forScope(scope).settings.skills?.disabled;
   return Array.isArray(raw) ? raw : [];
-}
-
-function buildHigherDisabled(settings: LoadedSettings): {
-  set: ReadonlySet<string>;
-  scopeOf: (name: string) => string | null;
-} {
-  const sysDefaults = normalizeNames(
-    namesFromScope(settings, SettingScope.SystemDefaults),
-  );
-  const user = normalizeNames(namesFromScope(settings, SettingScope.User));
-  const system = normalizeNames(namesFromScope(settings, SettingScope.System));
-  const set = new Set([...sysDefaults, ...user, ...system]);
-  // Highest-precedence scope wins for the locked-row label. System >
-  // User > SystemDefaults matches the merge order in `settings.ts`.
-  const scopeOf = (name: string): string | null => {
-    const l = lower(name);
-    if (system.includes(l)) return 'System';
-    if (user.includes(l)) return 'User';
-    if (sysDefaults.includes(l)) return 'SystemDefaults';
-    return null;
-  };
-  return { set, scopeOf };
 }
 
 function sortSkills(skills: SkillConfig[]): SkillConfig[] {
@@ -123,11 +148,6 @@ function sortSkills(skills: SkillConfig[]): SkillConfig[] {
       LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] ||
       a.name.localeCompare(b.name),
   );
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
 // Collapse line breaks from YAML block scalars so one label stays on one row.
@@ -184,12 +204,12 @@ export function SkillsManagerDialog({
   // render — that would invalidate every downstream useMemo dependency.
   const allSkills = useMemo(() => skills ?? [], [skills]);
   const lockedSkills = useMemo(
-    () => allSkills.filter((s) => higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) !== null),
+    [allSkills, higher],
   );
   const unlockedSkills = useMemo(
-    () => allSkills.filter((s) => !higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) === null),
+    [allSkills, higher],
   );
 
   const initialSelectedKeys = useMemo(
@@ -252,15 +272,12 @@ export function SkillsManagerDialog({
     );
   }, [lockedSkills, query, constrained]);
 
-  const items = useMemo<Array<MultiSelectItem<string>>>(
+  const items = useMemo<Array<MultiSelectItem<SkillItemValue>>>(
     () =>
       filteredUnlocked.map((s) => ({
         key: s.name,
-        value: s.name,
-        label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-          oneLine(s.description),
-          80,
-        )}  (${levelLabel(s.level)})`,
+        value: skillItemValue(s),
+        label: skillRowLabel(s),
       })),
     [filteredUnlocked],
   );
@@ -417,9 +434,12 @@ export function SkillsManagerDialog({
   // Enter themselves to send. This is "select" semantic — the dialog
   // points at a skill, the user decides whether/when to invoke.
   const handlePick = useCallback(
-    async (skillName: string) => {
-      // Don't pick a skill the user has just toggled off.
-      const isEnabled = selectedKeys?.includes(skillName) ?? false;
+    async (skill: SkillItemValue) => {
+      // A pick must still be enabled and pass the shared lock decision.
+      const isEnabled =
+        selectedKeys !== null &&
+        selectedKeys.includes(skill.name) &&
+        higher.lockedIn(skill) === null;
       if (!isEnabled) {
         // Persist any OTHER pending toggles before bailing — otherwise
         // the user's session-long edits get silently discarded just
@@ -435,10 +455,10 @@ export function SkillsManagerDialog({
       const result = await persistChanges();
       onClose();
       if (result === 'ok') {
-        setInputBuffer(`/${skillName}`);
+        setInputBuffer(`/${skill.name}`);
       }
     },
-    [onClose, persistChanges, selectedKeys, setInputBuffer, skills],
+    [higher, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
   );
 
   useKeypress(
@@ -601,8 +621,8 @@ export function SkillsManagerDialog({
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
             // Enter saves and fills the input with the highlighted skill.
-            onConfirm={(_selected, activeSkillName) => {
-              void handlePick(activeSkillName);
+            onConfirm={(_selected, activeSkill) => {
+              void handlePick(activeSkill);
             }}
             showNumbers={false}
             checkedText="[x]"
@@ -624,18 +644,34 @@ export function SkillsManagerDialog({
       {filteredLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary} wrap="truncate">
-            {t('Locked by higher-scope settings (cannot toggle here):')}
+            {t('Locked by settings entries you cannot toggle here:')}
           </Text>
-          {/* Scope names match settings-file identifiers and stay untranslated. */}
-          {filteredLocked.map((skill) => (
-            <Text key={skill.name} dimColor wrap="truncate">
-              {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                name: truncate(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN),
-                description: truncate(oneLine(skill.description), 60),
-                scope: higher.scopeOf(skill.name) ?? t('higher scope'),
-              })}
-            </Text>
-          ))}
+          {filteredLocked.map((s) => {
+            // Scope identifiers (System / User / SystemDefaults) stay as
+            // untranslated technical labels — they refer to settings file
+            // scopes by name and matching them exactly helps users locate
+            // the offending entry.
+            const scopeName = higher.lockedIn(s) ?? t('higher scope');
+            return (
+              <Text key={s.name} dimColor wrap="truncate">
+                {t('  {{name}} {{description}}  [locked: {{scope}}]', {
+                  name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
+                    NAME_COLUMN,
+                  ),
+                  description: truncateToWidth(
+                    oneLine(s.description),
+                    LOCKED_DESCRIPTION_COLUMN,
+                  ),
+                  scope: scopeName,
+                })}
+                {/* Appended outside the template rather than interpolated: the
+                    origin is already translated inside `skillOriginLabel`, so
+                    this costs no new string and the locked reason keeps its
+                    place. Bounded like every other column on the row. */}
+                {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
+              </Text>
+            );
+          })}
         </Box>
       )}
 

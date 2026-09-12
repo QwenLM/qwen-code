@@ -5,6 +5,12 @@
  */
 
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  saveArtifactSnapshot,
+  readArtifactSnapshot,
+  deleteArtifactSnapshot,
+} from '../tools/artifact/artifact-snapshots.js';
 import {
   commitUsageBeforeTranscriptDeletion,
   prepareUsageBeforeTranscriptDeletion,
@@ -1099,6 +1105,7 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages).toHaveLength(2);
       expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+        { onIncompleteRead: expect.any(Function) },
       );
       expect(statSyncSpy).toHaveBeenCalledTimes(1);
     });
@@ -5106,6 +5113,9 @@ describe('SessionService', () => {
       mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
       vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
       vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation(
+        actualJsonl.parseLineTolerant,
+      );
 
       // Restore any fs spies installed by the outer beforeEach.
       vi.mocked(readdirSyncSpy).mockRestore?.();
@@ -5778,6 +5788,235 @@ describe('SessionService', () => {
           ),
         ),
       ).toBe(false);
+    });
+
+    async function seedSavedPage(sessionId: string) {
+      const { file } = seedSession(sessionId);
+      const page = await saveArtifactSnapshot(
+        'original page',
+        'Page',
+        'https://example.com',
+        sessionId,
+        realTmpDir,
+      );
+      const id = stableSessionArtifactId(
+        sessionId,
+        `managed:${page.managedId}`,
+      );
+      const recordedAt = '2026-04-22T00:00:02.000Z';
+      fs.appendFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'saved-page',
+          parentUuid: 'u2',
+          sessionId,
+          type: 'system',
+          subtype: 'session_artifact_event',
+          timestamp: recordedAt,
+          cwd,
+          version: 'test',
+          systemPayload: {
+            v: 2,
+            sessionId,
+            sequence: 1,
+            recordedAt,
+            changes: [
+              {
+                action: 'created',
+                artifactId: id,
+                artifact: {
+                  ...page,
+                  id,
+                  source: 'tool',
+                  toolName: 'artifact',
+                  status: 'available',
+                  retention: 'restorable',
+                  clientRetained: false,
+                  createdAt: recordedAt,
+                  updatedAt: recordedAt,
+                },
+              },
+            ],
+          },
+        }) + '\n',
+      );
+      return page;
+    }
+
+    it('retains an unloaded fork snapshot until its final session is deleted', async () => {
+      const oldId = '11111111-1111-4111-8111-111111111119';
+      const newId = '22222222-2222-4222-8222-222222222229';
+      const page = await seedSavedPage(oldId);
+      await service.forkSession(oldId, newId);
+      process.env['QWEN_RUNTIME_DIR'] = realPath.join(
+        realTmpDir,
+        'other-runtime',
+      );
+      await expect(service.removeSession(oldId)).resolves.toBe(true);
+      await expect(readArtifactSnapshot(page, realTmpDir)).resolves.toBe(
+        'original page',
+      );
+      const loaded = await service.loadSession(newId);
+      expect(loaded?.artifactSnapshot?.artifacts).toHaveLength(1);
+      expect(loaded?.artifactSnapshot?.artifacts[0]).toMatchObject({
+        url: page.url,
+        managedId: page.managedId,
+      });
+      await expect(service.removeSession(newId)).resolves.toBe(true);
+      await expect(
+        fs.promises.stat(realPath.dirname(fileURLToPath(page.url!))),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each([false, true])(
+      'isolates relocated and replacement same-ID sessions, destination deleted first: %s',
+      async (destinationFirst) => {
+        const sessionId = '11111111-1111-4111-8111-111111111119';
+        const movedPage = await seedSavedPage(sessionId);
+        const movedCwd = realPath.join(realTmpDir, 'moved-workspace');
+        fs.mkdirSync(movedCwd);
+        const destination = new SessionService(movedCwd, {
+          runtimeBaseDir: realTmpDir,
+        });
+        const sourceFile = realPath.join(
+          service['storage'].getProjectDir(),
+          'chats',
+          `${sessionId}.jsonl`,
+        );
+        const destinationDir = realPath.join(
+          destination['storage'].getProjectDir(),
+          'chats',
+        );
+        fs.mkdirSync(destinationDir, { recursive: true });
+        const movedRecords = fs
+          .readFileSync(sourceFile, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => ({ ...JSON.parse(line), cwd: movedCwd }));
+        fs.writeFileSync(
+          realPath.join(destinationDir, `${sessionId}.jsonl`),
+          movedRecords.map((record) => JSON.stringify(record)).join('\n') +
+            '\n',
+        );
+        fs.unlinkSync(sourceFile);
+        const replacementPage = await seedSavedPage(sessionId);
+        const firstService = destinationFirst ? destination : service;
+        const firstPage = destinationFirst ? movedPage : replacementPage;
+        const secondService = destinationFirst ? service : destination;
+        const secondPage = destinationFirst ? replacementPage : movedPage;
+        await expect(firstService.removeSession(sessionId)).resolves.toBe(true);
+        await expect(
+          readArtifactSnapshot(firstPage, realTmpDir),
+        ).rejects.toThrow();
+        await expect(
+          readArtifactSnapshot(secondPage, realTmpDir),
+        ).resolves.toBe('original page');
+        await expect(secondService.removeSession(sessionId)).resolves.toBe(
+          true,
+        );
+        await expect(
+          readArtifactSnapshot(secondPage, realTmpDir),
+        ).rejects.toThrow();
+      },
+    );
+
+    it.each(['file', 'directory', 'references'])(
+      'forks the conversation while preserving a saved-page record with missing %s',
+      async (missing) => {
+        const oldId = '11111111-1111-4111-8111-111111111119';
+        const newId = '22222222-2222-4222-8222-222222222229';
+        const page = await seedSavedPage(oldId);
+        const file = fileURLToPath(page.url!);
+        await fs.promises.rm(
+          missing === 'file'
+            ? file
+            : missing === 'directory'
+              ? realPath.dirname(file)
+              : realPath.join(realPath.dirname(file), 'references'),
+          { recursive: true },
+        );
+        const warnings: string[] = [];
+        const forkService = new SessionService(cwd, {
+          runtimeBaseDir: realTmpDir,
+          onWarning: (message) => warnings.push(message),
+        });
+
+        await forkService.forkSession(oldId, newId);
+
+        const forked = await forkService.loadSession(newId);
+        expect(
+          forked?.conversation.messages.map((record) => record.uuid),
+        ).toEqual(['u1', 'u2']);
+        expect(forked?.artifactSnapshot?.artifacts).toEqual([
+          expect.objectContaining({
+            id: stableSessionArtifactId(newId, `managed:${page.managedId}`),
+            url: page.url,
+            managedId: page.managedId,
+            metadata: page.metadata,
+            createdAt: '2026-04-22T00:00:02.000Z',
+          }),
+        ]);
+        expect(warnings).toEqual([
+          expect.stringContaining('missing snapshot storage'),
+        ]);
+        expect(
+          (await forkService.loadSession(oldId))?.conversation.messages,
+        ).toHaveLength(2);
+      },
+    );
+
+    it('does not commit a fork when snapshot ownership bookkeeping fails', async () => {
+      const oldId = '11111111-1111-4111-8111-111111111119';
+      const newId = '22222222-2222-4222-8222-222222222229';
+      const page = await seedSavedPage(oldId);
+      const references = realPath.join(
+        realPath.dirname(fileURLToPath(page.url!)),
+        'references',
+      );
+      await fs.promises.rm(references, { recursive: true });
+      await fs.promises.writeFile(references, 'not a directory');
+      await expect(service.forkSession(oldId, newId)).rejects.toMatchObject({
+        code: 'ENOTDIR',
+      });
+      await expect(
+        fs.promises.stat(
+          realPath.join(
+            service['storage'].getProjectDir(),
+            'chats',
+            `${newId}.jsonl`,
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('rolls back only the failed fork operation snapshot reference', async () => {
+      const oldId = '11111111-1111-4111-8111-111111111119';
+      const newId = '22222222-2222-4222-8222-222222222229';
+      const page = await seedSavedPage(oldId);
+      const link = vi.spyOn(fs.promises, 'link').mockRejectedValue(
+        Object.assign(new Error('target won by another fork'), {
+          code: 'EEXIST',
+        }),
+      );
+      try {
+        await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+          'Target session already exists',
+        );
+      } finally {
+        link.mockRestore();
+      }
+      const references = realPath.join(
+        realPath.dirname(fileURLToPath(page.url!)),
+        'references',
+      );
+      expect(await fs.promises.readdir(references)).toHaveLength(1);
+      await expect(readArtifactSnapshot(page, realTmpDir)).resolves.toBe(
+        'original page',
+      );
+      await deleteArtifactSnapshot(page, realTmpDir, oldId);
+      await expect(fs.promises.stat(references)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
 
     it('does not resurrect artifacts removed by later side records when forking', async () => {

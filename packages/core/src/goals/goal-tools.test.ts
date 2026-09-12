@@ -27,6 +27,8 @@ import {
   type PendingGoalProposal,
   type ProposeGoalToolConfig,
   applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
@@ -160,6 +162,8 @@ describe('GetGoalTool', () => {
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
           tokenBudget: 30_000_000,
+          turnBudget: 40,
+          activeTimeBudgetMs: 1_800_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -192,6 +196,10 @@ describe('GetGoalTool', () => {
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
         tokenBudget: 30_000_000,
+        // A stopped Goal's cadence ceilings are reported beside the token
+        // one, so an inspection can see which allowance ran out.
+        turnBudget: 40,
+        activeTimeBudgetMs: 1_800_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });
@@ -238,6 +246,192 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe(
       'No Goal turn is permitted · last Goal paused after 1 turn',
     );
+  });
+
+  it('reports checkpoint health in the last Goal summary', async () => {
+    // A Goal the stall breaker stopped names the kind of failure in
+    // lastReason; only these two fields say how often and what it was.
+    const failure =
+      'InvalidGoalCheckpointError: Goal checkpoint verifier returned invalid JSON';
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 3,
+          lastCheckpointFailure: failure,
+          lastReason: 'checkpoints stalled',
+          limitKind: 'evidence_catalog' as const,
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 3,
+        status: 'usage_limited',
+        turnCount: 5,
+        activeTimeMs: 10,
+        tokensUsed: 0,
+        checkpointStalls: 3,
+        lastCheckpointFailure: failure,
+        lastReason: 'checkpoints stalled',
+      },
+    });
+  });
+
+  it('leaves checkpoint health out of the summary of a completed Goal', async () => {
+    // The terminal snapshot keeps whatever the record carried; a Goal that
+    // completed cleanly must not be reported with a stale failure.
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'complete' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+          lastReason: 'Evidence satisfies the objective',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({
+      status: 'complete',
+      lastReason: 'Evidence satisfies the objective',
+    });
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
+  it('leaves a stall-free failure out of the summary of a Goal paused for another reason', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'paused' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+          lastReason: 'no progress in three turns',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({ status: 'paused' });
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
+  it('reports a stall-free checkpoint failure while the Goal is still active', async () => {
+    // A turn without a Goal permit can find the Goal still active; the failure
+    // is what its later checks keep running into before any stall stops it.
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal.lastCheckpointFailure).toBe('Error: provider failed');
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+  });
+
+  it('reports the failure that stopped a Goal whose checkpoint request was too large', async () => {
+    // That stop spends no stall, and its failure is the whole explanation.
+    const failure =
+      'GoalCheckpointVerifierInputTooLargeError: Goal checkpoint verifier request of 300000 bytes exceeds the 256000-byte limit';
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          lastCheckpointFailure: failure,
+          lastReason: 'checkpoint request too large',
+          limitKind: 'checkpoint_request' as const,
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({
+      status: 'usage_limited',
+      lastCheckpointFailure: failure,
+    });
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
   });
 
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
@@ -984,7 +1178,11 @@ describe('UpdateGoalTool', () => {
       readyForVerification: false,
       goalLifecycleChanged: false,
       checkpointRequired: true,
-      nextAction: expect.stringContaining('checkpoint the evidence catalog'),
+      // A retry that runs another tool first can push a cited entry out of
+      // the catalog, so the hint says to retry before anything else.
+      nextAction: expect.stringMatching(
+        /checkpoint the evidence catalog[\s\S]*before running any other tool/,
+      ),
     });
     expect(result.terminateTurn).toBe(true);
     expect(recordTerminalProposal).not.toHaveBeenCalled();
@@ -1665,7 +1863,20 @@ describe('ProposeGoalTool', () => {
         objective: 'x'.repeat(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS + 1),
       }),
     ).not.toBeNull();
+    expect(
+      tool.validateToolParams({ objective: 'Outcome: ship it.\nBudget: 20.' }),
+    ).toBe('objective must be written on one line.');
     expect(tool.validateToolParams({ objective })).toBeNull();
+  });
+
+  it('prints each recovery command as a complete final line', () => {
+    for (const message of [
+      formatProposeGoalRecoveryNotStarted(objective),
+      formatProposeGoalRecoveryFailed(objective),
+    ]) {
+      expect(message.split('\n').at(-1)).toBe(`/goal set ${objective}`);
+      expect(message.match(/\/goal/g)).toHaveLength(1);
+    }
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
@@ -1680,6 +1891,7 @@ describe('ProposeGoalTool', () => {
     expect(details.type).toBe('info');
     if (details.type !== 'info') return;
     expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.hideAlwaysAllow).toBe(true);
     expect(details.prompt).toContain('Set this as the session Goal?');
     expect(details.prompt).toContain(objective);
 
@@ -1695,7 +1907,11 @@ describe('ProposeGoalTool', () => {
     // proposing turn of its Goal permit. The client applies it at the
     // turn boundary (see applyPendingGoalProposal below).
     expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
-    expect(config.pending()).toEqual({ objective, turnKey: 'user-turn-key' });
+    expect(config.pending()).toEqual({
+      objective,
+      turnKey: 'user-turn-key',
+      reviewedGoal: null,
+    });
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
 
@@ -1882,6 +2098,78 @@ describe('ProposeGoalTool', () => {
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
 
+  describe.each(['before approval', 'before settlement'] as const)(
+    'rejects a changed reviewed target %s',
+    (phase) => {
+      it.each(['create', 'edit', 'replace', 'clear'] as const)(
+        'preserves the result of a concurrent %s',
+        async (action) => {
+          const { runtime, host } = idleRuntime();
+          const pauseCurrent = async () => {
+            const current = runtime.getSnapshot().goal!;
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: current.goalId,
+              expectedRevision: current.revision,
+            });
+          };
+          if (action !== 'create') {
+            await runtime.dispatch({ action: 'create', objective: 'Original' });
+            await pauseCurrent();
+          }
+          const config = proposeConfig(runtime);
+          const invocation = new ProposeGoalTool(config).build({ objective });
+          const details = await invocation.getConfirmationDetails(
+            new AbortController().signal,
+          );
+          if (phase === 'before settlement') {
+            await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+            expect((await execute(invocation)).error).toBeUndefined();
+          }
+
+          if (action === 'create') {
+            await runtime.dispatch({ action, objective: 'Concurrent' });
+            await pauseCurrent();
+          } else {
+            const current = runtime.getSnapshot().goal!;
+            const version = {
+              expectedGoalId: current.goalId,
+              expectedRevision: current.revision,
+            };
+            await runtime.dispatch(
+              action === 'clear'
+                ? { action, ...version }
+                : { action, objective: 'Concurrent', ...version },
+            );
+            if (action === 'replace') await pauseCurrent();
+          }
+          const changed = runtime.getSnapshot().goal;
+          const startedBefore = host.started.length;
+
+          if (phase === 'before approval') {
+            await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+            const result = await execute(invocation);
+            expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+            expect(result.llmContent).toContain('changed after the proposal');
+            expect(config.pending()).toBeUndefined();
+          } else {
+            const result = await applyPendingGoalProposal(
+              runtime,
+              config.pending()!,
+            );
+            expect(result).toMatchObject({
+              applied: false,
+              kind: 'changed',
+              reason: expect.stringContaining('changed after the proposal'),
+            });
+          }
+          expect(runtime.getSnapshot().goal).toEqual(changed);
+          expect(host.started).toHaveLength(startedBefore);
+        },
+      );
+    },
+  );
+
   it('replaces a stopped Goal when the parked approval is applied', async () => {
     const { runtime, host } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
@@ -1906,6 +2194,10 @@ describe('ProposeGoalTool', () => {
     const result = await execute(invocation);
     const payload = JSON.parse(result.llmContent as string);
     expect(payload.replacesGoalId).toBe(paused.goalId);
+    expect(config.pending()?.reviewedGoal).toEqual({
+      goalId: paused.goalId,
+      revision: paused.revision,
+    });
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
 
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
@@ -1933,6 +2225,7 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
     expect(applied.applied).toBe(false);
     if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(applied.reason).toContain('became active');
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
@@ -1955,6 +2248,7 @@ describe('ProposeGoalTool', () => {
     const applied = applyPendingGoalProposal(runtime, {
       objective,
       turnKey: 'user-turn-key',
+      reviewedGoal: { goalId: original.goalId, revision: original.revision },
     });
 
     await expect(resumed).resolves.toMatchObject({
@@ -1966,7 +2260,10 @@ describe('ProposeGoalTool', () => {
         },
       },
     });
-    await expect(applied).resolves.toMatchObject({ applied: false });
+    await expect(applied).resolves.toMatchObject({
+      applied: false,
+      kind: 'changed',
+    });
     expect(runtime.getSnapshot().goal).toMatchObject({
       goalId: original.goalId,
       objective: 'Paused by user',
@@ -1995,8 +2292,11 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(stale, {
       objective,
       turnKey: 'user-turn-key',
+      reviewedGoal: { goalId: paused.goalId, revision: paused.revision - 1 },
     });
     expect(applied.applied).toBe(false);
+    if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
   });
 });

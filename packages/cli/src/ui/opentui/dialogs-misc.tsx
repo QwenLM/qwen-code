@@ -22,16 +22,14 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import type {
-  Config,
-  EditorType,
-  SessionListItem,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import {
   allowEditorTypeInSandbox,
   checkHasEditorType,
   isEditorAvailable,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/editor.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   EDITOR_DISPLAY_NAMES,
@@ -243,7 +241,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {editors.map((e, i) => (
                   <box key={e.type} flexDirection="row">
                     <text fg={i === sel ? C.accent : C.dim}>
-                      {i === sel ? '● ' : '○ '}
+                      {i === sel ? '› ' : '  '}
                     </text>
                     <text
                       fg={e.disabled ? C.dim : i === sel ? C.text : C.dim}
@@ -264,7 +262,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {scopeItems.map((s, i) => (
                   <box key={s.value} flexDirection="row">
                     <text fg={i === scopeSel ? C.accent : C.dim}>
-                      {i === scopeSel ? '● ' : '○ '}
+                      {i === scopeSel ? '› ' : '  '}
                     </text>
                     <text fg={i === scopeSel ? C.text : C.dim}>{s.label}</text>
                   </box>

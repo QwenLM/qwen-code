@@ -619,13 +619,8 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
     };
   }
 
-  // #6094 item 1: with blockStreaming:'on', onResponseChunk early-returns
-  // without populating streamState, so the streamState.has(sessionId) guard
-  // cannot tell prompt chunks from cron chunks. While a cron flow is active,
-  // every prompt-response chunk leaks into cronBuffer and is re-sent by the
-  // 2s idle flush on top of the BlockStreamer delivery.
-  it('item 1: blockStreaming=on prompt chunks during a cron flow are not duplicated into cronBuffer', async () => {
-    const ch = makeChannel({ blockStreaming: 'on' });
+  it('prompt chunks during a cron flow are not duplicated into cronBuffer', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
@@ -635,14 +630,12 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
     // A cron flow is active concurrently (scheduled-message flow in flight).
     pvt['_inCronFlow'] = 1;
 
-    // Prompt response chunk arrives. With blockStreaming:'on' the streaming
-    // path early-returns, so no streamState entry exists for this session.
     triggerTextChunk('sess-prompt', 'prompt response text');
     await flushSetImmediate();
 
     const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
     // The prompt text belongs to an active prompt — it must not be captured
-    // by the cron buffer (BlockStreamer already delivers it).
+    // by the cron buffer.
     expect(cronBuffer.has('sess-prompt')).toBe(false);
 
     await vi.advanceTimersByTimeAsync(2000);
@@ -651,11 +644,8 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
     promptHooks(ch).onPromptEnd('test-chat', 'sess-prompt');
   });
 
-  // Regression guard for item 1 fix: genuine cron chunks (no active prompt
-  // for the session) must still be buffered and delivered with
-  // blockStreaming:'on'.
-  it('item 1 regression: cron chunks without an active prompt are still delivered (blockStreaming=on)', async () => {
-    const ch = makeChannel({ blockStreaming: 'on' });
+  it('cron chunks without an active prompt are still delivered', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
     pvt['_inCronFlow'] = 1;

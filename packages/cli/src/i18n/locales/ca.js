@@ -138,8 +138,8 @@ export default {
   'No skills are currently available.':
     'No hi ha habilitats disponibles actualment.',
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'Locked by settings entries you cannot toggle here:':
+    'Bloquejades per entrades de paràmetres (aquí no es poden commutar):',
   '(+{{count}} locked)': '(+{{count}} bloquejada(s))',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
@@ -851,8 +851,8 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input, tool_use_id, error, error_type, is_interrupt i is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text de la TUI interactiva compatible).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text capturada en un límit d’enviament compatible).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':

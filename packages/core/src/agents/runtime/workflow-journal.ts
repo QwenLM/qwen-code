@@ -6,12 +6,21 @@
 
 /**
  * @fileoverview Same-session workflow resume via a JSONL journal. Every
- * `agent()` dispatch in a run appends a `started` then a `result` line to
- * `<projectDir>/workflows/<runId>/journal.jsonl`. Re-running the workflow
- * with `Workflow({resumeFromRunId})` loads the journal and serves cached
- * results for the longest UNCHANGED PREFIX of `agent()` calls — the first
- * call whose (rolling prefix + prompt + opts) hash diverges, or that has no
- * journaled result, runs live, and every call after it runs live too.
+ * `agent()` dispatch in a run appends a `started` line to
+ * `<projectDir>/workflows/<runId>/journal.jsonl`, then a `result` line when
+ * it returns a value or a `failed` line when it settles without one.
+ * Re-running the workflow with `Workflow({resumeFromRunId})` loads the
+ * journal and serves cached results for the longest UNCHANGED PREFIX of
+ * `agent()` calls — the first call whose (rolling prefix + prompt + opts)
+ * hash diverges, or that has no journaled result, runs live, and every call
+ * after it runs live too.
+ *
+ * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
+ * they buy on resume is the ability to say WHY a call is running live again:
+ * `failed` means the previous run's dispatch settled without a value, while
+ * a bare `started` means the run was interrupted with that agent in flight.
+ * A run the user cancelled writes no `failed` records at all, so every key it
+ * left open reads as interrupted rather than as broken.
  *
  * Key derivation (matches upstream `v2`): each dispatch's key is
  * `v2:sha256(prefixHash ‖ prompt ‖ canonicalOpts)`, where `prefixHash` is
@@ -32,8 +41,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants, promises as fs } from 'node:fs';
+import path from 'node:path';
 import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
@@ -54,7 +66,26 @@ export interface JournalResultEntry {
   result: unknown;
 }
 
-export type JournalEntry = JournalStartedEntry | JournalResultEntry;
+/**
+ * The dispatch for this key settled without a result: it failed on its own
+ * (turn/time cap, model error, setup error, or exhausted stall retries).
+ *
+ * Written only when the outcome belongs to the dispatch. A run the user
+ * cancelled writes nothing, because that is a different thing on resume: an
+ * interrupted agent is worth respawning quietly, one that actually failed is
+ * worth saying so — and before this record the two were indistinguishable,
+ * both leaving a `started` with no `result` behind.
+ */
+export interface JournalFailedEntry {
+  type: 'failed';
+  key: string;
+  agentId: string;
+}
+
+export type JournalEntry =
+  | JournalStartedEntry
+  | JournalResultEntry
+  | JournalFailedEntry;
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
@@ -62,6 +93,8 @@ export interface JournalReplay {
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
   started: Map<string, JournalStartedEntry[]>;
+  /** Keys whose dispatch settled without a result. See JournalFailedEntry. */
+  failed: Set<string>;
 }
 
 /**
@@ -155,21 +188,33 @@ export function deriveArgsSeed(args: unknown): string {
 /**
  * Build the replay maps from a flat list of journal entries. `result`
  * entries win last-write; `started` entries accumulate (so a key started
- * N times surfaces N prior attempts for the respawn telemetry).
+ * N times surfaces N prior attempts for the respawn telemetry); `failed`
+ * keys are collected as a set.
+ *
+ * An entry type this build does not know is skipped rather than rejected, so
+ * a journal written by a newer build still replays here for the records this
+ * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
+  const failed = new Set<string>();
   for (const e of entries) {
     if (e.type === 'result') {
       results.set(e.key, e);
     } else if (e.type === 'started') {
+      // A later attempt supersedes the prior terminal failure. If it is
+      // interrupted, the next resume must describe it as interrupted rather
+      // than carrying the stale failure classification forward forever.
+      failed.delete(e.key);
       const list = started.get(e.key);
       if (list) list.push(e);
       else started.set(e.key, [e]);
+    } else if (e.type === 'failed') {
+      failed.add(e.key);
     }
   }
-  return { results, started };
+  return { results, started, failed };
 }
 
 /**
@@ -180,8 +225,69 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
  */
 export class WorkflowJournal {
   private pending = Promise.resolve();
+  readonly path: string;
 
-  constructor(readonly path: string) {}
+  constructor(
+    journalPath: string,
+    private readonly root = path.dirname(path.dirname(journalPath)),
+  ) {
+    this.path = journalPath;
+  }
+
+  private async hasSymlinkedPath(): Promise<boolean> {
+    if (
+      (await isSymlinkedRoot(this.root)) ||
+      (await isSymlinkedRoot(path.dirname(this.path)))
+    ) {
+      return true;
+    }
+    return fs
+      .lstat(this.path)
+      .then((stat) => stat.isSymbolicLink())
+      .catch(() => false);
+  }
+
+  /** Ensure the advertised journal path exists without affecting the run. */
+  async ensureExists(): Promise<boolean> {
+    try {
+      if (await this.hasSymlinkedPath()) return false;
+      await fs.mkdir(path.dirname(this.path), { recursive: true });
+      if (await this.hasSymlinkedPath()) return false;
+      const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+      const file = await fs.open(
+        this.path,
+        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
+        0o600,
+      );
+      try {
+        await file.chmod(0o600);
+      } finally {
+        await file.close();
+      }
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.ensureExists failed for ${this.path}: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /** Remove a never-registered run's journal file, best-effort. */
+  async remove(): Promise<void> {
+    try {
+      if (await this.hasSymlinkedPath()) return;
+      await fs.rm(this.path, { force: true });
+      await fs.rmdir(path.dirname(this.path)).catch((error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error;
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.remove failed for ${this.path}: ${error}`,
+      );
+    }
+  }
 
   /** Load + parse all entries into replay maps. Empty maps if no file. */
   async load(): Promise<JournalReplay> {
@@ -190,7 +296,7 @@ export class WorkflowJournal {
       return buildReplay(entries);
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
-      return { results: new Map(), started: new Map() };
+      return { results: new Map(), started: new Map(), failed: new Set() };
     }
   }
 

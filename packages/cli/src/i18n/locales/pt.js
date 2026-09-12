@@ -131,8 +131,8 @@ export default {
   'No skills are currently available.':
     'Nenhuma habilidade está disponível no momento.',
   'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  'Locked by settings entries you cannot toggle here:':
+    'Bloqueado por entradas de configuração (não é possível alternar aqui):',
   '(+{{count}} locked)': '(+{{count}} bloqueado(s))',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
@@ -803,8 +803,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto capturada em um ponto de envio compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':

@@ -173,6 +173,7 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './skill-hooks-invocation-parity.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
@@ -186,6 +187,7 @@ describe('no-AK integration CI wiring', () => {
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/qwen-serve-standalone-concurrency.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
         './sdk-typescript/permission-control.test.ts',
         './sdk-typescript/sdk-mcp-server.test.ts',
@@ -302,6 +304,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
     expect(classifyJob).not.toContain('CI_BOT_PAT');
+    expect(workflow).toContain(
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+    );
 
     // Every consumer uses the profile that was already computed from the
     // base checkout. None may execute a classifier from the PR checkout —
@@ -844,14 +849,14 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('does not install Linux packages on self-hosted Playwright runners', () => {
+  it('installs Playwright system dependencies only on hosted runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium (hosted)',

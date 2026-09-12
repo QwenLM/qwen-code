@@ -8,8 +8,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import type { ConfigParameters, SandboxConfig } from './config.js';
+import type {
+  ConfigParameters,
+  SandboxConfig,
+  SkillSettingsLists,
+} from './config.js';
 import {
+  bareDisablementBlocksQualifiedGrantWarnings,
+  bareEnabledGrantWarnings,
   Config,
   ApprovalMode,
   APPROVAL_MODES,
@@ -21,12 +27,24 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
+  normalizeGoalMaxActiveMinutes,
+  normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  normalizeGoalCheckpointTimeoutSeconds,
+  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import {
+  createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+} from '../goals/goal-checkpoint-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -60,6 +78,7 @@ import {
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -76,6 +95,7 @@ import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import { AgentType, HookEventName } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -101,6 +121,20 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+
+/**
+ * A settled registration for the shared record, the shape
+ * `registerSession` reports. Every test here models a process holding one
+ * session; the slot only differs for a process hosting several.
+ */
+function sharedRegistration(
+  registered = true,
+): Promise<sessionRegistry.SessionRegistration> {
+  return Promise.resolve({
+    registered,
+    slot: sessionRegistry.SHARED_RECORD_SLOT,
+  });
+}
 import {
   ExtensionManager,
   type Extension,
@@ -109,8 +143,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import { HookSystem } from '../hooks/index.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import { createHookOutput, HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -431,10 +464,312 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
+vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import('../goals/goal-checkpoint-verifier.js')
+    >();
+  return {
+    ...original,
+    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
+  };
+});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
 }));
+
+describe('bareEnabledGrantWarnings', () => {
+  const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
+  const lists = (
+    enabled: string[],
+    defaultDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(defaultDisabled),
+    hardDisabled: new Set(),
+  });
+  const warning =
+    "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
+    "enables the extension skill 'rust:pdf'. Replace it with 'rust:pdf'.";
+
+  it('names the qualified replacement for a stale bare grant', () => {
+    expect(bareEnabledGrantWarnings(lists(['pdf']), [rustPdf])).toEqual([
+      warning,
+    ]);
+  });
+
+  it('stays silent for qualified entries, registry-identity entries, non-extension skills, and an empty enabled set', () => {
+    expect(bareEnabledGrantWarnings(lists(['rust:pdf']), [rustPdf])).toEqual(
+      [],
+    );
+    // A bare entry that owns some registry identity enables that skill.
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf']), [rustPdf, { name: 'pdf' }]),
+    ).toEqual([]);
+    expect(
+      bareEnabledGrantWarnings(lists(['commit']), [{ name: 'commit' }]),
+    ).toEqual([]);
+    expect(bareEnabledGrantWarnings(lists([]), [rustPdf])).toEqual([]);
+  });
+
+  it('stays silent for a load-bearing bare entry that cancels a defaultDisabled entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), [rustPdf]),
+    ).toEqual([]);
+  });
+
+  it('names every same-authored skill for one shared bare entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf']), [
+        rustPdf,
+        { name: 'other:pdf', authoredName: 'pdf' },
+      ]),
+    ).toEqual([
+      "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
+        "enables the extension skills 'rust:pdf', 'other:pdf'. Replace it " +
+        "with 'rust:pdf', 'other:pdf'.",
+    ]);
+  });
+
+  it('names the hard block that defeats the replacement', () => {
+    const withHard: SkillSettingsLists = {
+      enabled: new Set(['pdf']),
+      defaultDisabled: new Set(),
+      hardDisabled: new Set(['pdf']),
+    };
+
+    expect(bareEnabledGrantWarnings(withHard, [rustPdf]).join('\n')).toContain(
+      'remove that entry too',
+    );
+  });
+
+  it('warns when a load-bearing pair targets a default-off extension skill', () => {
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf'], ['pdf']),
+        [rustPdf],
+        new Set(['rust:pdf']),
+      ),
+    ).toEqual([
+      "Warning: skills.enabled and skills.defaultDisabled both list 'pdf' " +
+        'by bare name. The pair cancels the disablement but no longer ' +
+        "enables the extension skill 'rust:pdf', which defaults off. " +
+        "Replace the bare 'pdf' with 'rust:pdf' in both skills.enabled " +
+        'and skills.defaultDisabled to enable it.',
+    ]);
+  });
+
+  it('names only the same-authored members that really default off', () => {
+    const skills = [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }];
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), skills, new Set()),
+    ).toEqual([]);
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf'], ['pdf']),
+        skills,
+        new Set(['rust:pdf']),
+      ),
+    ).toEqual([
+      "Warning: skills.enabled and skills.defaultDisabled both list 'pdf' " +
+        'by bare name. The pair cancels the disablement but no longer ' +
+        "enables the extension skill 'rust:pdf', which defaults off. " +
+        "Replace the bare 'pdf' with 'rust:pdf' in both skills.enabled " +
+        'and skills.defaultDisabled to enable it.',
+    ]);
+  });
+
+  it('keeps the replacement advice while a qualified grant coexists with the bare pair', () => {
+    expect(
+      bareEnabledGrantWarnings(
+        lists(['pdf', 'rust:pdf'], ['pdf']),
+        [rustPdf],
+        new Set(['rust:pdf']),
+      ).join('\n'),
+    ).toContain("Replace the bare 'pdf' with 'rust:pdf' in both");
+  });
+
+  it('drops the off-state claim when a qualified grant already enables the skill', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('already enables it');
+    expect(joined).not.toContain('which defaults off');
+  });
+
+  it('names granted and ungranted default-off members in separate warnings', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      new Set(['rust:pdf', 'other:pdf']),
+    ).join('\n');
+    expect(joined).toContain(
+      "enables the extension skill 'other:pdf', which defaults off",
+    );
+    expect(joined).toContain(
+      "the qualified grant 'rust:pdf' in skills.enabled already enables",
+    );
+  });
+
+  it('keeps the off-state claim when a hard entry defeats the qualified grant', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf', 'rust:pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('keeps the off-state claim when a qualified hard entry defeats the qualified grant', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf', 'rust:pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['rust:pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('names the bare hard entry the pair replacement cannot out-enable', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).toContain("A bare 'pdf' in skills.disabled also blocks");
+    expect(joined).toContain('remove that entry too');
+  });
+
+  it('names a qualified hard entry the pair replacement cannot out-enable', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['rust:pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).toContain("'rust:pdf' in skills.disabled also blocks");
+    expect(joined).not.toContain('already enables');
+  });
+
+  it('pluralizes the grant noun when several qualified grants carry the pair', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf', 'other:pdf'], ['pdf']),
+      [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      new Set(['rust:pdf', 'other:pdf']),
+    ).join('\n');
+    expect(joined).toContain(
+      "the qualified grants 'rust:pdf', 'other:pdf' in skills.enabled " +
+        'already enable them',
+    );
+  });
+});
+
+describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
+  const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
+  const lists = (
+    enabled: string[],
+    hardDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(),
+    hardDisabled: new Set(hardDisabled),
+  });
+  const warn = (
+    enabled: string[],
+    disabledNames: string[],
+    hardDisabled: string[] = [],
+    skills: Array<{ name: string; authoredName?: string }> = [rustPdf],
+  ) =>
+    bareDisablementBlocksQualifiedGrantWarnings(
+      lists(enabled, hardDisabled),
+      new Set(disabledNames),
+      skills,
+    );
+  const defaultAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but a bare 'pdf' entry " +
+    'still blocks it — disable entries match under either spelling; a ' +
+    'skills.defaultDisabled entry is cancelled only by the identical ' +
+    "spelling. Write 'rust:pdf' in both lists, or remove 'pdf'.";
+  const hardAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but 'pdf' in " +
+    'skills.disabled still blocks it — hard entries are never cancelled ' +
+    "by skills.enabled. Remove 'pdf' from skills.disabled to enable the " +
+    'skill.';
+
+  it('advises both lists for a bare defaultDisabled block', () => {
+    expect(warn(['rust:pdf'], ['pdf'])).toEqual([defaultAdvice]);
+  });
+
+  it('names the siblings a hard-entry removal re-enables', () => {
+    expect(
+      warn(
+        ['rust:pdf'],
+        ['pdf'],
+        ['pdf'],
+        [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      ).join('\n'),
+    ).toContain("The removal also re-enables 'other:pdf'");
+  });
+
+  it('never advises re-adding a skill whose registry identity is the bare entry', () => {
+    // Following an add-back advice for the local skill would re-block the
+    // opt-in under either-spelling matching and reprint this same warning,
+    // so the advice must name the limitation instead of the entry.
+    const advice = warn(
+      ['rust:pdf'],
+      ['pdf'],
+      ['pdf'],
+      [rustPdf, { name: 'pdf' }],
+    ).join('\n');
+
+    expect(advice).toContain(
+      "'pdf' cannot be blocked on its own while 'rust:pdf' stays enabled",
+    );
+    expect(advice).not.toContain("Add 'pdf' to skills.disabled");
+  });
+
+  it('advises removal for a hard block, since rewriting it would silence the warning without unblocking', () => {
+    expect(warn(['rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
+  });
+
+  it('still warns when a same-named skill owns the bare spelling', () => {
+    expect(warn(['rust:pdf'], ['pdf'], [], [rustPdf, { name: 'pdf' }])).toEqual(
+      [defaultAdvice],
+    );
+  });
+
+  it('still warns when the bare name is also enabled, if the block is hard', () => {
+    expect(warn(['pdf', 'rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
+  });
+
+  it('stays silent for qualified disables, bare enables, and missing pairs', () => {
+    expect(warn(['rust:pdf'], ['rust:pdf'])).toEqual([]);
+    expect(warn(['pdf'], ['pdf'])).toEqual([]);
+    expect(warn([], ['pdf'])).toEqual([]);
+    expect(warn(['rust:pdf'], [])).toEqual([]);
+  });
+});
 
 describe('matchesServerPattern', () => {
   it('exact match when no glob characters', () => {
@@ -592,6 +927,121 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('skill settings migration warnings at initialize', () => {
+    // The pure generators are unit-tested above; these pin the wiring —
+    // initialize() must consume the provider and surface its warnings, or a
+    // refactor that drops the block stays green.
+    const initializeWithLists = async (
+      lists: SkillSettingsLists,
+      disabledSkillNamesProvider: () => ReadonlySet<string> = () =>
+        lists.hardDisabled,
+    ) => {
+      vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
+        { name: 'rust:pdf', authoredName: 'pdf' } as SkillConfig,
+      ]);
+      const config = new Config({
+        ...baseParams,
+        skillSettingsListsProvider: () => lists,
+        disabledSkillNamesProvider,
+      });
+      await config.initialize();
+      return config;
+    };
+
+    it('surfaces the stale bare grant warning from the provider lists', async () => {
+      const config = await initializeWithLists({
+        enabled: new Set(['pdf']),
+        defaultDisabled: new Set(),
+        hardDisabled: new Set(),
+      });
+
+      expect(config.getWarnings().join('\n')).toContain(
+        "no longer enables the extension skill 'rust:pdf'",
+      );
+    });
+
+    it('surfaces the bare disablement blocking a qualified grant', async () => {
+      const config = await initializeWithLists({
+        enabled: new Set(['rust:pdf']),
+        defaultDisabled: new Set(),
+        hardDisabled: new Set(['pdf']),
+      });
+
+      expect(config.getWarnings().join('\n')).toContain('still blocks it');
+    });
+
+    it('warns with the default-entry advice when the resolved disable set exceeds the hard list', async () => {
+      const config = await initializeWithLists(
+        {
+          enabled: new Set(['rust:pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        },
+        () => new Set(['pdf']),
+      );
+
+      expect(config.getWarnings().join('\n')).toContain(
+        'cancelled only by the identical spelling',
+      );
+    });
+
+    it('surfaces the default-off pair warning named by registry identity', async () => {
+      // The pure function is pinned above; this pins the caller half: the
+      // default-off set initialize() collects must carry registry names,
+      // or the pair warning goes silent while the skill stays off.
+      vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
+        {
+          name: 'rust:pdf',
+          authoredName: 'pdf',
+          level: 'extension',
+          extensionName: 'rust',
+        } as SkillConfig,
+      ]);
+      const config = new Config({
+        ...baseParams,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension reaches getExtensions() and feeds the caller.
+        overrideExtensions: undefined,
+        skillSettingsListsProvider: () => ({
+          enabled: new Set(['pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        }),
+      });
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          id: 'a'.repeat(64),
+          name: 'rust',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.0.0' },
+          contextFiles: [],
+          skills: [],
+        } as Extension,
+      ]);
+      vi.spyOn(manager, 'getExtensionSkillState').mockReturnValue({
+        defaultEnabled: false,
+        workspaceEnabled: null,
+      });
+      await config.initialize();
+
+      expect(config.getWarnings().join('\n')).toContain(
+        "enables the extension skill 'rust:pdf', which defaults off",
+      );
+    });
+
+    it('stays silent without a provider', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      expect(config.getWarnings().join('\n')).not.toContain(
+        'skills.enabled lists',
+      );
+    });
+  });
+
   it('resolves live skill settings without reviving an inactive or removed owner', () => {
     const disabled = new Set<string>();
     const enabled = new Set<string>();
@@ -659,6 +1109,50 @@ describe('Server Config (config.ts)', () => {
     ).toBe(false);
     expect(config.isSkillEnabled({ ...skill, level: 'project' })).toBe(true);
     expect(config.getDisabledSkillNames()).toEqual(new Set());
+
+    // A renamed extension skill: the registry spells it with its owner, the
+    // manifest and the workspace extension-skill store still spell it as
+    // authored. Both views must resolve to the same skill.
+    const qualified = {
+      ...skill,
+      name: 'suite:Review',
+      authoredName: 'Review',
+    };
+    disabled.clear();
+    enabled.clear();
+    state.defaultEnabled = true;
+    state.workspaceEnabled = null;
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    // Restriction: either spelling blocks it.
+    disabled.add('review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    disabled.clear();
+    disabled.add('suite:review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+
+    // Grant: only the registry identity opens it. A legacy bare entry does
+    // not, because an unrelated rename must not hand out capability.
+    disabled.clear();
+    state.defaultEnabled = false;
+    enabled.add('review');
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    enabled.add('suite:review');
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    // The store is keyed by the authored name, so a default declared by the
+    // extension author still applies to the renamed skill.
+    enabled.clear();
+    state.defaultEnabled = false;
+    state.workspaceEnabled = null;
+    expect(config.isSkillEnabled(qualified)).toBe(false);
+    state.workspaceEnabled = true;
+    expect(config.isSkillEnabled(qualified)).toBe(true);
+
+    const stateSpy = vi.mocked(manager.getExtensionSkillState);
+    stateSpy.mockClear();
+    config.isSkillEnabled(qualified);
+    expect(stateSpy).toHaveBeenCalledWith(extension.id, 'Review');
   });
 
   describe('project-dir registry lifecycle', () => {
@@ -2063,6 +2557,26 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('derived Config ownership', () => {
+    it('keeps session approval independent of nested agent and worktree modes', () => {
+      const parent = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const child = deriveConfig(parent, {
+        getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      });
+      const nested = deriveWorktreeConfig(
+        child,
+        '/tmp/native-permission-worktree',
+      );
+      const wrapper = Object.create(nested) as Config;
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+      expect(wrapper.getSessionApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      vi.spyOn(parent, 'getApprovalMode').mockReturnValue(ApprovalMode.YOLO);
+      expect(wrapper.getSessionApprovalMode()).toBe(ApprovalMode.YOLO);
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
     it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
       const child = deriveConfig(parent, {
@@ -3311,12 +3825,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'first',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(
         config.setPendingGoalProposal({
           objective: 'second',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(false);
       expect(config.hasPendingGoalProposal()).toBe(true);
@@ -3325,6 +3841,8 @@ describe('Server Config (config.ts)', () => {
       expect(config.takePendingGoalProposal('turn-1')).toEqual({
         objective: 'first',
         turnKey: 'turn-1',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
@@ -3333,11 +3851,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'explicitly cleared',
           turnKey: 'turn-3',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(config.takePendingGoalProposal()).toEqual({
         objective: 'explicitly cleared',
         turnKey: 'turn-3',
+        reviewedGoal: null,
+        approvalSignal: expect.any(AbortSignal),
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
     });
@@ -3347,6 +3868,7 @@ describe('Server Config (config.ts)', () => {
       config.setPendingGoalProposal({
         objective: 'stale approval',
         turnKey: 'turn-1',
+        reviewedGoal: null,
       });
 
       config.startNewSession('replacement-session');
@@ -3570,6 +4092,229 @@ describe('Server Config (config.ts)', () => {
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
     });
 
+    it('arms each new Goal with the configured cadence ceilings', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: 20,
+        goalMaxActiveMinutes: 30,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(20);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(1_800_000);
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    });
+
+    it('runs Goals with no cadence ceiling by default', async () => {
+      // Unlike the token budget, the default is nothing: a cadence is what an
+      // operator asks for, not a guard every Goal needs.
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_TURNS_CAP + 1],
+      ['fractional', 1.5],
+      ['not a number', '20' as unknown as number],
+    ])('runs Goals with no turn ceiling when goalMaxTurns is %s', (_l, v) => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: v,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_ACTIVE_MINUTES_CAP + 1],
+      ['fractional', 0.5],
+    ])(
+      'runs Goals with no time ceiling when goalMaxActiveMinutes is %s',
+      (_l, v) => {
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalMaxActiveMinutes: v,
+        });
+        expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+          Number.POSITIVE_INFINITY,
+        );
+      },
+    );
+
+    it('accepts each cadence cap itself and rejects one past it', () => {
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP)).toBe(
+        GOAL_MAX_TURNS_CAP,
+      );
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP + 1)).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+      expect(normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP)).toBe(
+        GOAL_MAX_ACTIVE_MINUTES_CAP * 60_000,
+      );
+      expect(
+        normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP + 1),
+      ).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it('logs invalid cadence settings and stays silent for accepted values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-cadence-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalMaxTurns: 1.5,
+          goalMaxActiveMinutes: '30' as unknown as number,
+        });
+
+        await vi.waitFor(() => {
+          const warnings = appendFileSpy.mock.calls.map((call) =>
+            String(call[1]),
+          );
+          expect(warnings).toEqual(
+            expect.arrayContaining([
+              expect.stringContaining('Ignoring invalid goalMaxTurns 1.5'),
+              expect.stringContaining(
+                'Ignoring invalid goalMaxActiveMinutes 30',
+              ),
+            ]),
+          );
+        });
+
+        appendFileSpy.mockClear();
+        for (const [goalMaxTurns, goalMaxActiveMinutes] of [
+          [undefined, undefined],
+          [0, 0],
+          [-1, -1],
+          [20, 30],
+        ] as const) {
+          new Config({
+            ...baseParams,
+            sessionId,
+            goalMaxTurns,
+            goalMaxActiveMinutes,
+          });
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes('Ignoring invalid goalMax'),
+          ),
+        ).toHaveLength(0);
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('arms the checkpoint verifier with the configured timeout', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 45,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+
+      config.getGoalRuntime();
+
+      // Assert the call, not only the getter: the options argument is the
+      // one line that carries the setting into the verifier, and the
+      // getter-only checks above stay green if it is dropped.
+      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[0]).toBe(config);
+      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+    });
+
+    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
+      // The checkpoint call is streamed, so past the stream lifetime guard it
+      // is the guard that ends the call and the verifier's own timer never
+      // fires. A cap above it would let the setting validate, and the getter
+      // report, a ceiling no default deployment can reach.
+      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
+      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
+      // The cap is a typo guard, accepted itself and refused one past.
+      expect(
+        normalizeGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ),
+      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
+      expect(
+        isValidGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+        ),
+      ).toBe(false);
+      for (const invalid of [
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        '30',
+        null,
+        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      ]) {
+        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
+        expect(
+          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
+        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
+      }
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 0,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+    });
+
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -3658,6 +4403,115 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringMatching(
+              new RegExp(
+                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
+              ),
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        for (const goalCheckpointTimeoutSeconds of [
+          undefined,
+          1,
+          180,
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ]) {
+          new Config({
+            ...baseParams,
+            sessionId,
+            goalCheckpointTimeoutSeconds,
+          });
+          // Let any fire-and-forget debug write settle before the next case.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes(
+              'Ignoring invalid goalCheckpointTimeoutSeconds',
+            ),
+          ),
+        ).toHaveLength(0);
+
+        // Control case: the channel is live in this test, so the silence
+        // above is meaningful.
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringContaining(
+              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
     it('bills Goal turns through the canonical chat recorder', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const started: GoalTurnPermit[] = [];
@@ -3679,6 +4533,31 @@ describe('Server Config (config.ts)', () => {
       await runtime.finishTurn(permit);
 
       expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
+    });
+
+    it('measures no-progress turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < 3; turn++) {
+        await vi.waitFor(() => expect(started).toHaveLength(turn + 1));
+        const permit = started[turn]!;
+        runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+        await runtime.finishTurn(permit);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        noProgressTurns: 3,
+      });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
@@ -5442,6 +6321,24 @@ describe('Server Config (config.ts)', () => {
         expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
       },
     );
+    it.each(['alwaysAsk', 'disabled'] as const)(
+      'honors %s for an ACP host with explicit Goal proposal support',
+      async (modelProposedGoals) => {
+        const config = new Config({
+          ...baseParams,
+          experimentalZedIntegration: true,
+          modelProposedGoals,
+        });
+        config.setGoalProposalHostSupported(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.PROPOSE_GOAL)).toBe(
+          modelProposedGoals === 'alwaysAsk',
+        );
+      },
+    );
     it('does not register propose_goal when goals.modelProposed is disabled', async () => {
       const config = new Config({
         ...baseParams,
@@ -5799,6 +6696,27 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it.each([true, false])(
+      'registers saved-page publishing only for recorded managed sessions (%s)',
+      async (chatRecording) => {
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+          chatRecording,
+        });
+        config.setArtifactSnapshotsEnabled(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.ARTIFACT)).toBe(
+          chatRecording,
+        );
+        if (chatRecording) expect(config.shouldAutoOpenArtifact()).toBe(false);
+      },
+    );
+
     it('registers display_image only for the main interactive TUI', async () => {
       const interactive = new Config({
         ...baseParams,
@@ -5883,6 +6801,248 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    describe('bundled review workflow activation', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it.each([undefined, false, true])(
+        'preserves the configured workflow preference %s on review activation',
+        async (workflowsEnabled) => {
+          const config = new Config({ ...baseParams, workflowsEnabled });
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+            ToolNames.WORKFLOW,
+          ]);
+          const getRegistry = vi.spyOn(config, 'getToolRegistry');
+          const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(workflowsEnabled !== false);
+          expect(getRegistry).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+          expect(refresh).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+        },
+      );
+
+      it('restores review auto-activation when an explicit opt-out is removed', async () => {
+        const config = new Config({ ...baseParams, workflowsEnabled: false });
+        await config.initialize();
+        vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        config.setWorkflowsEnabled(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it.each(['registered', 'deferred', 'disabled'] as const)(
+        'uses the existing registry with %s permissions',
+        async (status) => {
+          const config = new Config(baseParams);
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          const names = new Set<string>();
+          vi.spyOn(registry, 'getAllToolNames').mockImplementation(() => [
+            ...names,
+          ]);
+          const eager = vi
+            .spyOn(registry, 'registerFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          const deferred = vi
+            .spyOn(registry, 'registerPermissionDeferredFactory')
+            .mockImplementation((name) => {
+              names.add(name);
+            });
+          eager.mockClear();
+          deferred.mockClear();
+          vi.spyOn(
+            config.getPermissionManager()!,
+            'getToolRegistrationStatus',
+          ).mockResolvedValue(status);
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          await config.enableReviewWorkflow();
+          expect(config.getToolRegistry()).toBe(registry);
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+          expect(config.isWorkflowsEnabled()).toBe(status !== 'disabled');
+          await config.enableReviewWorkflow();
+          expect(eager).toHaveBeenCalledTimes(status === 'registered' ? 1 : 0);
+          expect(deferred).toHaveBeenCalledTimes(status === 'deferred' ? 1 : 0);
+        },
+      );
+
+      it('waits for the live chat tool declarations to refresh', async () => {
+        const config = new Config(baseParams);
+        await config.initialize();
+        const registry = config.getToolRegistry();
+        vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        let release!: () => void;
+        const refresh = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const setTools = vi
+          .spyOn(config.getLlmClient(), 'setTools')
+          .mockReturnValue(refresh);
+        let completed = false;
+        const activation = config.enableReviewWorkflow().then(() => {
+          completed = true;
+        });
+        await vi.waitFor(() => expect(setTools).toHaveBeenCalledOnce());
+        expect(completed).toBe(false);
+        release();
+        await activation;
+        expect(completed).toBe(true);
+      });
+
+      it.each([{ bareMode: true }, { provisionalWorkspace: true }])(
+        'keeps restricted sessions disabled: %j',
+        async (restriction) => {
+          const config = new Config({ ...baseParams, ...restriction });
+          const registration = vi.spyOn(config, 'getPermissionManager');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(false);
+          expect(registration).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not activate workflows or refresh the parent chat from a subagent', async () => {
+        const config = new Config(baseParams);
+        const registry = vi.spyOn(config, 'getToolRegistry');
+        const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+        await runWithAgentContext('review-child', () =>
+          config.enableReviewWorkflow(),
+        );
+        expect(registry).not.toHaveBeenCalled();
+        expect(refresh).not.toHaveBeenCalled();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('honors the explicit workflow kill switch before registering', async () => {
+        const config = new Config(baseParams);
+        vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+        const registration = vi.spyOn(config, 'getPermissionManager');
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        expect(registration).not.toHaveBeenCalled();
+      });
+    });
+
+    it('binds record_source only for a supported top-level session and refreshes it after session rotation', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      const factory = vi.fn(
+        () =>
+          new SessionSourceService({
+            sessionId: config.getSessionId(),
+            workspaceCwd: () => config.getTargetDir(),
+            load: async () => ({}),
+            persist: async () => undefined,
+          }),
+      );
+      config.setSessionSourceServiceFactory(factory);
+      const original = config.getSessionSourceService();
+      await config.initialize();
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.RECORD_SOURCE);
+      const child = Object.create(config) as Config;
+      expect(child.getSessionSourceService()).toBeUndefined();
+      config.startNewSession('replacement-source-session');
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(config.getSessionSourceService()).not.toBe(original);
+    });
+
+    it.each(['registered', 'deferred', 'disabled'] as const)(
+      'registers a source tool bound after initialization with %s permissions',
+      async (status) => {
+        const { SessionSourceService } = await import(
+          '../services/session-sources.js'
+        );
+        const config = new Config({ ...baseParams, sdkMode: false });
+        await config.initialize();
+        const registry = config.getToolRegistry();
+        const existingRegistry = registry;
+        (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+        (
+          ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+        ).mockClear();
+        vi.spyOn(
+          config.getPermissionManager()!,
+          'getToolRegistrationStatus',
+        ).mockResolvedValue(status);
+        config.setSessionSourceServiceFactory(
+          () =>
+            new SessionSourceService({
+              sessionId: config.getSessionId(),
+              workspaceCwd: () => config.getTargetDir(),
+              load: async () => ({}),
+              persist: async () => undefined,
+            }),
+        );
+        await config.registerSessionSourceTool();
+        expect(config.getToolRegistry()).toBe(existingRegistry);
+        const eagerNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        const deferredNames = (
+          ToolRegistry.prototype.registerPermissionDeferredFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(eagerNames.includes(ToolNames.RECORD_SOURCE)).toBe(
+          status === 'registered',
+        );
+        expect(deferredNames.includes(ToolNames.RECORD_SOURCE)).toBe(
+          status === 'deferred',
+        );
+      },
+    );
+
+    it('does not register record_source without a bound service or in SDK sessions', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      for (const sdkMode of [false, true]) {
+        (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode,
+        });
+        if (sdkMode)
+          config.setSessionSourceServiceFactory(
+            () =>
+              new SessionSourceService({
+                sessionId: config.getSessionId(),
+                workspaceCwd: () => config.getTargetDir(),
+                load: async () => ({}),
+                persist: async () => undefined,
+              }),
+          );
+        await config.initialize();
+        const names = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(names).not.toContain(ToolNames.RECORD_SOURCE);
+      }
+    });
+
     it('registers report_findings even in headless sessions — review run depends on it', async () => {
       const config = new Config({
         ...baseParams,
@@ -5895,6 +7055,16 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.REPORT_FINDINGS);
+    });
+
+    it('enables historical artifact snapshots only when a managed caller opts in', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.isArtifactSnapshotsEnabled()).toBe(false);
+      config.setArtifactSnapshotsEnabled(true);
+      expect(config.isArtifactSnapshotsEnabled()).toBe(true);
+      const unrecorded = new Config({ ...baseParams, chatRecording: false });
+      unrecorded.setArtifactSnapshotsEnabled(true);
+      expect(unrecorded.isArtifactSnapshotsEnabled()).toBe(false);
     });
 
     describe('isArtifactEnabled', () => {
@@ -6205,6 +7375,45 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('reasoning effort override', () => {
+    it('reports static overrides for the resolved configured tiered route', () => {
+      const config = new Config({ ...baseParams });
+      const cfg: ContentGeneratorConfig = {
+        model: 'qwen3.8-flash',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        extra_body: { thinking_budget: 4096 },
+      };
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue(cfg);
+      const resolve = vi
+        .spyOn(config, 'getResolvedModelConfig')
+        .mockReturnValue({
+          id: cfg.model,
+          name: cfg.model,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: cfg.baseUrl!,
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'medium', 'xhigh'],
+              defaultEffort: 'xhigh',
+              disableField: 'reasoning_effort',
+            },
+          },
+        });
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      expect(resolve).toHaveBeenCalledWith(
+        cfg.authType,
+        cfg.model,
+        cfg.baseUrl,
+      );
+      resolve.mockReturnValue(undefined);
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -6377,6 +7586,45 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(LlmClient).toHaveBeenCalledWith(config);
     });
+
+    it.each([false, true])(
+      'preserves thinking off through repeated auth with mandatory thinking %s',
+      async (thinkingMandatory) => {
+        const config = new Config({
+          ...baseParams,
+          generationConfig: { reasoning: false },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          () => ({
+            config: {
+              model: 'kimi-k2.6',
+              authType: AuthType.USE_OPENAI,
+              thinkingMandatory,
+              reasoning: { effort: 'high' },
+            },
+            sources: {},
+          }),
+        );
+
+        for (const initial of [true, undefined]) {
+          await config.refreshAuth(AuthType.USE_OPENAI, initial);
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            thinkingMandatory ? { effort: 'high' } : false,
+          );
+        }
+        if (!thinkingMandatory) {
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            false,
+          );
+        }
+
+        config.getModelsConfig().getGenerationConfig().reasoning = undefined;
+        await config.refreshAuth(AuthType.USE_OPENAI);
+        expect(config.getContentGeneratorConfig().reasoning).toEqual({
+          effort: 'high',
+        });
+      },
+    );
 
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
       // Regression: the provider sync (applyResolvedModelDefaults) overwrites
@@ -8050,7 +9298,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -8099,10 +9347,13 @@ describe('Server Config (config.ts)', () => {
     // sessions apart; the switch must reach it (and the directory-derived
     // name) or `qwen sessions ps` keeps showing the folder that was left.
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
       expect(settled).toContain('patch');
     });
     expect(settled[0]).toBe('relocated');
@@ -8120,7 +9371,7 @@ describe('Server Config (config.ts)', () => {
     // state is reachable and the /cd patch must survive it.
     const config = new Config(baseParams);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8141,10 +9392,13 @@ describe('Server Config (config.ts)', () => {
 
     // The patch rides its own fire-and-forget chain; let it settle.
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
     expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
 
@@ -8207,7 +9461,7 @@ describe('Server Config (config.ts)', () => {
     // until process exit.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const writeRuntimeStatusSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockRejectedValue(new Error('read-only project fs'));
@@ -8218,10 +9472,13 @@ describe('Server Config (config.ts)', () => {
     const newSessionId = config.startNewSession('replacement-session');
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
@@ -8231,9 +9488,12 @@ describe('Server Config (config.ts)', () => {
   it('serializes pending registration, transitions, and unregister', async () => {
     const config = new Config(baseParams);
     let finishRegistration!: (registered: boolean) => void;
-    const registration = new Promise<boolean>((resolve) => {
-      finishRegistration = resolve;
-    });
+    const registration = new Promise<sessionRegistry.SessionRegistration>(
+      (resolve) => {
+        finishRegistration = (registered) =>
+          resolve({ registered, slot: sessionRegistry.SHARED_RECORD_SLOT });
+      },
+    );
     let finishPatch!: () => void;
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8256,10 +9516,13 @@ describe('Server Config (config.ts)', () => {
 
     finishRegistration(true);
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
     });
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
 
@@ -8273,7 +9536,7 @@ describe('Server Config (config.ts)', () => {
 
   it('serializes the peer inbox address with session transitions', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
 
     let finishIpcPatch!: () => void;
@@ -8313,7 +9576,7 @@ describe('Server Config (config.ts)', () => {
     // ipcPath, so a patch skipped on transient fd pressure must retry
     // itself or the inbox stays undiscoverable until restart.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8323,10 +9586,54 @@ describe('Server Config (config.ts)', () => {
     await config.updateSessionRegistryIpcPath('/tmp/peer.sock');
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-      ipcPath: '/tmp/peer.sock',
-    });
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+      {
+        ipcPath: '/tmp/peer.sock',
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
+  });
+
+  it('names the minted record a hosted session registered under, on every write', async () => {
+    // A process hosting several sessions owns one record each. Every
+    // patch and the final removal have to name the right one — with the
+    // default slot they would all resolve to a `<pid>.json` that such a
+    // process never wrote, so a hosted session's record would never be
+    // updated and never be removed.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(
+      Promise.resolve({ registered: true, slot: 'a1b2c3d4' }),
+    );
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    expect(config.getSessionRegistrySlot()).toBe('a1b2c3d4');
+
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(true);
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    await config.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      { ipcPath: '/tmp/acp.sock', ipcToken: 'tok' },
+      'a1b2c3d4',
+    );
+
+    config.startNewSession('replacement-session');
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: 'replacement-session' }),
+        'a1b2c3d4',
+      ),
+    );
+
+    await config.unregisterSessionRegistry();
+    expect(unregisterSessionSpy).toHaveBeenCalledWith('a1b2c3d4');
+
+    patchSessionRecordSpy.mockRestore();
+    unregisterSessionSpy.mockRestore();
   });
 
   it('re-asserts the registry record with the current session id, retrying a skipped patch', async () => {
@@ -8334,7 +9641,7 @@ describe('Server Config (config.ts)', () => {
     // record may be the stale side (a /clear patch skipped under fd
     // pressure); re-asserting is the fix, and it retries like the advertise.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8344,16 +9651,19 @@ describe('Server Config (config.ts)', () => {
     await config.reassertSessionRegistryRecord();
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith({
-      sessionId: config.getSessionId(),
-      cwd: config.getTargetDir(),
-    });
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      {
+        sessionId: config.getSessionId(),
+        cwd: config.getTargetDir(),
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
   });
 
   it('bounds the re-assert retry and is a no-op with no registration', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8372,7 +9682,7 @@ describe('Server Config (config.ts)', () => {
 
   it('retries the /clear session-id patch when the registry skips it', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8401,7 +9711,7 @@ describe('Server Config (config.ts)', () => {
     // would publish an address peers cannot authenticate to — sends read as
     // 'sent' and are silently dropped — with the whole suite still green.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8420,7 +9730,7 @@ describe('Server Config (config.ts)', () => {
 
   it('gives up on the peer inbox advertise after a bounded retry', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8440,7 +9750,7 @@ describe('Server Config (config.ts)', () => {
       .spyOn(sessionRegistry, 'unregisterSession')
       .mockResolvedValue(undefined);
 
-    config.trackSessionRegistration(Promise.resolve(false));
+    config.trackSessionRegistration(sharedRegistration(false));
     await config.unregisterSessionRegistry();
 
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
@@ -8453,7 +9763,7 @@ describe('Server Config (config.ts)', () => {
     // surface through relocateWorkingDirectory either.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8473,10 +9783,13 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
@@ -9385,6 +10698,22 @@ describe('Server Config (config.ts)', () => {
         );
       },
     );
+
+    it('only enables dynamic header values for boolean true', () => {
+      for (const value of [undefined, false, 'false', 1, {}, []]) {
+        const outboundCorrelation = {
+          allowDynamicHeaderValues: value,
+        } as unknown as ConfigParameters['outboundCorrelation'];
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundAllowDynamicHeaderValues()).toBe(false);
+      }
+
+      const config = new Config({
+        ...baseParams,
+        outboundCorrelation: { allowDynamicHeaderValues: true },
+      });
+      expect(config.getOutboundAllowDynamicHeaderValues()).toBe(true);
+    });
   });
 
   describe('UseRipgrep Configuration', () => {
@@ -9827,7 +11156,7 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('does not register web_search or push a notice when the feature is disabled', async () => {
+    it('does not register web_search or push a notice when nothing is configured and no provider can back it', async () => {
       const config = new Config(baseParams);
       await config.initialize();
 
@@ -9843,6 +11172,222 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.getWarnings().filter((w) => w.includes('WebSearch')),
       ).toEqual([]);
+    });
+
+    it('registers web_search with no configuration when the primary model runs on a ModelStudio provider', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
+    });
+
+    it('registers web_search for an env-only configuration pointing at a DashScope host', async () => {
+      // No modelProviders entry at all: the endpoint comes from
+      // OPENAI_BASE_URL and the key variable is the auth type's default. The
+      // runtime model snapshot is not captured until after the tool registry
+      // is built, so the gate must read the resolved generation config.
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          // What the CLI resolver produces from OPENAI_BASE_URL /
+          // OPENAI_API_KEY: an endpoint but no key variable name.
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKey: 'sk-env-only',
+          },
+          generationConfigSources: {
+            apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('leaves web_search off for an env-only configuration on a non-DashScope host', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-5',
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-5',
+            baseUrl: 'https://api.openai.com/v1',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not activate a legacy model-only web search configuration', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { model: 'qwen3.6-plus' },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
+    });
+
+    it('leaves web_search off without a notice when the primary model runs on a provider that cannot back it', async () => {
+      process.env['OPENROUTER_API_KEY'] = 'sk-or-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'z-ai/glm-4.5-air:free',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'z-ai/glm-4.5-air:free',
+                baseUrl: 'https://openrouter.ai/api/v1',
+                envKey: 'OPENROUTER_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['OPENROUTER_API_KEY'];
+      }
+    });
+
+    it('does not register web_search when it is turned off explicitly', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { enabled: false },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
     });
 
     it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {
@@ -10785,6 +12330,79 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  describe('DAC plan workflow', () => {
+    it.each([
+      ApprovalMode.DEFAULT,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
+    ])('keeps planning while selecting %s for execution', (mode) => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const revision = config.getApprovalModeRevision();
+
+      config.setPlanMode(true, mode);
+
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(mode);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+      config.setPlanMode(false, mode);
+      expect(config.getApprovalMode()).toBe(mode);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+    });
+
+    it('clears the selected policy on approved or legacy exits', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.YOLO, {
+        fromApprovedPlanExit: true,
+      });
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+    });
+
+    it('rejects privileged policies before changing an untrusted config', () => {
+      const config = new Config(baseParams);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setPlanMode(true, ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.DEFAULT);
+      expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('rejects Plan as an execution policy and isolates derived configs', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setPlanMode(true, ApprovalMode.PLAN)).toThrow(
+        'Plan is not an execution approval mode',
+      );
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const child = deriveConfig(config);
+      expect(child.getPlanExecutionMode()).toBeUndefined();
+      expect(() => child.setPlanMode(false, ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change plan workflow mode',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.YOLO);
+    });
   });
 
   describe('prePlanMode tracking', () => {
@@ -12564,76 +14182,390 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
-  describe('Stop dispatch through the hook execution bridge', () => {
-    it.each([
-      {
-        name: 'ignores non-blocking outputs',
-        otherOutput: { continue: true },
-        expected: false,
-        expectedReason: undefined,
-      },
-      {
-        name: 'detects another blocking output',
-        otherOutput: {
-          decision: 'block',
-          reason: 'Policy review is still required',
-        },
-        expected: true,
-        expectedReason: 'Policy review is still required',
-      },
-      {
-        name: 'preserves a stop reason',
-        otherOutput: {
-          continue: false,
-          stopReason: 'External stop hook feedback',
-        },
-        expected: true,
-        expectedReason: 'External stop hook feedback',
-      },
-    ])(
-      '$name when a goal hook blocks',
-      async ({ otherOutput, expected, expectedReason }) => {
+  describe('every hook event through the hook execution bridge', () => {
+    // The schema side has a drift guard derived from HookEventName; this is
+    // the bus side. `eventName` is an open string on the wire, so the compiler
+    // cannot catch a missing case, and `default:` replies with the same empty
+    // success a real no-op produces.
+    it.each(Object.values(HookEventName))(
+      'routes %s to a hook system method instead of the unknown-event default',
+      async (eventName) => {
         const config = new Config({ ...baseParams });
         await config.initialize();
-        const goalOutput = {
-          decision: 'block' as const,
-          reason: 'Keep working',
-          hookSpecificOutput: {
-            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
+        const called: string[] = [];
+        // Every fire method resolves an empty aggregate, which each arm accepts.
+        const hookSystem = new Proxy(
+          {},
+          {
+            get: (_target, prop) => {
+              if (typeof prop !== 'string' || prop === 'then') {
+                return undefined;
+              }
+              return vi.fn(async () => {
+                called.push(prop);
+                return {
+                  success: true,
+                  allOutputs: [],
+                  errors: [],
+                  totalDuration: 0,
+                  finalOutput: undefined,
+                };
+              });
+            },
           },
-        };
-        const fireStopEvent = vi.fn().mockResolvedValue({
-          finalOutput: {
-            ...goalOutput,
-            ...otherOutput,
-          },
-          allOutputs: [goalOutput, otherOutput],
-        });
+        );
         // @ts-expect-error - accessing private for testing
-        config['hookSystem'] = { fireStopEvent };
+        config['hookSystem'] = hookSystem;
+        const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
         const response = await config
           .getMessageBus()!
           .request<HookExecutionRequest, HookExecutionResponse>(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'Stop',
-              input: {
-                stop_hook_active: true,
-                last_assistant_message: 'last response',
-              },
+              eventName,
+              input: {},
             },
             MessageBusType.HOOK_EXECUTION_RESPONSE,
           );
 
-        expect(response.error).toBeUndefined();
-        expect(response).toMatchObject({
-          success: true,
-          hasNonGoalBlockingStopHook: expected,
-        });
-        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
+        expect(warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('Unknown hook event'),
+        );
+        expect(called.some((method) => method.startsWith('fire'))).toBe(true);
+        expect(response.success).toBe(true);
       },
     );
+  });
+
+  describe('direct-call hook events through the hook execution bridge', () => {
+    const dispatch = async (
+      method: string,
+      fire: ReturnType<typeof vi.fn>,
+      eventName: string,
+      input: Record<string, unknown>,
+      signal: AbortSignal,
+    ) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { [method]: fire };
+      return config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName,
+            input,
+            signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+    };
+
+    // Events whose fire method returns the hook output itself, or undefined
+    // when no hook is configured.
+    const directOutputRows = [
+      {
+        eventName: 'SessionStart',
+        method: 'fireSessionStartEvent',
+        input: {
+          source: 'resume',
+          model: 'qwen-max',
+          permission_mode: 'plan',
+          agent_type: 'Custom',
+        },
+        args: ['resume', 'qwen-max', 'plan', 'Custom'],
+      },
+      {
+        eventName: 'SessionEnd',
+        method: 'fireSessionEndEvent',
+        input: { reason: 'clear' },
+        args: ['clear'],
+      },
+      {
+        eventName: 'SessionDelete',
+        method: 'fireSessionDeleteEvent',
+        input: { deleted_session_id: 'old-session' },
+        args: ['old-session'],
+      },
+      {
+        eventName: 'PreCompact',
+        method: 'firePreCompactEvent',
+        input: { trigger: 'manual', custom_instructions: 'keep todos' },
+        args: ['manual', 'keep todos'],
+      },
+      {
+        eventName: 'PostCompact',
+        method: 'firePostCompactEvent',
+        input: { trigger: 'auto', compact_summary: 'summary' },
+        args: ['auto', 'summary'],
+      },
+      {
+        eventName: 'InstructionsLoaded',
+        method: 'fireInstructionsLoadedEvent',
+        input: {
+          file_path: '/repo/QWEN.md',
+          memory_type: 'project',
+          load_reason: 'session_start',
+          trigger_file_path: '/repo/src/a.ts',
+          parent_file_path: '/repo/QWEN.md',
+        },
+        args: [
+          '/repo/QWEN.md',
+          'project',
+          'session_start',
+          {
+            triggerFilePath: '/repo/src/a.ts',
+            parentFilePath: '/repo/QWEN.md',
+          },
+        ],
+      },
+    ];
+
+    it('uses a declared AgentType in the SessionStart wire example', () => {
+      // The wire carries a raw string and nothing downstream validates it, so
+      // this row is the example an out-of-process producer copies.
+      const row = directOutputRows.find(
+        ({ eventName }) => eventName === 'SessionStart',
+      )!;
+      expect(Object.values(AgentType)).toContain(row.input['agent_type']);
+    });
+
+    it.each(directOutputRows)(
+      'forwards $eventName to $method',
+      async ({ eventName, method, input, args }) => {
+        const output = { systemMessage: `${eventName} ran` };
+        const fire = vi.fn().mockResolvedValue(output);
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(output);
+      },
+    );
+
+    it.each(directOutputRows)(
+      'replies with no output when no $eventName hook is configured',
+      async ({ eventName, method, input, args }) => {
+        const fire = vi.fn().mockResolvedValue(undefined);
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        // The call assertion also tells this arm apart from `default:`, which
+        // publishes the same empty success reply without calling anything.
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toBeUndefined();
+      },
+    );
+
+    it.each([
+      {
+        eventName: 'TodoCreated',
+        method: 'fireTodoCreatedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          todo_status: 'pending',
+          all_todos: [],
+          phase: 'validation',
+        },
+        args: ['1', 'write tests', 'pending', [], 'validation'],
+      },
+      {
+        eventName: 'TodoCompleted',
+        method: 'fireTodoCompletedEvent',
+        input: {
+          todo_id: '1',
+          todo_content: 'write tests',
+          previous_status: 'in_progress',
+          all_todos: [],
+          phase: 'postWrite',
+        },
+        args: ['1', 'write tests', 'in_progress', [], 'postWrite'],
+      },
+    ])(
+      'forwards $eventName to $method and returns its final output',
+      async ({ eventName, method, input, args }) => {
+        // Two distinct outputs whose merge differs from the first, so
+        // replying with one hook's output instead of the merged result fails.
+        const finalOutput = { decision: 'block', reason: 'not yet' };
+        const fire = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [{ decision: 'allow' }, finalOutput],
+          errors: [],
+          totalDuration: 1,
+          finalOutput,
+        });
+        const controller = new AbortController();
+
+        const response = await dispatch(
+          method,
+          fire,
+          eventName,
+          input,
+          controller.signal,
+        );
+
+        expect(fire).toHaveBeenCalledWith(...args, controller.signal);
+        expect(response.success).toBe(true);
+        expect(response.output).toEqual(finalOutput);
+      },
+    );
+
+    it('awaits StopFailure hooks but replies with no output', async () => {
+      // The shape HookAggregator returns for StopFailure: fire-and-forget,
+      // outputs and errors dropped, no final output.
+      const fire = vi.fn().mockResolvedValue({
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 3,
+        finalOutput: undefined,
+      });
+      const controller = new AbortController();
+
+      const response = await dispatch(
+        'fireStopFailureEvent',
+        fire,
+        'StopFailure',
+        {
+          error: 'rate_limit',
+          error_details: '429 Too Many Requests',
+          last_assistant_message: 'partial',
+        },
+        controller.signal,
+      );
+
+      expect(fire).toHaveBeenCalledWith(
+        'rate_limit',
+        '429 Too Many Requests',
+        'partial',
+        controller.signal,
+      );
+      expect(response.success).toBe(true);
+      expect(response.output).toBeUndefined();
+    });
+  });
+
+  describe('Stop dispatch through the hook execution bridge', () => {
+    // The goal-specific half of this suite went with the two response fields
+    // it asserted. What remains is the only exercise of the surviving
+    // `case 'Stop':` branch: without it, deleting that branch or throwing
+    // inside it leaves the whole package green while every configured Stop
+    // hook silently stops blocking.
+    it('forwards the request input positionally, wraps the output, and counts the hooks that ran', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const blockingOutput = {
+        decision: 'block' as const,
+        reason: 'Policy review is still required',
+      };
+      const secondOutput = { continue: true };
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: blockingOutput,
+        allOutputs: [blockingOutput, secondOutput],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const controller = new AbortController();
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: {
+              stop_hook_active: true,
+              last_assistant_message: 'last response',
+              context_limit: 1_000,
+              input_tokens: 250,
+            },
+            signal: controller.signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(response.error).toBeUndefined();
+      expect(response.success).toBe(true);
+      // Positional, so swapping the two strings is caught here rather than by
+      // a consumer that happens to read only one of them.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        true,
+        'last response',
+        { context_usage: 0.25, context_limit: 1_000, input_tokens: 250 },
+        controller.signal,
+      );
+      // Read off the bridge response rather than through a consumer: both
+      // consumers mask a missing value with `?? 1`, so an assertion made
+      // through them would still pass if the producer stopped setting it.
+      expect(response.stopHookCount).toBe(2);
+      // The `createHookOutput('Stop', ...)` wrap. A plain object would carry
+      // the same fields but none of the methods every consumer calls.
+      // The `createHookOutput('Stop', ...)` wrap, asserted on the call rather
+      // than the result: this file replaces the hooks module with a bare mock,
+      // so the wrap returns undefined here. The call is what matters -- without
+      // it no consumer can ask the output whether it blocks.
+      expect(vi.mocked(createHookOutput)).toHaveBeenCalledWith(
+        'Stop',
+        blockingOutput,
+      );
+    });
+
+    it('reports no output when every Stop hook declines to act', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: undefined,
+        allOutputs: [],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: { stop_hook_active: false },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(response.success).toBe(true);
+      expect(response.output).toBeUndefined();
+      expect(response.stopHookCount).toBe(0);
+      // No final output means nothing to wrap.
+      expect(vi.mocked(createHookOutput)).not.toHaveBeenCalled();
+      // An absent last message is forwarded as the empty string, and usage
+      // figures that cannot be computed are forwarded as undefined.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        false,
+        '',
+        undefined,
+        undefined,
+      );
+    });
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {

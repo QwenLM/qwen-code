@@ -28,7 +28,7 @@
  * and the keyboard; it delegates every decision here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
+import { escapePath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { Fzf, type FzfResultItem } from 'fzf';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
@@ -46,7 +46,10 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
 } from '../commands/commands.js';
-import { getCommandDisplayName } from '../../services/commandMetadata.js';
+import {
+  getCommandDisplayName,
+  getCommandSourceBadge,
+} from '../../services/commandMetadata.js';
 import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
@@ -830,6 +833,7 @@ function toCommandSuggestion(
     label: getCommandDisplayName(command, { matchedAlias, includeAliases }),
     value: command.name,
     description: command.description,
+    sourceBadge: getCommandSourceBadge(command) ?? undefined,
     argumentHint: command.argumentHint,
     matchedAlias,
     submitOnAccept: command.submitOnAccept,

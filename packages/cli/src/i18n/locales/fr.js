@@ -137,8 +137,8 @@ export default {
     'Aucune compétence n’est actuellement disponible.',
   'No skills match the search.':
     'Aucune compétence ne correspond à la recherche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'Locked by settings entries you cannot toggle here:':
+    'Verrouillées par des entrées de paramètres (impossible de basculer ici) :',
   '(+{{count}} locked)': '(+{{count}} verrouillée(s))',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
@@ -866,8 +866,8 @@ export default {
     "L'entrée de la commande est du JSON avec tool_name, tool_input, tool_use_id, error, error_type, is_interrupt et is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'L’entrée de la commande est un JSON avec "prompt" (l’invite actuelle liée au modèle) et, facultativement, "submitted_prompt" (la projection textuelle de l’interface TUI interactive prise en charge).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'L’entrée de la commande est un JSON avec "prompt" (l’invite actuelle liée au modèle) et, facultativement, "submitted_prompt" (la projection textuelle capturée à une frontière de soumission prise en charge).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':

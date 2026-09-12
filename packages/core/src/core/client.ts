@@ -30,6 +30,10 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   goalRequiresExactPermit,
   PAUSED_GOAL_SYSTEM_REMINDER,
   type GoalSnapshotV2,
@@ -40,16 +44,9 @@ import {
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
 import {
-  activeGoalEquals,
-  getActiveGoal,
-  type ActiveGoal,
-} from '../goals/activeGoalStore.js';
-import {
-  abortGoalForStopHookCap,
-  getStopHookContinuationReason,
-  GOAL_HOOK_ID_OUTPUT_KEY,
-} from '../goals/goalHook.js';
-import { applyPendingGoalProposal } from '../goals/goal-tools.js';
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+} from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
@@ -95,6 +92,7 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
 import {
@@ -164,6 +162,11 @@ import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import {
+  TrustedUserAnswers,
+  type TrustedUserAnswerQuestion,
+  type TrustedUserAnswerSnapshot,
+} from '../permissions/trusted-user-answers.js';
 
 // Hook types and utilities
 import {
@@ -179,7 +182,8 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
@@ -206,6 +210,9 @@ export enum SendMessageType {
   /** Runtime-owned continuation for an active Goal. */
   Goal = 'goal',
 }
+
+/** Upper bound on prompt ids remembered as Stop-hook-forced. */
+const MAX_STOP_HOOK_FORCED_PROMPT_IDS = 32;
 
 export interface SendMessageOptions {
   type: SendMessageType;
@@ -236,6 +243,16 @@ export interface SendMessageOptions {
   goalSignal?: AbortSignal;
   /** Whether this permit belongs to runtime work or a real-user turn. */
   goalOrigin?: 'runtime' | 'user';
+  /**
+   * Host-specific reason when this send has to pause an interrupted Goal.
+   * `interruption.failure` carries the error that ended the turn when there
+   * was one, so a host can tell a run that died apart from one that stopped.
+   * `interruption.cause` names a non-error stop with host-specific wording.
+   */
+  getInterruptedGoalPauseReason?: (interruption?: {
+    failure?: string;
+    cause?: 'stop-hook-cap';
+  }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
 }
@@ -362,6 +379,7 @@ type MainSessionPromptConfig = Pick<
   | 'getSystemPrompt'
   | 'getModel'
   | 'getOutputStyle'
+  | 'getCodeModeOnly'
   | 'getExperimentalZedIntegration'
   | 'getInputFormat'
   | 'isInteractive'
@@ -390,11 +408,13 @@ export function getMainSessionBaseSystemPrompt(
         // section, and a session must not be reminded of one it lacks.
         resolveMainSessionOutputStyle(config),
         config.isTodoWriteEnabled(),
+        config.getCodeModeOnly(),
       );
 }
 
 export class LlmClient {
   private chat?: LlmChat;
+  private readonly trustedUserAnswers = new TrustedUserAnswers();
   private initializedSessionId: string | undefined;
   /**
    * Open session-swap telemetry transaction, if any. See
@@ -414,6 +434,25 @@ export class LlmClient {
     undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
   };
   private sessionTurnCount = 0;
+  /**
+   * Prompt ids whose previous Stop check was blocked by a Stop hook, so the
+   * turn now running is that hook's continuation. Drives `stop_hook_active`.
+   *
+   * Kept on the client, keyed by prompt id, because a hook-forced
+   * continuation that calls a tool comes back through a fresh top-level
+   * sendMessageStream call from the caller. That re-entry must reuse the
+   * same `prompt_id` to be recognised. Any send that starts an interaction
+   * (user query, retry, cron, notification, teammate, goal turn) clears its
+   * own id: new input arrived, so the next Stop is not hook-forced. A caller
+   * that re-mints the prompt id for the re-entry (the teammate turn in
+   * headless mode) therefore starts fresh by design. Entries are also
+   * cleared when the stop is allowed, the blocking cap is hit, steer input
+   * replaces the turn, or the send exits abnormally.
+   *
+   * Only the flag lives here; the consecutive-block count still rides the
+   * per-call `stopHookState`.
+   */
+  private readonly stopHookForcedPromptIds = new Set<string>();
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
@@ -829,6 +868,18 @@ export class LlmClient {
     return this.getChat().getHistoryTail(count, curated);
   }
 
+  recordTrustedUserAnswers(
+    callId: string,
+    questions: readonly TrustedUserAnswerQuestion[],
+    answers: unknown,
+  ): boolean {
+    return this.trustedUserAnswers.record(callId, questions, answers);
+  }
+
+  getTrustedUserAnswers(): TrustedUserAnswerSnapshot {
+    return this.trustedUserAnswers.snapshot();
+  }
+
   private getHistoryTailShallow(
     count: number,
     curated: boolean = false,
@@ -861,13 +912,17 @@ export class LlmClient {
    * continuations keep the proposal parked until their final boundary. An
    * aborted turn drops the approval instead of starting a loop the user just
    * cancelled; an abort during dispatch pauses the new Goal.
+   * Host-supported sessions settle after classifying their own protective
+   * exits, so core must leave their single-take proposal latch untouched.
    */
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
     loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
     turnKey: string,
+    reportFailure: (message: string) => void,
   ): Promise<void> {
+    if (this.config.getGoalProposalHostSupported?.()) return;
     const take = this.config.takePendingGoalProposal;
     if (typeof take !== 'function') return;
     if (!turnEnded && !signal.aborted) return;
@@ -879,16 +934,21 @@ export class LlmClient {
       debugLogger.debug(
         'Dropping an approved Goal proposal: the Goal runtime is unavailable',
       );
+      reportFailure(formatProposeGoalRecoveryFailed(proposal.objective));
       return;
     }
     if (signal.aborted) return;
     const result = await applyPendingGoalProposal(runtime, proposal);
-    if (signal.aborted && result.applied) {
+    if (
+      (signal.aborted || proposal.approvalSignal?.aborted) &&
+      result.applied
+    ) {
       try {
         await runtime.dispatch({
           action: 'pause',
           expectedGoalId: result.goal.goalId,
           expectedRevision: result.goal.revision,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
         });
       } catch (error) {
         debugLogger.warn(
@@ -900,6 +960,11 @@ export class LlmClient {
     }
     if (!result.applied) {
       debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+      reportFailure(
+        result.kind === 'changed'
+          ? result.reason
+          : formatProposeGoalRecoveryFailed(proposal.objective),
+      );
     }
   }
 
@@ -988,6 +1053,7 @@ export class LlmClient {
       // Nothing to strip — leave caches and IDE context alone.
       return strippedEntries;
     }
+    this.trustedUserAnswers.clear();
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
@@ -1066,6 +1132,7 @@ export class LlmClient {
   }
 
   setHistory(history: Content[]) {
+    this.trustedUserAnswers.clear();
     this.getChat().setHistory(history);
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
@@ -1090,6 +1157,7 @@ export class LlmClient {
     // the clear, reintroducing the file_unchanged placeholder bug).
     const newLen = this.getChat().getHistoryLength();
     if (newLen < prevLen) {
+      this.trustedUserAnswers.clear();
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
@@ -1105,12 +1173,13 @@ export class LlmClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
+    const codeModeOnly = this.config.getToolMode?.() === ToolMode.CodeModeOnly;
     const deferredSummary = toolRegistry.getDeferredToolSummary();
     // Progressive MCP discovery registers tools after a resumed chat has
     // already been constructed. Re-scan the live history here so historical
     // MCP calls reveal their newly registered schemas before declarations are
     // refreshed. setTools() is shared by interactive and headless refreshes.
-    if (!options.skipHistoryReveal) {
+    if (!codeModeOnly && !options.skipHistoryReveal) {
       this.revealDeferredToolsReferencedInHistory(deferredSummary, () =>
         this.getHistoryShallow(),
       );
@@ -1668,6 +1737,7 @@ export class LlmClient {
    * later stay deferred until the next session start.
    */
   private preloadDeferredToolsWithinBudget(): void {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) return;
     const toolRegistry = this.config.getToolRegistry();
     // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
     // reveals everything — there is no budget decision to make.
@@ -2113,23 +2183,6 @@ export class LlmClient {
     }
   }
 
-  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
-    switch (approvalMode) {
-      case ApprovalMode.DEFAULT:
-        return PermissionMode.Default;
-      case ApprovalMode.PLAN:
-        return PermissionMode.Plan;
-      case ApprovalMode.AUTO_EDIT:
-        return PermissionMode.AutoEdit;
-      case ApprovalMode.AUTO:
-        return PermissionMode.Auto;
-      case ApprovalMode.YOLO:
-        return PermissionMode.Yolo;
-      default:
-        return PermissionMode.Default;
-    }
-  }
-
   private async fireSessionStartHook(
     source: SessionStartSource,
     signal?: AbortSignal,
@@ -2148,14 +2201,14 @@ export class LlmClient {
         ? await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
             undefined,
             signal,
           )
         : await hookSystem.fireSessionStartEvent(
             source,
             this.config.getModel() ?? '',
-            this.toPermissionMode(this.config.getApprovalMode()),
+            approvalModeToPermissionMode(this.config.getApprovalMode()),
           );
       signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
@@ -2174,6 +2227,7 @@ export class LlmClient {
     signal?: AbortSignal,
   ): Promise<LlmChat> {
     signal?.throwIfAborted();
+    this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2203,6 +2257,8 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      const codeModeOnly =
+        this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
@@ -2211,12 +2267,14 @@ export class LlmClient {
       // call to foo_tool because the schema is absent. This must happen
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
-      profiler.timeSync('resume_deferred_tool_reveal', () => {
-        this.revealDeferredToolsReferencedInHistory(
-          deferredSummary,
-          () => extraHistory,
-        );
-      });
+      if (!codeModeOnly) {
+        profiler.timeSync('resume_deferred_tool_reveal', () => {
+          this.revealDeferredToolsReferencedInHistory(
+            deferredSummary,
+            () => extraHistory,
+          );
+        });
+      }
       // Budget-based deferred-tool preload runs BEFORE the deferred
       // reminder is resolved so preloaded tools are filtered out of the
       // startup reminder and never enter the announced set.
@@ -2786,6 +2844,24 @@ export class LlmClient {
     }
   }
 
+  private markStopHookForced(promptId: string): void {
+    this.stopHookForcedPromptIds.delete(promptId);
+    this.stopHookForcedPromptIds.add(promptId);
+    // Bounded: a continuation that ends with tool calls the caller never
+    // re-enters leaves its id behind until that id starts a new interaction.
+    while (
+      this.stopHookForcedPromptIds.size > MAX_STOP_HOOK_FORCED_PROMPT_IDS
+    ) {
+      const oldest = this.stopHookForcedPromptIds.values().next().value;
+      if (oldest === undefined) break;
+      this.stopHookForcedPromptIds.delete(oldest);
+    }
+  }
+
+  private clearStopHookForced(promptId: string): void {
+    this.stopHookForcedPromptIds.delete(promptId);
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -2865,6 +2941,13 @@ export class LlmClient {
     let goalPermitReleased = false;
     let unsubscribeGoalState: (() => void) | undefined;
     const pendingGoalStateEvents: GoalStateStreamEvent[] = [];
+    const pendingGoalSettlementMessages: ServerLlmStreamEvent[] = [];
+    const reportGoalSettlementFailure = (message: string) => {
+      pendingGoalSettlementMessages.push({
+        type: LlmEventType.GoalSettlementFailed,
+        value: message,
+      });
+    };
     let hasEmittedActiveGoalProjection = false;
     let lastEmittedActiveGoal: ActiveGoalEventValue | undefined;
     const closeGoalStateEvents = () => {
@@ -2887,7 +2970,10 @@ export class LlmClient {
       });
     };
     const takePendingGoalEvents = (): ServerLlmStreamEvent[] => {
-      const events: ServerLlmStreamEvent[] = [];
+      const events = pendingGoalSettlementMessages.splice(
+        0,
+        pendingGoalSettlementMessages.length,
+      );
       for (const stateEvent of pendingGoalStateEvents.splice(
         0,
         pendingGoalStateEvents.length,
@@ -2936,7 +3022,11 @@ export class LlmClient {
       }
       return goalRuntime;
     };
-    const releaseGoalPermitOnInterruptedExit = async () => {
+    const releaseGoalPermitOnInterruptedExit = async (
+      pauseReason?: string,
+      failure?: string,
+      cause?: 'stop-hook-cap',
+    ) => {
       if (
         goalPermitReleased ||
         !goalPermit ||
@@ -2958,10 +3048,27 @@ export class LlmClient {
 
         if (runtime.getSnapshot().goal?.status === 'active') {
           try {
+            // This is the pause that wins the race on the interactive Esc
+            // path: it runs before every host's own reasoned pause, and a
+            // second pause on a non-active Goal throws, so the reason has to
+            // ride here or it never reaches the record. The site also runs
+            // for a turn that merely failed to complete (`!normalCompletion`),
+            // which is not a user interrupt and must not read as one.
             await runtime.dispatch({
               action: 'pause',
               expectedGoalId: goalPermit.goalId,
               expectedRevision: goalPermit.revision,
+              reason:
+                pauseReason ??
+                options?.getInterruptedGoalPauseReason?.({
+                  failure,
+                  ...(cause ? { cause } : {}),
+                }) ??
+                (cause === 'stop-hook-cap'
+                  ? GOAL_PAUSE_REASON_STOP_HOOK_CAP
+                  : callerSignal.aborted
+                    ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                    : goalPauseReasonForFailure('the turn was interrupted')),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause interrupted Goal turn', error);
@@ -2982,8 +3089,12 @@ export class LlmClient {
         debugLogger.warn('Failed to release interrupted Goal turn', error);
       }
     };
-    const finalizeInterruptedGoalTurn = async () => {
-      await releaseGoalPermitOnInterruptedExit();
+    const finalizeInterruptedGoalTurn = async (
+      pauseReason?: string,
+      failure?: string,
+      cause?: 'stop-hook-cap',
+    ) => {
+      await releaseGoalPermitOnInterruptedExit(pauseReason, failure, cause);
       closeGoalStateEvents();
       return takePendingGoalEvents();
     };
@@ -3113,6 +3224,9 @@ export class LlmClient {
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      // New input starts this interaction, so its first Stop is not
+      // hook-forced even when a retry or goal turn reuses the prompt id.
+      this.clearStopHookForced(prompt_id);
       startInteractionSpan(this.config, {
         promptId: prompt_id,
         model: options?.modelOverride ?? this.config.getModel(),
@@ -3221,6 +3335,7 @@ export class LlmClient {
               return runtime;
             },
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -3269,7 +3384,10 @@ export class LlmClient {
         signal.aborted ? undefined : getErrorType(error),
       );
       this.config.takePendingGoalProposal?.(prompt_id);
-      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn(
+        undefined,
+        getErrorMessage(error),
+      )) {
         yield goalEvent;
       }
       // A hook failure (including an abort during the hook await) exits
@@ -3348,7 +3466,10 @@ export class LlmClient {
         signal.aborted ? undefined : getErrorType(error),
       );
       this.config.takePendingGoalProposal?.(prompt_id);
-      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn(
+        undefined,
+        getErrorMessage(error),
+      )) {
         yield goalEvent;
       }
       // A Goal admission failure rethrows before the settlement
@@ -3439,6 +3560,7 @@ export class LlmClient {
     // early-return) leaves this `false`, and the `finally` block aborts the
     // prefetch as a safety net.
     let normalCompletion = false;
+    let sessionTokenLimitExceeded = false;
     let hasToolCalls = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
@@ -3642,6 +3764,7 @@ export class LlmClient {
         const lastPromptTokenCount =
           this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {
+          sessionTokenLimitExceeded = true;
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
             type: LlmEventType.SessionTokenLimitExceeded,
@@ -3885,7 +4008,10 @@ export class LlmClient {
               part as Part,
             ])
           ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
               yield goalEvent;
             }
             const loopType = this.loopDetector.getLastLoopType();
@@ -3938,31 +4064,6 @@ export class LlmClient {
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
       }
-
-      const activeGoalAtTurnStart = goalRuntime?.getSnapshot().goal
-        ? undefined
-        : getActiveGoal(this.config.getSessionId());
-      if (activeGoalAtTurnStart) {
-        yield {
-          type: LlmEventType.ActiveGoal,
-          value: activeGoalAtTurnStart,
-        };
-      }
-      let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
-      // Tracks the last emitted goal value to suppress duplicate events.
-      // Mutates `lastEmittedActiveGoal` when an event is returned.
-      const maybeEmitActiveGoalChange = (
-        nextActiveGoal: ActiveGoal | undefined,
-      ): ServerLlmStreamEvent | undefined => {
-        if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
-          return undefined;
-        }
-        lastEmittedActiveGoal = nextActiveGoal;
-        return {
-          type: LlmEventType.ActiveGoal,
-          value: nextActiveGoal ?? null,
-        };
-      };
 
       // MessageDisplay hook: fires repeatedly as this turn's reply streams
       // (before Stop, which fires once at the end). One dispatcher — one
@@ -4077,7 +4178,10 @@ export class LlmClient {
             // the non-interactive runner) build their own list from the yielded
             // ToolCallRequest events and stop on LoopDetected.
             turn.pendingToolCalls.length = 0;
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
               yield goalEvent;
             }
             const loopType = this.loopDetector.getLastLoopType();
@@ -4110,7 +4214,10 @@ export class LlmClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
               yield goalEvent;
             }
             const loopType = this.loopDetector.getLastLoopType();
@@ -4178,7 +4285,12 @@ export class LlmClient {
             (event.type === LlmEventType.UserCancelled && signal.aborted) ||
             event.type === LlmEventType.Error
           ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              event.type === LlmEventType.Error
+                ? event.value.error?.message
+                : undefined,
+            )) {
               yield goalEvent;
             }
           }
@@ -4241,6 +4353,8 @@ export class LlmClient {
         const steerTurnBudget = boundedTurns - 1;
         const steerInput = await takeSteerInput(steerTurnBudget);
         if (steerInput) {
+          // A steered turn is user-driven, not forced by a Stop hook.
+          this.clearStopHookForced(prompt_id);
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
@@ -4295,7 +4409,10 @@ export class LlmClient {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
             eventName: 'Stop',
             input: {
-              stop_hook_active: true,
+              // True while this prompt is continuing because a Stop hook
+              // blocked, including after tool calls made along the way, so a
+              // hook can tell its own continuation apart and stop re-blocking.
+              stop_hook_active: this.stopHookForcedPromptIds.has(prompt_id),
               last_assistant_message: responseText,
               ...contextUsage,
             },
@@ -4307,22 +4424,10 @@ export class LlmClient {
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
-        // Stop hook callbacks can mutate active goal state during request().
-        // Capture it before cancellation returns so clear events are not lost.
-        const activeGoalAfterStopHook = goalPermit
-          ? undefined
-          : getActiveGoal(this.config.getSessionId());
-
         // Check if aborted after hook execution
         if (signal.aborted) {
           for (const goalEvent of await finalizeInterruptedGoalTurn()) {
             yield goalEvent;
-          }
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
           }
           endCurrentInteraction('cancelled');
           return turn;
@@ -4357,6 +4462,7 @@ export class LlmClient {
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
 
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.clearStopHookForced(prompt_id);
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
@@ -4366,7 +4472,11 @@ export class LlmClient {
               value: warning,
             };
             debugLogger.warn(warning);
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              undefined,
+              'stop-hook-cap',
+            )) {
               yield goalEvent;
             }
             endCurrentInteraction('ok');
@@ -4402,6 +4512,7 @@ export class LlmClient {
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
             const pushCountBefore = currentPushCount();
+            this.markStopHookForced(prompt_id);
             let hookTurn: Turn;
             try {
               hookTurn = yield* this.sendMessageStream(
@@ -4440,17 +4551,11 @@ export class LlmClient {
         ) {
           // Check if aborted before continuing
           if (signal.aborted) {
-            const activeGoalEvent = maybeEmitActiveGoalChange(
-              activeGoalAfterStopHook,
-            );
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
             endCurrentInteraction('cancelled');
             return turn;
           }
 
-          const continueReason = getStopHookContinuationReason(stopOutput);
+          const continueReason = stopOutput.getEffectiveReason();
 
           // Track stop hook iterations
           const currentIterationCount =
@@ -4466,23 +4571,11 @@ export class LlmClient {
           // yield because a cap of 1 means no follow-up turn should run.
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
+            this.clearStopHookForced(prompt_id);
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
             );
-            abortGoalForStopHookCap(
-              this.config,
-              this.config.getSessionId(),
-              warning,
-            );
-            const activeGoalAfterCap = getActiveGoal(
-              this.config.getSessionId(),
-            );
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterCap);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
             yield {
               type: LlmEventType.HookSystemMessage,
               value: warning,
@@ -4493,19 +4586,13 @@ export class LlmClient {
               signal,
               loadGoalRuntime,
               prompt_id,
+              reportGoalSettlementFailure,
             );
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
             endCurrentInteraction('ok');
             return turn;
-          }
-
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
           }
 
           yield {
@@ -4517,80 +4604,25 @@ export class LlmClient {
             },
           };
 
-          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
-          // back to the model, starting a new logical turn — reset per-turn
-          // loop accounting so each continuation gets its own tool-call
-          // budget. Without this, a goal chain accumulates every iteration's
-          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
-          // handful of healthy iterations. The ACP daemon path already has
-          // these semantics (fresh DaemonToolLoopState per continuation).
-          // Runaway protection is preserved: the cap still bounds each
-          // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
-          // Goal-specific bounds on this path (a user-set maxSessionTurns
-          // still cuts the chain: each hook hop is a plain send with no
-          // Goal permit, so it counts as a session turn): the legacy hook
-          // Goal recurses inside one sendMessageStream call, so the
-          // runtime's token budget (which meters continuations the Goal
-          // runtime schedules) never sees it, and the recursion budget is
-          // not decremented below because a 50-iteration chain with steer
-          // and next-speaker continues would otherwise exhaust MAX_TURNS
-          // before its own iteration cap.
+          // A blocking Stop hook feeds a fresh user-role prompt back to the
+          // model, starting a new logical turn — reset per-turn loop
+          // accounting so each continuation gets its own tool-call budget.
+          // Without this, a hook chain accumulates every iteration's tool
+          // calls into one "turn" and trips TURN_TOOL_CALL_CAP after a handful
+          // of healthy iterations. The ACP daemon path already has these
+          // semantics (fresh DaemonToolLoopState per continuation). Runaway
+          // protection is preserved: the cap still bounds each iteration, and
+          // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
 
-          const activeGoal = getActiveGoal(this.config.getSessionId());
-          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
+          const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
-          const activeGoalAfterSteer = getActiveGoal(
-            this.config.getSessionId(),
-          );
-          const activeGoalChanged =
-            activeGoal !== undefined &&
-            activeGoalAfterSteer?.hookId !== activeGoal.hookId;
-          const goalContinuationChanged =
-            activeGoalChanged &&
-            stopOutput.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] ===
-              activeGoal.hookId;
-          if (activeGoalChanged) {
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterSteer);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
-          }
-          const discardGoalContinuation =
-            goalContinuationChanged &&
-            response.hasNonGoalBlockingStopHook === false;
-          const continuationReasonAfterSteer = discardGoalContinuation
-            ? undefined
-            : goalContinuationChanged &&
-                response.hasNonGoalBlockingStopHook === true
-              ? response.nonGoalBlockingStopReason || 'No reason provided'
-              : continueReason;
-          if (!continuationReasonAfterSteer && !pendingSteer) {
-            await this.settlePendingGoalProposal(
-              true,
-              signal,
-              loadGoalRuntime,
-              prompt_id,
-            );
-            for (const goalEvent of takePendingGoalEvents()) {
-              yield goalEvent;
-            }
-            endCurrentInteraction('ok');
-            normalCompletion = true;
-            return turn;
-          }
-          const continueRequest: Part[] = continuationReasonAfterSteer
-            ? [{ text: continuationReasonAfterSteer }]
-            : [];
+          const continueRequest: Part[] = [{ text: continueReason }];
           if (pendingSteer) {
-            if (continueRequest.length > 0) {
-              continueRequest.push({ text: '\n\n' });
-            }
-            continueRequest.push(...pendingSteer.parts);
+            continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
           }
           const pushCountBefore = currentPushCount();
+          this.markStopHookForced(prompt_id);
           let hookTurn: Turn;
           try {
             hookTurn = yield* this.sendMessageStream(
@@ -4602,19 +4634,10 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                stopHookState: discardGoalContinuation
-                  ? undefined
-                  : {
-                      iterationCount: currentIterationCount,
-                      reasons:
-                        continuationReasonAfterSteer &&
-                        continuationReasonAfterSteer !== continueReason
-                          ? [
-                              ...currentReasons.slice(0, -1),
-                              continuationReasonAfterSteer,
-                            ]
-                          : currentReasons,
-                    },
+                stopHookState: {
+                  iterationCount: currentIterationCount,
+                  reasons: currentReasons,
+                },
               },
               hookTurnBudget,
             );
@@ -4630,6 +4653,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4641,12 +4665,8 @@ export class LlmClient {
           return hookTurn;
         }
 
-        const activeGoalEvent = maybeEmitActiveGoalChange(
-          activeGoalAfterStopHook,
-        );
-        if (activeGoalEvent) {
-          yield activeGoalEvent;
-        }
+        // The stop was allowed, so this prompt is no longer hook-forced.
+        this.clearStopHookForced(prompt_id);
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
@@ -4710,6 +4730,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4767,6 +4788,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4810,6 +4832,7 @@ export class LlmClient {
         signal,
         loadGoalRuntime,
         prompt_id,
+        reportGoalSettlementFailure,
       );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
@@ -4817,7 +4840,10 @@ export class LlmClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
-      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn(
+        undefined,
+        getErrorMessage(error),
+      )) {
         yield goalEvent;
       }
       if (
@@ -4845,7 +4871,11 @@ export class LlmClient {
         this.config.endAutomaticActiveTodoWorkChain(prompt_id);
       }
       if (!goalPermitReleased && (callerSignal.aborted || !normalCompletion)) {
-        await releaseGoalPermitOnInterruptedExit();
+        await releaseGoalPermitOnInterruptedExit(
+          sessionTokenLimitExceeded
+            ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
+            : undefined,
+        );
       }
       closeGoalStateEvents();
       if (pushInitiated) {
@@ -4870,6 +4900,9 @@ export class LlmClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        // Only a natural end can hand a hook-forced turn's tool calls back to
+        // the caller for a ToolResult re-entry; any other exit ends it.
+        this.clearStopHookForced(prompt_id);
         this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
