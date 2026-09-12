@@ -827,7 +827,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
                 type: 'string',
                 enum: ['container'],
                 description:
-                  "Run this regular subagent's file and shell tools in a container. Composes with worktree isolation. Git metadata, host tools, hooks, nested agents, and task resume are unavailable. Workspace file changes persist.",
+                  "Run this regular subagent's file and shell tools in a container. Composes with worktree isolation. The workspace root's .git is masked; nested Git metadata remains workspace content. Host tools, hooks, nested agents, and task resume are unavailable. Workspace file changes persist.",
               },
             }
           : {}),
@@ -2687,6 +2687,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         )
       );
     };
+    const cleanupAfterExecution = async (): Promise<string> => {
+      try {
+        return formatWorktreeSuffix(await cleanupWorktreeIsolation());
+      } catch (error) {
+        if (!executionEnvironment) throw error;
+        return (
+          formatExecutionCleanupFailure(error) +
+          '\nThe agent result is preserved. Do not automatically rerun the task; container resources may still require cleanup.'
+        );
+      }
+    };
 
     // Hoisted so the outer catch can restore parent PermissionManager
     // state when an exception lands between `createApprovalModeOverride`
@@ -3801,11 +3812,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 recordTerminalOutcome();
               }
 
-              const wtSuffix = formatWorktreeSuffix(
+              const wtSuffix =
                 hadWorktreeIsolation || executionEnvironment
-                  ? await cleanupWorktreeIsolation()
-                  : {},
-              );
+                  ? await cleanupAfterExecution()
+                  : '';
               // The usage notice is a suffix, not part of the model-visible
               // text: baking it into finalText would make the `finalText ||
               // <reason>` fallbacks below see a non-empty string and publish
@@ -4452,7 +4462,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           stopHookWarning,
         );
         const wtSuffix =
-          formatWorktreeSuffix(await cleanupWorktreeIsolation()) +
+          (await cleanupAfterExecution()) +
           (subagentConfig.executor !== undefined ? EXTERNAL_USAGE_NOTICE : '');
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {

@@ -13,7 +13,6 @@ import {
 import { writeStderrLine } from './stdioHelpers.js';
 
 interface RelaunchOptions {
-  filterEnvironment?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   afterSpawn?: () => void;
   childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
@@ -69,8 +68,7 @@ export async function relaunchAppInChildProcess(
       ...scriptArgs,
     ];
     const newEnv: NodeJS.ProcessEnv = {
-      // Reload files in the child so their values retain file provenance.
-      ...(options?.filterEnvironment?.(process.env) ?? process.env),
+      ...process.env,
       ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
     };

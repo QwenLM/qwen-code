@@ -2,7 +2,7 @@
 
 [English](2026-09-12-agent-container-execution.md) | [简体中文](2026-09-12-agent-container-execution.zh-CN.md)
 
-Status: implemented; real Docker/Podman isolation validation pending runtime availability. Related: #11695, #11696, #9556.
+Status: implemented; independent Linux rootful Docker verification reported; Podman/rootless verification remains pending. Related: #11695, #11696, #9556.
 
 ## Problem and current state
 
@@ -33,8 +33,11 @@ For a source checkout, run `npm run build` and `npm run bundle`, then launch
 `QWEN_AGENT_EXECUTION_BACKEND=docker node dist/cli.js`. Ask the Agent tool to use
 `execution_backend: "container"`. Replace `docker` with `podman` when appropriate.
 An operator can export `QWEN_CODE_CUSTOM_SANDBOX_IMAGE` for another toolchain.
-CLI relaunches reload file-sourced environment values so they retain their
-provenance instead of becoming trusted inherited values in the child process.
+CLI relaunches preserve environment values for startup-time consumers such as
+Node TLS certificates and settings interpolation. Private parent-to-child
+metadata preserves their file provenance before environment files are loaded;
+no file scope can supply this metadata. Container runtime clients still discard
+all file-sourced values.
 
 The option composes with `isolation: "worktree"` and `working_dir`. It does not
 extend the model-visible isolation enum or change `isolation: "remote"`.
@@ -109,9 +112,12 @@ it does not expose the host runtime directory.
 
 Mask the working tree's `.git` entry with an empty read-only mount. Linked
 worktrees refer to a shared common directory which contains parent and sibling
-state and may contain credentials. This first backend edits working files; Git
-metadata operations inside the container are unavailable. The host still sees
-the actual changes and applies the existing worktree preservation rules. Git
+state and may contain credentials. Only the selected workspace root's `.git` is
+masked. Nested repositories and
+submodules inside the workspace remain readable and writable workspace content,
+including any credentials stored there. This is not a repository-secret filter.
+The host still sees the actual changes and applies the existing worktree
+preservation rules. Git
 commit transfer or a private Git metadata view requires a separate design.
 
 ## Network and credentials
@@ -120,13 +126,20 @@ General commands, file operations, builds, tests run without
 network access. An explicitly recognized standalone package installation may run
 in a separate install container sharing the working files. Command classification
 must reject compound shell expressions as installation requests. This exception
-allows ordinary networking, not a claimed registry-only restriction.
+allows ordinary networking, including package lifecycle scripts and access to
+the writable workspace. Scripts can transmit workspace contents. Lifecycle
+scripts remain enabled for dependency/toolchain compatibility; registry-only
+egress or mandatory `--ignore-scripts` would be a separate policy change.
 
 Both paths use the same explicit environment allowlist and temporary HOME. No
 model, GitHub, cloud or MCP credentials are forwarded. Images and the container
-runtime are trusted infrastructure. This first backend is not advertised inside
-the existing whole-session sandbox: that handoff does not preserve environment
-provenance. A forced container request fails as unavailable; the Docker socket
+runtime are trusted infrastructure. Rootful runtimes use the invoking host
+UID/GID; a root operator therefore runs UID 0 inside the container. The dropped
+capabilities and `no-new-privileges` still apply; UID mapping does not guarantee
+an unprivileged user. This first backend is not advertised inside
+the existing whole-session sandbox or daemon/embedded-bridge ACP children:
+those handoffs do not preserve environment provenance. A forced container
+request fails as unavailable; the Docker socket
 is never automatically mounted.
 
 ## Lifecycle and recovery
@@ -136,8 +149,14 @@ idempotent cleanup on startup failure, foreground completion, background
 completion, cancellation, error and teardown. Await cleanup before host worktree
 inspection or removal. Killing only the host runtime client is insufficient.
 Tool invocation resources are released on scheduler terminal states, including
-host permission denials. Automatic history compression invalidates the worker
-cache directly across derived Config layers.
+host permission denials. If installation execution finishes but cleanup fails,
+return its original output with a cleanup warning, retain the worker's ownership,
+and fail session cleanup rather than remove its workspace. Foreground and
+background agent completion also retain their result and termination status
+with a cleanup warning; the root session keeps ownership of failed resources.
+A cleanup failure is
+not grounds for replaying an already completed command. Automatic history
+compression invalidates the worker cache directly across derived Config layers.
 
 The first version does not resume a disposed container subagent. Both discovery
 and direct resume must reject it. Persist a container isolation marker in the
@@ -148,6 +167,14 @@ insufficient because old readers ignore unknown properties.
 
 Container loss becomes a tool error. A lost response after a possible write is
 reported as an unknown outcome; the harness never automatically replays it.
+Cancellation and malformed protocol responses fail the whole worker session.
+Current product cancellation also stops the owning agent. Silently skipping
+protocol corruption would hide a possibly lost result, so recovery is deferred.
+
+A hard host exit such as `SIGKILL` cannot run this cleanup. Exited containers and
+temporary output directories may remain; there is no startup sweeper in this
+slice. Operators must verify ownership and that execution has stopped before
+manual removal. A cross-session reaper requires separate ownership/race rules.
 
 ## Affected areas
 
@@ -172,6 +199,14 @@ verify inaccessible host sentinel credentials, worktree persistence, denied
 networking, installation, process cleanup and container death. Simulated runtime
 tests are protocol evidence, not evidence of kernel isolation. Report unavailable
 real-runtime tests explicitly.
+
+[Independent Linux verification](https://github.com/QwenLM/qwen-code/pull/11711#issuecomment-5645312113)
+reports ten harness suites and thirteen CLI arms at `ebae028529` with rootful
+Docker 26.1.5. It used the published 0.23.0 image because 0.23.3 could not be
+pulled, and a local HTTP tarball server because the bridge lacked public egress.
+Podman, a live rootless daemon and the configured 0.23.3 image remain unverified
+by that report. These are external results, distinct from local process-fixture
+checks.
 
 Build, typecheck, bundle, run focused tests, then perform two clean self-audit
 passes and the repository code-review workflow before declaring completion.

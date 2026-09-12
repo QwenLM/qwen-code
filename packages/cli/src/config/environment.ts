@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
@@ -74,6 +75,37 @@ function isReloadExcludedKey(key: string): boolean {
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
+
+// Consume only inherited metadata, before any environment file can be loaded.
+const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+if (inheritedProvenance) {
+  const sources: unknown = JSON.parse(inheritedProvenance);
+  if (
+    !sources ||
+    typeof sources !== 'object' ||
+    !('dotEnv' in sources) ||
+    !('settingsEnv' in sources) ||
+    !Array.isArray(sources.dotEnv) ||
+    !Array.isArray(sources.settingsEnv) ||
+    !sources.dotEnv.every((key) => typeof key === 'string') ||
+    !sources.settingsEnv.every((key) => typeof key === 'string')
+  ) {
+    throw new Error('Invalid inherited environment provenance.');
+  }
+  for (const key of sources.dotEnv) dotEnvSourcedKeys.add(key);
+  for (const key of sources.settingsEnv) settingsEnvSourcedKeys.add(key);
+}
+
+export function getRelaunchEnvProvenance(): Record<string, string> {
+  return {
+    [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
+      dotEnv: [...dotEnvSourcedKeys],
+      settingsEnv: [...settingsEnvSourcedKeys],
+    }),
+  };
+}
+
 const lastReloadSnapshot = new Map<string, string>();
 let lastReloadSnapshotSeeded = false;
 

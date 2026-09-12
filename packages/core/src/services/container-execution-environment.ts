@@ -517,20 +517,44 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     update?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const worker = this.invocation(id);
+    let result: ToolResult;
     try {
-      return await worker.request(
+      result = await worker.request<ToolResult>(
         { method: 'execute', invocationId: id },
         signal,
         update,
       );
-    } finally {
-      this.invocations.delete(id);
-      if (worker !== this.primary) {
+    } catch (error) {
+      await this.release(id, AbortSignal.timeout(30_000)).catch(
+        () => undefined,
+      );
+      throw error;
+    }
+    this.invocations.delete(id);
+    if (worker !== this.primary) {
+      try {
         await worker.dispose();
         this.workers.delete(worker);
+      } catch (error) {
+        const notice = `\n\n[Container cleanup failed after tool execution: ${String(error)}. The tool result above is still valid; do not automatically retry the command.]`;
+        result.llmContent =
+          typeof result.llmContent === 'string'
+            ? result.llmContent + notice
+            : [
+                ...(Array.isArray(result.llmContent)
+                  ? result.llmContent
+                  : [result.llmContent]),
+                { text: notice },
+              ];
+        if (typeof result.returnDisplay === 'string') {
+          result.returnDisplay += notice;
+        }
+        if (result.error) result.error.message += notice;
       }
     }
+    return result;
   }
+
   modificationContent(
     toolName: string,
     params: Record<string, unknown>,

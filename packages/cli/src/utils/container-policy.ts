@@ -21,42 +21,21 @@ export function hasRootlessMarker(info: string): boolean {
   );
 }
 
-/**
- * The environment the PR's code is given inside the container.
- *
- * An allowlist rather than the inherited environment, which is the point:
- * today both call sites hand it `process.env`, and on CI that carries the
- * review's model and GitHub credentials. `CI` and the npm knobs are the ones
- * the pipeline sets on purpose (`buildRunEnv`), so they are the ones that
- * cross.
- */
+// Preserve the established review sandbox HOME path for both consumers.
 export const CONTAINER_HOME = '/qwen-review-home';
 
+/** Only these explicit values reach review commands and subagent workers. */
 export function containerEnv(cacheDir: string): string[] {
   return [
     'CI=1',
     'npm_config_yes=true',
     'QWEN_SKIP_PREPARE=1',
-    // `HOME` explicitly, because forcing a uid resets it to `/` in these
-    // images — `utils/sandbox.ts` copies the host's for the same reason — and
-    // `/` is not writable by the mapped user, so npm's first write fails
-    // before the install starts.
-    //
-    // And it points at a TMPFS, not at the mount. The first cut put it under
-    // the mount and shared it across every command of every tree: `sh -lc` is
-    // a login shell that sources `$HOME/.profile`, and npm reads
-    // `$HOME/.npmrc`, so one run's postinstall could plant both and the NEXT
-    // review's install — network on — would source and read them. That is
-    // cross-run execution wearing this module's own `--rm` "isolation by
-    // construction" claim, and it was introduced by the fix for the `$HOME`
-    // problem rather than found in the original. A tmpfs is discarded with the
-    // container and never touches the host, so the claim is true again.
+    // A mapped uid needs a writable HOME. A fresh tmpfs also prevents a
+    // previous run's .profile or .npmrc from influencing a later install.
     `HOME=${CONTAINER_HOME}`,
-    // The npm cache stays on the mount, deliberately: it is what keeps an
-    // install from re-downloading ~1 700 packages every review, it holds no
-    // rc file or profile, and npm verifies each entry's integrity hash on
-    // read. That verification is what stands between a poisoned cache and a
-    // bad install — worth naming rather than implying the cache is inert.
+    // The caller owns cache lifetime: review uses its persistent mount;
+    // per-agent installation uses a disposable cache inside the HOME tmpfs.
+    // npm verifies cached package integrity when reusing the review cache.
     `npm_config_cache=${cacheDir}`,
   ];
 }
@@ -68,7 +47,7 @@ export function containerEnv(cacheDir: string): string[] {
  * repository that ships one in `.qwen/.env` points both the availability probe
  * and every `docker run` at a daemon it controls: `required` reads as
  * satisfied, the mount is handed over, and whatever that daemon returns is
- * scored as build, test and probe evidence. An operator's own `DOCKER_HOST`
+ * treated as trusted execution evidence. An operator's own `DOCKER_HOST`
  * (a remote engine, colima, rootless) is untouched — only the file-sourced
  * ones are dropped.
  */

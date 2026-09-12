@@ -475,6 +475,59 @@ describe('AgentTool', () => {
       expect(environment.dispose).toHaveBeenCalledTimes(1);
     });
 
+    it.each(
+      [false, true].flatMap((background) =>
+        [
+          AgentTerminateMode.GOAL,
+          AgentTerminateMode.CANCELLED,
+          AgentTerminateMode.ERROR,
+        ].map((mode) => ({ background, mode })),
+      ),
+    )(
+      'preserves output, terminal status and environment ownership when cleanup fails: %j',
+      async ({ background, mode }) => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(environment.dispose).mockRejectedValue(
+          new ExecutionCleanupError('container still running'),
+        );
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({ ...params, run_in_background: background })
+          .execute();
+        await vi.runAllTimersAsync();
+        const registry = config.getBackgroundTaskRegistry();
+        const publish =
+          mode === AgentTerminateMode.GOAL
+            ? registry.complete
+            : mode === AgentTerminateMode.CANCELLED
+              ? registry.finalizeCancelled
+              : registry.fail;
+        const output = background
+          ? vi.mocked(publish).mock.calls[0]?.[1]
+          : partToString(result.llmContent);
+        expect(output).toContain('Contained result');
+        expect(output).toContain('Container cleanup failed');
+        expect(output).toContain('container still running');
+        expect(output).toContain('Do not automatically rerun');
+        expect(result.error).toBeUndefined();
+        if (background) {
+          expect(publish).toHaveBeenCalledOnce();
+          if (mode !== AgentTerminateMode.GOAL) {
+            expect(registry.complete).not.toHaveBeenCalled();
+          }
+          if (mode !== AgentTerminateMode.ERROR) {
+            expect(registry.fail).not.toHaveBeenCalled();
+          }
+        } else if (mode === AgentTerminateMode.CANCELLED) {
+          expect(output).toContain('cancelled by the user');
+        }
+        expect(registry.registerResidentAgent).not.toHaveBeenCalled();
+        const unregister = vi.mocked(config.registerExecutionEnvironment).mock
+          .results[0].value;
+        expect(unregister).not.toHaveBeenCalled();
+        expect(environment.dispose).toHaveBeenCalledOnce();
+      },
+    );
+
     it('registers startup ownership before awaiting the environment', async () => {
       let ready!: (environment: ExecutionEnvironment) => void;
       const startup = new Promise<ExecutionEnvironment>((resolve) => {

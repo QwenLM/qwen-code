@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { trustedProcessEnv } from './container-policy.js';
 import {
   vi,
   describe,
@@ -24,9 +23,10 @@ import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import {
   loadEnvironment,
-  isFileSourcedEnvKey,
+  getRelaunchEnvProvenance,
   resetEnvironmentTrackingForTesting,
 } from '../config/environment.js';
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../config/shared-env-keys.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -184,7 +184,7 @@ describe('relaunchAppInChildProcess', () => {
     });
   });
 
-  it('reloads file values in the child without promoting them to operator environment', async () => {
+  it('preserves file values and passes their provenance to the child', async () => {
     resetEnvironmentTrackingForTesting();
     delete process.env['TRACK_A_FILE_VALUE'];
     process.env['TRACK_A_OPERATOR_VALUE'] = 'operator';
@@ -192,11 +192,16 @@ describe('relaunchAppInChildProcess', () => {
     const child = createMockChildProcess(0, false);
     mockedSpawn.mockReturnValue(child);
     const promise = relaunchAppInChildProcess([], [], {
-      filterEnvironment: (env) => trustedProcessEnv(env, isFileSourcedEnvKey),
+      childEnv: getRelaunchEnvProvenance(),
     });
     await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
     const childEnv = mockedSpawn.mock.calls[0]?.[2]?.env;
-    expect(childEnv?.['TRACK_A_FILE_VALUE']).toBeUndefined();
+    expect(childEnv?.['TRACK_A_FILE_VALUE']).toBe('repository');
+    const provenance = JSON.parse(childEnv![PRIVATE_RELAUNCH_ENV_PROVENANCE]!);
+    expect(provenance.settingsEnv).toContain('TRACK_A_FILE_VALUE');
+    expect([...provenance.dotEnv, ...provenance.settingsEnv]).not.toContain(
+      'TRACK_A_OPERATOR_VALUE',
+    );
     expect(childEnv?.['TRACK_A_OPERATOR_VALUE']).toBe('operator');
     expect(process.env['TRACK_A_FILE_VALUE']).toBe('repository');
     child.emit('close', 0);

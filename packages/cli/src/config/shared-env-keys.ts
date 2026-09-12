@@ -17,6 +17,8 @@ export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
 export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
 export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
   'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
+export const PRIVATE_RELAUNCH_ENV_PROVENANCE =
+  'QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE';
 
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
 // credentials, installation IDs, etc.) is written. A project `.env` must never
@@ -242,6 +244,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // child as Conversations-hosted (it would force the writer lease and the
   // unbound-durable-task skip onto sessions the contract does not cover).
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -285,6 +288,7 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
 // entry point captures and deletes before any environment-file load.
 const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+  PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
 ]);
 
 export function isPrivateProvenanceEnvKey(key: string): boolean {

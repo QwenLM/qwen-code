@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Config } from '../config/config.js';
@@ -17,8 +17,72 @@ import {
   type ContainerExecutionOptions,
 } from './container-execution-environment.js';
 import type { ExecutionWorkerOptions } from './execution-environment.js';
+import { ExecutionCleanupError } from './execution-environment.js';
+import type { ToolResult } from '../tools/tools.js';
 
 describe('container execution boundary', () => {
+  it.each([
+    { llmContent: 'installed package', returnDisplay: 'installation complete' },
+    {
+      llmContent: [{ text: 'installed package' }],
+      returnDisplay: 'installation complete',
+    },
+    {
+      llmContent: 'partial installation output',
+      returnDisplay: 'installation failed',
+      error: { message: 'package installation failed' },
+    },
+  ] satisfies ToolResult[])(
+    'preserves the tool result and cleanup ownership when installation cleanup fails: %j',
+    async (toolResult) => {
+      const temporaryDirectory = await mkdtemp(
+        join(tmpdir(), 'execution-cleanup-'),
+      );
+      const failure = new ExecutionCleanupError('container removal failed');
+      const primary = { dispose: vi.fn().mockResolvedValue(undefined) };
+      const install = {
+        request: vi.fn().mockResolvedValue(structuredClone(toolResult)),
+        dispose: vi.fn().mockRejectedValue(failure),
+      };
+      const environment: ContainerExecutionEnvironment = Object.assign(
+        Object.create(ContainerExecutionEnvironment.prototype),
+        {
+          primary,
+          temporaryDirectory,
+          workers: new Set([primary, install]),
+          invocations: new Map([['install', install]]),
+        },
+      );
+      try {
+        const result = await environment.execute(
+          'install',
+          new AbortController().signal,
+        );
+        expect(JSON.stringify(result.llmContent)).toContain(
+          typeof toolResult.llmContent === 'string'
+            ? toolResult.llmContent
+            : toolResult.llmContent[0].text,
+        );
+        expect(result.returnDisplay).toContain(toolResult.returnDisplay);
+        expect(JSON.stringify(result.llmContent)).toContain(
+          'Container cleanup failed after tool execution',
+        );
+        expect(result.returnDisplay).toContain('do not automatically retry');
+        if (toolResult.error) {
+          expect(result.error?.message).toContain(toolResult.error.message);
+          expect(result.error?.message).toContain('container removal failed');
+        } else {
+          expect(result.error).toBeUndefined();
+        }
+        await expect(environment.dispose()).rejects.toBe(failure);
+        await expect(access(temporaryDirectory)).resolves.toBeUndefined();
+        expect(primary.dispose).toHaveBeenCalledOnce();
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     'npm ci',
     'npm install',

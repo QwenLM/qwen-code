@@ -15,7 +15,10 @@ import {
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
-import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
+import {
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+} from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
 import { TrustLevel } from './trustedFolders.js';
 
@@ -88,6 +91,8 @@ const TRACKED_ENV = [
   'qwen_update_base_url',
   'Qwen_Update_Base_Url',
   'QWEN_HOME',
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
@@ -147,6 +152,82 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   tmpDirs = [];
+});
+
+describe('relaunch environment provenance', () => {
+  it('restores file provenance before loading files while preserving inherited values', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=file\n');
+    process.env['RUNTIME_PARENT'] = 'operator';
+    parent.loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'settings' } }),
+      workspace,
+    );
+    Object.assign(process.env, parent.getRelaunchEnvProvenance());
+
+    vi.resetModules();
+    const child = await import('./environment.js');
+    expect(process.env['RUNTIME_DOTENV']).toBe('file');
+    expect(process.env['RUNTIME_SETTINGS']).toBe('settings');
+    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBeUndefined();
+    expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_PARENT')).toBe(false);
+    expect(child.getRelaunchEnvProvenance()).toEqual(
+      parent.getRelaunchEnvProvenance(),
+    );
+
+    child.loadEnvironment(testSettings({}), workspace);
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=updated\n');
+    child.reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['RUNTIME_DOTENV']).toBe('updated');
+    expect(process.env['RUNTIME_SETTINGS']).toBeUndefined();
+    expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    child.resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['project .env', 'home .env', 'settings.env'])(
+    'rejects forged provenance from %s on load, reload and runtime snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const keys = [
+        PRIVATE_RELAUNCH_ENV_PROVENANCE,
+        PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
+      ];
+      const forged = JSON.stringify({ dotEnv: [], settingsEnv: [] });
+      const values = Object.fromEntries(keys.map((key) => [key, forged]));
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        fs.writeFileSync(
+          path.join(source === 'home .env' ? os.homedir() : workspace, '.env'),
+          keys.map((key) => `${key}=${forged}`).join('\n'),
+        );
+      }
+      loadEnvironment(settings, workspace);
+      for (const key of keys) expect(process.env[key]).toBeUndefined();
+      reloadEnvironment(settings, workspace);
+      for (const key of keys) expect(process.env[key]).toBeUndefined();
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      for (const key of keys) {
+        expect(snapshot.effectiveEnv[key]).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(['{', '{"dotEnv":[1],"settingsEnv":[]}'])(
+    'rejects malformed inherited provenance instead of losing its trust boundary: %s',
+    async (metadata) => {
+      process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE] = metadata;
+      vi.resetModules();
+      await expect(import('./environment.js')).rejects.toThrow();
+      expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBeUndefined();
+    },
+  );
 });
 
 describe('update download source environment', () => {

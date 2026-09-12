@@ -50,4 +50,16 @@ describe('agent execution capability', () => {
       ),
     ).toThrow('must be docker or podman');
   });
+  it('does not trust inherited backend settings in daemon ACP sessions', () => {
+    expect(
+      agentExecutionFactory(
+        {
+          QWEN_CODE_SERVE: '1',
+          [AGENT_EXECUTION_BACKEND_ENV]: 'docker',
+          DOCKER_HOST: 'tcp://file-controlled.invalid:2375',
+        },
+        () => false,
+      ),
+    ).toBeUndefined();
+  });
 });

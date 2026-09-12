@@ -23,8 +23,8 @@ export function agentExecutionFactory(
   env: NodeJS.ProcessEnv = process.env,
   fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): ExecutionEnvironmentFactory | undefined {
-  // Whole-session sandbox handoffs do not preserve environment provenance.
-  if (env['SANDBOX']) return undefined;
+  // Sandbox and daemon handoffs do not preserve environment provenance.
+  if (env['SANDBOX'] || env['QWEN_CODE_SERVE'] === '1') return undefined;
   if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) return undefined;
   const runtime = env[AGENT_EXECUTION_BACKEND_ENV]?.trim().toLowerCase();
   if (!runtime) return undefined;
