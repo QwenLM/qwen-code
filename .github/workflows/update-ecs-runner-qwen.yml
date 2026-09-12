@@ -1,5 +1,5 @@
 name: 'HK2 Read-only Incident Diagnostic'
-run-name: 'HK2 read-only incident diagnostic 20260912 v2'
+run-name: 'HK2 read-only incident diagnostic 20260912 v3'
 on:
   workflow_dispatch:
 permissions: {}
@@ -40,60 +40,26 @@ jobs:
           #!/usr/bin/env bash
           set -u
           export LC_ALL=C
-          section() { printf '\n===== %s =====\n' "$1"; }
-          section identity
-          date -Is
-          uptime
-          free -h
-          section limits
-          for n in 1 7 10; do
-            unit="actions.runner.QwenLM-qwen-code.ecs-qwen-hk2-${n}.service"
-            systemctl show "$unit" -p Id -p ActiveState -p Result -p MainPID -p ControlGroup -p MemoryCurrent -p MemoryPeak -p MemoryMax -p MemoryHigh -p MemorySwapMax -p TasksCurrent -p TasksMax -p OOMPolicy -p OOMScoreAdjust -p Slice -p Restart -p ExecMainStartTimestamp
-            systemctl cat "$unit" --no-pager
-            cg=$(systemctl show "$unit" -p ControlGroup --value)
-            if [[ -n "$cg" ]]; then
-              for f in memory.events memory.max memory.high memory.peak memory.current pids.events pids.max pids.current; do
-                p="/sys/fs/cgroup${cg}/$f"
-                if [ -r "$p" ]; then printf '%s: ' "$p"; cat "$p"; fi
-              done
-            fi
-          done
-          section global-limits
-          systemctl show system.slice -p MemoryMax -p TasksMax -p MemoryHigh
-          cat /proc/sys/kernel/pid_max /proc/sys/kernel/threads-max /proc/sys/vm/overcommit_memory /proc/sys/vm/overcommit_ratio
-          cat /proc/pressure/memory /proc/pressure/cpu /proc/pressure/io
-          ps -eo pid,ppid,nlwp,etimes,stat,rss,pcpu,comm --sort=-nlwp | head -40
-          section allowed-sudo
-          sudo -n -l
-          section runner-diagnostics
-          for n in 1 7 2 10; do
+          for n in 1 7; do
+            printf '\n===== runner %s job metadata =====\n' "$n"
             d="/home/github-runner/actions-runner-hk2-${n}/_diag"
-            printf '\n--- runner %s ---\n' "$n"
-            find "$d" -maxdepth 1 -type f -name 'Runner_2026091*.log' -print | sort | while IFS= read -r f; do
+            find "$d" -maxdepth 1 -type f -name 'Worker_2026091*.log' -print | sort | tail -12 | while IFS= read -r f; do
               printf '\n--- %s ---\n' "$f"
-              grep -Ein 'out of memory|exception|EAGAIN|137|session|connect error|reconnect|job request|running job|job completed|received job|jobId|planId|runId|buildId|Stop|SIGTERM' "$f" | tail -120
-            done
-            find "$d" -maxdepth 1 -type f -name 'Worker_2026091*.log' -print | sort | tail -10 | while IFS= read -r f; do
-              printf '\n--- %s ---\n' "$f"
-              grep -En '"(run_id|run_number|job|workflow|event_name|ref|sha|repository)"|Job ID|Job name|Job Id|PlanId|Out of memory|EAGAIN|No space left|Killed|Process completed with exit code|systemctl (stop|restart)|killall|pkill' "$f" | head -60
+              grep -A 3 -E '"k": "(run_id|run_number|workflow|event_name|ref|sha)"' "$f" | head -100
             done
           done
-          section cloudmonitor-window
-          ls -lh /usr/local/cloudmonitor/local_data/logs/argusagent*
-          for f in /usr/local/cloudmonitor/local_data/logs/argusagent*.log*; do
+          for f in /home/github-runner/actions-runner-hk2-1/_diag/Worker_20260912-030645-utc.log /home/github-runner/actions-runner-hk2-1/_diag/Worker_20260912-030646-utc.log /home/github-runner/actions-runner-hk2-7/_diag/Worker_20260911-131159-utc.log /home/github-runner/actions-runner-hk2-7/_diag/Worker_20260911-131200-utc.log; do
             [ -r "$f" ] || continue
-            printf '\n--- %s ---\n' "$f"
-            case "$f" in *.gz) continue;; esac
-            grep -Ei '2026-09-12 (00:4|12:3|12:4|12:5|13:0)|2026-09-11 04:3|starting|stopping|shutdown|terminated|out of memory' "$f" | grep -v 'failed to read file /proc/' | tail -200
+            printf '\n===== job tail %s =====\n' "$f"
+            tail -100 "$f" | cut -c 1-1000
           done
-          section selected-timer-code
-          systemctl cat qwen-docker-cleanup.service qwen-runner-cleanup.service qwen-runner-watchdog.service --no-pager
-          section sar-resources
-          for f in /var/log/sysstat/sa12 /var/log/sa/sa12; do
-            [ -r "$f" ] || continue
-            sar -q -f "$f"
-            sar -r -f "$f" -s 10:30:00 -e 13:00:00
-          done
+          printf '\n===== runner7 process state =====\n'
+          ps -eo pid,ppid,lstart,stat,wchan:30,args | grep -F '/home/github-runner/actions-runner-hk2-7/' | grep -v grep | cut -c 1-600
+          printf '\n===== monitoring near stall =====\n'
+          f=/usr/local/cloudmonitor/local_data/logs/argusagent.log
+          awk 'length($0)<1200 && /2026-09-12 (11:4|11:5|12:0|12:1|12:2|12:3|12:4)/ && !/failed to read file \/proc\// { print }' "$f" | tail -180
+          printf '\n===== cleanup script =====\n'
+          sed -n '1,260p' /usr/local/sbin/qwen-docker-cleanup
           exit 0
           HK2_SCRIPT
           chmod 600 "$work/collect.sh"
