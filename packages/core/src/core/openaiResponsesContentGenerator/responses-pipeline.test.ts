@@ -228,6 +228,67 @@ describe('ResponsesPipeline', () => {
     ]);
   });
 
+  it('logs only request metadata, never raw request-body bytes (issue #11667)', async () => {
+    // Synthetic markers that must never reach the debug log: a user prompt,
+    // a tool name, a replayed reasoning id, and its encrypted content. The
+    // pre-fix code logged `body.substring(0, 500)` — which serializes `model`
+    // first and then `input` — so all four would leak into the per-session
+    // debug file.
+    const promptMarker = 'PROMPT_SECRET_MARKER_7f3a';
+    const toolMarker = 'TOOL_SECRET_MARKER_9c1b';
+    const reasoningIdMarker = 'REASONING_ID_SECRET_2d4e';
+    const encryptedMarker = 'ENCRYPTED_CONTENT_SECRET_5b6f';
+
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const request: GenerateContentParameters = {
+      model: 'gpt-5',
+      contents: [
+        { role: 'user', parts: [{ text: `${promptMarker} hello` }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              thought: true,
+              thoughtSignature: JSON.stringify({
+                id: reasoningIdMarker,
+                encrypted_content: encryptedMarker,
+              }),
+            },
+          ],
+        },
+      ],
+      config: {
+        tools: [{ functionDeclarations: [{ name: toolMarker }] }],
+      },
+    };
+    for await (const _ of pipeline.executeStream(request, 'prompt-1')) {
+      // drain
+    }
+
+    const logged = debugMock.mock.calls
+      .flat()
+      .map((a) => String(a))
+      .join(' ');
+    // No raw content may leak into the debug log.
+    expect(logged).not.toContain(promptMarker);
+    expect(logged).not.toContain(toolMarker);
+    expect(logged).not.toContain(reasoningIdMarker);
+    expect(logged).not.toContain(encryptedMarker);
+    // …but the transport diagnostic must stay: method + redacted URL, byte
+    // length, and per-input-item-type counts.
+    expect(logged).toContain('POST https://api.openai.com/v1/responses');
+    expect(logged).toContain('bodyBytes=');
+    expect(logged).toContain('inputItems=');
+    expect(logged).toContain('message=1');
+    expect(logged).toContain('reasoning=1');
+  });
+
   it('keys prompt_cache_key on the session so it stays stable across turns', async () => {
     // userPromptId is `${sessionId}########${counter}` and changes on every
     // send, so keying on it directly gives each turn its own cache namespace
@@ -1499,7 +1560,8 @@ describe('ResponsesPipeline', () => {
 
     expect(debugMock).toHaveBeenCalledWith(
       'POST https://<redacted>@gateway.example/v1/responses',
-      expect.any(String),
+      expect.stringContaining('bodyBytes='),
+      expect.stringContaining('inputItems='),
     );
     expect(inspect(debugMock.mock.calls)).not.toContain('review-secret');
     expect(inspect(debugMock.mock.calls)).not.toContain('review-user');

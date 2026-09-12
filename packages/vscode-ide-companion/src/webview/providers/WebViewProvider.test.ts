@@ -2304,12 +2304,12 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
    * A view-host context whose Memento only answers the keys it is seeded with,
    * and writes through — so a migration that retires an entry is observable.
    */
-  function createSessionStateContext(entries: Record<string, string>) {
+  function createSessionStateContext(entries: Record<string, unknown>) {
     return {
       subscriptions: [],
       workspaceState: {
         get: vi.fn((key: string) => entries[key]),
-        update: vi.fn((key: string, value: string | undefined) => {
+        update: vi.fn((key: string, value: unknown) => {
           if (value === undefined) {
             delete entries[key];
           } else {
@@ -2396,6 +2396,91 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         }),
       );
     });
+  });
+
+  it('persists history ownership beside the view session id', async () => {
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({
+      type: 'webShellSessionChanged',
+      data: {
+        sessionId: 'terminal-session',
+        workspaceCwd: '/workspace-a',
+        historySource: 'default',
+      },
+    });
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(
+      context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`),
+    ).toBe('terminal-session');
+    expect(
+      context.workspaceState.get(
+        'qwenCode.webShellSessionSource:/workspace-a:terminal-session',
+      ),
+    ).toBe('default');
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'terminal-session',
+          sessionHistorySource: 'default',
+        }),
+      }),
+    );
+  });
+
+  it('restores history ownership only when it matches the view session', async () => {
+    const context = createSessionStateContext({
+      [`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`]: 'terminal-session',
+      'qwenCode.webShellSessionSource:/workspace-a:terminal-session': 'default',
+      'qwenCode.webShellSessionSource:/workspace-a:new-vscode-session':
+        'vscode',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'terminal-session',
+          sessionHistorySource: 'default',
+        }),
+      }),
+    );
+  });
+
+  it('ignores stale history ownership for a different view session', async () => {
+    const context = createSessionStateContext({
+      [`${WEB_SHELL_SESSION_KEY_PREFIX}/workspace-a`]: 'vscode-session',
+      'qwenCode.webShellSessionSource:/workspace-a:old-terminal-session':
+        'default',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          sessionId: 'vscode-session',
+          sessionHistorySource: 'vscode',
+        }),
+      }),
+    );
   });
 
   it('ships restorable legacy conversation ids in the bootstrap payload', async () => {
@@ -2839,6 +2924,20 @@ describe('WebViewProvider web-shell permission bridge', () => {
     provider.respondToPendingPermission('allow');
 
     expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('relays a permission diff dismissal to the webview under requestId', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.notifyPermissionDiffClosed('req-1');
+
+    // The receiver in the webview reads data.requestId only and treats any
+    // other key as "not a dismissal", so the rename this wire invites has to
+    // be pinned here.
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionDiffClosed',
+      data: { requestId: 'req-1' },
+    });
   });
 
   it('does not vote before permission ownership state arrives', async () => {
