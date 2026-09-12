@@ -89,7 +89,7 @@ describe('isShellCommandReadOnlyAST', () => {
       }
     });
 
-    it('downgrades only the two reproduced command/config pairs', async () => {
+    it('downgrades Git commands for the repository-local hooks they consume', async () => {
       const cwd = createRepo();
       gitConfig(cwd, 'diff.external', 'example-external-diff');
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
@@ -101,12 +101,17 @@ describe('isShellCommandReadOnlyAST', () => {
 
       gitConfig(cwd, '--unset', 'diff.external');
       gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
-      expect(
-        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
-      ).toBe(false);
-      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        true,
-      );
+      for (const command of [
+        'git status',
+        'git diff',
+        'git blame file.txt',
+        'git grep needle',
+        'git ls-files',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
 
       gitConfig(cwd, 'core.fsmonitor', 'false');
       expect(
@@ -127,6 +132,116 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
         true,
       );
+    });
+
+    it('downgrades git diff for diff-driver commands without over-downgrading log/show', async () => {
+      const cwd = createRepo();
+      gitConfig(cwd, 'diff.pwn.command', 'example-diff-command');
+
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        false,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git log -p -1', cwd),
+      ).toBe(true);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git show HEAD', cwd),
+      ).toBe(true);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
+    it('downgrades diff/log/show/blame when a textconv driver is configured', async () => {
+      const cwd = createRepo();
+      gitConfig(cwd, 'diff.pwn.textconv', 'example-textconv');
+
+      for (const command of [
+        'git diff',
+        'git log -p -1',
+        'git show HEAD',
+        'git blame file.txt',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
+    it('handles empty diff-driver subsection names conservatively', async () => {
+      const commandCwd = createRepo();
+      gitConfig(commandCwd, 'diff..command', 'example-diff-command');
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git diff', commandCwd),
+      ).toBe(false);
+
+      const textconvCwd = createRepo();
+      gitConfig(textconvCwd, 'diff..textconv', 'example-textconv');
+      for (const command of [
+        'git diff',
+        'git log -p -1',
+        'git show HEAD',
+        'git blame file.txt',
+      ]) {
+        expect(
+          await isShellCommandReadOnlyASTInDirectory(command, textconvCwd),
+        ).toBe(false);
+      }
+    });
+
+    it('ignores empty diff-driver helper values', async () => {
+      const cwd = createRepo();
+      gitConfig(cwd, 'diff.pwn.command', '');
+      gitConfig(cwd, 'diff.pwn.textconv', '');
+
+      for (const command of [
+        'git diff',
+        'git log -p -1',
+        'git show HEAD',
+        'git blame file.txt',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          true,
+        );
+      }
+    });
+
+    it('keeps diff-driver config gates in regex fallback mode', async () => {
+      const commandCwd = createRepo();
+      gitConfig(commandCwd, 'diff.pwn.command', 'example-diff-command');
+      const textconvCwd = createRepo();
+      gitConfig(textconvCwd, 'diff.pwn.textconv', 'example-textconv');
+
+      _setParserFailedForTesting();
+      try {
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('git diff', commandCwd),
+        ).toBe(false);
+        expect(
+          await isShellCommandReadOnlyASTInDirectory('git diff', textconvCwd),
+        ).toBe(false);
+      } finally {
+        _resetParser();
+        await initParser();
+      }
+    });
+
+    it('keeps ordinary read-only Git commands read-only without diff-driver helpers', async () => {
+      const cwd = createRepo();
+
+      for (const command of [
+        'git diff',
+        'git log -1',
+        'git show HEAD',
+        'git blame file.txt',
+      ]) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          true,
+        );
+      }
     });
 
     it('fails closed instead of simulating a changed directory', async () => {
