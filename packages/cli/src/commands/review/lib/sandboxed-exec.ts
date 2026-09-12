@@ -47,15 +47,23 @@
 
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
-import { REVIEW_TMP_DIR } from './paths.js';
-import { redirectedAncestor } from './worktree.js';
+import { mountRootFor } from './worktree.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { readPackageUpSync } from 'read-package-up';
 import { CLI_VERSION } from '../../../generated/git-commit.js';
+
+// Re-exported from its old home: `mountRootFor` moved into `worktree.ts` so
+// the gates there — `untrustedGitfile`, `untrustedRepositoryFrom` and the
+// residue probe's own location check — can DEFAULT to it instead of taking
+// it as an argument every call site had to remember to pass. It stays
+// importable from here because every one of this pipeline's commands
+// already reaches it by this name, and the mount is still this module's
+// subject.
+export { mountRootFor };
 
 /**
  * Last resort only: the real default is the CLI's own `config.sandboxImageUri`
@@ -430,73 +438,6 @@ export function containerEnv(cacheDir: string): string[] {
     // bad install — worth naming rather than implying the cache is inert.
     `npm_config_cache=${cacheDir}`,
   ];
-}
-
-/**
- * The directory to mount for a command running in `cwd`, or null when `cwd` is
- * not one of the pipeline's trees.
- *
- * Not the tree: the dependency farm links out of every tree into the review
- * worktree's `node_modules`, so a per-tree mount leaves every link dangling.
- * Every tree the pipeline builds is a sibling under the review temp dir, so
- * that directory covers both ends of every link while `<repo>/.git` stays
- * outside it.
- *
- * `lastIndexOf`, because a review run from inside another review's worktree —
- * this pipeline's own dogfood geometry — nests one `.qwen/tmp` inside another,
- * and the FIRST occurrence would widen the mount to the outer temp dir,
- * pulling `<repo>/.git` and every sibling checkout in with it. Tree names
- * cannot contain a separator (scratch labels flatten to `[A-Za-z0-9._-]`), so
- * the deepest occurrence is always the tree's own parent.
- *
- * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
- * the tree under test IS the user's working copy and there is no sibling
- * layout to mount.
- */
-export function mountRootFor(cwd: string): string | null {
-  const resolved = resolve(cwd);
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.lastIndexOf(marker);
-  if (at < 0) return null;
-  const root = resolved.slice(0, at + marker.length - 1);
-  // A LEXICAL root is not a safe mount target. `resolve` never touches the
-  // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
-  // 120000 and materialised by a fresh clone — silently widens a read-write
-  // bind mount to wherever it points. Every other creating or destroying path
-  // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
-  // `resetScratchTree`); the mount is the one place a redirect would hand the
-  // reviewed code a directory nobody chose.
-  try {
-    if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
-      return null;
-    }
-    const real = realpathSync(root);
-    // `-v src:dst` separates its fields with `:`, so a root that contains one
-    // cannot be spelled in that grammar at all: docker answers `invalid spec
-    // ... too many colons` and every command in the phase hard-fails with a
-    // raw mount error. Under `auto` those land as build/test failures the
-    // report attributes to the PR; under `required` the gate passes and the
-    // refusal that should have explained it never happens. Both designed
-    // degradations are bypassed because this said "mountable" about a root
-    // that is not.
-    //
-    // Refusing it here puts such a checkout back on the path every other
-    // unmountable root already takes. That is the whole fix: the `-v` grammar
-    // has exactly one separator, and `:` in a repository path — legal, if
-    // rare — is the only way to write it.
-    //
-    // On Windows this refuses EVERY absolute path, and that is the right
-    // answer rather than a casualty of it: a drive letter is a colon, and the
-    // mount this builds uses one path as both source and target, which a
-    // Windows path cannot be — the container side has no `C:`. So containment
-    // is not available there, and saying so gives `auto` its direct fallback
-    // and `required` its refusal instead of the runtime's parse error on every
-    // single command.
-    if (real.includes(':')) return null;
-    return real;
-  } catch {
-    return null;
-  }
 }
 
 /**

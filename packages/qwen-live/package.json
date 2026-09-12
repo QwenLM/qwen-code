@@ -10,7 +10,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,15 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./i18n": {
+      "types": "./dist/i18n/messages.d.ts",
+      "import": "./dist/i18n/messages.js"
+    },
+    "./subagents": {
+      "types": "./dist/subagents/types.d.ts",
+      "import": "./dist/subagents/types.js"
+    }
   },
   "files": [
     "dist",
@@ -39,6 +47,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
+    "@node-rs/jieba": "2.0.2",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "ansi-regex": "^6.2.2",
     "prompts": "^2.4.2",

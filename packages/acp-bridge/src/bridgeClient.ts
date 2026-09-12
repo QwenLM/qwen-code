@@ -22,6 +22,8 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
@@ -1945,12 +1947,27 @@ export class BridgeClient implements Client {
       );
     }
     const model = params['model'];
+    const groupId = params['groupId'];
+    if (model !== undefined && !isValidCronTaskRoutingId(model)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`model\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters`,
+      );
+    }
+    if (
+      groupId !== undefined &&
+      (!isScheduledTaskRunSource(source) || !isValidCronTaskRoutingId(groupId))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`groupId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters and is only supported for scheduled-task runs`,
+      );
+    }
     const result = await this.onCreateSubSession({
       prompt,
       completion,
-      ...(typeof model === 'string' && model.length > 0 && model.length <= 128
-        ? { model }
-        : {}),
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...source,
       callerSessionId,
@@ -2208,6 +2225,25 @@ export class BridgeClient implements Client {
       typeof notificationSessionId === 'string' &&
       this.abandonedRestoreIds.has(notificationSessionId)
     ) {
+      return;
+    }
+    if (method === 'qwen/notify/session/sources-changed') {
+      const sessionId = params['sessionId'];
+      const revision = params['revision'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof revision !== 'number' ||
+        !Number.isSafeInteger(revision) ||
+        revision < 0 ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'source_changed',
+        data: { sessionId, revision },
+      });
       return;
     }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {

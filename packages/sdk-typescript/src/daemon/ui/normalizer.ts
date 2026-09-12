@@ -256,6 +256,14 @@ export function normalizeDaemonEvent(
       ];
     }
 
+    case 'turn_complete':
+      return getString(event.data, 'stopReason') === 'cancelled'
+        ? normalizePromptCancellation(
+            isRecord(event.data) ? event.data['promptCancelled'] : undefined,
+            base,
+          )
+        : [];
+
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
@@ -371,6 +379,19 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
@@ -904,6 +925,9 @@ function normalizeSessionUpdate(
       const parentToolCallId = extractParentToolCallId(update);
       const meta = extractUpdateMeta(update);
       const events: DaemonUiEvent[] = [];
+      if (!parentToolCallId && meta?.['promptCancelled'] !== undefined) {
+        return normalizePromptCancellation(meta['promptCancelled'], base);
+      }
       if (text) {
         events.push({
           ...base,
@@ -2153,6 +2177,31 @@ function normalizeAuthDeviceFlowCancelled(
     );
   }
   return [{ ...base, type: 'auth.device_flow.cancelled', deviceFlowId }];
+}
+
+function normalizePromptCancellation(
+  value: unknown,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const elapsedMs = numberField(value, 'elapsedMs');
+  const cancelledAt = numberField(value, 'cancelledAt');
+  const promptId = stringField(value, 'promptId') ?? base.promptId;
+  if (
+    !promptId ||
+    elapsedMs === undefined ||
+    elapsedMs < 0 ||
+    cancelledAt === undefined
+  )
+    return [];
+  return [
+    {
+      ...base,
+      type: 'prompt.cancelled',
+      promptId,
+      elapsedMs,
+      serverTimestamp: cancelledAt,
+    },
+  ];
 }
 
 function numberField(value: unknown, key: string): number | undefined {

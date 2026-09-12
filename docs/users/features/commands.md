@@ -36,7 +36,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+> Opening an HTML export loads the renderer and stylesheet for that exact Qwen Code version from `unpkg.com`. If the version has not been published or either asset cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
 
 > [!note]
 >
@@ -140,6 +140,10 @@ Commands for managing AI tools and models.
 > [!note]
 >
 > `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+
+> [!note]
+>
+> A skill from an installed extension is a slash command too, and its name carries its owner: `/rust:pdf`, not `/pdf`. The bare form is not an alias — if another skill is named `pdf`, `/pdf` runs that skill instead. `slashCommands.disabled` gates such a command under either spelling, so an entry written before the name carried the owner still bites. See [How extension Skills are named](./skills.md#how-extension-skills-are-named).
 
 ### 1.5 Built-in Skills
 
@@ -801,7 +805,10 @@ A table with columns: NAME, KIND, PID, AGE, STATE, DIRECTORY.
 KIND says what registered the session — `tui` for someone at a terminal,
 `external` for a program that is not a Qwen Code session at all (a voice
 front-end, a relay), and `headless` or `serve` for a session another
-program drives. It is a self-report, like NAME and DIRECTORY: every field
+program drives. Several `serve` or `headless` rows can share one PID: a
+`qwen --acp` child hosts all its sessions in one process — `serve` when
+the daemon spawned it, `headless` when a client is driving it directly —
+and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. A managed session writes no
 registry record, so nothing registered it and its KIND reads `managed`
@@ -1108,6 +1115,28 @@ Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
 
+### Sessions a program drives over ACP
+
+Any `qwen --acp` child registers each session it hosts — as `serve` when
+the daemon spawned the process, as `headless` when an editor or another
+client is driving `qwen --acp` directly — and the session appears in
+`qwen sessions ps` and in another session's `list_agents` like any
+other. It can send: its model can call `send_message` to reach a terminal
+you have open. Several of them share one process and one inbox, so a
+sender has to name the session it means — every Qwen Code session does
+that automatically.
+
+Messages sent _to_ one are refused rather than held. Holding is a
+question put to a person, and nobody is watching a held-message list on a
+driven session's behalf; a sender is told at once instead of
+waiting out an expiry. Where a held message should surface for those
+sessions is not settled yet.
+
+A session registers only while its own settings have
+`agents.crossSessionMessaging` on. With it off it stays invisible,
+because the only reason to list a session nobody can message would be to
+advertise an address that never answers.
+
 ### Programs that are not Qwen Code sessions
 
 Everything above works between sessions, but nothing in it is specific to
@@ -1122,3 +1151,8 @@ writing one: the record schema and how liveness is judged, the socket
 paths and framing, the auth line, every frame field, the receipt states
 and their transitions, and what a receiver does with a message before its
 model sees it.
+
+A Node program does not have to write any of that by hand:
+`@qwen-code/sdk/peer` implements the contract. `PeerEndpoint.start({ name })`
+publishes the record and binds the inbox, `list()` and `send()` address
+sessions by name, and `onMessage` receives what they send.

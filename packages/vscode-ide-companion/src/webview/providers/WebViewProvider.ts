@@ -1997,6 +1997,29 @@ export class WebViewProvider {
           ),
           canonicalWorkspaceCwd,
         );
+        // Pre-cutover companions recorded their conversations in globalState;
+        // their daemon transcripts carry no source attribution, so the
+        // vscode-scoped history query cannot surface them. Ship the legacy ids
+        // as an allowlist so the panel can claim its own sessions back from
+        // the daemon's unattributed catalog. Read-only: the store stays
+        // untouched for downgrade/recovery, and only ids cross the bridge —
+        // never the message snapshots.
+        let legacyConversationIds: string[] | undefined;
+        try {
+          const legacyIds = (await this.conversationStore.getAllConversations())
+            .map((conversation) =>
+              getRestorableDaemonSessionId(conversation.id),
+            )
+            .filter((id): id is string => id !== undefined);
+          if (legacyIds.length > 0) {
+            legacyConversationIds = legacyIds;
+          }
+        } catch (error) {
+          logger.warn(
+            '[WebViewProvider] Failed to read legacy conversations:',
+            error,
+          );
+        }
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
@@ -2086,6 +2109,7 @@ export class WebViewProvider {
               : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
+            ...(legacyConversationIds ? { legacyConversationIds } : {}),
           },
         });
         // A daemon that dies after a successful start — or that gets
@@ -2454,6 +2478,26 @@ export class WebViewProvider {
     return (
       this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
     );
+  }
+
+  /**
+   * Tell the web shell that a diff it asked the host to open was closed
+   * without a vote, so it can take the edit preview back (#10557).
+   */
+  notifyPermissionDiffClosed(permissionRequestId: string): void {
+    if (!this.getActiveWebview()) {
+      // A dismissal with no attached webview is the drop point a field report
+      // ("closed the tab, row stayed locked") cannot otherwise be triaged
+      // from; the open direction logs at this level, so mirror it here (#10557).
+      logger.log(
+        '[Extension] Permission diff closed, no active webview to notify',
+      );
+      return;
+    }
+    this.sendMessageToWebView({
+      type: 'permissionDiffClosed',
+      data: { requestId: permissionRequestId },
+    });
   }
 
   /** Get current ACP mode id (if known). */

@@ -41,6 +41,11 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { ResponsesHttpError } from '../utils/responses-http-error.js';
+import {
+  getResponsesMessage,
+  sameResponsesMessage,
+} from '../utils/responses-message.js';
 import {
   classifyRetryError,
   isFallbackEligible,
@@ -340,6 +345,108 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
+function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
+  // A turn can legitimately contain multiple distinct reasoning episodes
+  // separated by tool calls (Anthropic interleaved thinking, OpenAI
+  // Responses reasoning items on parallel function calls). Each episode
+  // must keep its own signature and its own position relative to the
+  // tool calls it preceded -- merging every thought-flagged part into one
+  // blob and keeping only the first signature silently discards every
+  // other episode's replayable payload and destroys the interleaving.
+  //
+  // Both wires terminate an episode with a text-less, signature-only
+  // chunk (anthropicContentGenerator.ts's signature_delta handling;
+  // responses-converter.ts's output_item.done for a reasoning item), so a
+  // thought part carrying fresh non-empty text while the open episode
+  // already has both accumulated text and a signature can only be the
+  // start of a new episode -- no legitimate continuation of the same
+  // episode reintroduces text after its signature is set. The
+  // `openEpisodeText.length > 0` guard additionally protects against a
+  // non-compliant proxy emitting a signature before any thinking text for
+  // its episode. Signature fragments are concatenated (not "first seen")
+  // because a long signature can legitimately arrive split across
+  // multiple signature_delta events.
+  //
+  // Known limitation: two back-to-back thought parts with NO signature at
+  // all and no intervening non-thought part still merge into one episode
+  // -- neither boundary condition above can fire without a signature to
+  // test. This is consistent with both wires' documented invariant that
+  // every episode ends in a signature-only chunk; it is not reachable via
+  // Anthropic interleaved thinking or OpenAI Responses reasoning items as
+  // implemented, but would misattribute text across episodes if a
+  // non-compliant proxy ever dropped a signature entirely.
+  //
+  // Responses emits one complete JSON {id, encrypted_content} payload at
+  // output_item.done. Close that episode immediately, even without summary
+  // text; unlike Anthropic signature_delta fragments, it must never be
+  // concatenated with the next reasoning item's payload.
+  const consolidatedHistoryParts: Part[] = [];
+  let openEpisodeText = '';
+  let openEpisodeSignature = '';
+  let hasOpenEpisode = false;
+
+  const flushThoughtEpisode = () => {
+    if (!hasOpenEpisode) return;
+    const text = openEpisodeText.trim();
+    // A signature-only episode (no text) is kept, not dropped: it is
+    // still potentially replayable per Anthropic's spec, and this is
+    // the ACTIVE (latest) turn's thinking, which must replay byte-exact
+    // -- unlike converter.ts's dropEmptyTextThinkingBlocks, which drops
+    // this same empty-text shape but only from non-latest turns, where
+    // the rationale is that prior-turn thinking is disposable, not that
+    // an empty-text signed block is inherently invalid.
+    if (text !== '' || openEpisodeSignature !== '') {
+      const episodePart: Part = { text, thought: true };
+      if (openEpisodeSignature) {
+        episodePart.thoughtSignature = openEpisodeSignature;
+      }
+      consolidatedHistoryParts.push(episodePart);
+    }
+    openEpisodeText = '';
+    openEpisodeSignature = '';
+    hasOpenEpisode = false;
+  };
+
+  for (const part of allModelParts) {
+    if (part.thought) {
+      const partText = typeof part.text === 'string' ? part.text : '';
+      if (
+        hasOpenEpisode &&
+        partText !== '' &&
+        openEpisodeText.length > 0 &&
+        openEpisodeSignature !== ''
+      ) {
+        flushThoughtEpisode();
+      }
+      hasOpenEpisode = true;
+      openEpisodeText += partText;
+      if (part.thoughtSignature) {
+        openEpisodeSignature += part.thoughtSignature;
+        if (isCompleteResponsesReasoningSignature(part.thoughtSignature)) {
+          flushThoughtEpisode();
+        }
+      }
+      continue;
+    }
+    flushThoughtEpisode();
+    const lastPart =
+      consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
+    if (
+      lastPart?.text &&
+      isValidNonThoughtTextPart(lastPart) &&
+      sameResponsesMessage(lastPart, part) &&
+      isValidNonThoughtTextPart(part)
+    ) {
+      lastPart.text += part.text;
+    } else if (isValidContentPart(part)) {
+      consolidatedHistoryParts.push(part);
+    }
+  }
+  flushThoughtEpisode();
+
+  return consolidatedHistoryParts;
+}
+
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -544,7 +651,7 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
-const TRANSPORT_STREAM_RETRY_CONFIG = {
+const STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
   /**
@@ -922,6 +1029,29 @@ function mergeDeliveredPrefix(
   );
 }
 
+function mergeDeliveredParts(prefix: Part[], remainder: Part[]): Part[] {
+  if (prefix.length === 0) return remainder;
+  if ([...prefix, ...remainder].some((part) => getResponsesMessage(part))) {
+    return appendRecoveryContinuationParts(prefix, remainder);
+  }
+  const parts = [...remainder];
+  const textIndex = parts.findIndex(isPlainTextPart);
+  const text = getPlainTextFromParts(prefix);
+  if (textIndex < 0) {
+    // Keep the prefix after completed thoughts and before tool calls, without
+    // burying a dangling unsigned thought that the trailing-only check needs.
+    dropDanglingUnsignedTrailingThought(parts, true);
+    const insertAt = parts.findIndex((part) => !part.thought);
+    parts.splice(insertAt < 0 ? parts.length : insertAt, 0, { text });
+  } else {
+    parts[textIndex] = {
+      ...parts[textIndex],
+      text: mergeDeliveredPrefix(text, parts[textIndex]!.text!),
+    };
+  }
+  return parts;
+}
+
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
@@ -1023,12 +1153,15 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
  * earlier fragments. Both functions live in this file precisely so the
  * coupling is reviewable in a single window.
  *
- * Return-value shape. The returned array preserves the *shape convention* of
- * `processStreamResponse` output: `[thoughtPart?, ...consolidatedTextParts,
- * ...nonTextParts]`. {@link LlmChat.coalesceRecoveryPairs} relies on this
- * by feeding the merged result back as `previousParts` on the next recovery
- * iteration; if the shape ever diverges, multi-iteration recovery dedup would
- * fail silently against the wrong part.
+ * Return-value shape. The returned array preserves whatever ordering
+ * `processStreamResponse` produced: zero or more thought episodes (each its
+ * own `Part`) freely interleaved with functionCall/text parts in original
+ * stream order -- not just a single leading thought ahead of everything
+ * else. {@link LlmChat.coalesceRecoveryPairs} relies on this by feeding
+ * the merged result back as `previousParts` on the next recovery iteration;
+ * the mechanics below scan for the plain-text anchor rather than assuming a
+ * fixed shape, so they tolerate any number and arrangement of non-text
+ * parts (thought episodes, tool calls, or both) ahead of that anchor.
  */
 function appendRecoveryContinuationParts(
   previousParts: Part[] | undefined,
@@ -1037,14 +1170,14 @@ function appendRecoveryContinuationParts(
   const mergedParts = [...(previousParts ?? [])];
   const nextParts = [...(continuationParts ?? [])];
 
-  // `processStreamResponse` orders parts as
-  // `[thoughtPart?, ...consolidatedHistoryParts]`, so for thinking models the
-  // first element of `nextParts` is the recovery turn's thought, not its
-  // plain-text continuation. Similarly the previous truncated turn may end
-  // with a non-text part. Scan both sides for the dedup-relevant plain-text
-  // anchor instead of locking onto the boundary indices, otherwise thinking
-  // models leak duplicated text into durable history because the dedup block
-  // gets skipped wholesale.
+  // `processStreamResponse` can place one or more thought episodes (and/or
+  // tool calls) ahead of a turn's plain-text continuation, so for thinking
+  // models the first element of `nextParts` is not reliably the recovery
+  // turn's plain-text continuation. Similarly the previous truncated turn
+  // may end with a non-text part. Scan both sides for the dedup-relevant
+  // plain-text anchor instead of locking onto the boundary indices,
+  // otherwise thinking models leak duplicated text into durable history
+  // because the dedup block gets skipped wholesale.
   const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
   const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
 
@@ -1055,6 +1188,11 @@ function appendRecoveryContinuationParts(
     const continuationTextPart = nextParts[continuationTextIndex] as Part & {
       text: string;
     };
+    // Distinct Responses messages carry their own meaning, even when their
+    // text overlaps (for example commentary repeated as the final answer).
+    if (!sameResponsesMessage(previousTextPart, continuationTextPart)) {
+      return [...mergedParts, ...nextParts];
+    }
     const suffix = getRecoveryContinuationSuffix(
       previousTextPart.text,
       continuationTextPart.text,
@@ -1087,6 +1225,106 @@ function appendRecoveryContinuationParts(
   }
 
   return [...mergedParts, ...nextParts];
+}
+
+/**
+ * Drop the TRAILING thought part from `parts` if it's unsigned (has real
+ * text but no `thoughtSignature`) and `hasToolCall` is true. An unsigned
+ * trailing episode is a dangling reasoning episode that never received
+ * its terminating signature-only chunk (stream cut off mid-episode) --
+ * pairing it with a `tool_use` in the same turn permanently wedges the
+ * session once the tool result comes back:
+ * `dropUnsignedThinkingFromAssistantMessages` throws on every subsequent
+ * request on proxy-hosted adaptive Claude, or native Anthropic rejects
+ * the request outright.
+ *
+ * Deliberately TRAILING-ONLY, not a whole-array scan: an unsigned thought
+ * part earlier in the array (e.g. immediately preceding a `functionCall`
+ * in an otherwise complete, untruncated turn) is not a corruption
+ * signal -- it's DeepSeek's and other non-Anthropic providers' normal,
+ * complete wire shape (DeepSeek doesn't validate thinking signatures the
+ * way Anthropic does; `injectThinkingOnToolUseTurns` even synthesizes an
+ * empty-signature placeholder when none exists). A stream's own
+ * truncation can only ever leave the DANGLING episode as the trailing
+ * element -- any part that follows it in the same stream would have
+ * already flushed it via `flushThoughtEpisode()` -- so "trailing" is the
+ * only signal available at this layer, where no provider-specific context
+ * exists.
+ *
+ * Two accepted false-result directions, neither safely fixable here:
+ *
+ *  - FALSE NEGATIVE: a wire-protocol violation that drops a NON-trailing
+ *    episode's signature without truncating the connection is not caught.
+ *    See the "Known limitation" note above the episode consolidation loop.
+ *  - FALSE POSITIVE: a non-signing provider (DeepSeek) whose stream is
+ *    truncated mid-reasoning after a tool call also ends in an unsigned
+ *    trailing thought, and its legitimate reasoning text is dropped from
+ *    both history and the JSONL record. Trailing-only scope does NOT
+ *    distinguish that from a truncated signing-provider episode; the shape
+ *    is genuinely identical. Gating the pop on "this turn contains at least
+ *    one signature" was evaluated and rejected: it is wrong at the
+ *    recovery-coalescing call site below, where a truncated turn legitimately
+ *    has no signature anywhere yet. Losing a trailing reasoning fragment for
+ *    a provider that never validates signatures is the cheaper failure than
+ *    permanently wedging a session that does.
+ *
+ * Applied at FOUR call sites: at the end of a single stream's
+ * consolidation; inside the XML tool-call recovery branch, immediately
+ * before the recovered `functionCall` parts are appended (the per-stream
+ * call has already early-returned there, because recovery's own gate
+ * requires `hasToolCall === false`, and once the calls are appended the
+ * episode is no longer trailing) -- gated there on whether the episode was
+ * ALREADY trailing before that branch's own text-removal loop runs, since
+ * splicing out non-thought text parts would otherwise manufacture a
+ * trailing position for an episode that was never trailing in the actual
+ * stream; on the truncated turn's OWN parts (with `hasToolCall`
+ * reinterpreted as "the recovery continuation is about to introduce a
+ * functionCall") immediately before `coalesceRecoveryPairs` merges it with
+ * a recovery continuation; and immediately before a transport-continuation
+ * prefix is inserted into a parts array holding only thought parts --
+ * inserting first would bury the episode mid-array (past the "trailing"
+ * position) before the coalescing-site check ever runs. The
+ * `coalesceRecoveryPairs` call site exists because the per-stream trailing
+ * check can't see a functionCall that hasn't arrived yet: the MAX_TOKENS
+ * recovery loop only proceeds when the truncated turn has NO functionCall
+ * of its own, so the first call site's `hasToolCall` is false and it never
+ * fires -- exactly the precondition under which the merge is about to
+ * attach one from a different attempt.
+ *
+ * Scope limit: the coalescing call site mutates in-memory history only.
+ * `recordAssistantTurn` has already written the truncated turn to the
+ * session JSONL by then, so `--resume` rehydrates the dangling episode and
+ * can re-create the wedge this function prevents in-session. That is
+ * inherited drift in the recovery-coalescing mechanism as a whole (the
+ * dropped recovery pair is likewise already on disk), not something this
+ * check introduces, and closing it belongs at the persistence layer.
+ */
+function dropDanglingUnsignedTrailingThought(
+  parts: Part[],
+  hasToolCall: boolean,
+): void {
+  if (!hasToolCall) return;
+  const lastPart = parts[parts.length - 1];
+  if (lastPart?.thought && lastPart.text && !lastPart.thoughtSignature) {
+    parts.pop();
+  }
+}
+
+function isCompleteResponsesReasoningSignature(signature: string): boolean {
+  if (!signature.startsWith('{')) return false;
+  try {
+    const payload: unknown = JSON.parse(signature);
+    return (
+      payload !== null &&
+      typeof payload === 'object' &&
+      'id' in payload &&
+      typeof payload.id === 'string' &&
+      'encrypted_content' in payload &&
+      typeof payload.encrypted_content === 'string'
+    );
+  } catch {
+    return false;
+  }
 }
 
 function findLastPlainTextPartIndex(parts: Part[]): number {
@@ -3107,6 +3345,9 @@ export class LlmChat {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return (async function* () {
+      let successfulRecoveries = 0;
+      let activeRecoveryUser: Content | undefined;
+      let pendingTransportPrefix: Part[] = [];
       const sleepInhibitorHandle = acquireSleepInhibitor(
         self.config,
         'Qwen Code is streaming a model response',
@@ -3150,7 +3391,7 @@ export class LlmChat {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
         };
-        let transportStreamRetryCount = 0;
+        let streamReplayRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -3160,18 +3401,19 @@ export class LlmChat {
         // replayed stripped, so the buffer holds no fragment twice.
         let transportContinuationCount = 0;
         let transportContinuationText = '';
+        let transportContinuationParts: Part[] = [];
         // Text delivered by the attempt currently running, before it is folded
         // into `transportContinuationText`. Kept separate so the overlap a
         // continuation attempt replays is stripped once, at the attempt
         // boundary where it occurs, rather than per chunk — the overlap scan is
         // suffix-anchored and would eat legitimately repeated text mid-stream.
-        let transportAttemptText = '';
+        let transportAttemptParts: Part[] = [];
         // Text delivered *before* the attempt currently running. Empty unless
         // a continuation is in flight. `processStreamResponse` only pushes the
         // final attempt's own output to history, so this is what has to be
         // prepended once the send succeeds, or the next turn would see the
         // model's answer starting mid-sentence.
-        let transportContinuationPrefix = '';
+        let transportContinuationPrefix: Part[] = [];
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
@@ -3236,13 +3478,13 @@ export class LlmChat {
                 ...requestContents,
                 {
                   role: 'model',
-                  parts: [{ text: transportContinuationPrefix }],
+                  parts: transportContinuationPrefix,
                 },
                 createUserContent([
                   {
                     text: buildRecoveryMessageFromText(
                       TRANSPORT_CONTINUATION_MESSAGE,
-                      transportContinuationPrefix,
+                      getPlainTextFromParts(transportContinuationPrefix),
                     ),
                   },
                 ]),
@@ -3262,8 +3504,10 @@ export class LlmChat {
         const resetTransportContinuation = () => {
           transportContinuationCount = 0;
           transportContinuationText = '';
-          transportAttemptText = '';
-          transportContinuationPrefix = '';
+          transportContinuationParts = [];
+          transportAttemptParts = [];
+          transportContinuationPrefix = [];
+          pendingTransportPrefix = [];
         };
 
         // Fold the running attempt's text into the accumulated buffer,
@@ -3276,16 +3520,20 @@ export class LlmChat {
         // (telemetry, a MAX_TOKENS-recovery guard) would be missing the final
         // attempt's text and must fold on the success path too.
         const foldTransportAttemptText = () => {
-          transportContinuationText += getRecoveryContinuationSuffix(
-            transportContinuationText,
-            transportAttemptText,
+          transportContinuationParts = mergeDeliveredParts(
+            transportContinuationParts,
+            consolidateModelResponseParts(transportAttemptParts),
           );
-          transportAttemptText = '';
+          transportContinuationText = getPlainTextFromParts(
+            transportContinuationParts,
+          );
+          transportAttemptParts = [];
         };
 
         let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
-          transportAttemptText = '';
+          transportAttemptParts = [];
+          let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -3302,7 +3550,7 @@ export class LlmChat {
             } else if (
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
-              transportStreamRetryCount > 0 ||
+              streamReplayRetryCount > 0 ||
               transportContinuationCount > 0
             ) {
               // A fresh-restart retry reaching this point means a branch that
@@ -3331,7 +3579,10 @@ export class LlmChat {
                 : undefined,
               acceptQuietToolResultCompletion,
             );
+            streamEstablished = true;
 
+            // The processor now owns cancellation persistence for this prefix.
+            pendingTransportPrefix = [];
             lastFinishReason = undefined;
             for await (const chunk of stream) {
               if (hasCandidateOutput(chunk)) {
@@ -3348,7 +3599,13 @@ export class LlmChat {
               // the catch below history holds nothing about what the user
               // already saw.
               const chunkParts = chunk.candidates?.[0]?.content?.parts;
-              transportAttemptText += getPlainTextFromParts(chunkParts);
+              // The processor consolidates its own parts in place before
+              // throwing. Keep text independent, but share late phase updates.
+              transportAttemptParts.push(
+                ...(chunkParts ?? [])
+                  .filter(isPlainTextPart)
+                  .map((part) => ({ ...part })),
+              );
               if (chunkParts?.some((part) => part.functionCall)) {
                 streamYieldedFunctionCall = true;
               }
@@ -3364,10 +3621,11 @@ export class LlmChat {
             // again here would risk double-applying it: the dedup helper only
             // strips a replayed prefix that clears its significance floor, so
             // a short prefix would survive the second pass and be doubled.
-            transportContinuationPrefix = '';
+            transportContinuationPrefix = [];
             break;
           } catch (error) {
             lastError = error;
+            if (params.config?.abortSignal?.aborted) throw error;
             // This attempt is over; fold what it delivered into the running
             // buffer before any branch below reads it. Doing this here rather
             // than per chunk keeps the overlap scan anchored at the attempt
@@ -3405,6 +3663,12 @@ export class LlmChat {
               });
             }
 
+            if (
+              error instanceof ResponsesHttpError &&
+              error.headers.get('x-should-retry') === 'false'
+            ) {
+              throw error;
+            }
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
@@ -3444,6 +3708,7 @@ export class LlmChat {
                   delayMs,
                   params.config?.abortSignal,
                 );
+                resetTransportContinuation();
                 yield {
                   type: StreamEventType.RETRY,
                   retryInfo: {
@@ -3468,8 +3733,23 @@ export class LlmChat {
               });
             }
 
-            // Replay only curated socket-level failures before any
-            // content (non-thought output) has reached callers.
+            // HTTP establishment failures already exhausted retryWithBackoff;
+            // only server errors raised while reading the stream join replay.
+            const isServerStreamError =
+              streamEstablished &&
+              !isRateLimit &&
+              (classification.kind === 'http' ||
+                classification.kind === 'sse-provider') &&
+              classification.diagnosis === 'retryable' &&
+              classification.statusCode !== undefined &&
+              classification.statusCode >= 500 &&
+              classification.statusCode < 600;
+            const isReplayableStreamError =
+              isRetryableStreamTransportError(classification) ||
+              isServerStreamError;
+
+            // Replay transient server errors and curated socket-level failures
+            // before any content (non-thought output) has reached callers.
             // Thinking-only output does not block the replay: such an
             // attempt persists nothing (error-path persistence
             // requires a delivered functionCall, which this gate
@@ -3479,7 +3759,7 @@ export class LlmChat {
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamTransportError(classification) &&
+              isReplayableStreamError &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3490,24 +3770,31 @@ export class LlmChat {
               // consulted here because this branch is checked before the
               // continuation one below.
               transportContinuationText.trim().length === 0 &&
-              transportStreamRetryCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
-              transportStreamRetryCount++;
+              streamReplayRetryCount++;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportStreamRetryCount;
-              debugLogger.warn('Transport stream retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                retryDelayMs: delayMs,
-                yieldedNonContentChunks: streamYieldedChunk,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+                STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry scheduled'
+                  : 'Transport stream retry scheduled',
+                {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
+                  attempt: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  retryDelayMs: delayMs,
+                  yieldedNonContentChunks: streamYieldedChunk,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                    providerCode: classification.providerCode,
+                  }),
+                },
+              );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. The gate above now admits
@@ -3545,7 +3832,7 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
@@ -3554,16 +3841,15 @@ export class LlmChat {
               // and is never reset while continuing. Each attempt's own text
               // was folded in at the catch above with its replayed overlap
               // stripped, so this carries no fragment twice.
-              transportContinuationPrefix = transportContinuationText;
+              transportContinuationPrefix = transportContinuationParts;
+              pendingTransportPrefix = transportContinuationPrefix;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportContinuationCount;
+                STREAM_RETRY_CONFIG.initialDelayMs * transportContinuationCount;
               debugLogger.warn('Transport stream continuation scheduled', {
                 retryPath: 'stream',
                 retryDecision: 'continue',
                 attempt: transportContinuationCount,
-                maxRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
+                maxRetries: STREAM_RETRY_CONFIG.maxContinuationRetries,
                 retryDelayMs: delayMs,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
@@ -3579,25 +3865,36 @@ export class LlmChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError(classification)) {
+            if (isReplayableStreamError) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
               // (function-call cut, no text to anchor on, or its own budget
               // exhausted).
-              debugLogger.warn('Transport stream retry not taken', {
-                retryPath: 'stream',
-                retryDecision: streamYieldedContentChunk
-                  ? 'skipped_after_content'
-                  : 'exhausted',
-                attempts: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                continuationAttempts: transportContinuationCount,
-                maxContinuationRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry not taken'
+                  : 'Transport stream retry not taken',
+                {
+                  retryPath: 'stream',
+                  retryDecision:
+                    streamYieldedContentChunk ||
+                    transportContinuationText.trim().length > 0
+                      ? 'skipped_after_content'
+                      : 'exhausted',
+                  attempts: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  continuationAttempts: transportContinuationCount,
+                  maxContinuationRetries:
+                    STREAM_RETRY_CONFIG.maxContinuationRetries,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                    providerCode: classification.providerCode,
+                  }),
+                },
+              );
             }
 
             const contextOverflow = getContextLengthExceededInfo(error);
@@ -3657,6 +3954,10 @@ export class LlmChat {
                     ? 'Request body rejected with HTTP 413; attempting reactive compression.'
                     : 'Context length exceeded; attempting reactive compression.',
                 );
+                // The failed text stream no longer owns cancellation recording.
+                if (!streamYieldedFunctionCall) {
+                  pendingTransportPrefix = transportContinuationParts;
+                }
                 try {
                   const reactiveInfo = await self.tryCompress(
                     prompt_id,
@@ -3721,12 +4022,10 @@ export class LlmChat {
                       type: StreamEventType.COMPRESSED,
                       info: reactiveInfo,
                     };
-                    yield { type: StreamEventType.RETRY };
-                    // Compression rebuilt `requestContents` from scratch, so
-                    // any continuation staged against the old contents is
-                    // stale — and the RETRY above already told the UI to drop
-                    // the delivered text.
+                    // Drop the stale continuation before telling the UI to
+                    // clear it: the consumer may cancel at the RETRY yield.
                     resetTransportContinuation();
+                    yield { type: StreamEventType.RETRY };
                     suppressNextRetryEvent = true;
                     rearmQuietAcceptanceIfBudgetSpent();
                     continue;
@@ -3996,6 +4295,7 @@ export class LlmChat {
               }
               return;
             } catch (error) {
+              if (attemptState.params.config?.abortSignal?.aborted) throw error;
               attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
 
@@ -4113,7 +4413,6 @@ export class LlmChat {
           // response in history and inject a recovery message so the model can
           // continue from where it left off.
           let recoveryCount = 0;
-          let successfulRecoveries = 0;
           while (
             recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
@@ -4220,6 +4519,7 @@ export class LlmChat {
               for await (const event of streamWithInvalidStreamRetries(
                 () => {
                   self.history.push(recoveryUserContent);
+                  activeRecoveryUser = recoveryUserContent;
                   return {
                     requestContents: self.getRequestHistoryForRoute(
                       currentUserContent,
@@ -4243,7 +4543,9 @@ export class LlmChat {
               // the model continuation turn are now in history and can be
               // coalesced back into the preceding model entry after the loop.
               successfulRecoveries++;
+              activeRecoveryUser = undefined;
             } catch (recoveryError) {
+              if (params.config?.abortSignal?.aborted) throw recoveryError;
               rollbackRecoveryAttempt();
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
@@ -4266,15 +4568,6 @@ export class LlmChat {
               };
               break;
             }
-          }
-
-          // Coalesce completed recovery pairs back into the preceding model
-          // turn so the OUTPUT_RECOVERY_MESSAGE control prompt does not
-          // persist as a synthetic user turn in durable history. The user
-          // never sent that message, and leaving it in history would bias
-          // later turns and pollute compression / replay / export.
-          if (successfulRecoveries > 0) {
-            self.coalesceRecoveryPairs(successfulRecoveries);
           }
         }
 
@@ -4448,7 +4741,12 @@ export class LlmChat {
                   );
                   return;
                 } catch (fallbackError) {
-                  if (isAbortError(fallbackError)) throw fallbackError;
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(fallbackError)
+                  ) {
+                    throw fallbackError;
+                  }
                   lastError = fallbackError;
 
                   if (currentFallbackYieldedAnyChunk) {
@@ -4534,6 +4832,39 @@ export class LlmChat {
           }
         }
       } finally {
+        // Between attempts there is no response processor to save visible text.
+        if (
+          params.config?.abortSignal?.aborted &&
+          pendingTransportPrefix.length > 0
+        ) {
+          const parts = pendingTransportPrefix;
+          self.history.push({ role: 'model', parts });
+          self.pendingPartialAssistantTurnIndex = self.history.length - 1;
+          self.pendingPartialAssistantRecord = {
+            model,
+            message: parts,
+            contextWindowSize:
+              self.config.getContentGeneratorConfig()?.contextWindowSize,
+            ...(turnGoalContext ? { goalContext: { ...turnGoalContext } } : {}),
+          };
+        }
+        // Also clean up a recovery abandoned at a yield, before its success
+        // counter advances. Preserve the continuation, not its control prompt.
+        const recoveryIndex = activeRecoveryUser
+          ? self.history.indexOf(activeRecoveryUser)
+          : -1;
+        if (recoveryIndex === self.history.length - 1 && recoveryIndex >= 0) {
+          self.history.pop();
+        } else if (
+          recoveryIndex >= 0 &&
+          recoveryIndex === self.history.length - 2 &&
+          self.history.at(-1)?.role === 'model'
+        ) {
+          successfulRecoveries++;
+        }
+        if (successfulRecoveries > 0) {
+          self.coalesceRecoveryPairs(successfulRecoveries);
+        }
         sleepInhibitorHandle.release();
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
@@ -4583,7 +4914,7 @@ export class LlmChat {
     },
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
-    transportContinuationPrefix?: string,
+    transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
@@ -4606,6 +4937,10 @@ export class LlmChat {
     const persistentMode = overrides ? false : isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
+        if (error instanceof ResponsesHttpError) {
+          return error.shouldRetry(extraRetryErrorCodes);
+        }
+
         if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
           if (isInvalidArgumentError(error.message)) return false;
@@ -4668,6 +5003,7 @@ export class LlmChat {
       goalContext,
       transportContinuationPrefix,
       acceptQuietToolResultCompletion,
+      params.config?.abortSignal,
     );
   }
 
@@ -5199,7 +5535,7 @@ export class LlmChat {
   }
 
   /**
-   * @param transportContinuationPrefix - Text a previous attempt already
+   * @param transportContinuationPrefix - Text parts a previous attempt already
    *   delivered before a socket cut, which this attempt was asked to resume
    *   from (issue #7832). On success it is folded into the response parts
    *   before either durable write, so the JSONL transcript and in-memory
@@ -5211,8 +5547,9 @@ export class LlmChat {
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     routeKey: string,
     goalContext?: GoalTurnPermit,
-    transportContinuationPrefix?: string,
+    transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -5243,6 +5580,7 @@ export class LlmChat {
         if (
           previous &&
           isValidNonThoughtTextPart(previous) &&
+          sameResponsesMessage(previous, part) &&
           isValidNonThoughtTextPart(part)
         ) {
           previous.text! += part.text!;
@@ -5480,8 +5818,53 @@ export class LlmChat {
       }
     } catch (e) {
       streamError = e;
+    } finally {
+      // Cancellation can close the generator at a yield, skipping everything
+      // after this finally. Keep the delivered partial in both history and JSONL.
+      if (abortSignal?.aborted) {
+        let parts = consolidateModelResponseParts(allModelParts);
+        dropDanglingUnsignedTrailingThought(parts, hasToolCall);
+        if (transportContinuationPrefix) {
+          if (
+            [...transportContinuationPrefix, ...parts].some(getResponsesMessage)
+          ) {
+            parts = mergeDeliveredParts(transportContinuationPrefix, parts);
+          } else {
+            // Cancellation keeps even unfinished reasoning. The success-only
+            // merge may drop it to avoid burying a dangling thought before tools.
+            const text = getPlainTextFromParts(transportContinuationPrefix);
+            const textPart = parts.find(isPlainTextPart);
+            if (textPart) {
+              textPart.text = mergeDeliveredPrefix(text, textPart.text);
+            } else {
+              parts.push({ text });
+            }
+          }
+        }
+        if (parts.length > 0) {
+          this.history.push({ role: 'model', parts });
+          this.pendingPartialAssistantTurnIndex = this.history.length - 1;
+          this.pendingPartialAssistantRecord = {
+            model,
+            message: parts.map(
+              (part) => redactStructuredOutputArgsForRecording(part) ?? part,
+            ),
+            tokens: coercedUsage
+              ? { ...usageMetadata, ...coercedUsage }
+              : usageMetadata,
+            contextWindowSize:
+              this.config.getContentGeneratorConfig()?.contextWindowSize,
+            ...(goalContext ? { goalContext: { ...goalContext } } : {}),
+          };
+        }
+      }
     }
+    if (abortSignal?.aborted && streamError !== null) {
+      throw streamError;
+    }
+    abortSignal?.throwIfAborted();
 
+    let pendingProtocolChunk: GenerateContentResponse | undefined;
     if (
       streamError === null &&
       pendingProtocolParts.length > 0 &&
@@ -5504,49 +5887,47 @@ export class LlmChat {
         syncFunctionCallsField(chunk, parts);
         hasToolCall ||= parts.some((part) => part.functionCall);
         allModelParts.push(...parts);
-        yield chunk;
+        pendingProtocolChunk = chunk;
       }
     }
 
-    let thoughtContentPart: Part | undefined;
-    const thoughtText = allModelParts
+    const consolidatedHistoryParts =
+      consolidateModelResponseParts(allModelParts);
+
+    // A thought episode can be flushed while still incomplete if the
+    // stream is cut off before its terminating signature-only chunk
+    // arrives (SSE drop, MAX_TOKENS) -- see the "Known limitation" note
+    // above for the mechanics, and dropDanglingUnsignedTrailingThought's
+    // doc for why this must stay trailing-only and is applied again
+    // (with different semantics) after recovery-coalescing below.
+    dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, hasToolCall);
+
+    // Single predicate for "visible text part", shared by contentText's
+    // computation here, its post-recovery recompute below, and the
+    // XML-recovery removal loop -- so a part that contributes to contentText
+    // is always exactly the set of parts recovery removes and replaces with
+    // remainingText. A prior divergence (contentText used `part.text &&
+    // !part.thought` while the removal loop used the stricter
+    // isValidNonThoughtTextPart, which also excludes any part carrying a
+    // thoughtSignature) let a real wire shape slip through: a part with
+    // `thoughtSignature` set but no `thought: true` (see
+    // loggingContentGenerator.ts's independent thought/thoughtSignature
+    // spreads) was scanned for XML here but survived the removal loop
+    // untouched, leaking raw tool-call XML into durable history alongside
+    // the recovered functionCall. Intentionally looser than
+    // isValidNonThoughtTextPart: hasAnyContent below must keep treating such
+    // a part as visible text, not silently empty.
+    const isVisibleTextPart = (part: Part): boolean =>
+      Boolean(part.text) && !part.thought;
+
+    const thoughtText = consolidatedHistoryParts
       .filter((part) => part.thought)
       .map((part) => part.text)
       .join('')
       .trim();
 
-    if (thoughtText !== '') {
-      thoughtContentPart = {
-        text: thoughtText,
-        thought: true,
-      };
-
-      const thoughtSignature = allModelParts.filter(
-        (part) => part.thoughtSignature && part.thought,
-      )?.[0]?.thoughtSignature;
-      if (thoughtContentPart && thoughtSignature) {
-        thoughtContentPart.thoughtSignature = thoughtSignature;
-      }
-    }
-
-    let contentParts = allModelParts.filter((part) => !part.thought);
-    const consolidatedHistoryParts: Part[] = [];
-    for (const part of contentParts) {
-      const lastPart =
-        consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
-      if (
-        lastPart?.text &&
-        isValidNonThoughtTextPart(lastPart) &&
-        isValidNonThoughtTextPart(part)
-      ) {
-        lastPart.text += part.text;
-      } else if (isValidContentPart(part)) {
-        consolidatedHistoryParts.push(part);
-      }
-    }
-
     let contentText = consolidatedHistoryParts
-      .filter((part) => part.text)
+      .filter(isVisibleTextPart)
       .map((part) => part.text)
       .join('')
       .trim();
@@ -5570,14 +5951,40 @@ export class LlmChat {
       const recovery = tryRecoverXmlToolCalls(contentText);
       if (recovery.recovered) {
         hasToolCall = true;
-        // recovery.remainingText is derived from the join of ALL text
-        // parts, so every text part is consumed. Remove them, reinsert
-        // remainingText at the first text position so non-text parts
-        // (inlineData/fileData) keep their original relative order, and
-        // append functionCallParts at the end.
+        // recovery.remainingText is derived from the join of ALL
+        // non-thought text parts (contentText excludes thought parts), so
+        // only those are consumed here. Remove them, reinsert remainingText
+        // at the first text position so non-text parts (inlineData/fileData)
+        // keep their original relative order, and append functionCallParts
+        // at the end. Must use isVisibleTextPart (the same predicate as
+        // contentText above) rather than a bare `.text !== undefined` check
+        // or the stricter isValidNonThoughtTextPart -- see isVisibleTextPart's
+        // doc for why both alternatives are wrong here: a bare text check
+        // would delete a reasoning episode's text and thoughtSignature
+        // whenever XML recovery fires on the same turn (flushThoughtEpisode
+        // always sets `episodePart.text`, even '' for a signature-only
+        // episode), while isValidNonThoughtTextPart would leave a
+        // thoughtSignature-bearing non-thought part's raw XML behind.
+        // Capture trailing-ness BEFORE the removal loop below: that loop
+        // splices out every visible (non-thought) text part, which would
+        // otherwise manufacture a trailing dangling episode out of one that
+        // was never trailing in the actual stream. A COMPLETE, untruncated
+        // turn from a non-signing provider that emitted XML tool-calls (e.g.
+        // `[thought(unsigned), text-with-XML]`, finish reason present, no
+        // truncation) has no wedge risk -- non-signing providers never
+        // validate signatures -- so dropping its reasoning here has no
+        // protective benefit and is a pure, avoidable loss from history, the
+        // JSONL record, and `--resume` replay.
+        const lastPartBeforeRemoval =
+          consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
+        const hadTrailingDanglingThought = Boolean(
+          lastPartBeforeRemoval?.thought &&
+            lastPartBeforeRemoval.text &&
+            !lastPartBeforeRemoval.thoughtSignature,
+        );
         const textIndices: number[] = [];
         for (let i = 0; i < consolidatedHistoryParts.length; i++) {
-          if (consolidatedHistoryParts[i]!.text !== undefined)
+          if (isVisibleTextPart(consolidatedHistoryParts[i]!))
             textIndices.push(i);
         }
         for (let j = textIndices.length - 1; j >= 0; j--) {
@@ -5587,20 +5994,47 @@ export class LlmChat {
           textIndices[0] ?? 0,
           consolidatedHistoryParts.length,
         );
+        // Third call site for the dangling-episode drop, and the only one
+        // that can catch this path. The per-stream call above already ran
+        // with `hasToolCall === false` (XML recovery's own gate requires
+        // it), so it early-returned; appending functionCallParts below is
+        // what turns this into an active tool-use turn.
+        //
+        // Placement is load-bearing on BOTH sides. It must run after the
+        // consumed text parts are spliced out and BEFORE `remainingText` is
+        // re-inserted or the calls are appended -- this is the only window
+        // in which a dangling episode is guaranteed to be the last element.
+        // Re-inserting first would put the recovered text behind an episode
+        // that preceded the consumed XML, so the trailing-only check would
+        // see a text part last and no-op, persisting
+        // `[thought(unsigned), text, functionCall]` and wedging the turn.
+        //
+        // Gated on `hadTrailingDanglingThought` (captured above, before the
+        // removal loop) rather than unconditionally: the removal loop always
+        // leaves a thought part last once every non-thought text part is
+        // gone, but that "trailing" position may be an artifact of the
+        // removal, not a genuine stream truncation. Only a thought episode
+        // that was ALREADY last -- i.e. a real dangling truncation -- is
+        // eligible for the drop.
+        if (hadTrailingDanglingThought) {
+          dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, true);
+        }
         if (recovery.remainingText) {
-          consolidatedHistoryParts.splice(insertAt, 0, {
-            text: recovery.remainingText,
-          });
+          consolidatedHistoryParts.splice(
+            Math.min(insertAt, consolidatedHistoryParts.length),
+            0,
+            { text: recovery.remainingText },
+          );
         }
         consolidatedHistoryParts.push(...recovery.functionCallParts);
-        // Recompute contentText and contentParts so the JSONL recording
-        // below stays aligned with in-memory history (--resume fidelity).
+        // Recompute contentText so the post-recovery validation below
+        // (and the recovery debug log) reflects the rewritten parts; the
+        // JSONL recording reads consolidatedHistoryParts directly.
         contentText = consolidatedHistoryParts
-          .filter((part) => part.text)
+          .filter(isVisibleTextPart)
           .map((part) => part.text)
           .join('')
           .trim();
-        contentParts = consolidatedHistoryParts;
         // Build a synthetic chunk so the agent loop (turn.ts) actually
         // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
@@ -5696,10 +6130,6 @@ export class LlmChat {
       }
     }
 
-    if (recoveredChunk) {
-      yield recoveredChunk;
-    }
-
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
     // JSONL never carries a partial turn we deliberately dropped from
@@ -5710,8 +6140,7 @@ export class LlmChat {
     // conversation or surface as duplicate output).
     const willPersistToHistory =
       streamError === null ||
-      (hasToolCall &&
-        (thoughtContentPart || consolidatedHistoryParts.length > 0));
+      (hasToolCall && consolidatedHistoryParts.length > 0);
     // Transport-continuation merge (issue #8094). `allModelParts` is
     // per-attempt, so a continuation's parts carry the resumed remainder only.
     // Fold the already-delivered prefix back in HERE — into the parts
@@ -5744,26 +6173,17 @@ export class LlmChat {
     // attempt that did not survive, and a fresh-restart retry discards it via
     // `resetTransportContinuation`.
     if (streamError === null && transportContinuationPrefix) {
-      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
-      if (textIndex < 0) {
-        // Continuation returned no text of its own (e.g. only a functionCall).
-        // `thoughtContentPart` is prepended separately at the push below, so
-        // index 0 here is already "after any leading thought part".
-        consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
-      } else {
-        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
-          text: string;
-        };
-        consolidatedHistoryParts[textIndex] = {
-          ...remainderPart,
-          text: mergeDeliveredPrefix(
-            transportContinuationPrefix,
-            remainderPart.text,
-          ),
-        };
-      }
+      const mergedParts = mergeDeliveredParts(
+        transportContinuationPrefix,
+        consolidatedHistoryParts,
+      );
+      consolidatedHistoryParts.splice(
+        0,
+        consolidatedHistoryParts.length,
+        ...mergedParts,
+      );
       contentText = consolidatedHistoryParts
-        .filter((part) => part.text)
+        .filter(isVisibleTextPart)
         .map((part) => part.text)
         .join('')
         .trim();
@@ -5774,42 +6194,26 @@ export class LlmChat {
     // parts like inlineData, which have no slot in the text/toolCall
     // assembly and would otherwise desync transcript from history on
     // `--resume`).
-    const acceptedTurnParts: Part[] = [
-      ...(thoughtContentPart ? [thoughtContentPart] : []),
-      ...consolidatedHistoryParts,
-    ];
+    const acceptedTurnParts: Part[] = [...consolidatedHistoryParts];
     if (acceptedQuietToolResultCompletion && acceptedTurnParts.length === 0) {
       acceptedTurnParts.push({ text: GEMINI_EMPTY_CONTENT_PLACEHOLDER });
     }
     if (
       willPersistToHistory &&
-      (acceptedQuietToolResultCompletion ||
-        thoughtContentPart ||
-        contentText ||
-        hasToolCall ||
-        usageMetadata)
+      (acceptedTurnParts.length > 0 || usageMetadata)
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       const recordArgs = {
         model,
-        message: acceptedQuietToolResultCompletion
-          ? acceptedTurnParts
-          : [
-              ...(thoughtContentPart ? [thoughtContentPart] : []),
-              ...(contentText ? [{ text: contentText }] : []),
-              ...(hasToolCall
-                ? contentParts
-                    .map(redactStructuredOutputArgsForRecording)
-                    .filter(
-                      (
-                        p,
-                      ): p is {
-                        functionCall: NonNullable<Part['functionCall']>;
-                      } => p !== null,
-                    )
-                : []),
-            ],
+        message: acceptedTurnParts.map((part) =>
+          // Non-null: redactStructuredOutputArgsForRecording only returns
+          // null for parts with no functionCall, which this ternary
+          // already excludes.
+          part.functionCall
+            ? redactStructuredOutputArgsForRecording(part)!
+            : part,
+        ),
         tokens: coercedUsage
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
@@ -5851,17 +6255,14 @@ export class LlmChat {
       // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
       // block above instead of re-deriving it. When `streamError !== null`,
       // `willPersistToHistory` reduces to exactly the original expression
-      // `hasToolCall && (thoughtContentPart || consolidatedHistoryParts.length > 0)`;
-      // sharing the single binding eliminates drift risk if one gate is
-      // tightened without the other and the JSONL recording silently
-      // desyncs from in-memory history.
+      // `hasToolCall && consolidatedHistoryParts.length > 0`; sharing the
+      // single binding eliminates drift risk if one gate is tightened
+      // without the other and the JSONL recording silently desyncs from
+      // in-memory history.
       if (willPersistToHistory) {
         this.history.push({
           role: 'model',
-          parts: [
-            ...(thoughtContentPart ? [thoughtContentPart] : []),
-            ...consolidatedHistoryParts,
-          ],
+          parts: consolidatedHistoryParts,
         });
         // Track the pushed turn so the outer sendMessageStream retry loop
         // can roll it back if it decides to retry the same send. Without
@@ -5899,6 +6300,11 @@ export class LlmChat {
       role: 'model',
       parts: acceptedTurnParts,
     });
+    // Persist before these synthetic yields: the consumer may cancel and
+    // close the generator immediately after receiving a tool call.
+    if (pendingProtocolChunk) yield pendingProtocolChunk;
+    if (recoveredChunk) yield recoveredChunk;
+    abortSignal?.throwIfAborted();
     if (deferredFinishReason) {
       yield {
         candidates: [{ finishReason: deferredFinishReason }],
@@ -5936,12 +6342,33 @@ export class LlmChat {
         return;
       }
 
+      // The MAX_TOKENS recovery loop only reaches this merge when
+      // `precedingModel` had NO functionCall of its own (its own break
+      // condition), so the per-stream trailing guard's `hasToolCall` was
+      // false and never fired for a dangling unsigned episode there --
+      // exactly the precondition under which this merge is about to
+      // attach a functionCall from a DIFFERENT attempt. Re-run the same
+      // trailing-only check on `precedingModel.parts` BEFORE merging
+      // (not after): `appendRecoveryContinuationParts`'s dedup anchor is
+      // blind to `thought` parts, so post-merge the dangling episode is
+      // no longer trailing and this check would miss it entirely. See
+      // dropDanglingUnsignedTrailingThought's doc for why this must stay
+      // trailing-only rather than scanning the whole merged array.
+      if (precedingModel.parts) {
+        dropDanglingUnsignedTrailingThought(
+          precedingModel.parts,
+          (modelContinuation.parts ?? []).some((p) => p.functionCall),
+        );
+      }
       precedingModel.parts = appendRecoveryContinuationParts(
         precedingModel.parts,
         modelContinuation.parts,
       );
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
+      if (this.pendingPartialAssistantTurnIndex === len - 1) {
+        this.pendingPartialAssistantTurnIndex = len - 3;
+      }
     }
   }
 }
