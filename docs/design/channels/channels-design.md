@@ -1,5 +1,7 @@
 # Channels Design
 
+[English](channels-design.md) | [简体中文](channels-design.zh-CN.md)
+
 > External messaging integrations for Qwen Code — interact with an agent from Telegram, WeChat, and more.
 >
 > User documentation: [Channels Overview](../../users/features/channels/overview.md).
@@ -50,7 +52,7 @@ Normalized message format all platforms convert to:
 - **Content**: `text`, optional `imageBase64`/`imageMimeType`, optional `referencedText`
 - **Context**: `isGroup`, `isMentioned`, `isReplyToBot`, optional `threadId`
 
-Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic; @mentions stripped from `text`.
+Plugin responsibilities: `senderId` must be stable/unique; `chatId` must distinguish DMs from groups; boolean flags must be accurate for gate logic; `text` is the single adapter-normalized message used for start-anchored local controls, deterministic channel-memory phrases, memory relevance scoring, and the agent prompt. Mention normalization is platform-specific; no hidden mention-stripped control or recall projection is created. Retaining a leading mention prevents slash commands, direct `!` execution, and fully anchored memory phrases from matching at the start. The group/shared safety gate still refuses a retained-mention-plus-`!` shape without extracting or executing it. Whole-text classifiers and relevance scorers inspect the retained mention and may produce different results than mention-free text.
 
 ### Message Flow
 

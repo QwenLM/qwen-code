@@ -74,7 +74,7 @@ export class MyChannel extends ChannelBase {
       senderId: '...', // Stable, unique platform user ID
       senderName: '...', // Display name
       chatId: '...', // Chat/conversation ID (distinct for DMs vs groups)
-      text: '...', // Message text (strip @mentions)
+      text: '...', // Adapter-normalized message text
       isGroup: false, // Accurate — used by GroupGate
       isMentioned: false, // Accurate — used by GroupGate
       isReplyToBot: false, // Accurate — used by GroupGate
@@ -107,7 +107,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `senderName`     | string       | Yes      | Display name                                                               |
 | `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
 | `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
-| `text`           | string       | Yes      | Strip bot @mentions                                                        |
+| `text`           | string       | Yes      | Adapter-normalized text used for local controls and agent input            |
 | `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
 | `isGroup`        | boolean      | Yes      | GroupGate relies on this                                                   |
@@ -117,6 +117,8 @@ The normalized message object you build from platform data. The boolean flags dr
 | `imageBase64`    | string       | No       | Base64-encoded image (legacy — prefer `attachments`)                       |
 | `imageMimeType`  | string       | No       | e.g., `image/jpeg` (legacy — prefer `attachments`)                         |
 | `attachments`    | Attachment[] | No       | Structured media attachments (see below)                                   |
+
+Mention normalization is platform-specific. An adapter may remove a routing mention when the platform identifies it reliably, or preserve the platform-delivered text when removal would be heuristic. The same `text` value is used for start-anchored local controls, deterministic channel-memory phrases, memory relevance scoring, and the agent prompt; there is no hidden mention-stripped control or recall projection. A retained leading mention therefore prevents slash commands, direct `!` execution, and fully anchored memory phrases from matching at the start. The group/shared safety gate still refuses a retained-mention-plus-`!` shape without extracting or executing it. Whole-text classifiers and relevance scorers inspect the retained mention and may produce different results than mention-free text.
 
 ### Attachments
 

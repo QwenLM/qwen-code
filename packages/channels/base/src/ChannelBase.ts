@@ -53,9 +53,11 @@ import {
   sanitizeSenderName,
   sanitizeQuotedText,
   sanitizePromptText,
+  sanitizePromptTextAfterLeadingMentions,
   sanitizePromptPath,
   sanitizeLogText,
   sanitizeDisplayText,
+  isMentionPrefixedBang,
   truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
@@ -3737,8 +3739,9 @@ export abstract class ChannelBase {
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
     return (
-      bangText.startsWith('!') &&
-      (envelope.isGroup || this.isSharedSession(envelope))
+      (envelope.isGroup || this.isSharedSession(envelope)) &&
+      (bangText.startsWith('!') ||
+        (envelope.isMentioned && isMentionPrefixedBang(envelope.text)))
     );
   }
 
@@ -6500,6 +6503,41 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
+    // Refuse shell-shaped input outside a private 1:1 BEFORE memory
+    // classification, local commands, or session routing. Retained mentions do
+    // not become an executable projection: they contribute only a boolean
+    // safety signal in group/shared contexts.
+    const bangText = envelope.text.trimStart();
+    const directBang = bangText.startsWith('!');
+    const sharedShellScope = envelope.isGroup || this.isSharedSession(envelope);
+    const blockedBangAttempt =
+      sharedShellScope &&
+      (directBang ||
+        (envelope.isMentioned && isMentionPrefixedBang(envelope.text)));
+    if (blockedBangAttempt) {
+      // A group/shared member trying `!` is security-relevant. Sanitize the
+      // attacker-controlled display name and do not echo the command payload.
+      const who = sanitizeSenderName(
+        envelope.senderName || envelope.senderId || 'unknown',
+      );
+      process.stderr.write(
+        `[${this.name}] blocked ! shell command from ${who} (sender ${envelope.senderId}) in chat ${sanitizeLogText(envelope.chatId, 64)}\n`,
+      );
+      if (envelope.isGroup) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'Shell commands (`!`) are disabled in group chats.',
+        );
+        return;
+      }
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Shell commands (`!`) are disabled in shared sessions.',
+      );
+      return;
+    }
     const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
@@ -6586,44 +6624,6 @@ export abstract class ChannelBase {
           );
           return;
         }
-      }
-    }
-
-    // 3.5. Bang (!) shell command — refuse outside a private 1:1 chat BEFORE
-    // resolving a session, so a refused command never creates or persists one.
-    // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
-    // boundary). Any group is multi-operator — even a user-scope group, which is
-    // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
-    if (bangText.startsWith('!')) {
-      if (envelope.isGroup || this.isSharedSession(envelope)) {
-        // Audit a blocked host-shell attempt — a group/shared member trying `!`
-        // is security-relevant, so surface it to operators. Sanitize the display
-        // name (attacker-controlled) and do NOT echo the command payload.
-        const who = sanitizeSenderName(
-          envelope.senderName || envelope.senderId || 'unknown',
-        );
-        process.stderr.write(
-          `[${this.name}] blocked ! shell command from ${who} (sender ${envelope.senderId}) in chat ${sanitizeLogText(envelope.chatId, 64)}\n`,
-        );
-      }
-      if (envelope.isGroup) {
-        await this.sendThreadMessage(
-          envelope.chatId,
-          envelope.threadId,
-          'Shell commands (`!`) are disabled in group chats.',
-        );
-        return;
-      }
-      // A single-scope DM collapses every DM to one channel-wide session, so it
-      // is multi-operator too despite not being a group.
-      if (this.isSharedSession(envelope)) {
-        await this.sendThreadMessage(
-          envelope.chatId,
-          envelope.threadId,
-          'Shell commands (`!`) are disabled in shared sessions.',
-        );
-        return;
       }
     }
 
@@ -6721,7 +6721,7 @@ export abstract class ChannelBase {
     // Bang (!) execution — a private 1:1 session has a single operator, so
     // direct shell execution stays allowed. Group/shared contexts were refused
     // above, before the session was resolved.
-    if (bangText.startsWith('!')) {
+    if (directBang) {
       const cmd = bangText.slice(1).trim();
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
@@ -6795,7 +6795,10 @@ export abstract class ChannelBase {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
-      promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      const sanitizedPromptText = envelope.isMentioned
+        ? sanitizePromptTextAfterLeadingMentions(promptText)
+        : sanitizePromptText(promptText);
+      promptText = `[${who}] ${sanitizedPromptText}`;
       // Render the non-bot mention marker AFTER sanitization (like the
       // [Replying to:] wrapper below). Inside `text` it would pass through
       // sanitizePromptText, which strips brackets only on content <=64 chars

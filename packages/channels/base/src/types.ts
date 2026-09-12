@@ -89,6 +89,14 @@ export interface Envelope {
   senderName: string;
   chatId: string;
   chatName?: string;
+  /**
+   * Adapter-normalized message text used for start-anchored local controls,
+   * deterministic channel-memory phrases, relevance scoring, and the agent
+   * prompt. A retained leading mention prevents slash commands and direct `!`
+   * execution from matching at the start; group/shared safety still refuses a
+   * mention-prefixed `!` shape without executing it. Whole-text classifiers and
+   * relevance scorers inspect the retained mention too.
+   */
   text: string;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
@@ -109,10 +117,11 @@ export interface Envelope {
   /**
    * Stable identifiers (staffId preferred, platform ID fallback) of non-bot
    * members mentioned alongside the bot in a group message, deduplicated and
-   * excluding the bot itself. Kept separate from `text` (like `metadata`) so
-   * slash-command parsing sees the message body alone; ChannelBase renders it
-   * as a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered
-   * format stays uniform regardless of the identifier list length.
+   * excluding the bot itself. Stable IDs stay separate from `text` (like
+   * `metadata`) so they do not alter command parsing; adapters may still retain
+   * platform-rendered mention labels in `text`. ChannelBase renders the IDs as
+   * a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered format
+   * stays uniform regardless of the identifier list length.
    * Rendered only when sender attribution is rendered (group/single-scope,
    * not `alreadyPrefixed`, not a recognized slash command) — self-prefixing
    * adapters must render it themselves. Group history backfill records the

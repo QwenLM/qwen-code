@@ -336,7 +336,7 @@ interface Envelope {
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
   chatName?: string; // inbound group display name, when provided
-  text: string; // message text (@mentions stripped)
+  text: string; // adapter-normalized message text
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions
   isGroup: boolean; // true for group chats
@@ -356,6 +356,8 @@ interface Attachment {
   fileName?: string; // original file name from the platform
 }
 ```
+
+The same `text` value drives start-anchored local controls, deterministic channel-memory phrases, memory relevance scoring, and the agent prompt. Mention normalization is platform-specific, and ChannelBase does not create a hidden mention-stripped control or recall projection. Retaining a leading mention prevents slash commands, direct `!` execution, and fully anchored memory phrases from matching at the start. The group/shared safety gate still refuses a retained-mention-plus-`!` shape without extracting or executing it. Whole-text classifiers and relevance scorers inspect the retained mention and may produce different results than mention-free text.
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 

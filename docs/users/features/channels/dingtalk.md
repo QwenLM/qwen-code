@@ -162,7 +162,15 @@ DingTalk bots work in both DM and group conversations. To enable group support:
 3. @mention the bot in the group to trigger a response
 4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
-By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
+DingTalk delivers group robot callbacks only for messages that @mention the bot. `requireMention` remains an additional channel-side gate, but setting it to `false` cannot make DingTalk deliver unmentioned group messages. See [Group Chats](./overview#group-chats) for the shared channel options.
+
+`groupHistoryLimit` is accepted for configuration compatibility, but a DingTalk bot cannot collect new group-history backfill: messages without a bot mention never reach the channel, while a delivered mention or reply is an active trigger rather than a skipped history entry. Use a channel whose platform delivers ordinary group messages, such as DWS, when backfill is required.
+
+### Inbound Mention Text
+
+DingTalk normalizes mentions differently by message type. Plain-text callbacks already omit the bot mention, so a message such as `@Bot /clear` reaches Qwen Code as `/clear` and can run as a local channel command. Rich-text callbacks retain the visible mention in their ordered text parts, so Qwen Code preserves it; `@Bot /clear` in rich text is ordinary agent input rather than a local `/clear` command. The adapter does not special-case or rewrite command-shaped rich text. For safety, a group/shared message shaped like `@Bot !command` is refused and audited, but its body is never extracted or executed.
+
+The adapter does not reconstruct visible mention text from the callback's member ID list. This preserves the text and ordering supplied by DingTalk, including repeated mentions. The retained mention also remains visible to exact channel-memory phrases, memory classification, and recall scoring; Qwen Code does not create a hidden mention-stripped projection for those consumers.
 
 Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 

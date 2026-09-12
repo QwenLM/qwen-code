@@ -278,20 +278,19 @@ Configure per-group with the `groups` setting:
 
 ### Group History Backfill
 
-By default, Qwen ignores unmentioned group messages and does not store them as session turns. To let the next `@mention` include recent group context, set `groupHistoryLimit` to a positive number.
+By default, Qwen ignores unmentioned group messages and does not store them as session turns. To let the next `@mention` include recent group context, set `groupHistoryLimit` to a positive number. The platform must deliver ordinary unmentioned group messages to the adapter. For Telegram, disable privacy mode in BotFather and remove/re-add the bot after changing that setting.
 
 ```json
 {
   "channels": {
-    "my-dingtalk": {
-      "type": "dingtalk",
-      "clientId": "$DINGTALK_CLIENT_ID",
-      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+    "my-telegram": {
+      "type": "telegram",
+      "token": "$TELEGRAM_BOT_TOKEN",
       "groupPolicy": "open",
       "groupHistoryLimit": 50,
       "groups": {
         "*": { "requireMention": true },
-        "sensitive-group-id": {
+        "-100123456": {
           "requireMention": true,
           "groupHistoryLimit": 0
         }
@@ -307,6 +306,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
+- Mention-scoped platforms cannot collect new backfill. For example, DingTalk group robot callbacks and WeCom group callbacks are delivered only for bot mentions, so a positive `groupHistoryLimit` does not make ordinary group messages available.
 
 ### How group messages are evaluated
 

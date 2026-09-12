@@ -13,6 +13,60 @@
 export const PROMPT_UNSAFE_INVISIBLES =
   /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
 
+const MENTION_SEPARATOR = /[\s\p{Cf}]|\p{Variation_Selector}/u;
+
+function codePointWidth(text: string, index: number): number {
+  return (text.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+}
+
+function isMentionSeparator(text: string, index: number): boolean {
+  const codePoint = text.codePointAt(index) ?? 0;
+  if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+    return true;
+  }
+  const width = codePointWidth(text, index);
+  return MENTION_SEPARATOR.test(text.slice(index, index + width));
+}
+
+/**
+ * Locate the body after one or more leading `@token` mentions without
+ * returning a mention-stripped projection. The scanner is deliberately
+ * linear and recognizes only the visible token shape available in
+ * adapter-normalized text; it does not guess platform identities.
+ */
+function leadingMentionBodyStart(text: string): number | undefined {
+  let cursor = 0;
+  while (cursor < text.length && isMentionSeparator(text, cursor)) {
+    cursor += codePointWidth(text, cursor);
+  }
+  if (text[cursor] !== '@') return undefined;
+
+  while (text[cursor] === '@') {
+    cursor += 1;
+    while (cursor < text.length) {
+      if (text[cursor] === '[') return cursor;
+      if (isMentionSeparator(text, cursor)) break;
+      cursor += codePointWidth(text, cursor);
+    }
+    while (cursor < text.length && isMentionSeparator(text, cursor)) {
+      cursor += codePointWidth(text, cursor);
+    }
+    if (cursor >= text.length) return undefined;
+    if (text[cursor] !== '@') return cursor;
+  }
+
+  return undefined;
+}
+
+/**
+ * Detect a retained leading mention followed by a bang command shape. This is
+ * a boolean safety signal only: callers must never slice or execute the body.
+ */
+export function isMentionPrefixedBang(text: string): boolean {
+  const bodyStart = leadingMentionBodyStart(text);
+  return bodyStart !== undefined && text[bodyStart] === '!';
+}
+
 /**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
  * applied with `.slice` counts code units, so one landing mid-surrogate-pair
@@ -226,6 +280,21 @@ export function sanitizePromptText(text: string): string {
   // only the string start is still a start-of-line prompt position — which is
   // exactly what this second pass covers.
   return unwrapStartOfLineTags(folded);
+}
+
+/**
+ * Sanitize a prompt whose platform-normalized text retains leading mentions.
+ * The mention prefix remains visible, while the following body receives the
+ * same start-of-line tag protection it would have had without that prefix.
+ */
+export function sanitizePromptTextAfterLeadingMentions(text: string): string {
+  const normalized = text.replace(PROMPT_UNSAFE_INVISIBLES, ' ');
+  const bodyStart = leadingMentionBodyStart(normalized);
+  if (bodyStart === undefined) return sanitizePromptText(normalized);
+  return (
+    sanitizePromptText(normalized.slice(0, bodyStart)) +
+    sanitizePromptText(normalized.slice(bodyStart))
+  );
 }
 
 /**
