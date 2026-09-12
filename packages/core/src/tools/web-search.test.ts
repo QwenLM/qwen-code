@@ -222,6 +222,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -453,6 +454,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -649,6 +651,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         // Not the primary model id: the search runs on the documented
         // search model at the same endpoint.
         modelId: 'qwen3.8-flash',
@@ -2000,5 +2003,26 @@ describe('WebSearchTool execute', () => {
     const schema = tool.schema;
     expect(schema.description).toContain('July 2026');
     vi.useRealTimers();
+  });
+});
+
+describe('WebSearchTool citations', () => {
+  it('asks the model to cite bare URLs without titles', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('as bare URLs, one per line');
+    expect(content).toContain('cannot be verified');
+    expect(content).not.toContain('as markdown links');
+  });
+
+  it('shows a bare URL citation example in the tool description', () => {
+    const description = new WebSearchTool(makeConfig()).schema.description;
+    expect(description).toContain(
+      '- https://www.cms.gov/files/document/r12951cp.pdf',
+    );
+    expect(description).toContain('do not wrap them in markdown links');
+    expect(description).not.toContain('](https://');
   });
 });

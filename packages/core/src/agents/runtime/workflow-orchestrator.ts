@@ -240,10 +240,11 @@ function resolveSubagentBound(
 /** Per-attempt turn ceiling for a workflow subagent. */
 export function resolveSubagentMaxTurns(
   env: Record<string, string | undefined> = process.env,
+  defaultValue = DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
 ): number {
   return resolveSubagentBound(
     WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
-    DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+    defaultValue,
     HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
     env,
   );
@@ -252,10 +253,11 @@ export function resolveSubagentMaxTurns(
 /** Per-attempt wall-clock ceiling, in minutes, for a workflow subagent. */
 export function resolveSubagentMaxTimeMinutes(
   env: Record<string, string | undefined> = process.env,
+  defaultValue = DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 ): number {
   return resolveSubagentBound(
     WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
-    DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+    defaultValue,
     HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
     env,
   );
@@ -270,7 +272,7 @@ export function resolveSubagentMaxTimeMinutes(
  * workflow subagents do not register. Defense-in-depth alongside the workflow
  * system prompt's return-value contract.
  */
-const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
@@ -319,6 +321,7 @@ export type { WorkflowAgentResult, WorkflowMeta, WorkflowOrchestratorEmitter };
 export interface WorkflowRunRequest {
   script: string;
   args: unknown;
+  maxWallClockMs?: number;
   // FIX-D (Round 3 ARCH-I1): `signal` was previously declared here but never
   // read by `run()` — cancellation flows through `createProductionDispatch`'s
   // closure-captured signal, not via per-run state. Removed to prevent
@@ -458,6 +461,11 @@ function sanitizeForErrorMessage(value: string): string {
   return stripAnsiAndControl(value);
 }
 
+export interface WorkflowSubagentBounds {
+  max_turns: number;
+  max_time_minutes: number;
+}
+
 /**
  * Build the production agent-dispatch function.
  *
@@ -501,6 +509,7 @@ export function createProductionDispatch(
     emitter: AgentEventEmitter,
     dispatchId?: string,
   ) => () => void,
+  subagentBounds?: WorkflowSubagentBounds,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -563,6 +572,7 @@ export function createProductionDispatch(
             workflowAgentId,
             agentIdentity,
             onTokens,
+            subagentBounds,
           );
         } finally {
           cleanupTranscript();
@@ -725,6 +735,7 @@ async function runSingleDispatch(
   /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
   agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  subagentBounds?: WorkflowSubagentBounds,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
@@ -753,7 +764,7 @@ async function runSingleDispatch(
       // cannot loop the model indefinitely. Without this, runConfig was {}
       // and the loop guards never tripped — combined with the cancellation
       // bug below, workflows were effectively unkillable.
-      {
+      subagentBounds ?? {
         max_turns: resolveSubagentMaxTurns(),
         max_time_minutes: resolveSubagentMaxTimeMinutes(),
       },
@@ -809,6 +820,7 @@ async function runSingleDispatch(
     agentIdentity,
     onTokens,
     emitter,
+    subagentBounds,
   );
 }
 
@@ -894,6 +906,7 @@ async function runOverridePath(
    * so the watchdog and schema capture observe the one subagent's events.
    */
   emitter?: AgentEventEmitter,
+  subagentBounds?: WorkflowSubagentBounds,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -1143,7 +1156,7 @@ async function runOverridePath(
         // Workflow always bounds resource ceiling regardless of agentType's
         // own runConfig / maxTurns — these are workflow-level safety bounds,
         // not subagent-level preferences. P5 will refine via budget.
-        runConfigOverrides: {
+        runConfigOverrides: subagentBounds ?? {
           max_turns: resolveSubagentMaxTurns(),
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
@@ -2153,6 +2166,7 @@ export class WorkflowOrchestrator {
 
     const sandbox = createWorkflowSandbox({
       args: req.args,
+      maxWallClockMs: req.maxWallClockMs,
       runId,
       dispatch: countedDispatch,
       parallel: parallelImpl,

@@ -100,6 +100,7 @@ import type { MessageListHandle } from './MessageList';
 import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
@@ -1014,6 +1015,7 @@ export function ChatPane({
         const submit = () =>
           actions
             .sendPrompt(trimmed, {
+              submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
               ...(files && files.length ? { files } : {}),
               ...(inputAnnotations ? { inputAnnotations } : {}),
@@ -1092,7 +1094,15 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images, files)
+          ? enqueuePrompt(
+              trimmed,
+              images,
+              files,
+              undefined,
+              undefined,
+              undefined,
+              text,
+            )
           : enqueuePrompt(
               trimmed,
               images,
@@ -1100,6 +1110,7 @@ export function ChatPane({
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
+              text,
             );
       if (queued !== false && catalogOwnerCwd) {
         sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
@@ -1331,13 +1342,12 @@ export function ChatPane({
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [commands, connection.skills]);
+  const contextUsageAvailable = !shouldBlockComposerSubmit({
+    connectionStatus: connection.status,
+    hasSession: Boolean(connection.sessionId),
+  });
   const handleShowContextUsage = useCallback(() => {
-    if (
-      shouldBlockComposerSubmit({
-        connectionStatus: connection.status,
-        hasSession: Boolean(connection.sessionId),
-      })
-    ) {
+    if (!contextUsageAvailable) {
       return;
     }
     const owner = sessionOwnerGuard.capture();
@@ -1360,14 +1370,7 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [
-    actions,
-    connection.sessionId,
-    connection.status,
-    reportError,
-    sessionOwnerGuard,
-    store,
-  ]);
+  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1739,6 +1742,11 @@ export function ChatPane({
               )}
             </div>
           )}
+          <SessionRecoveryBanner
+            blocked={
+              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+            }
+          />
           <ChatEditor
             ref={editorRef}
             onSubmit={handleSubmit}
@@ -1750,9 +1758,15 @@ export function ChatPane({
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
-            tokenCount={connection.tokenCount ?? 0}
-            contextWindow={connection.contextWindow ?? 0}
-            onShowContextUsage={handleShowContextUsage}
+            tokenCount={
+              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+            }
+            contextWindow={
+              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+            }
+            onShowContextUsage={
+              contextUsageAvailable ? handleShowContextUsage : undefined
+            }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}

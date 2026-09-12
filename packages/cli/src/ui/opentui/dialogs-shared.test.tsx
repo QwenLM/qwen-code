@@ -33,8 +33,35 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-import { useDialogSelect } from './dialogs-shared.js';
+import {
+  dialogAreaWidth,
+  dialogContentWidth,
+  useDialogSelect,
+} from './dialogs-shared.js';
 import { NUMBER_SELECT_TIMEOUT_MS } from './dialogs-core.js';
+
+describe('dialogAreaWidth', () => {
+  it('leaves room for the two-column margins ink puts around every popup', () => {
+    expect(dialogAreaWidth(100)).toBe(96);
+    expect(dialogAreaWidth(80)).toBe(76);
+  });
+
+  it('caps at 100 so a wide terminal does not stretch the border', () => {
+    expect(dialogAreaWidth(120)).toBe(100);
+    expect(dialogAreaWidth(200)).toBe(100);
+  });
+});
+
+describe('dialogContentWidth', () => {
+  it('drops the frame border and padding on both sides', () => {
+    // 92 is the rule width ink's model dialog measures at a 100-column
+    // terminal, and a full-width rule has to be spelled out to it because
+    // OpenTUI has no single-sided border to draw one with.
+    expect(dialogContentWidth(100)).toBe(92);
+    expect(dialogContentWidth(120)).toBe(96);
+    expect(dialogContentWidth(4)).toBe(0);
+  });
+});
 
 const items = Array.from({ length: 15 }, (_, i) => ({
   key: `item-${i}`,

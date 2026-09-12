@@ -147,6 +147,7 @@ import {
   extractAndStripMeta,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
+  qualifySkillName,
   sessionIdContext,
   registerSession,
   SessionSourceService,
@@ -425,6 +426,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
@@ -440,6 +443,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -2908,17 +2912,26 @@ export async function runAcpAgent(
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
   // closure keeps the timeout + log labels consistent.
+  let drainPoolPromise: Promise<void> | undefined;
   const drainPoolBeforeExit = async (
     label: string,
     strict = false,
   ): Promise<void> => {
     if (!agentInstance) return;
     try {
-      await agentInstance.shutdownMcpPool(8_000);
+      drainPoolPromise ??= agentInstance.shutdownMcpPool(8_000);
+      await drainPoolPromise;
     } catch (err) {
       debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
       if (strict) throw err;
     }
+  };
+
+  let disposeSessionsPromise: Promise<void> | undefined;
+  const disposeSessionsOnce = (): Promise<void> => {
+    if (!agentInstance) return Promise.resolve();
+    disposeSessionsPromise ??= agentInstance.disposeSessions();
+    return disposeSessionsPromise;
   };
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
@@ -2927,53 +2940,88 @@ export async function runAcpAgent(
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
   let managedShutdownPromise: Promise<void> | undefined;
-  let sessionEndFired = false;
+  let sessionEndPromise: Promise<void> | undefined;
 
   // Helper to fire SessionEnd hook once, preventing double-fire from both
   // shutdown handler path and connection.closed path.
-  const fireSessionEndOnce = async (
+  const fireSessionEndOnce = (
     reason: SessionEndReason,
     managedConfigs?: Config[],
-  ) => {
-    if (sessionEndFired) return;
-    sessionEndFired = true;
+  ): Promise<void> => {
+    if (sessionEndPromise) return sessionEndPromise;
 
-    const configs = new Set<Config>(managedConfigs ?? [config]);
-    if (!managedConfigs) {
-      const sessions = agentInstance?.getActiveSessions();
-      if (sessions) {
-        for (const session of sessions) {
-          const sessionConfig = session.getConfig?.();
-          if (sessionConfig) {
-            configs.add(sessionConfig);
+    sessionEndPromise = (async () => {
+      const configs = new Set<Config>(managedConfigs ?? [config]);
+      if (!managedConfigs) {
+        const sessions = agentInstance?.getActiveSessions();
+        if (sessions) {
+          for (const session of sessions) {
+            const sessionConfig = session.getConfig?.();
+            if (sessionConfig) {
+              configs.add(sessionConfig);
+            }
           }
         }
       }
-    }
 
-    const failures: unknown[] = [];
-    for (const cfg of configs) {
-      const hookSystem = cfg.getHookSystem?.();
-      const hooksEnabled = !cfg.getDisableAllHooks?.();
-      if (
-        !hooksEnabled ||
-        !hookSystem ||
-        !cfg.hasHooksForEvent?.('SessionEnd')
-      ) {
-        continue;
-      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      timeout.unref();
       try {
-        await hookSystem.fireSessionEndEvent(reason);
-      } catch (err) {
-        if (managedConfigs) failures.push(err);
-        debugLogger.warn(
-          `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        const results = await Promise.allSettled(
+          [...configs].flatMap((cfg) => {
+            const hookSystem = cfg.getHookSystem?.();
+            if (
+              cfg.getDisableAllHooks?.() ||
+              !hookSystem ||
+              typeof hookSystem.fireSessionEndEvent !== 'function' ||
+              !cfg.hasHooksForEvent?.('SessionEnd')
+            ) {
+              return [];
+            }
+            return [
+              Promise.resolve().then(() =>
+                hookSystem.fireSessionEndEvent(reason, controller.signal),
+              ),
+            ];
+          }),
         );
+        const failures = results
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason);
+        // A SessionEnd hook that outlives the 30s budget is cancelled rather
+        // than rejected: `fireSessionEndEvent` resolves to `undefined` for a
+        // cancelled hook (the `{ success: false, outcome: 'cancelled' }`
+        // result never rejects), so `Promise.allSettled` cannot observe it and
+        // `failures` above stays empty. Detect the abort directly so the
+        // cancellation is recorded at all, instead of the CLI exiting 0 as
+        // though every hook had run. What recording it buys depends on the
+        // caller: the throw below is gated on `managedConfigs`, so a managed
+        // shutdown turns it into a non-zero exit while an unmanaged one gets
+        // the warning line only.
+        if (controller.signal.aborted) {
+          failures.push(
+            new Error(
+              'SessionEnd hook did not complete within 30s (cancelled)',
+            ),
+          );
+        }
+        for (const failure of failures) {
+          debugLogger.warn(
+            `SessionEnd hook failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+          );
+        }
+        if (managedConfigs && failures.length > 0) {
+          throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
+        }
+      } finally {
+        clearTimeout(timeout);
       }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
-    }
+    })();
+    return sessionEndPromise;
   };
 
   const shutdownManagedAgent = (
@@ -3076,7 +3124,7 @@ export async function runAcpAgent(
     try {
       // Fire SessionEnd hook for all active sessions (aligned with core path)
       await fireSessionEndOnce(SessionEndReason.Other);
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
 
       try {
         process.stdin.destroy();
@@ -3128,7 +3176,7 @@ export async function runAcpAgent(
       // Mirror the SIGTERM handler's pool drain on the IDE-initiated
       // normal close path to avoid leaking shared MCP entries.
       await drainPoolBeforeExit('ide_close');
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
     }
   } finally {
     process.off('SIGTERM', shutdownHandler);
@@ -6118,7 +6166,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -6303,13 +6353,30 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const submittedPrompt =
+      this.privateParentState === 'trusted'
+        ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
+        : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
+      meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
+    }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta['qwen.goalProposalApproval'];
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedGoalProposalApproval === true
+    ) {
+      meta['qwen.goalProposalApproval'] = true;
+    }
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
@@ -7466,13 +7533,26 @@ class QwenAgent implements Agent {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
           const extensionName = extension.name;
-          const key = `extension:${extensionName}:${skill.name}`;
+          // The registry rows above key on the qualified name; the manifest
+          // still holds the authored spelling. Qualify it here or the two keys
+          // never meet, and a stale registry row plus its manifest entry emit
+          // the same skill twice under two names.
+          const key = `extension:${extensionName}:${qualifySkillName(
+            extensionName,
+            skill.name,
+          )}`;
           if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
               {
                 ...skill,
+                // Carry the qualified name like the registry rows do: a
+                // surface that persists this row's name verbatim (the web
+                // shell's Enable toggle) would otherwise write a bare entry
+                // that can never grant once the extension activates.
+                name: qualifySkillName(extensionName, skill.name),
+                authoredName: skill.name,
                 level: 'extension',
                 extensionName,
                 extensionDisplayName: extension.displayName,
@@ -8086,6 +8166,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      recovery: session.getRecoveryStatus(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -13797,9 +13878,7 @@ class QwenAgent implements Agent {
             // The merged view is already workspace-stripped, so a repo
             // cannot self-grant here any more than at construction.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.setWorkflowsEnabled(
-              newMerged.tools?.workflowsEnabled === true,
-            );
+            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               // The `workflows` slash command comes and goes with the
               // flag; a client holding the old list would keep offering
@@ -14318,6 +14397,10 @@ class QwenAgent implements Agent {
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
+    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
+      config.setGoalProposalHostSupported(true);
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
