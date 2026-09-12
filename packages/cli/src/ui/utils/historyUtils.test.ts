@@ -442,4 +442,24 @@ describe('omitSystemReminderBlocks', () => {
     const text = `${envelope}\n\nmy prompt`;
     expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe('my prompt');
   });
+
+  it("removes only the producer separator, keeping the next line's indentation", () => {
+    // A queue member's projection is the trimmed typed text, so the
+    // producer's envelope run ends with the whitespace up to it —
+    // including the user's own leading indentation. Removing a greedy
+    // whitespace run with the block would eat that indentation.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      omitSystemReminderBlocks(
+        `${envelope}\n\n  indented prompt`,
+        `${envelope}\n\n  `,
+      ),
+    ).toBe('  indented prompt');
+    expect(
+      omitSystemReminderBlocks(
+        `first\n\n${envelope}\n\n  indented second`,
+        `${envelope}\n\n  `,
+      ),
+    ).toBe('first\n\n  indented second');
+  });
 });

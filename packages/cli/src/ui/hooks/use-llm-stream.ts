@@ -1828,6 +1828,13 @@ export const useLlmStream = (
               ...(userVisibleQuery === trimmedQuery
                 ? {}
                 : { modelText: trimmedQuery }),
+              // The producer's per-member envelope decomposition, carried
+              // when the adoption gate verified it: a mid-aggregate
+              // envelope is invisible to the rewind restore's leading-only
+              // split of `modelText`, so the item keeps the run itself.
+              ...(adoptedReminders === undefined
+                ? {}
+                : { reminders: adoptedReminders }),
               promptId: prompt_id,
             } as HistoryItemWithoutId,
             userMessageTimestamp,

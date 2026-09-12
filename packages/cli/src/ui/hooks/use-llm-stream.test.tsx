@@ -1017,6 +1017,10 @@ describe('useLlmStream', () => {
     expect(userItems).toHaveLength(1);
     expect(userItems[0][0].text).toBe(projection);
     expect(userItems[0][0].modelText).toBe(modelText);
+    // The producer decomposition rides the committed item too: a rewind
+    // restore re-arms a mid-aggregate envelope from it, which the
+    // leading-only split of `modelText` cannot recover.
+    expect(userItems[0][0].reminders).toBe(envelope);
     expect(mockLogMessage).toHaveBeenCalledWith(
       MessageSenderType.USER,
       projection,

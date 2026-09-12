@@ -826,13 +826,6 @@ const SHELL_WIDTH_FRACTION = 0.89;
  */
 const SHELL_HEIGHT_PADDING = 10;
 
-// The collapsed form a large paste takes in the composer (Ink and OpenTUI
-// agree on it). A producer display value containing one is not
-// re-submittable — the pendingPastes expansion map is gone once the first
-// submit cleared it — so restore paths fall back to the expanded model
-// text instead of refilling the composer with the literal placeholder.
-const PASTE_PLACEHOLDER_RE = /\[Pasted Content \d+ chars\](?: #\d+)?/;
-
 export const AppContainer = (props: AppContainerProps) => {
   const {
     settings,
@@ -2699,10 +2692,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // only the envelopes. A queue aggregate's envelope can sit
       // mid-string (a non-leading member): the producer carries the
       // per-member envelope run as `reminders` so the restore re-arms it
-      // instead of dropping it. A producer value that cannot be
-      // resubmitted as-is — a collapsed large-paste placeholder, whose
-      // pendingPastes expansion is gone — falls back to the split: the
-      // expanded model text is the only re-submittable form.
+      // instead of dropping it.
       const split = splitLeadingSystemReminders(submission.modelText);
       const producerDisplay =
         submission.displayText ?? submission.submittedPrompt;
@@ -2726,19 +2716,18 @@ export const AppContainer = (props: AppContainerProps) => {
           displayText = split.rest;
           reminders = split.reminders;
         }
-      } else if (
-        producerDisplay &&
-        !PASTE_PLACEHOLDER_RE.test(producerDisplay)
-      ) {
-        displayText = producerDisplay;
-        reminders = submission.reminders ?? split.reminders;
       } else {
-        // The producer's decomposition names exactly which blocks were
-        // injected, so omit those (a mid-string aggregate envelope
-        // included) from the expanded model text; a leading-only split
-        // would leave the raw envelope in the composer and drop its
-        // re-arm. Without a producer decomposition the leading split is
-        // all that is safe to remove.
+        // A producer value that is not the model text minus a pure
+        // envelope prefix is not verified as its display form — an
+        // attachment `@ref` it predates, a collapsed large-paste
+        // placeholder whose pendingPastes expansion is gone, an untrimmed
+        // trailing space — so adopting it would silently discard whatever
+        // else differs. The producer's decomposition names exactly which
+        // blocks were injected, so omit those (a mid-string aggregate
+        // envelope included) from the model text instead; a leading-only
+        // split would leave a mid-string envelope in the composer and
+        // drop its re-arm. Without a producer decomposition the leading
+        // split is all that is safe to remove.
         reminders = submission.reminders ?? split.reminders;
         displayText = omitSystemReminderBlocks(submission.modelText, reminders);
       }
@@ -4474,11 +4463,17 @@ export const AppContainer = (props: AppContainerProps) => {
           if (userItem.type === 'user' && userItem.text) {
             // The truncate above deleted the API-side copy of the turn's
             // envelope and its one-shot latch is spent; the stash re-arms
-            // it from the item's model text for the resubmit.
+            // it from the item's model text for the resubmit. A
+            // mid-aggregate envelope is invisible to the restore's
+            // leading-only split, so the item's producer decomposition
+            // carries it.
             buffer.setText(
               stashRestoredSubmission({
                 modelText: userItem.modelText ?? userItem.text,
                 displayText: userItem.text,
+                ...(userItem.reminders === undefined
+                  ? {}
+                  : { reminders: userItem.reminders }),
               }),
             );
           }

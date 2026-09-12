@@ -451,6 +451,29 @@ describe('resumeHistoryUtils', () => {
       ]);
     });
 
+    it('keeps a user-authored leading envelope a winning displayText carries', () => {
+      // The record's model-facing parts carry the same leading run as the
+      // displayText, so the record cannot prove the run was injected (a
+      // provenance-backed writer keeps an injected prefix out of
+      // displayText): the row rebuilds to the user's typed text verbatim,
+      // with no modelText because nothing injected needs a rewind re-arm.
+      const text =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nmy prompt';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+        systemPayload: { displayText: text, hookContext: 'ctx' },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text,
+          sentToModel: true,
+        },
+      ]);
+    });
+
     it('strips the envelope from an at-command userText', () => {
       const conversation = {
         messages: [

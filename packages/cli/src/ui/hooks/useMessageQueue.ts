@@ -12,10 +12,7 @@ import type {
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
-import {
-  isOnlyLeadingSystemReminders,
-  stripLeadingSystemReminders,
-} from '../utils/historyUtils.js';
+import { isOnlyLeadingSystemReminders } from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -132,18 +129,21 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  // Every member contributes a projection — its own when it has one, its
-  // stripped model text otherwise — so a single projection-less member
-  // cannot drop a peer message's one-liner and surface the raw envelope
-  // as the user's prompt instead.
+  // Every member contributes a projection — its producer-carried one when
+  // it has one, its own text verbatim otherwise. A shape-stripped fallback
+  // is not producer provenance: a projection-less member (a vim submit, a
+  // legacy restore) keeps its text untouched rather than having a
+  // user-authored leading block classified as an injected envelope, and a
+  // single projection-less member still cannot drop a peer message's
+  // one-liner.
   const projections = messages.map(
-    (message) =>
-      message.submittedPrompt ?? stripLeadingSystemReminders(message.text),
+    (message) => message.submittedPrompt ?? message.text,
   );
   // Each member's injected envelope run: the difference between its model
   // text and its projection when that difference is a pure leading
   // envelope prefix. A user-authored leading block (projection carried
-  // verbatim) contributes nothing.
+  // verbatim) contributes nothing — and neither does a projection-less
+  // member, whose verbatim projection leaves no difference to arm.
   const reminders = messages
     .map((message, index) => {
       const projection = projections[index];
@@ -435,14 +435,15 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    // Preview rows are display forms, not model text: prefer the entry's
-    // producer projection verbatim (it is where a user-authored leading
-    // envelope survives as content); only a genuinely projection-less entry
-    // falls back to the shape strip. Peer entries always carry their
-    // displayText as the projection.
+    // Preview rows are display forms, not model text: the entry's
+    // producer projection verbatim when it has one (it is where a
+    // user-authored leading envelope survives as content), its own text
+    // otherwise — a projection-less entry (a vim submit, a legacy restore)
+    // has no provenance to strip by, so the preview shows exactly what a
+    // pop would restore. Peer entries always carry their displayText as
+    // the projection.
     messageQueue: queuedMessages.map(
-      ({ text, submittedPrompt }) =>
-        submittedPrompt ?? stripLeadingSystemReminders(text),
+      ({ text, submittedPrompt }) => submittedPrompt ?? text,
     ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,

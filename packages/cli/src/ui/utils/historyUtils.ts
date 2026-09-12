@@ -232,8 +232,11 @@ export function prependMissingSystemReminders(
  * other block — including a user-authored one — in place. Provenance-driven
  * counterpart to the leading-only shape strip: a mid-string injected
  * envelope is dropped without touching identical-looking user content
- * elsewhere in the text. Each removed block takes the whitespace separator
- * that followed it, mirroring how the envelopes were prepended.
+ * elsewhere in the text. Each removed block takes the separator that
+ * followed it, mirroring how the envelopes were prepended — exactly one
+ * `\n\n` (the producer's separator), or a single whitespace char for a
+ * hand-shaped envelope. A greedy `\s+` run would also eat the user's own
+ * leading indentation on the line after the block.
  */
 export function omitSystemReminderBlocks(
   text: string,
@@ -253,10 +256,32 @@ export function omitSystemReminderBlocks(
     const at = result.indexOf(block);
     if (at === -1) continue;
     const after = result.slice(at + block.length);
-    const separator = after.match(/^\s+/)?.[0] ?? '';
+    const separator = after.startsWith('\n\n')
+      ? '\n\n'
+      : (after.match(/^\s/)?.[0] ?? '');
     result = result.slice(0, at) + after.slice(separator.length);
   }
   return result;
+}
+
+/**
+ * Whether a recorded user prompt's display text carries a leading
+ * `<system-reminder>` run that the record's own model-facing parts carry
+ * too. When the writer's provenance was available, `displayText` is the
+ * pre-injection typed text, so a leading run in it is user-authored
+ * content; when provenance was unavailable (a vim submit), an injected
+ * envelope lands in both fields and is indistinguishable from a pasted
+ * one — either way the parts carrying the same run mean the record cannot
+ * prove the run was injected, so the safe read-back keeps the text rather
+ * than deleting user content by shape. Only when the parts lack the run
+ * does the strip apply.
+ */
+export function hasUserAuthoredLeadingReminders(
+  displayText: string,
+  modelPartsText: string,
+): boolean {
+  const { reminders } = splitLeadingSystemReminders(displayText);
+  return reminders !== '' && modelPartsText.includes(reminders);
 }
 
 /**

@@ -177,6 +177,15 @@ export type HistoryItemUser = HistoryItemBase & {
    */
   modelText?: string;
   /**
+   * The producer's decomposition of the injected `<system-reminder>`
+   * envelope run `modelText` carried (see `aggregateUserMessages`), kept
+   * when the dispatch adoption gate used it. A mid-aggregate envelope is
+   * invisible to the rewind restore's leading-only split, so the restore
+   * re-arms exactly this run. Absent on items rebuilt from a resumed
+   * session, which never carry a decomposition.
+   */
+  reminders?: string;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

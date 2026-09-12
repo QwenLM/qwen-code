@@ -20,7 +20,10 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
-import { stripLeadingSystemReminders } from '../utils/historyUtils.js';
+import {
+  hasUserAuthoredLeadingReminders,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 
 interface SessionPart {
   text?: string;
@@ -100,12 +103,23 @@ export function transcribeSession(
         o.systemPayload.attachmentReferences.length > 0;
       // The same one-shot envelope strip as Ink's resume path: both
       // renderers replay the same session file and must agree on the row.
-      const text = stripLeadingSystemReminders(
-        o.systemPayload?.displayText ||
-          (hasAttachmentReferences
-            ? '[User message with attachments]'
-            : partsText),
-      );
+      // A winning displayText whose leading envelope run the record's own
+      // model-facing parts also carry is user-authored content — keep it
+      // verbatim, as Ink's resume path does. A mid-turn steer row's
+      // displayText is the drained model-bound text, not typed-text
+      // provenance, so it keeps the strip.
+      const displayText = o.systemPayload?.displayText;
+      const text =
+        o.subtype !== 'mid_turn_user_message' &&
+        displayText &&
+        hasUserAuthoredLeadingReminders(displayText, partsText)
+          ? displayText
+          : stripLeadingSystemReminders(
+              displayText ||
+                (hasAttachmentReferences
+                  ? '[User message with attachments]'
+                  : partsText),
+            );
       if (text) {
         events.push({ type: 'user', text });
         prompts.push(text);

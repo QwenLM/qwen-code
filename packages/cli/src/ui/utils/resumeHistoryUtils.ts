@@ -40,6 +40,7 @@ import {
   indexGapsByChild,
 } from './history-gap-notice.js';
 import {
+  hasUserAuthoredLeadingReminders,
   isOnlyLeadingSystemReminders,
   stripLeadingSystemReminders,
 } from './historyUtils.js';
@@ -427,11 +428,26 @@ function convertToHistoryItems(
           const projection = projectUserTranscriptForDisplay(record);
           // Strip the resolved value: `userText`/`displayText` win the
           // chain and both can carry the envelope, so wrapping only the
-          // parts branch would leave the normal path unfiltered.
+          // parts branch would leave the normal path unfiltered. A winning
+          // `displayText` whose leading run the record's own model-facing
+          // parts also carry is user-authored content, though — keep it
+          // verbatim.
           const raw =
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
-          const text = stripLeadingSystemReminders(raw);
+          const text =
+            !payload.userText &&
+            projection.displayText &&
+            hasUserAuthoredLeadingReminders(
+              projection.displayText,
+              extractTextFromParts(
+                stripTrailingUserPromptSubmitContextPart(
+                  (record.message?.parts ?? []) as Part[],
+                ),
+              ),
+            )
+              ? raw
+              : stripLeadingSystemReminders(raw);
           if (text) {
             // A recorded user message is a turn that reached the model:
             // stamp it so isRealUserTurn does not fall back to the lexical
@@ -472,12 +488,30 @@ function convertToHistoryItems(
         const hasAttachmentReferences =
           Array.isArray(payload?.attachmentReferences) &&
           payload.attachmentReferences.length > 0;
+        // The record's model-facing parts (a hook-context trailer
+        // stripped): the modelText carry-through's envelope source below,
+        // and the provenance check for a winning `displayText`.
+        const modelFromParts = extractTextFromParts(
+          stripTrailingUserPromptSubmitContextPart(
+            (record.message?.parts ?? []) as Part[],
+          ),
+        );
         const raw =
           projection.displayText ||
           (hasAttachmentReferences
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
-        const text = stripLeadingSystemReminders(raw);
+        // A winning `displayText` whose leading envelope run the parts
+        // also carry is user-authored content, not an injected notice:
+        // keep it verbatim rather than shape-stripping the user's words.
+        const text =
+          projection.displayText &&
+          hasUserAuthoredLeadingReminders(
+            projection.displayText,
+            modelFromParts,
+          )
+            ? raw
+            : stripLeadingSystemReminders(raw);
         if (text) {
           // Same stamp as the at-command branch above. The modelText
           // carry-through prefers the record's model-facing parts over the
@@ -490,11 +524,6 @@ function convertToHistoryItems(
           // envelope run (a hook-context trailing part is stripped first);
           // otherwise `raw` itself is the model text that carried the
           // envelope.
-          const modelFromParts = extractTextFromParts(
-            stripTrailingUserPromptSubmitContextPart(
-              (record.message?.parts ?? []) as Part[],
-            ),
-          );
           const envelopePrefix =
             modelFromParts !== '' &&
             modelFromParts !== text &&

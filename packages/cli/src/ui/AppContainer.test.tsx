@@ -5209,6 +5209,55 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('keeps attachment refs in the composer when the queue aggregate projection predates them', async () => {
+      // handleSubmitAndClear captures the projection before prepending
+      // attachment @refs, so a two-member aggregate's projection
+      // ('X\n\nY') is not the model text minus its envelopes. Adopting it
+      // would drop both refs from the composer while the chips are
+      // already cleared — the restore must fall back to the full model
+      // text instead.
+      const aggregateModelText = '@src/a.ts\n\nX\n\n@src/b.ts\n\nY';
+      const mockSetText = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [aggregateModelText],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(aggregateModelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          kind: 'user',
+          modelText: aggregateModelText,
+          submittedPrompt: 'X\n\nY',
+          turnKey: 'k1',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      expect(poppedText).toBe(aggregateModelText);
+    });
+
     it('re-arms the envelope when a drained submission aborts before dispatch', async () => {
       // The armed one-shot envelope was consumed into the queued
       // submission's model text at admission; the at-command read failing
@@ -6925,10 +6974,12 @@ describe('AppContainer State Management', () => {
     it('keeps the producer projection on a multi-member queue-pop restore (mid-aggregate envelope)', async () => {
       // A two-member aggregate whose SECOND member carried an envelope: the
       // producer projection is no suffix of the model text, so suffix
-      // arithmetic cannot recover it — the composer must get the producer
-      // value, never the enveloped model text.
-      const modelText =
-        'A\n\n<system-reminder>\nworkflow steering\n</system-reminder>\n\nrun the workflow';
+      // arithmetic cannot recover it — the composer's display text is the
+      // model text minus exactly the producer-decomposed envelope run, never
+      // the enveloped model text.
+      const envelope =
+        '<system-reminder>\nworkflow steering\n</system-reminder>\n\n';
+      const modelText = `A\n\n${envelope}run the workflow`;
       const projection = 'A\n\nrun the workflow';
       const mockSetText = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
@@ -6953,6 +7004,7 @@ describe('AppContainer State Management', () => {
         popAllMessages: vi.fn().mockReturnValue({
           modelText,
           submittedPrompt: projection,
+          reminders: envelope,
         }),
         drainQueue: vi.fn().mockReturnValue([]),
         popNextTurn: vi.fn().mockReturnValue(null),
@@ -9062,6 +9114,45 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'my prompt',
+      );
+    });
+
+    it('re-arms a mid-aggregate envelope when rewinding a live item that carries reminders', async () => {
+      // Two prompts queued while a turn was active aggregate with the
+      // second member's injected envelope mid-string; the committed item
+      // carries the producer decomposition, so the rewind restore re-arms
+      // exactly that envelope after truncateHistory deleted the API-side
+      // copy — while the composer shows the aggregate's display text.
+      const envelope =
+        '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\n';
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        { id: 2, type: 'gemini', text: 'first response' },
+        {
+          id: 3,
+          type: 'user',
+          text: 'first message\n\nsecond message',
+          sentToModel: true,
+          modelText: `first message\n\n${envelope}second message`,
+          reminders: envelope,
+          promptId: 'prompt-2',
+        },
+        { id: 4, type: 'gemini', text: 'second response' },
+      ];
+      const harness = renderRewindHarness({ history });
+
+      await runRewind(harness.target, 'conversation');
+
+      expect(harness.setText).toHaveBeenCalledWith(
+        'first message\n\nsecond message',
+      );
+      capturedUIActions.handleFinalSubmit('first message\n\nsecond message', {
+        submittedPrompt: 'first message\n\nsecond message',
+      });
+      expect(harness.addMessage).toHaveBeenCalledWith(
+        `${envelope}first message\n\nsecond message`,
+        false,
+        'first message\n\nsecond message',
       );
     });
 
