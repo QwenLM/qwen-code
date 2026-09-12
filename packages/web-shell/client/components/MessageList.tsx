@@ -1,3 +1,4 @@
+import { getSourcesByTurn } from './sources/sourceEntries';
 import {
   forwardRef,
   memo,
@@ -44,6 +45,7 @@ import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
@@ -173,6 +175,9 @@ export interface MessageListProps {
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  sourceEntries?: readonly WebShellSource[];
+  sourceSessionId?: string;
+  onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
     changes: readonly TurnOutputFileChange[],
@@ -2903,6 +2908,9 @@ export const MessageList = memo(
       onCanScrollToBottomChange,
       turnFileChanges,
       turnArtifacts,
+      sourceEntries,
+      sourceSessionId,
+      onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
@@ -3421,7 +3429,25 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
+    const { collapseCompletedTurns, sourceReferences } =
+      useWebShellCustomization();
+    const sourcesByTurn = useMemo(
+      () =>
+        getSourcesByTurn(
+          messages,
+          sourceEntries ?? [],
+          workspaceCwd,
+          sourceSessionId,
+          sourceReferences,
+        ),
+      [
+        messages,
+        sourceEntries,
+        workspaceCwd,
+        sourceSessionId,
+        sourceReferences,
+      ],
+    );
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
@@ -5548,6 +5574,12 @@ export const MessageList = memo(
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              turnSources={
+                finalAssistantTurnId
+                  ? sourcesByTurn.get(finalAssistantTurnId)
+                  : undefined
+              }
+              onSourceOpen={onSourceOpen}
               generateContent={generateContent}
             />
           );
@@ -5607,6 +5639,8 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        sourcesByTurn,
+        onSourceOpen,
         onError,
       ],
     );

@@ -14,6 +14,8 @@ import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart
 import type {
   DaemonInputAnnotation,
   DaemonSessionArtifact,
+  DaemonSessionAttachmentReference,
+  SessionSource,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -68,7 +70,63 @@ export interface WebShellMarkdownChartCustomization {
   chartStyle?: CSSProperties;
 }
 
+export interface WebShellFootnote {
+  readonly id: string;
+  readonly number: number;
+  readonly definitionMarkdown: string;
+  readonly title?: string;
+  readonly summary: string;
+  readonly href?: string;
+  readonly source?: string;
+  readonly image?: string;
+}
+
+/** Synchronous, side-effect-free selection for a complete group of footnotes. */
+export type WebShellFootnoteIconResolver = (
+  footnotes: readonly WebShellFootnote[],
+) => WebShellIconSource | null | undefined;
+
+export type WebShellSource =
+  | { readonly type: 'source'; readonly source: SessionSource }
+  | {
+      readonly type: 'attachment';
+      readonly attachment: DaemonSessionAttachmentReference;
+    };
+
+export interface WebShellSourceReference {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly sourceId: string;
+}
+
+export type WebShellSourceIconResolver = (
+  sources: readonly WebShellSource[],
+) => WebShellIconSource | null | undefined;
+
+export interface WebShellFootnotePreviewInfo {
+  readonly footnotes: readonly WebShellFootnote[];
+  readonly footnote: WebShellFootnote;
+  readonly index: number;
+  readonly title: string;
+  readonly sourceLabel: string;
+  /** Place this Qwen-managed element in the layout without replacing its children. */
+  readonly sourceLink: HTMLElement;
+}
+
+export interface WebShellFootnotePreviewHandle {
+  update(info: WebShellFootnotePreviewInfo): void;
+  dispose(): void;
+}
+
+/** Mounts current-page content only. Keep this synchronous function stable. */
+export type WebShellFootnotePreviewMount = (
+  container: HTMLElement,
+  info: WebShellFootnotePreviewInfo,
+) => WebShellFootnotePreviewHandle | null | undefined;
+
 export interface WebShellMarkdownCustomization {
+  getInlineFootnoteIcon?: WebShellFootnoteIconResolver;
+  mountFootnotePreview?: WebShellFootnotePreviewMount;
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
@@ -83,7 +141,9 @@ export interface WebShellMarkdownCustomization {
   /**
    * Custom markdown components override Web Shell's built-ins. In particular,
    * `components.code` replaces the default code renderer, so `renderCodeBlock`
-   * will not be called for that source.
+   * will not be called for that source. Internal footnote references and
+   * backreferences keep the built-in link behavior. Providing `components.sup`
+   * disables footnote grouping.
    */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
@@ -576,6 +636,8 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;

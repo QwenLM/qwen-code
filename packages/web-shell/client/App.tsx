@@ -1,4 +1,6 @@
 import './styles/globals.css';
+import { getSourceEntries } from './components/sources/sourceEntries';
+import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
@@ -389,6 +391,9 @@ import {
   type WebShellComposerApi,
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceIconResolver,
+  type WebShellSourceReference,
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
   type UserMessageContentParser,
@@ -1324,6 +1329,8 @@ export interface WebShellProps {
   onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -3009,6 +3016,8 @@ export function App({
   renderComposerTagTooltip,
   onComposerTagClick,
   renderAssistantTurnFooter,
+  getAssistantSourcesIcon,
+  sourceReferences,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -3276,6 +3285,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -3306,6 +3317,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -4469,29 +4482,22 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // Uploaded sources come from the daemon attachment store. Refresh on
-  // transcript updates while the panel is open, throttled during streaming.
+  // The source panel and turn footers share the attachment inventory.
+  // Refresh on transcript updates, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
-    environmentPanelReachable &&
-    environmentSourcesEnabled &&
-    environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
     connection.capabilities?.features.includes(
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
-    const attachmentsSectionEnabled =
-      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
       ) === true;
     if (
-      !attachmentsSectionEnabled ||
-      !environmentPanelOpen ||
       connection.status !== 'connected' ||
       !connection.sessionId ||
       !logicalSessionKey
@@ -4604,13 +4610,10 @@ export function App({
     connection.status,
     attachmentRefreshNonce,
     environmentPanelOpen,
-    environmentPanelReachable,
-    environmentPanelItems,
     logicalSessionKey,
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
-    environmentSourcesEnabled,
     t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
@@ -17132,6 +17135,52 @@ export function App({
     onToggleFullscreen: toggleArtifactPanelFullscreen,
   };
   const environmentPanelOwner = sessionOwnerGuard.capture();
+  const panelAttachments = logicalSessionKey
+    ? sessionAttachmentsBySessionRef.current.get(logicalSessionKey)
+    : undefined;
+  const sourceEntries = useMemo(
+    () =>
+      getSourceEntries(
+        sourcesState.supported ? sourcesState.sources : [],
+        panelAttachments ?? [],
+      ),
+    [sourcesState.supported, sourcesState.sources, panelAttachments],
+  );
+  const openTurnSource = useCallback(
+    (entry: WebShellSource) => {
+      const owner = sourcesState.owner;
+      if (!owner.isCurrent()) return;
+      openSourceEntry(entry, {
+        onOpen: openSourcePanel,
+        onReadImage: readSessionImage,
+        onImagePreview: (src, alt, source) => {
+          if (owner.isCurrent()) openImagePanel(src, alt, source);
+        },
+        onAttachmentPreview: (file) => {
+          if (owner.isCurrent())
+            openAttachmentPanel(file, undefined, undefined, true);
+        },
+        onAttachmentPreviewError: (error) => {
+          if (owner.isCurrent())
+            pushToast(
+              'error',
+              t('rightPanel.attachmentLoadFailed', {
+                error: formatError(error, t('environment.unavailable')),
+              }),
+            );
+        },
+      });
+    },
+    [
+      sourcesState.owner,
+      openSourcePanel,
+      readSessionImage,
+      openImagePanel,
+      openAttachmentPanel,
+      pushToast,
+      t,
+    ],
+  );
 
   // BrandProvider sits above I18nProvider so portals and every pane see it. The
   // prettier-ignore keeps adding it from re-indenting the whole subtree, the
@@ -18741,6 +18790,9 @@ export function App({
                                     ? fileChangesByTurn
                                     : undefined
                                 }
+                                sourceEntries={sourceEntries}
+                                sourceSessionId={connection.sessionId}
+                                onSourceOpen={openTurnSource}
                                 turnArtifacts={
                                   visibleTurnOutputKinds.has('artifact')
                                     ? artifactsByTurn

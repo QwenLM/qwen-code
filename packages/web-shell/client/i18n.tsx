@@ -16,6 +16,13 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
+  'footnotes.preview': 'Reference preview',
+  'footnotes.previous': 'Previous reference',
+  'footnotes.next': 'Next reference',
+  'footnotes.citations': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -2933,6 +2940,9 @@ const EN: Messages = {
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
   'sources.title': 'Sources',
+  'sources.count': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'source' : 'sources'}`,
+  'sources.currentTurn': 'Sources for this turn',
   'sources.add': 'Add source',
   'sources.empty': 'Add files or links for reference.',
   'sources.explanation':
@@ -3696,6 +3706,12 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
+  'footnotes.preview': '引用预览',
+  'footnotes.previous': '上一条引用',
+  'footnotes.next': '下一条引用',
+  'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -6476,6 +6492,8 @@ const ZH: Messages = {
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
   'sources.title': '来源',
+  'sources.count': (v) => `${v?.count ?? 0} 个来源`,
+  'sources.currentTurn': '本轮来源',
   'sources.add': '添加来源',
   'sources.empty': '添加文件或链接作为参考。',
   'sources.explanation': '添加引用不会将内容发送给助手。',

@@ -13,7 +13,10 @@ import type {
   TodoItem,
 } from '../adapters/types';
 import { CompactModeContext } from '../WebShellContexts';
-import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
+import type {
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellSource,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -71,6 +74,8 @@ interface MessageItemProps {
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -94,6 +99,8 @@ export const MessageItem = memo(function MessageItem({
   showAssistantBranch = false,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  turnSources,
+  onSourceOpen,
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
@@ -177,6 +184,8 @@ export const MessageItem = memo(function MessageItem({
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
             customFooterInfo={assistantTurnFooterInfo}
+            turnSources={turnSources}
+            onSourceOpen={onSourceOpen}
           />
         );
       case 'thinking':
@@ -409,6 +418,11 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.turnSources !== next.turnSources ||
+    prev.onSourceOpen !== next.onSourceOpen
+  )
+    return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,
