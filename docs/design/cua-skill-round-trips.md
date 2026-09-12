@@ -8,8 +8,9 @@ The platform-routed skill currently illustrates initialization, platform lookup,
 reference reading and cleanup as separate calls. A recorded successful macOS
 task used separate model responses for those steps and also split a known edit
 from saving. The native tool calls occupied only a small part of elapsed time.
-This change improves the general skill workflow; it adds no application-specific
-instructions and changes no SDK, native API, task prompt or authorization policy.
+This change improves the general skill workflow and MCP tool metadata; it adds
+no application-specific instructions and changes no SDK runtime, native API,
+task prompt or authorization policy.
 
 ## Proposed behavior
 
@@ -25,12 +26,21 @@ results still require observation. Prefer AX text when sufficient, and use
 screenshots for missing context, coordinates or visual properties. Close the
 connection after final verification in the same call when the task is complete.
 
+Keep shared MCP server instructions short and put the complete execution rules
+in the `node_repl` tool description. Clients that prepend server instructions to
+every tool then avoid repeating those rules across all five tools. The primary
+description preserves the exact existing import, binding, cancellation,
+checkpoint and external-effect rules. Tool schemas and runtime behavior stay
+unchanged; auxiliary descriptions continue to define their own operations.
+
 ## Risks and validation
 
 Batching must not guess future dialog controls or repeat unconfirmed actions.
 The resource path belongs to the skill host, even when the connected desktop
 is remote. Preserve the existing platform, observation and text-operation tests;
 build and typecheck the packaged SDK and ensure staged skill resources match.
+Verify MCP initialization and tool discovery retain every execution rule in the
+primary tool, then run the existing MCP schema and lifecycle tests.
 Run the unchanged task in a fresh VM clone, with the same model and pristine
 input. Accept the change only with a correct saved output and observed reduction
 in unnecessary response boundaries; record time and tokens including regressions.
