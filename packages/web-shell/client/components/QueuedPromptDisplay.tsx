@@ -143,6 +143,13 @@ export interface QueuedPrompt {
    * row bound at or after that flight's dispatch.
    */
   boundAtSeq?: number;
+  /**
+   * Provenance, not state: the daemon refused this message once with
+   * `session_idle`. A row carrying it is confirmed against a pending-prompt
+   * snapshot when it is eventually submitted — immediately, or later when a
+   * hold lifts and the drain releases it — instead of being echoed on the
+   * activity mirror's say-so, which another client's queued prompt can lag.
+   */
   resubmittedAfterIdleRejection?: boolean;
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;

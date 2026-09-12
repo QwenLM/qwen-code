@@ -1893,6 +1893,89 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('confirms a released held row whose explicit insert was refused at idle', async () => {
+    let rejectInsert: (() => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return new Promise((resolve) => {
+          rejectInsert = () =>
+            resolve({ accepted: false, reason: 'session_idle' });
+        });
+      },
+    );
+    let resolveRelease: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRelease = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('held follow-up');
+        await Promise.resolve();
+      });
+      const heldId = harness.result().queuedPrompts[0]?.id;
+      expect(heldId).toEqual(expect.any(Number));
+      // The user asks for it now, and the daemon has already gone idle.
+      let insertion!: Promise<void>;
+      act(() => {
+        insertion = harness.result().insertQueuedPrompt(heldId!);
+      });
+      await act(async () => {
+        rejectInsert?.();
+        await insertion;
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      // A hold is still active, so the row goes back to being held. It has to
+      // carry the provenance with it: the drain releases this row later, and
+      // that submission is the one that must not guess from the mirror.
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'held follow-up' }),
+      ]);
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'held follow-up',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+            originatorClientId: CLIENT_ID,
+          },
+        ],
+      });
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      await act(async () => {
+        resolveRelease?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      // The admission is admission-only and the snapshot says the daemon
+      // queued it behind another turn, so echoing it as sent would drop the
+      // queue row that is the user's only way to edit or cancel it.
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'held follow-up',
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('confirms a released held row the daemon refused at idle', async () => {
     let rejectInsert: (() => void) | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
@@ -6138,6 +6221,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
 
       const queuedPromptId = harness.result().queuedPrompts[0]?.id;
+      // Positive control: without a held row to insert, both negatives below
+      // would hold for a no-op call and the test would pin nothing.
+      expect(queuedPromptId).toEqual(expect.any(Number));
       await act(async () => {
         await harness.result().insertQueuedPrompt(queuedPromptId!);
       });

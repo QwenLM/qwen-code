@@ -8807,9 +8807,10 @@ export function registerSessionRoutes(
   // snapshot can still report `hasActivePrompt: true`). Every other rejection
   // cause — closing, attachment budget, mismatched `messageId`, full queue —
   // omits it, and a kept mismatched payload is not a delivery promise: a
-  // removed promoted message disappears from snapshots at once and is
-  // retained internally — doomed — until its aborted turn settles, so the
-  // removal response is the only `removed = true` a client ever observes.
+  // removed promoted message disappears from snapshots at once — one that had
+  // not started is dropped where it stands, one already running is hidden
+  // until its aborted turn settles — so the removal response is the only
+  // `removed = true` a client ever observes.
   // For a new admission, a `content` reference the session no longer holds
   // (or an invalid one) is declined before the idle/queue verdicts: the
   // bridge throws and the error mapping answers 410/400 with an

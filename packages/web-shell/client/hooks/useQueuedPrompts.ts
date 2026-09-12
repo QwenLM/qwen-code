@@ -744,7 +744,10 @@ export function useQueuedPrompts({
         // been served before the daemon admitted the prompt — the client's
         // dispatch order is not the daemon's processing order — so the
         // snapshot's silence proves nothing: keep a row whose bind is not
-        // older than the dispatch that produced this snapshot.
+        // older than the dispatch that produced this snapshot. Reading the
+        // counter live is safe here and equals the pass's own dispatch
+        // sequence: nothing awaits between that sequence's fence and this
+        // filter, so no dispatch can land in between.
         if ((p.boundAtSeq ?? 0) >= refreshRequestSeqRef.current) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
@@ -1004,8 +1007,12 @@ export function useQueuedPrompts({
         // A rendering with no payload source carries no message to show:
         // leave the park (inert once settled) rather than echo a blank
         // bubble, or the daemon's placeholder for an attachment this client
-        // no longer holds. Both sibling consumers of a parked text refuse
-        // those two as well.
+        // no longer holds. This is the only consumer of a parked text that
+        // refuses the placeholder — the removal replay and the started
+        // handler's raw branch refuse a blank rendering alone, and are safe
+        // only because every removal arm that can park an attachment prompt
+        // stashes its payload first. A new replay site that can reach a
+        // prompt with no stash must add the same refusal.
         (full !== undefined ||
           (parkedText !== '' && parkedText !== IMAGE_ONLY_PROMPT_TEXT)) &&
         !settledServerPromptIdsRef.current.has(promptId) &&
@@ -1174,9 +1181,10 @@ export function useQueuedPrompts({
                 })
                 .then((removed) => {
                   if (removed) {
-                    // The daemon confirmed the removal: the prompt never
-                    // ran, so a start parked inside the flight and the
-                    // stashed payload are both dead weight.
+                    // The daemon confirmed the removal: the prompt either
+                    // never dispatched or was aborted by it, so a start parked
+                    // inside the flight and the stashed payload are both dead
+                    // weight — the cancellation took effect either way.
                     startedDuringRemovalRef.current.delete(clearedPromptId);
                     pendingEchoByPromptIdRef.current.delete(clearedPromptId);
                   } else {
@@ -1955,10 +1963,11 @@ export function useQueuedPrompts({
   /**
    * Submit one pending prompt. Returns the admission promise (already
    * error-handled) so callers releasing several prompts can chain them and
-   * keep the daemon's queue in the order the user typed them. A chain link is
-   * never an idle-rejected resubmission — those are submitted directly, and
-   * only their bodies await a confirming snapshot — so a link settles at its
-   * admission.
+   * keep the daemon's queue in the order the user typed them. A link settles
+   * at its admission, with one exception: a row the daemon refused at idle
+   * keeps that provenance through the hold and the drain, so its link also
+   * spans the confirming snapshot the body awaits — one extra queue round
+   * trip before the next link can POST.
    */
   const submitPendingPrompt = useCallback(
     (prompt: QueuedPrompt): Promise<void> => {
@@ -2067,10 +2076,13 @@ export function useQueuedPrompts({
                 pendingEchoByPromptIdRef.current.delete(oldest);
               }
             }
-            // Refreshes are single-flight per session, but the snapshot must
-            // post-date this body's own admission: the fence default refuses
-            // to join a GET dispatched before this call, which would read a
-            // queue that cannot list the prompt and confirm a wrong verdict.
+            // A refresh waits out an older same-session flight rather than
+            // racing it, but the single tracked slot cannot guarantee that:
+            // a dispatch for another session leaves the older flight
+            // untracked. The fence is therefore what matters here — its
+            // default anchor refuses to join a GET dispatched before this
+            // call, which would read a queue that cannot list the prompt and
+            // confirm a wrong verdict.
             // The UI-side writes stay behind the sequence fence inside
             // `refreshPendingPrompts`.
             const refresh = await refreshPendingPrompts(targetSessionId);
@@ -2639,10 +2651,11 @@ export function useQueuedPrompts({
       }
       // Re-check the hold per link, not once for the whole batch: the chain
       // is built synchronously when the hold lifts, but each link runs only
-      // after the previous admission settles. A Goal resumed inside that
-      // window (or a write block) must stop the remaining links instead of
-      // POSTing them against an active Goal — they return to held, and the
-      // next inactive transition re-drains them in order.
+      // after the previous link settles — its admission, plus the confirming
+      // snapshot of a row the daemon once refused at idle. A Goal resumed
+      // inside that window (or a write block) must stop the remaining links
+      // instead of POSTing them against an active Goal — they return to held,
+      // and the next inactive transition re-drains them in order.
       if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
         // Inline rather than `setQueuedPromptFlags`: that callback is
         // declared below, so naming it here would read it before its
@@ -3273,7 +3286,9 @@ export function useQueuedPrompts({
       // prompt overtake it and reach the daemon's queue out of order.
       //
       // The chain is built synchronously, but each link runs only after the
-      // previous admission settles, so the session can change mid-drain.
+      // previous link settles (its admission, plus the confirming snapshot
+      // of a row the daemon once refused at idle), so the session can change
+      // mid-drain.
       // Pinned here rather than read per link: the guard has to ask "is this
       // still the owner the chain was built for", not "is there an owner".
       const chainOwner = ownerTokenRef.current;
@@ -3743,6 +3758,11 @@ export function useQueuedPrompts({
         const nextFlags = {
           ...flags,
           ...(submitAtIdle ? { serverState: 'submitting' as const } : {}),
+          // Persist the provenance on a row that goes back to the hold, the
+          // way the mid-turn requeue does: the drain releases that row later,
+          // and its submission has to confirm against a snapshot instead of
+          // echoing on the activity mirror's say-so.
+          ...(serverSaidIdle ? { resubmittedAfterIdleRejection: true } : {}),
         };
         clearInsertionFlag(nextFlags);
         finishInsertion();
@@ -3753,7 +3773,12 @@ export function useQueuedPrompts({
           if (pendingPrompt)
             submitPendingPrompt({
               ...pendingPrompt,
-              resubmittedAfterIdleRejection: serverSaidIdle,
+              // Never strip provenance the row already carries: a held row
+              // the daemon refused at idle keeps its flag, and an insert
+              // refused for some other reason must not clear it.
+              ...(serverSaidIdle
+                ? { resubmittedAfterIdleRejection: true }
+                : {}),
             });
         }
         return submitAtIdle;

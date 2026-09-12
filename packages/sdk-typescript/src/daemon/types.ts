@@ -3898,9 +3898,10 @@ export interface DaemonSessionBtwResult {
  * other rejection cause (queue full, closing session, attachment budget,
  * mismatched `messageId` — the payload the daemon already admitted is kept,
  * though that is not a delivery promise: a removed promoted message
- * disappears from pending-prompt snapshots at once and is retained
- * internally — doomed — until its aborted turn settles, so the removal
- * response is the only `removed = true` a client observes), so callers must
+ * disappears from pending-prompt snapshots at once — one that had not
+ * started is dropped where it stands, one already running is hidden until
+ * its aborted turn settles — so the removal response is the only
+ * `removed = true` a client observes), so callers must
  * keep their own idle detection alongside it. For a new admission, a
  * `content` reference the session no longer holds (or an invalid one) does
  * not produce this body: the request is declined before the idle verdict
