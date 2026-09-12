@@ -1035,6 +1035,12 @@ export function useQueuedPrompts({
         queuedPromptsRef.current.some(
           (item) =>
             !item.serverPromptId &&
+            // A row the drain has stamped but not handed to a body has never
+            // been POSTed, so it cannot be this prompt's own admission still
+            // in flight: deferring the last-chance echo to it strands the
+            // message, which is what the two event-side matchers and the
+            // sync's own match count already exclude those rows to avoid.
+            !unreleasedPromptIdsRef.current.has(item.id) &&
             item.serverState === 'submitting' &&
             item.id < parked.rowIdFrontier &&
             pendingPromptTextsMatch(item.text, parked.text),
@@ -1889,8 +1895,9 @@ export function useQueuedPrompts({
           // leaves the echo to this park's settle-time consume.
           // A row the drain has stamped but not handed to a body has never
           // been POSTed, so it cannot own this event: counting it would
-          // manufacture an ambiguity and lose an echo. The sync's own matcher
-          // keeps matching those rows — it binds by snapshot, not by event.
+          // manufacture an ambiguity and lose an echo. The sync's match count
+          // and the settle's own-submission check exclude them for the same
+          // reason.
           const unboundMatches = queuedPromptsRef.current.filter(
             (item) =>
               !unreleasedPromptIdsRef.current.has(item.id) &&
