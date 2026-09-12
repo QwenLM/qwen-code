@@ -115,8 +115,7 @@ class TerminalQueryStripper {
   strip(data: string): string {
     const combined = this.pending + data;
     const partial = PARTIAL_ESCAPE_SUFFIX_RE.exec(combined);
-    const hold =
-      partial !== null && partial[0].length <= MAX_HELD_ESCAPE_CHARS;
+    const hold = partial !== null && partial[0].length <= MAX_HELD_ESCAPE_CHARS;
     this.pending = hold ? partial![0] : '';
     const complete = hold ? combined.slice(0, partial!.index) : combined;
     return complete.replace(TERMINAL_QUERY_SEQUENCE_RE, '');
