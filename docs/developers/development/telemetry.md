@@ -128,9 +128,9 @@ two things happen:
    therefore occupy more bytes after OTLP export.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
-   logs endpoint) keep their existing `function_args` field, plus `prompt`,
-   `request_text`, and `response_text` when `logPrompts` is also enabled,
-   instead of being dropped.
+   logs endpoint) retain `function_args`, `error`, `error.message`, and
+   `error_message`, plus `prompt`, `request_text`, and `response_text` when
+   `logPrompts` is also enabled, instead of dropping these attributes.
 
 ⚠️ **Security warning:** enabling this flag streams full conversation history,
 file contents read by `read_file`, shell commands and their output (including
