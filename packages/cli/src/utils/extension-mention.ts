@@ -9,6 +9,7 @@ import type { Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isSubpath,
+  qualifySkillName,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 
@@ -78,8 +79,15 @@ export function buildExtensionContextText(extension: Extension): string {
   const capabilities: string[] = [];
 
   if (extension.skills && extension.skills.length > 0) {
+    // The hint must name the command that exists: registration qualifies
+    // extension skills, so advertising the authored spelling sends the model
+    // to a slash command that was never created.
     const skillNames = extension.skills
-      .map((s) => sanitizeDisplayText(s.name) || s.name)
+      .map(
+        (s) =>
+          sanitizeDisplayText(qualifySkillName(extension.name, s.name)) ||
+          s.name,
+      )
       .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }

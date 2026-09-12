@@ -43,6 +43,13 @@ const mocks = vi.hoisted(() => ({
   errorNotifications: { current: 0 },
 }));
 
+interface RewindSnapshotStub {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
 const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
   getRewindSnapshots: vi.fn<
@@ -1082,6 +1089,33 @@ describe('web shell permission decision messages', () => {
     expect(respondToPendingPermission).not.toHaveBeenCalled();
   });
 
+  // R3-5: the host-side binding gates the vote on the id the host believes is
+  // pending. Only the matching-id path was exercised, so a regression that
+  // dropped the comparison would have gone unnoticed.
+  it('ignores a decision bound to a different request id', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props, 'req-1');
+
+    await dispatchDecision('allow', window.parent, 'req-stale');
+
+    expect(respondToPendingPermission).not.toHaveBeenCalled();
+  });
+
+  // R3-6: 'reject' is half the decision vocabulary and had no forwarding
+  // witness; the guard admits exactly 'allow' and 'reject'.
+  it('forwards a host-relayed reject', async () => {
+    const props = await renderApp();
+    const respondToPendingPermission = vi.fn().mockResolvedValue(true);
+    installShellApi({ respondToPendingPermission });
+    await setPendingPermission(props);
+
+    await dispatchDecision('reject', window.parent);
+
+    expect(respondToPendingPermission).toHaveBeenCalledWith('req-1', 'reject');
+  });
+
   it('surfaces a notice when the shell resolves the vote to false', async () => {
     const props = await renderApp();
     const respondToPendingPermission = vi.fn().mockResolvedValue(false);
@@ -1101,6 +1135,430 @@ describe('web shell permission decision messages', () => {
     // user without the hard-error state reset of `handleShellError`.
     expect(container.textContent).toContain(
       'The approval decision could not be applied.',
+    );
+  });
+});
+
+describe('EmbeddedApp permission diff dismissal', () => {
+  const permissionBlock = {
+    id: 'perm-write',
+    kind: 'permission',
+    requestId: 'req-write',
+    title: 'Write new.ts',
+    options: [],
+    preview: { kind: 'key_value', rows: [] },
+    toolCall: {
+      content: [
+        {
+          type: 'diff',
+          path: '/workspace/new.ts',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    },
+  };
+
+  function latestProps(): CapturedProps {
+    const props = mocks.embeddedProps.current;
+    expect(props).not.toBeNull();
+    return props as CapturedProps;
+  }
+
+  async function dismiss(
+    requestId: string,
+    source: Window | null = window.parent,
+  ): Promise<void> {
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'permissionDiffClosed', data: { requestId } },
+          source,
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('hands the edit preview back when the user closes the diff unvoted', async () => {
+    const props = await renderApp();
+    expect(props['hostOwnsEditDiffPreview']).toBe(true);
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+
+    // The row unlocks and the web shell renders the diff inline, so the user
+    // can still see what they are approving (#10557).
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // ...and the host does not reopen the tab the user just closed.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+  });
+
+  it('takes the preview back for the next permission request', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          ...permissionBlock,
+          id: 'perm-second',
+          requestId: 'req-second',
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/other.ts',
+                oldText: 'x',
+                newText: 'y',
+              },
+            ],
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(2);
+    expect((opened[1]?.data as { requestId?: string })?.requestId).toBe(
+      'req-second',
+    );
+  });
+
+  // R5-3/R5-4: the teardown half of the recovery path the Risk & Scope section
+  // rests on. `closeOpenPermissionDiffs` hands the preview back and forgets the
+  // dismissed id, and the dismissal handler drops the request from the
+  // open-diff map — reverting any of the three lines left every test green.
+  it('returns preview ownership to the host when the pending diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // Moving to an automatic approval mode tears every pending diff down.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'modeChanged', data: { modeId: 'yolo' } },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    // The tab the user already closed is not closed a second time: the
+    // dismissal dropped it from the open-diff map, so the teardown loop has
+    // nothing left to post for that request.
+    expect(postMessagesOfType('closeDiff')).toEqual([]);
+
+    // With the dismissed id forgotten, the same request can own a native diff
+    // again once the mode allows approvals.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(2);
+  });
+
+  it('ignores a dismissal posted by a nested iframe window', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+
+    // MCP apps and artifact previews run in scriptable sandboxed iframes inside
+    // this webview. Handing the edit preview back is not a vote, but it is a
+    // state flip they must not be able to trigger.
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    try {
+      await dismiss('req-write', iframe.contentWindow);
+      await dismiss('req-write', null);
+    } finally {
+      iframe.remove();
+    }
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+
+  it('ignores a dismissal for a request that is not the pending one', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    await dismiss('req-stale');
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+  });
+});
+
+describe('EmbeddedApp permission diff request-id wiring', () => {
+  function permission(requestId: string, path: string) {
+    return {
+      id: `block-${requestId}`,
+      kind: 'permission',
+      requestId,
+      title: `Edit ${path}`,
+      resolved: false,
+      options: [],
+      preview: { kind: 'key_value', rows: [] },
+      toolCall: {
+        content: [{ type: 'diff', path, oldText: 'before', newText: 'after' }],
+      },
+    };
+  }
+
+  // R3-16: the host used to open a native diff for every pending permission.
+  // Only the first one gets a tab now, and nothing asserted the count.
+  it('opens a native diff only for the first pending permission', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        permission('req-a', '/workspace/a.txt'),
+        permission('req-b', '/workspace/b.txt'),
+      ]);
+      await Promise.resolve();
+    });
+
+    const opened = postMessagesOfType('openDiff');
+    expect(opened).toHaveLength(1);
+    expect((opened[0]?.data as { requestId?: string })?.requestId).toBe(
+      'req-a',
+    );
+  });
+
+  // R3-13: the host file-open hand-off had zero coverage in either package.
+  // It is what makes a workspace file open in a real VS Code editor instead of
+  // the web shell's own attachment panel.
+  it('routes a workspace file open to the extension host', async () => {
+    const props = await renderApp();
+    const onWorkspaceFileOpen = callback<(path: string) => void>(
+      props,
+      'onWorkspaceFileOpen',
+    );
+
+    await act(async () => {
+      onWorkspaceFileOpen('src/app.ts');
+      await Promise.resolve();
+    });
+
+    expect(postMessagesOfType('openFile')).toEqual([
+      { type: 'openFile', data: { path: 'src/app.ts' } },
+    ]);
+  });
+
+  // R3-4: the cleanup loop closes by (path, requestId) rather than by path, so
+  // a resolved approval cannot close a diff another request owns.
+  it('closes the diff scoped to the request that no longer needs it', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permission('req-a', '/workspace/a.txt')]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await act(async () => {
+      onTranscriptChange([
+        { ...permission('req-a', '/workspace/a.txt'), resolved: true },
+      ]);
+      await Promise.resolve();
+    });
+
+    const closed = postMessagesOfType('closeDiff');
+    expect(closed).toHaveLength(1);
+    expect(closed[0]).toEqual({
+      type: 'closeDiff',
+      data: { path: '/workspace/a.txt', requestId: 'req-a' },
+    });
+  });
+});
+
+describe('EmbeddedApp message edit rewind', () => {
+  interface PrepareSubmission {
+    sessionId?: string;
+    prompt: string;
+    inputAnnotations: unknown[];
+  }
+
+  function snapshot(turnIndex: number): RewindSnapshotStub {
+    return {
+      promptId: `prompt-${turnIndex}`,
+      turnIndex,
+      timestamp: '2026-09-06T00:00:00.000Z',
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    };
+  }
+
+  async function startEditing(
+    props: CapturedProps,
+    turnIndex: number,
+  ): Promise<(submission: PrepareSubmission) => Promise<unknown>> {
+    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
+      props,
+      'onUserMessageEditRequest',
+    );
+    await act(async () => {
+      onEdit(turnIndex, 'original text');
+      await Promise.resolve();
+    });
+    const latest = mocks.embeddedProps.current;
+    expect(latest).not.toBeNull();
+    return callback<(submission: PrepareSubmission) => Promise<unknown>>(
+      latest as CapturedProps,
+      'prepareSubmit',
+    );
+  }
+
+  beforeEach(() => {
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [] });
+    sdkMocks.rewindSession.mockResolvedValue({});
+  });
+
+  // The daemon-backed edit/rewind shipped with the cutover but nothing ever
+  // exercised it: getRewindSnapshots and rewindSession appeared in this file
+  // only as mock stubs (#9911).
+  it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2), snapshot(5), snapshot(3)],
+    });
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    // Turn 3, even though turn 5 is newer and listed before it.
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+
+  it('refuses the edit when the turn no longer has a snapshot', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(2)],
+    });
+    const prepareSubmit = await startEditing(props, 7);
+
+    await expect(
+      prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }),
+    ).rejects.toThrow('The original message can no longer be edited.');
+
+    // The rejection is what the web shell now surfaces to the user; rewinding
+    // to some other turn would silently discard different work.
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
+  it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
+    const props = await renderApp();
+
+    // Hold the snapshot fetch open so the session can switch while it is in
+    // flight.
+    let resolveSnapshots!: (value: { snapshots: RewindSnapshotStub[] }) => void;
+    sdkMocks.getRewindSnapshots.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSnapshots = resolve;
+        }),
+    );
+
+    const prepareSubmit = await startEditing(props, 3);
+    const submission = prepareSubmit({
+      sessionId: 'session-1',
+      prompt: 'edited text',
+      inputAnnotations: [],
+    });
+
+    // The user navigates to another session before the fetch resolves; the
+    // rewind must still target the session the submission was captured for.
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveSnapshots({ snapshots: [snapshot(2), snapshot(3), snapshot(5)] });
+      await submission;
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
     );
   });
 });
