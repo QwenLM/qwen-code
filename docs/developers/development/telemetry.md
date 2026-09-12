@@ -76,7 +76,7 @@ These settings can be overridden by environment variables or CLI flags.
 | `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                      | URL string        | -                       |
 | `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                   | URL string        | -                       |
 | `outfile`                         | `QWEN_TELEMETRY_OUTFILE`                             | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                         | file path         | -                       |
-| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                      | `true`/`false`    | `true`                  |
+| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include user prompt content and API request/response text in telemetry logs                                                            | `true`/`false`    | `true`                  |
 | `userId`                          | `QWEN_TELEMETRY_USER_ID`                             | -                                                        | Stable end-user identifier written to GenAI spans as the ARMS extension `gen_ai.user.id`; prefer a pseudonymous value                  | string            | -                       |
 | `includeSensitiveSpanAttributes`  | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES`   | -                                                        | Include standard GenAI messages, instructions, tool definitions, tool arguments, and successful tool results as native span attributes | `true`/`false`    | `false`                 |
 | `sensitiveSpanAttributeMaxLength` | `QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH` | -                                                        | Maximum compact JSON string length for each sensitive native span attribute. Set lower if your backend rejects large attributes.       | `1..104857600`    | `1048576`               |
@@ -128,8 +128,9 @@ two things happen:
    therefore occupy more bytes after OTLP export.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
-   logs endpoint) keep their existing `prompt`, `function_args`, and
-   `response_text` fields, instead of being dropped.
+   logs endpoint) retain `function_args`, `error`, `error.message`, and
+   `error_message`, plus `prompt`, `request_text`, and `response_text` when
+   `logPrompts` is also enabled, instead of dropping these attributes.
 
 ⚠️ **Security warning:** enabling this flag streams full conversation history,
 file contents read by `read_file`, shell commands and their output (including
@@ -642,10 +643,10 @@ The following events are logged:
 #### API Events
 
 - `qwen-code.api_request`: Outgoing request to the LLM API.
-  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional), `subagent_name` (string, optional)
+  - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional — contains request content only when `log_prompts_enabled` is true; log-to-span bridge spans additionally require `includeSensitiveSpanAttributes`; opaque `thoughtSignature` provider payload is included, with its policy decision tracked in #11682), `subagent_name` (string, optional)
 
 - `qwen-code.api_response`: Response received from LLM API.
-  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional), `subagent_name` (string, optional)
+  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional — contains visible response content only when `log_prompts_enabled` is true; log-to-span bridge spans additionally require `includeSensitiveSpanAttributes`; it carries no content for internal prompt ids or responses with no visible text), `subagent_name` (string, optional)
 
 - `qwen-code.api_error`: API request failed.
   - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
