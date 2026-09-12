@@ -940,17 +940,32 @@ export async function runNonInteractive(
       config.getMonitorRegistry().abortAll();
       flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
+    let backgroundTaskTerminalDrain: Promise<void> | undefined;
     const abortBackgroundTasksAndHoldBackNotifications = async () => {
-      const registry = config.getBackgroundTaskRegistry();
-      registry.abortAll();
-      // `abortAll()` marks each task `cancelled` synchronously, but the
-      // matching task_notification is emitted later by the task's natural
-      // handler. Keep the same bounded holdback for every terminal path that
-      // aborts tasks so stream-json never closes with an unpaired task_started.
-      const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
-      while (Date.now() < holdbackDeadline && registry.hasUnfinalizedTasks()) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      // A caller-owned adapter belongs to a reusable host. Its background
+      // tasks are session-owned and must survive a turn-scoped error or
+      // interrupt; the Session tears them down when the session itself ends.
+      if (!ownsAdapter) return;
+
+      // Several terminal routes converge through the outer catch. Share one
+      // promise so a route that already drained cannot start a second abort
+      // or extend the bounded holdback by another full window.
+      backgroundTaskTerminalDrain ??= (async () => {
+        const registry = config.getBackgroundTaskRegistry();
+        registry.abortAll();
+        // `abortAll()` marks each task `cancelled` synchronously, but the
+        // matching task_notification is emitted later by the task's natural
+        // handler. One-shot terminal paths that call this helper hold back
+        // briefly so stream-json can pair task_started with task_notification.
+        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+        while (
+          Date.now() < holdbackDeadline &&
+          registry.hasUnfinalizedTasks()
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      })();
+      await backgroundTaskTerminalDrain;
     };
 
     // EPIPE: don't process.exit here — that bypasses the caller's
@@ -964,6 +979,13 @@ export async function runNonInteractive(
       if (err.code === 'EPIPE' && !pipeBroken) {
         pipeBroken = true;
         process.stdout.destroy();
+      }
+    };
+    let stderrPipeBroken = false;
+    const stderrErrorHandler = (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE' && !stderrPipeBroken) {
+        stderrPipeBroken = true;
+        process.stderr.destroy();
       }
     };
 
@@ -1093,6 +1115,7 @@ export async function runNonInteractive(
 
     try {
       process.stdout.on('error', stdoutErrorHandler);
+      process.stderr.on('error', stderrErrorHandler);
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
@@ -3396,6 +3419,7 @@ export async function runNonInteractive(
       unsubscribeRecordingFailure?.();
 
       process.stdout.removeListener('error', stdoutErrorHandler);
+      process.stderr.removeListener('error', stderrErrorHandler);
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);

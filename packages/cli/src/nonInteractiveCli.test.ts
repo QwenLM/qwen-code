@@ -5854,6 +5854,7 @@ describe('runNonInteractive', () => {
         }),
       ).rejects.toThrow(errorMessage);
       expect(cleanup).not.toHaveBeenCalled();
+      expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
       expect(onResultEmitted).toHaveBeenCalledTimes(1);
       const results = processStdoutSpy.mock.calls
         .map((call) => String(call[0]))
@@ -5917,6 +5918,7 @@ describe('runNonInteractive', () => {
       ),
     ).rejects.toThrow('process.exit(130) called');
     expect(process.exit).toHaveBeenCalledWith(130);
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
     const envelopesAtExit = stdoutAtExit
       .trim()
       .split('\n')
@@ -5926,6 +5928,97 @@ describe('runNonInteractive', () => {
         type: 'system',
         subtype: 'task_notification',
         data: expect.objectContaining({ task_id: 'mon_abort' }),
+      }),
+    );
+  });
+
+  it('flushes notifications when the main stream aborts after its final event', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const abortController = new AbortController();
+    const writes: string[] = [];
+    let stdoutAtExit = '';
+    let backgroundTaskNotification:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            agentId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    vi.mocked(process.exit).mockImplementation((code) => {
+      stdoutAtExit = writes.join('');
+      throw new Error(`process.exit(${code}) called`);
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        backgroundTaskNotification = cb ?? undefined;
+      },
+    );
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation((cb) => {
+      cb?.({
+        agentId: 'bg_main_abort',
+        toolUseId: 'tool_bg_main_abort',
+        description: 'Background task during the main stream',
+        subagentType: 'general-purpose',
+      });
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'main-aborted-tool',
+            name: 'test-tool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'main-abort',
+          },
+        };
+        backgroundTaskNotification?.(
+          'Background task completed',
+          '<task-notification>completed</task-notification>',
+          {
+            agentId: 'bg_main_abort',
+            toolUseId: 'tool_bg_main_abort',
+            status: 'completed',
+          },
+        );
+        abortController.abort();
+      })(),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'main-abort', {
+        abortController,
+      }),
+    ).rejects.toThrow('process.exit(130) called');
+
+    expect(process.exit).toHaveBeenCalledWith(130);
+    expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    const envelopesAtExit = stdoutAtExit
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(envelopesAtExit).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'task_notification',
+        data: expect.objectContaining({
+          task_id: 'bg_main_abort',
+          status: 'completed',
+        }),
       }),
     );
   });
@@ -6150,6 +6243,28 @@ describe('runNonInteractive', () => {
     vi.spyOn(adapter, 'emitResult').mockImplementation(() => {
       throw new Error('write EPIPE');
     });
+    const stderrDestroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockImplementation(() => process.stderr);
+    const stderrErrorListenersBefore = process.stderr.listenerCount('error');
+    let stderrErrorListenersAtWrite = -1;
+    let stderrErrorEmitted = false;
+    processStderrSpy.mockImplementation((chunk) => {
+      stderrErrorListenersAtWrite = process.stderr.listenerCount('error');
+      if (
+        !stderrErrorEmitted &&
+        String(chunk).includes('[API Error: provider failed mid-stream]')
+      ) {
+        stderrErrorEmitted = true;
+        queueMicrotask(() => {
+          process.stderr.emit(
+            'error',
+            Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+          );
+        });
+      }
+      return true;
+    });
     mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
@@ -6167,6 +6282,71 @@ describe('runNonInteractive', () => {
     expect(
       processStderrSpy.mock.calls.map((call) => call[0]).join(''),
     ).toContain('[API Error: provider failed mid-stream]');
+    expect(stderrErrorListenersAtWrite).toBe(stderrErrorListenersBefore + 1);
+    expect(stderrDestroySpy).toHaveBeenCalled();
+  });
+
+  it('falls back to stderr for an owned stream-json adapter after a terminal API error', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    vi.spyOn(
+      StreamJsonOutputAdapter.prototype,
+      'emitResult',
+    ).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: 'provider failed owned-adapter' } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'owned-adapter-emit-error',
+      ),
+    ).rejects.toThrow('provider failed owned-adapter');
+    expect(
+      processStderrSpy.mock.calls.map((call) => call[0]).join(''),
+    ).toContain('[API Error: provider failed owned-adapter]');
+  });
+
+  it('falls back to stderr for a caller-owned adapter after a plain turn error', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    vi.spyOn(adapter, 'emitResult').mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        yield* [] as ServerLlmStreamEvent[];
+        throw new Error('caller-owned turn exploded');
+      })(),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'caller-owned-plain-error',
+        { adapter },
+      ),
+    ).rejects.toThrow('caller-owned turn exploded');
+    expect(
+      processStderrSpy.mock.calls.map((call) => call[0]).join(''),
+    ).toContain('caller-owned turn exploded');
   });
 
   it('keeps JSON stderr parseable when its stdout result cannot be emitted', async () => {
@@ -6678,6 +6858,7 @@ describe('runNonInteractive', () => {
       return true;
     });
     const turnAbortController = new AbortController();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
     mockLlmClient.sendMessageStream.mockReturnValue(
       (async function* () {
         turnAbortController.abort(new TurnInterruptedError());
@@ -6694,8 +6875,11 @@ describe('runNonInteractive', () => {
       'interrupt me',
       'prompt-recoverable-interrupt',
       {
+        adapter,
         abortController: turnAbortController,
         recoverableCancellation: true,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
       },
     );
 
@@ -6706,6 +6890,7 @@ describe('runNonInteractive', () => {
       .map((line) => JSON.parse(line));
     expect(exitCode).toBe(130);
     expect(process.exit).not.toHaveBeenCalled();
+    expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
     expect(envelopes.at(-1)).toMatchObject({
       type: 'result',
       is_error: true,
