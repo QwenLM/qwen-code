@@ -7,6 +7,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
+// `vscode.env.language` is `readonly` in @types/vscode, so the tests mutate this
+// holder instead of the namespace member. It has to be hoisted because the
+// vi.mock factory runs at module load, before anything in this file.
 const envMock = vi.hoisted(() => ({ language: 'en' }));
 
 vi.mock('vscode', () => ({
@@ -39,6 +42,8 @@ function createMockWebview() {
 describe('WebViewContent', () => {
   const fakeExtensionUri = { fsPath: '/ext' } as never;
 
+  // envMock is shared across the whole file, so reset it or a test that sets a
+  // language leaks into whatever runs next.
   beforeEach(() => {
     envMock.language = 'en';
   });
@@ -135,5 +140,16 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('<html lang="en">');
+  });
+
+  it('escapes the language value in the html lang attribute', () => {
+    envMock.language = '"><script>alert(1)</script>';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain(
+      '<html lang="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">',
+    );
+    expect(html).not.toContain('<html lang=""><script>');
   });
 });
