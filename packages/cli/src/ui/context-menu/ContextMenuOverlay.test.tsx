@@ -84,9 +84,12 @@ function Scene({ children }: { children: ReactNode }) {
 }
 
 /**
- * The exclusivity fixture: an ordinary key consumer listening while the menu
- * is open. Single definition for every test that asserts what leaked (or was
- * consumed) under the open menu.
+ * The exclusivity fixture: ordinary key consumers listening while the menu
+ * is open. Two bystanders, both ordinary subscribers — production always
+ * has several live at once (global handler, composer input, focus hooks),
+ * so a declined key must fan out to EVERY ordinary handler, not just the
+ * first: the doubled exact-array assertions below pin that the declined
+ * path delivers to all subscribers and a first-only truncation reddens.
  */
 function ExclusiveScene({
   items,
@@ -98,6 +101,7 @@ function ExclusiveScene({
   return (
     <Scene>
       <ContextMenuProvider>
+        <InnocentBystander onKey={onKey} />
         <InnocentBystander onKey={onKey} />
         <MenuOpener items={items} />
         <ContextMenuOverlay />
@@ -231,6 +235,40 @@ describe('ContextMenuOverlay', () => {
       expect(bystanderKeys).toEqual([]);
     });
 
+    it('an unmodified ArrowUp at the top row clamps and keeps the menu usable', async () => {
+      // Effect witness for the up branch: from index 0, `Math.max(0, -1)`
+      // is the only thing keeping selectedIndex at a real row. A no-op, an
+      // unclamped decrement, or a closeMenu-instead-of-move would each
+      // leave the plain consumption test above green. The leading Up from
+      // the clamped floor is the ONLY press that exposes a lost clamp —
+      // Down-first ordering yields 0 with or without Math.max. Separate
+      // chunks with a wait between: one stdin chunk dispatches in a single
+      // tick and both arrows would compute from the same stale closure
+      // index (the open R3-1 follow-up), proving nothing about navigation.
+      const handlers = { open: vi.fn(), copy: vi.fn() };
+      const bystanderKeys: string[] = [];
+      const { lastFrame, stdin } = renderWithProviders(
+        <ExclusiveScene
+          items={makeItems(handlers)}
+          onKey={(k) => bystanderKeys.push(k)}
+        />,
+      );
+      await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+
+      stdin.write('\u001b[A'); // Up from index 0 — clamps to 0
+      await wait();
+      stdin.write('\u001b[B'); // Down -> item 2
+      await wait();
+      stdin.write('\u001b[A'); // Up -> back to item 1, menu stays open
+      await wait();
+      expect(lastFrame()).toContain('Open Link');
+
+      stdin.write('\r');
+      await waitFor(() => expect(handlers.open).toHaveBeenCalledTimes(1));
+      expect(handlers.copy).not.toHaveBeenCalled();
+      expect(bystanderKeys).toEqual([]);
+    });
+
     it('an ordinary handler does not receive Escape aimed at the open menu', async () => {
       const handlers = { open: vi.fn(), copy: vi.fn() };
       const bystanderKeys: string[] = [];
@@ -260,12 +298,13 @@ describe('ContextMenuOverlay', () => {
       await waitFor(() => expect(lastFrame()).toContain('Open Link'));
 
       // A printable key the menu does not handle: dismisses the menu AND
-      // still reaches the ordinary handler (typing "x" dismisses and types
-      // "x"). Swallowing it would drop the keystroke entirely.
+      // still reaches every ordinary handler (typing "x" dismisses and
+      // types "x"). Swallowing it would drop the keystroke entirely;
+      // first-only fan-out would deliver it to just one subscriber.
       stdin.write('x');
       await waitFor(() => expect(lastFrame()).not.toContain('Open Link'));
 
-      expect(bystanderKeys).toContain('x');
+      expect(bystanderKeys).toEqual(['x', 'x']);
     });
 
     it('Shift+Enter dismisses the menu and falls through without firing the item', async () => {
@@ -288,10 +327,12 @@ describe('ContextMenuOverlay', () => {
 
       expect(handlers.open).not.toHaveBeenCalled();
       expect(handlers.copy).not.toHaveBeenCalled();
-      // The exact key must reach the bystander: if kitty decoding
-      // regressed, the sequence would shred into an escape plus
-      // printables instead of one decoded 'return+shift'.
-      expect(bystanderKeys).toEqual(['return+shift']);
+      // The exact key must reach BOTH bystanders: fan-out on the declined
+      // path is all-subscribers, and a first-only truncation would leave
+      // the second recorder empty. If kitty decoding regressed, the
+      // sequence would shred into an escape plus printables instead of
+      // one decoded 'return+shift' per subscriber.
+      expect(bystanderKeys).toEqual(['return+shift', 'return+shift']);
     });
 
     // R2-4: the claim predicate has three modifier axes; pin every cell
@@ -320,7 +361,9 @@ describe('ContextMenuOverlay', () => {
 
         expect(handlers.open).not.toHaveBeenCalled();
         expect(handlers.copy).not.toHaveBeenCalled();
-        expect(bystanderKeys).toEqual([expectedBystander]);
+        // Delivered to BOTH ordinary bystanders — first-only fan-out on
+        // the declined path would leave the array at length 1.
+        expect(bystanderKeys).toEqual([expectedBystander, expectedBystander]);
       },
     );
 
