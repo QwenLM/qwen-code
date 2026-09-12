@@ -270,8 +270,9 @@ daemon 的 debug 模式另外为视觉 Monitor 保存真实请求，目录为系
 `proactive.monitor_debug_started` 和 `proactive.monitor_request_saved` 日志给出绝对路径。
 仅 daemon debug 开启；Host 的 `--live-debug` 单独启用不会录制，纯音频 Monitor 也不录制。
 启动及新建 Monitor 时清理，只保留最近创建的 10 个 Monitor（不是最近 10 次请求）。
-删除尽力而为：操作系统无法删除的归档（例如 Windows 上被其他进程占用文件）会超出
-该上限保留，并上报 `proactive.monitor_debug_prune_failed`，直至可以移除。
+删除尽力而为：无法移除的归档（例如 Windows 上被其他进程占用文件）会超出该上限
+保留，上报 `proactive.monitor_debug_prune_failed` 并附带失败原因，之后的清理
+会重试直至可以移除；`EACCES`、`unsafe_directory` 等持续存在的原因需要手动清理。
 被清理的 Monitor 继续运行但停止录制。文件仅在 macOS／Linux 上保证仅当前用户可访问
 （0700/0600 强制执行，不满足则拒绝）；Windows 无法校验 POSIX 权限位，
 隔离性仅取决于系统临时目录自身继承的 ACL。内容包含真实屏幕／摄像头、

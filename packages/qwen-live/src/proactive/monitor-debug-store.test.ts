@@ -30,11 +30,39 @@ const rmFailures = vi.hoisted(() => new Map<string, number>());
 const rmCalls = vi.hoisted(
   () => [] as Array<{ path: string; options: unknown }>,
 );
+// One-shot lstat tampering after `after` real calls, simulating a concurrent
+// pruner or tamperer acting between the prune scan and the deletion phase.
+const lstatTampers = vi.hoisted(
+  () => new Map<string, { after: number; effect: 'enoent' | 'symlink' }>(),
+);
 
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
     ...fs,
+    lstat: async (
+      path: Parameters<typeof fs.lstat>[0],
+      options?: Parameters<typeof fs.lstat>[1],
+    ) => {
+      const key = String(path);
+      const tamper = lstatTampers.get(key);
+      if (tamper) {
+        if (tamper.after > 0) {
+          tamper.after -= 1;
+        } else {
+          lstatTampers.delete(key);
+          if (tamper.effect === 'symlink') {
+            const stat = await fs.lstat(path);
+            stat.isSymbolicLink = () => true;
+            return stat;
+          }
+          throw Object.assign(new Error('no such file or directory'), {
+            code: 'ENOENT',
+          });
+        }
+      }
+      return fs.lstat(path, options);
+    },
     rm: async (
       path: Parameters<typeof fs.rm>[0],
       options?: Parameters<typeof fs.rm>[1],
@@ -104,6 +132,7 @@ describe('MonitorDebugStore', () => {
     vi.restoreAllMocks();
     rmFailures.clear();
     rmCalls.length = 0;
+    lstatTampers.clear();
     await rm(temporary, { recursive: true, force: true });
   });
 
@@ -453,25 +482,89 @@ describe('MonitorDebugStore', () => {
     for (let time = 1; time <= 12; time += 1)
       owned.push(await ownedDirectory(time));
     // The prune visits stale archives newest-first, so blocking owned[1]
-    // leaves the older owned[0] to prove the loop continued.
-    rmFailures.set(owned[1]!, Number.POSITIVE_INFINITY);
+    // leaves the older owned[0] to prove the loop continued. Block the media
+    // subtree, as a held-open media file does: the removal must fail before
+    // the marker is touched, so the next prune still recognizes the archive.
+    rmFailures.set(join(owned[1]!, 'requests'), 1);
     expect(await store.initialize()).toBe(true);
     await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    expect((await lstat(join(owned[1]!, 'monitor.json'))).isFile()).toBe(true);
     expect(log).toHaveBeenCalledWith(
       'proactive.monitor_debug_prune_failed',
-      expect.objectContaining({ directory: owned[1], retained: true }),
+      expect.objectContaining({
+        directory: owned[1],
+        retained: true,
+        reason: 'EBUSY',
+      }),
+    );
+    // A retained archive must never be logged as destroyed.
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
     );
     // maxRetries rides out a transient handle (AV scanner/indexer) on Windows.
-    expect(rmCalls.find((call) => call.path === owned[1])?.options).toEqual(
+    expect(
+      rmCalls.find((call) => call.path === join(owned[1]!, 'requests'))
+        ?.options,
+    ).toEqual(
       expect.objectContaining({ recursive: true, force: true, maxRetries: 3 }),
     );
+    // Once the handle clears, the next prune retries and removes the archive.
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[1]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(log).toHaveBeenCalledWith('proactive.monitor_debug_pruned', {
+      directory: owned[1],
+    });
     const recorder = store.create(INFO);
     expect(recorder).toBeDefined();
     await recorder!.start();
     expect(log).not.toHaveBeenCalledWith(
       'proactive.monitor_debug_failed',
       expect.objectContaining({ reason: 'initialization_failed' }),
+    );
+  });
+
+  it('reports nothing when a concurrent pruner removes a stale archive first', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 12; time += 1)
+      owned.push(await ownedDirectory(time));
+    // The scan recognizes owned[1]; a second store on the same root then
+    // removes it before this prune's deletion phase. Nothing was retained,
+    // so neither a failure nor a pruned event may be logged for it.
+    lstatTampers.set(owned[1]!, { after: 1, effect: 'enoent' });
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+  });
+
+  it('reports the reason when a stale archive turns unsafe mid-prune', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 11; time += 1)
+      owned.push(await ownedDirectory(time));
+    // The scan accepts owned[0], then the archive is swapped for a symlink
+    // before the deletion phase rechecks it. The refusal is a privacy guard,
+    // not a transient OS delete failure, and must be reported by name.
+    lstatTampers.set(owned[0]!, { after: 1, effect: 'symlink' });
+    expect(await store.initialize()).toBe(true);
+    expect((await lstat(owned[0]!)).isDirectory()).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({
+        directory: owned[0],
+        retained: true,
+        reason: 'unsafe_directory',
+      }),
     );
   });
 

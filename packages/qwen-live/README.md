@@ -409,11 +409,13 @@ visible or spoken secrets inside media are not redacted. Directories/files are
 on Windows the store cannot check POSIX modes, so isolation is only whatever
 ACLs the OS temporary directory inherits. Debug startup and new Monitor
 creation keep only the ten most recently created Monitor directories; this is
-not a ten-request or disk-size limit. Deletion is best-effort: an archive the
-OS cannot delete (for example a file held open by another process on Windows)
-is kept past this cap and reported as `proactive.monitor_debug_prune_failed`
-until it can be removed. An evicted Monitor keeps running but
-stops recording and logs skipped requests. Disk/permission failures or
+not a ten-request or disk-size limit. Deletion is best-effort: an archive
+that cannot be removed (for example a file held open by another process on
+Windows) is kept past this cap and reported as
+`proactive.monitor_debug_prune_failed` with the failure reason, and later
+prunes retry it until it can be removed; a persistent reason such as `EACCES`
+or `unsafe_directory` needs manual cleanup. An evicted Monitor keeps running
+but stops recording and logs skipped requests. Disk/permission failures or
 exceeding the 32 MiB pending-write budget disable that recorder and log an
 incomplete recording without stopping the call.
 Long-running debug Monitors can consume significant disk space; disable debug
