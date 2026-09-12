@@ -211,10 +211,8 @@ export function removeDaemonTokenFromUrl(): void {
   if (changed) window.history.replaceState(null, '', url);
 }
 
-export function getDaemonAuthHeaders(
-  baseUrl?: string,
-): HeadersInit | undefined {
-  const token = getDaemonToken(baseUrl);
+export function getDaemonAuthHeaders(): HeadersInit | undefined {
+  const token = getDaemonToken();
   return token ? { Authorization: `Bearer ${token}` } : undefined;
 }
 
