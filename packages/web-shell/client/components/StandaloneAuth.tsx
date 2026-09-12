@@ -328,9 +328,9 @@ export function StandaloneAuth({
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
-          {!invalidTarget && (
+          {normalizedAddress && (
             <CardDescription className="font-mono text-xs break-all">
-              {baseUrl}
+              {normalizedAddress}
             </CardDescription>
           )}
         </CardHeader>

@@ -727,6 +727,9 @@ it('updates the token destination hint when a local address is edited', async ()
     addressInput().dispatchEvent(new Event('input', { bubbles: true }));
   });
   expect(container.textContent).toContain('sent to the address shown above');
+  expect(
+    container.querySelector('[data-slot="card-description"]')?.textContent,
+  ).toBe('https://remote.example');
 });
 
 it('offers cross-origin diagnostics without treating network failures as permanent policy errors', async () => {

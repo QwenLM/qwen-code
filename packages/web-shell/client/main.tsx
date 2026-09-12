@@ -376,7 +376,7 @@ async function main() {
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
       : undefined);
-  removeDaemonTokenFromUrl();
+  if (!INVALID_DAEMON_TARGET) removeDaemonTokenFromUrl();
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
