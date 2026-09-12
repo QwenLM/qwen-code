@@ -12,7 +12,10 @@ import type {
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
-import { stripLeadingSystemReminders } from '../utils/historyUtils.js';
+import {
+  isOnlyLeadingSystemReminders,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -25,6 +28,16 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /**
+   * The members' injected leading `<system-reminder>` envelope runs,
+   * joined in queue order. The aggregate's model text can carry a
+   * member's envelope mid-string (only the first member's envelope is
+   * leading), where the restore path's leading-only split cannot see
+   * it — carrying the producer's per-member decomposition lets the
+   * restore re-arm those consumed one-shot notices instead of dropping
+   * them.
+   */
+  reminders?: string;
   turnKey: string;
 }
 
@@ -120,20 +133,34 @@ function aggregateUserMessages(
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
   // Every member contributes a projection — its own when it has one, its
-  // model text otherwise — so a single projection-less member cannot drop
-  // a peer message's one-liner and surface the raw envelope as the
-  // user's prompt instead.
-  const submittedPrompt = messages
-    .map(
-      (message) =>
-        message.submittedPrompt ?? stripLeadingSystemReminders(message.text),
-    )
-    .join('\n\n');
+  // stripped model text otherwise — so a single projection-less member
+  // cannot drop a peer message's one-liner and surface the raw envelope
+  // as the user's prompt instead.
+  const projections = messages.map(
+    (message) =>
+      message.submittedPrompt ?? stripLeadingSystemReminders(message.text),
+  );
+  // Each member's injected envelope run: the difference between its model
+  // text and its projection when that difference is a pure leading
+  // envelope prefix. A user-authored leading block (projection carried
+  // verbatim) contributes nothing.
+  const reminders = messages
+    .map((message, index) => {
+      const projection = projections[index];
+      if (!message.text.endsWith(projection)) return '';
+      const prefix = message.text.slice(
+        0,
+        message.text.length - projection.length,
+      );
+      return isOnlyLeadingSystemReminders(prefix) ? prefix : '';
+    })
+    .join('');
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    submittedPrompt,
+    submittedPrompt: projections.join('\n\n'),
+    ...(reminders === '' ? {} : { reminders }),
   };
 }
 

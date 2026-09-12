@@ -549,6 +549,15 @@ export interface CancelSubmitInfo {
    */
   turnProducedMeaningfulContent: boolean;
   /**
+   * True once the turn's request was handed to the model
+   * (`sendMessageStream` called). The cancel handler's preserve-output
+   * branches keep the turn's API-side copy, so a one-shot reminder
+   * envelope on it was already delivered; a turn cancelled before
+   * dispatch holds no API-side copy, so its envelope must be re-armed
+   * for the resubmit instead of dropped.
+   */
+  turnDispatchedToApi: boolean;
+  /**
    * True when the cancelled turn was a Goal continuation turn. Such a turn
    * appends a synthetic continuation prompt to the chat history but, unlike a
    * UserQuery, adds no UI user item, so the cancel handler's auto-restore
@@ -844,6 +853,7 @@ export const useLlmStream = (
   // committed text alongside the cancelled prompt. Reset at turn start
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
+  const turnDispatchedToApiRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
   // Envelope parts stripped from `lastPromptRef` when their drained
@@ -1484,6 +1494,7 @@ export const useLlmStream = (
         lastTurnUserItem: lastTurnUserItemRef.current,
         canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
+        turnDispatchedToApi: turnDispatchedToApiRef.current,
         wasGoalTurn: activeGoalTurnRef.current !== null,
       });
     } finally {
@@ -3492,7 +3503,11 @@ export const useLlmStream = (
             addItem(
               {
                 type: MessageType.USER,
-                text: message,
+                // The persisted record above keeps the raw model-facing
+                // text; the transcript row drops an injected one-shot
+                // envelope the queue drain carried, matching the strip
+                // both resume paths apply to the same record.
+                text: stripLeadingSystemReminders(message),
                 // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
                 sentToModel: false,
               },
@@ -3674,6 +3689,7 @@ export const useLlmStream = (
         lastTurnUserItemRef.current = null;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
+        turnDispatchedToApiRef.current = false;
         handledToolCallFingerprintsRef.current.clear();
         duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
@@ -4074,6 +4090,9 @@ export const useLlmStream = (
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
+          // Mark dispatch before the request leaves: a cancel racing the
+          // stream setup must still know the turn reached the API.
+          turnDispatchedToApiRef.current = true;
           const stream = llmClient.sendMessageStream(
             finalQueryToSend,
             providerSignal,

@@ -553,6 +553,61 @@ describe('resumeHistoryUtils', () => {
         { id: 1_001, type: 'user', text, sentToModel: true },
       ]);
     });
+
+    it('carries the enveloped model text through on a UserPromptSubmit-hook record', () => {
+      // A hook-context record resolves displayText (the clean projection)
+      // and filters every text part out of the projection, so the
+      // envelope lives only in the record's model-facing parts. The
+      // carry-through must read those parts (minus the hook-context
+      // trailer) or the rewind re-arm can never fire for this shape.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              text: '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+            },
+            {
+              text: '<qwen:user-prompt-submit-context>\nctx\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+        systemPayload: { displayText: 'my prompt', hookContext: 'ctx' },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          sentToModel: true,
+          modelText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+        },
+      ]);
+    });
+
+    it('strips an injected envelope from a mid-turn steer row on resume', () => {
+      // A steer queued while an injector was armed persists the envelope in
+      // displayText; the resumed row must match the live row and the
+      // OpenTUI adapter, which both strip it.
+      const items = buildUserItems({
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        message: { parts: [{ text: 'my steer text' }] },
+        systemPayload: {
+          displayText:
+            '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy steer text',
+        },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my steer text',
+          sentToModel: false,
+        },
+      ]);
+    });
   });
 
   describe('UserPromptSubmit hook context provenance', () => {

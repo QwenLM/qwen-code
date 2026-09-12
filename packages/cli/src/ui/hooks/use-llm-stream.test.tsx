@@ -7108,6 +7108,114 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledOnce();
   });
 
+  it('strips an injected envelope from the live steer row while recording the raw text', async () => {
+    // A steer drained from the queue can carry a one-shot reminder envelope
+    // in its model text. The persisted record keeps the raw text (the API
+    // rebuild replays it), but the transcript row must show the user-visible
+    // form, matching the strip both resume paths apply to the same record.
+    const envelope =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\n';
+    const queuedPrompt = `${envelope}my steer text`;
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-envelope',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // The recorder keeps the raw model-facing message…
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [{ text: queuedPrompt }],
+      queuedPrompt,
+    );
+    // …while the transcript row shows only the user-visible text.
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: 'my steer text', sentToModel: false },
+      expect.any(Number),
+    );
+  });
+
   it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();

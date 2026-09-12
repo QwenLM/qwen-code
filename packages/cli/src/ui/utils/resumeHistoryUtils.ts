@@ -23,6 +23,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -38,7 +39,10 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
-import { stripLeadingSystemReminders } from './historyUtils.js';
+import {
+  isOnlyLeadingSystemReminders,
+  stripLeadingSystemReminders,
+} from './historyUtils.js';
 import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
@@ -394,11 +398,16 @@ function convertToHistoryItems(
           const hasAttachmentReferences =
             Array.isArray(payload?.attachmentReferences) &&
             payload.attachmentReferences.length > 0;
-          const text =
+          // Same strip as the sibling user branches and the OpenTUI
+          // adapter: a steer queued while an injector was armed persists
+          // the envelope in displayText, and both renderers must agree on
+          // the row.
+          const text = stripLeadingSystemReminders(
             payload?.displayText ||
-            (hasAttachmentReferences
-              ? '[User message with attachments]'
-              : extractTextFromParts(record.message?.parts as Part[]));
+              (hasAttachmentReferences
+                ? '[User message with attachments]'
+                : extractTextFromParts(record.message?.parts as Part[])),
+          );
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -470,12 +479,40 @@ function convertToHistoryItems(
             : extractTextFromParts(projection.parts));
         const text = stripLeadingSystemReminders(raw);
         if (text) {
-          // Same stamp + carry-through as the at-command branch above.
+          // Same stamp as the at-command branch above. The modelText
+          // carry-through prefers the record's model-facing parts over the
+          // resolved display value: on the displayText-wins path (a
+          // UserPromptSubmit-hook record) `raw` is the clean projection,
+          // so `text === raw` always holds and the enveloped model text
+          // would be dropped — killing the rewind re-arm for exactly the
+          // records whose envelope was injected. The parts-derived text is
+          // adopted only when it differs from `text` by a pure leading
+          // envelope run (a hook-context trailing part is stripped first);
+          // otherwise `raw` itself is the model text that carried the
+          // envelope.
+          const modelFromParts = extractTextFromParts(
+            stripTrailingUserPromptSubmitContextPart(
+              record.message?.parts as Part[],
+            ),
+          );
+          const envelopePrefix =
+            modelFromParts !== '' &&
+            modelFromParts !== text &&
+            modelFromParts.endsWith(text)
+              ? modelFromParts.slice(0, modelFromParts.length - text.length)
+              : undefined;
+          const modelText =
+            envelopePrefix !== undefined &&
+            isOnlyLeadingSystemReminders(envelopePrefix)
+              ? modelFromParts
+              : text !== raw
+                ? raw
+                : undefined;
           items.push({
             type: 'user',
             text,
             sentToModel: true,
-            ...(text === raw ? {} : { modelText: raw }),
+            ...(modelText === undefined ? {} : { modelText }),
           });
         }
         break;

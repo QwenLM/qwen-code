@@ -818,6 +818,13 @@ const SHELL_WIDTH_FRACTION = 0.89;
  */
 const SHELL_HEIGHT_PADDING = 10;
 
+// The collapsed form a large paste takes in the composer (Ink and OpenTUI
+// agree on it). A producer display value containing one is not
+// re-submittable — the pendingPastes expansion map is gone once the first
+// submit cleared it — so restore paths fall back to the expanded model
+// text instead of refilling the composer with the literal placeholder.
+const PASTE_PLACEHOLDER_RE = /\[Pasted Content \d+ chars\](?: #\d+)?/;
+
 export const AppContainer = (props: AppContainerProps) => {
   const {
     settings,
@@ -1032,11 +1039,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // users can verify discovery (e.g., catch typos in context.fileName)
   // without digging into debug logs (#5267).
   const contextFilesAnnouncedRef = useRef(false);
+  // The one-shot reminder envelopes a restored prompt carried, re-applied to
+  // its resubmit. Their latches (recovered agents, worktree restore) were
+  // consumed by the first attempt, so the envelopes must ride again even on
+  // an edited or vim-mode resubmit — delivery is not tied to buffer
+  // identity. Kept separate from restoredSubmissionRef: vim's provenance
+  // invalidation clears that ref but must not clear this one.
+  const pendingRestoredRemindersRef = useRef<string | null>(null);
   // /clear and other same-process session switches wipe the emitted INFO
   // item without remounting this component while context files stay
   // attached, so re-arm the latch for the new session's first prompt.
   useEffect(() => {
     contextFilesAnnouncedRef.current = false;
+    // A session switch must also drop the previous session's armed
+    // one-shot envelopes: they name that session's worktree/agent state,
+    // and every read-back surface shows only the user's words, so nothing
+    // would reveal a cross-session leak.
+    pendingRestoredRemindersRef.current = null;
   }, [sessionStats.sessionId]);
   // Wrap loadHistory to reconcile the announcement latch after any history
   // replacement (rewind, /restore, /resume of the current session). If the
@@ -1499,13 +1518,6 @@ export const AppContainer = (props: AppContainerProps) => {
     // the projection an unedited resubmit hands back to the queue.
     displayText: string;
   } | null>(null);
-  // The one-shot reminder envelopes a restored prompt carried, re-applied to
-  // its resubmit. Their latches (recovered agents, worktree restore) were
-  // consumed by the first attempt, so the envelopes must ride again even on
-  // an edited or vim-mode resubmit — delivery is not tied to buffer
-  // identity. Kept separate from restoredSubmissionRef: vim's provenance
-  // invalidation clears that ref but must not clear this one.
-  const pendingRestoredRemindersRef = useRef<string | null>(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   // Set only when the provenance-unavailable latch above was tripped by an
   // EDIT to a restored submission (the handleBufferChange divergence
@@ -1569,35 +1581,35 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
-      buffer.setText(text);
+      // A stash written by an older build can hold the model-facing text
+      // with its injected envelope; restore only the user-visible form.
+      buffer.setText(stripLeadingSystemReminders(text));
     });
   }, [buffer, promptStashTargetDir]);
 
   useEffect(() => {
     const fetchUserMessages = async () => {
-      // Legacy log entries predate the write-time strip: normalize on
-      // read too, or an old enveloped row resurfaces into the composer (and
-      // dodges the dedupe against its stripped current-session twin).
-      const pastMessagesRaw = (
-        (await logger?.getPreviousUserMessages()) || []
-      ).map(stripLeadingSystemReminders);
-      // Normalize the current-session side identically to the log side
-      // above: a user-authored leading envelope the write side kept would
-      // otherwise produce two recall entries for one prompt.
-      const currentSessionUserMessages = realUserPromptTexts(
-        historyManager.history,
-      )
-        .map(stripLeadingSystemReminders)
-        .reverse();
-      // Current-session messages are already newest-first; combining with past
-      // messages gives a newest-first list. dedupeNewestFirst keeps the first
-      // (newest) occurrence so resubmitting an old prompt promotes it to
-      // "most recent" rather than leaving a stale copy at an older position.
+      const pastMessagesRaw = (await logger?.getPreviousUserMessages()) || [];
+      // Current-session messages are already newest-first once reversed;
+      // combining with past messages gives a newest-first list.
       const combinedMessages = [
-        ...currentSessionUserMessages,
+        ...realUserPromptTexts(historyManager.history).reverse(),
         ...pastMessagesRaw,
       ];
-      setUserMessages(dedupeNewestFirst(combinedMessages).reverse());
+      // Dedupe on the envelope-stripped form — an injected-envelope row and
+      // its clean twin are one prompt — but keep the newest ORIGINAL text:
+      // a user-authored leading <system-reminder> block is content, and
+      // recall must hand back what the user actually typed, not a
+      // shape-stripped rewrite of it.
+      const seen = new Set<string>();
+      const deduped: string[] = [];
+      for (const message of combinedMessages) {
+        const key = stripLeadingSystemReminders(message);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(message);
+      }
+      setUserMessages(deduped.reverse());
     };
     fetchUserMessages();
   }, [historyManager.history, logger]);
@@ -2666,35 +2678,35 @@ export const AppContainer = (props: AppContainerProps) => {
       modelText: string;
       displayText?: string;
       submittedPrompt?: string;
+      reminders?: string;
     }): string => {
       // Prefer the producer-carried display text over shape-stripping the
-      // model text, but only when it is a display form of it: an explicit
-      // `displayText` equal to the model text means nothing was injected
+      // model text, but only when it is a display form of it: a producer
+      // value byte-identical to the model text means nothing was injected
       // (a user-authored leading envelope stays visible and arms nothing);
-      // otherwise the difference must be a pure leading-envelope prefix,
-      // and exactly that prefix is armed. A prefix mixing envelopes with
-      // display content (an attachment `@ref`) keeps the content in the
-      // composer and arms only the envelopes; a producer value that is no
-      // suffix of the model text at all (a collapsed large-paste
-      // placeholder) is kept because the expanded model text has no usable
-      // display form. A producer value reached via `submittedPrompt` can
-      // also BE the raw model text (a projection-less queue member
-      // aggregates that way), which still takes the split.
+      // otherwise a suffix value leaves a prefix that must be a pure
+      // leading-envelope run for the pair to be adopted, and exactly that
+      // prefix is armed. A prefix mixing envelopes with display content
+      // (an attachment `@ref`) keeps the content in the composer and arms
+      // only the envelopes. A queue aggregate's envelope can sit
+      // mid-string (a non-leading member): the producer carries the
+      // per-member envelope run as `reminders` so the restore re-arms it
+      // instead of dropping it. A producer value that cannot be
+      // resubmitted as-is — a collapsed large-paste placeholder, whose
+      // pendingPastes expansion is gone — falls back to the split: the
+      // expanded model text is the only re-submittable form.
       const split = splitLeadingSystemReminders(submission.modelText);
       const producerDisplay =
         submission.displayText ?? submission.submittedPrompt;
       let displayText: string;
       let reminders: string;
-      if (!producerDisplay) {
-        displayText = split.rest;
-        reminders = split.reminders;
-      } else if (
-        submission.displayText !== undefined &&
-        submission.displayText === submission.modelText
-      ) {
-        displayText = submission.displayText;
+      if (producerDisplay && producerDisplay === submission.modelText) {
+        displayText = producerDisplay;
         reminders = '';
-      } else if (submission.modelText.endsWith(producerDisplay)) {
+      } else if (
+        producerDisplay &&
+        submission.modelText.endsWith(producerDisplay)
+      ) {
         const prefix = submission.modelText.slice(
           0,
           submission.modelText.length - producerDisplay.length,
@@ -2706,12 +2718,23 @@ export const AppContainer = (props: AppContainerProps) => {
           displayText = split.rest;
           reminders = split.reminders;
         }
-      } else {
+      } else if (
+        producerDisplay &&
+        !PASTE_PLACEHOLDER_RE.test(producerDisplay)
+      ) {
         displayText = producerDisplay;
+        reminders = submission.reminders ?? split.reminders;
+      } else {
+        displayText = split.rest;
         reminders = split.reminders;
       }
       restoredSubmissionRef.current = { displayText };
-      pendingRestoredRemindersRef.current = reminders === '' ? null : reminders;
+      // Merge, don't overwrite: a restore carrying no envelope of its own
+      // must not null one an earlier restore or deferred submit armed —
+      // that notice's latch is spent, so dropping it here loses the
+      // notice for the rest of the session.
+      pendingRestoredRemindersRef.current =
+        reminders === '' ? pendingRestoredRemindersRef.current : reminders;
       submittedPromptProvenanceUnavailableRef.current = false;
       restoredPromptEditedRef.current = false;
       return displayText;
@@ -3623,9 +3646,11 @@ export const AppContainer = (props: AppContainerProps) => {
           }),
         );
         if (!rearmReminders) {
-          // The preserve-output branches keep the cancelled turn's API-side
-          // copy, so the envelope was already delivered once — re-arming
-          // would deliver the one-shot notice twice.
+          // The cancelled turn kept its API-side copy (it was dispatched),
+          // so the envelope was already delivered once — re-arming would
+          // deliver the one-shot notice twice. When the turn never reached
+          // the API the notice has not been delivered anywhere, so the
+          // stash's armed envelope must survive.
           pendingRestoredRemindersRef.current = null;
         }
       };
@@ -3648,7 +3673,9 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving streamed output and restoring prompt text',
         );
-        restoreCancelledPrompt(false);
+        // Preserved output implies the turn was dispatched (its API-side
+        // copy stays), so the envelope was already delivered once.
+        restoreCancelledPrompt(!info.turnDispatchedToApi);
         return;
       }
       if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
@@ -3668,7 +3695,10 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving committed output and restoring prompt text',
         );
-        restoreCancelledPrompt(false);
+        // Committed-but-undispatched turns (an at-command's tool_group
+        // lands before the request goes out) hold no API-side envelope
+        // copy, so the re-arm must survive; dispatched turns keep theirs.
+        restoreCancelledPrompt(!(info?.turnDispatchedToApi ?? false));
         return;
       }
 

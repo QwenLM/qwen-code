@@ -572,6 +572,61 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual([]);
     });
 
+    it('carries each member’s injected envelope prefix as producer reminders', () => {
+      // A queued member whose envelope sits mid-aggregate is invisible to
+      // the restore path's leading-only split; the aggregate must carry
+      // the per-member envelope run so the restore can re-arm it.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope = '<system-reminder>\nnotice\n</system-reminder>\n\n';
+
+      act(() => {
+        result.current.addMessage('first message', false, 'first message');
+        result.current.addMessage(
+          `${envelope}second message`,
+          false,
+          'second message',
+        );
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: `first message\n\n${envelope}second message`,
+        submittedPrompt: 'first message\n\nsecond message',
+        reminders: envelope,
+      });
+    });
+
+    it('arms no reminders for a user-authored leading envelope carried as its own projection', () => {
+      // The projection equals the model text, so nothing was injected —
+      // the user's own <system-reminder> block is content, not a reminder.
+      const { result } = renderHook(() => useMessageQueue());
+      const text =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nreview this';
+
+      act(() => {
+        result.current.addMessage(text, false, text);
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // Exact shape: a `reminders` key would mean the user's own block was
+      // mis-classified as an injected prefix.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: text,
+        submittedPrompt: text,
+        turnKey: expect.any(String),
+      });
+    });
+
     it('reports the exact removed turn keys for Goal reservation release', () => {
       const { result } = renderHook(() => useMessageQueue());
       act(() => result.current.addMessage('queued user'));
