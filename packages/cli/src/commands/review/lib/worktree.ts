@@ -1068,11 +1068,15 @@ export interface FilterScreen {
    */
   filters: string[];
   /**
-   * Filter keys supplied by a trusted global/system origin. Checkout callers
-   * do not refuse on these, but a residue measurement still blanks them so
-   * its own index refresh cannot execute a content-filter command.
+   * Filter keys supplied by a trusted global/system origin. Callers do not
+   * refuse on these; residue measurement narrows this set to `reachedExempt`.
    */
   exempt: string[];
+  /**
+   * Trusted filter keys reached through the repo-local include graph. Residue
+   * measurements blank these keys, but leave unrelated global filters active.
+   */
+  reachedExempt: string[];
   /**
    * Every file the walk could NOT read to the bottom, each with its reason:
    * another user's `~user/`, a target that is not a regular file, a parse
@@ -1198,10 +1202,12 @@ export function filterCommandsIn(
   }
   const filters = new Set<string>();
   const exempt = new Set<string>();
+  const reachedExempt = new Set<string>();
   const unread = new Set<string>();
   const dangling = new Set<string>();
   const visited = new Set<string>();
   const trustedOrigins = new Set<string>();
+  const trustedFiltersByOrigin = new Map<string, string[]>();
   // Keep the spelling Git opens. A repo-controlled symlink may resolve to a
   // user config now and be repointed after this screen; realpath equality
   // would therefore turn that alias into authority it does not own.
@@ -1357,7 +1363,15 @@ export function filterCommandsIn(
       if (!repositoryControls(file)) trustedOrigins.add(originKey(file));
     }
     for (const { file, key } of trustedFilterRecords) {
-      if (trustedOrigins.has(originKey(file))) exempt.add(key);
+      const origin = originKey(file);
+      if (trustedOrigins.has(origin)) {
+        exempt.add(key);
+        const keys = trustedFiltersByOrigin.get(origin) ?? [];
+        keys.push(key);
+        trustedFiltersByOrigin.set(origin, keys);
+      } else if (repositoryControls(file)) {
+        filters.add(key);
+      }
     }
   }
 
@@ -1404,7 +1418,13 @@ export function filterCommandsIn(
       }
       return;
     }
-    if (via !== null && trustedOrigins.has(originKey(file))) return;
+    const origin = originKey(file);
+    if (via !== null && trustedOrigins.has(origin)) {
+      for (const key of trustedFiltersByOrigin.get(origin) ?? []) {
+        reachedExempt.add(key);
+      }
+      return;
+    }
     if (visited.has(real)) return;
     if (visited.size >= MAX_INCLUDE_FILES) {
       unread.add(
@@ -1480,6 +1500,7 @@ export function filterCommandsIn(
   return {
     filters: [...filters],
     exempt: [...exempt],
+    reachedExempt: [...reachedExempt],
     unread: [...unread],
     dangling: [...dangling],
   };
@@ -2468,7 +2489,10 @@ export function worktreeResidue(
             'include, or the file it names, if it is not yours',
         };
       }
-      filterBlanks = filterBlankEnv([...screen.filters, ...screen.exempt]);
+      filterBlanks = filterBlankEnv([
+        ...screen.filters,
+        ...screen.reachedExempt,
+      ]);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.

@@ -261,6 +261,44 @@ describe('worktreeResidue', () => {
     expect(got).toEqual({ paths: [], total: 0 });
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'leaves an unrelated transforming global filter active during residue measurement',
+    () => {
+      const globalConfig = join(gitIsolation.home, '.gitconfig');
+      writeFileSync(
+        globalConfig,
+        '[filter "xform"]\n' +
+          '\tclean = tr a-z A-Z\n' +
+          '\tsmudge = tr A-Z a-z\n' +
+          '\trequired = true\n',
+      );
+      writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=xform\n');
+      gitRepo('add', '.gitattributes', 'a.ts');
+      gitRepo('commit', '-qm', 'filtered head');
+      const head = gitRepo('rev-parse', 'HEAD');
+      git('reset', '--hard', '-q', head);
+      expect(git('status', '--porcelain')).toBe('');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree, 'a.ts'), stale, stale);
+      const screen = filterCommandsIn(
+        git('rev-parse', '--path-format=absolute', '--git-common-dir'),
+        git('rev-parse', '--path-format=absolute', '--git-dir'),
+        tree,
+      );
+      expect(screen.filters).toEqual([]);
+      expect(screen.exempt).toEqual([
+        'filter.xform.clean',
+        'filter.xform.smudge',
+      ]);
+      expect(screen.reachedExempt).toEqual([]);
+
+      expect(worktreeResidue(tree, 12, head)).toEqual({
+        paths: [],
+        total: 0,
+      });
+    },
+  );
+
   it('refuses a dangling include rather than reading it as "no filters"', () => {
     // git ignores an include whose target is missing; a screen that did the
     // same would certify a config whose payload file lands one step later.
@@ -2084,6 +2122,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.evil.process'],
       exempt: [],
+      reachedExempt: [],
       unread: [],
       dangling: [],
     });
@@ -2100,6 +2139,7 @@ describe('filterCommandsIn — the include walk', () => {
     const exact = filterCommandsIn(dir, dir);
     expect(exact.filters).toEqual([]);
     expect(exact.exempt).toEqual(['filter.lfs.clean']);
+    expect(exact.reachedExempt).toEqual(['filter.lfs.clean']);
     expect(exact.dangling).toEqual([]);
 
     // Canonical target equality is not enough: a path the repository controls
@@ -2228,6 +2268,21 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([
       'filter.tracked.clean',
     ]);
+
+    // The repository can route through a trusted global source and back into
+    // a tracked config. The trusted merged read must classify that origin as
+    // repository-controlled even though Git reports its inherited scope as
+    // global.
+    git(
+      repo,
+      'config',
+      '--replace-all',
+      'include.path',
+      join(gitIsolation.home, '.gitconfig'),
+    );
+    expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([
+      'filter.tracked.clean',
+    ]);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -2322,6 +2377,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.evil.clean'],
         exempt: [],
+        reachedExempt: [],
         unread: [],
         dangling: [],
       });
@@ -2347,6 +2403,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.x.clean'],
         exempt: [],
+        reachedExempt: [],
         unread: [],
         dangling: [],
       });
@@ -2369,6 +2426,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.home.clean'],
       exempt: [],
+      reachedExempt: [],
       unread: [],
       dangling: [],
     });
