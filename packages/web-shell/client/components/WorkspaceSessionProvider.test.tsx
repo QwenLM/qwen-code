@@ -123,6 +123,23 @@ describe('WorkspaceSessionProvider targets', () => {
     return onSessionIdChange;
   }
 
+  it('forwards the extension pairing credential when creating a session', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          extensionPairingCredential="paired-credential"
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      createSessionRequest: {
+        extensionPairingCredential: 'paired-credential',
+      },
+    });
+  });
+
   it('updates the provider immediately without remounting for a different target', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     expect(mocks.providerMounts).toBe(1);

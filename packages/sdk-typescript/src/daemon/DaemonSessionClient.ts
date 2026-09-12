@@ -111,6 +111,8 @@ export interface DaemonSessionClientOptions {
   eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** Original request fields retained for an automatic session reattach. */
+  restore?: RestoreSessionRequest;
   /** True when the load response explicitly carried both replay arrays. */
   replaySnapshotComplete?: boolean;
   /** True when persisted replay was only partially reconstructed. */
@@ -283,6 +285,7 @@ export class DaemonSessionClient {
   private reattaching?: Promise<void>;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
+  private readonly restore: RestoreSessionRequest | undefined;
   private readonly attachmentCache = new Map<
     string,
     { pending: Promise<DaemonSessionAttachmentData>; size: number }
@@ -317,6 +320,7 @@ export class DaemonSessionClient {
     this.replayPartial = opts.replayPartial ?? false;
     this.replayError = opts.replayError;
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.restore = opts.restore;
     this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
       opts.maxPendingPromptsPerSession === undefined
@@ -368,6 +372,7 @@ export class DaemonSessionClient {
       client,
       session,
       hasActivePrompt: session.hasActivePrompt,
+      restore: req,
       lastEventId,
       // Newer daemons may stamp the bus epoch on the create/attach
       // response; older ones don't — the first subscription then learns it
@@ -410,6 +415,7 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt,
       state,
+      restore: req,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
       replaySnapshot: {
@@ -451,6 +457,7 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt,
       state,
+      restore: req,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
     });
@@ -792,11 +799,15 @@ export class DaemonSessionClient {
     // Send no clientId so the bridge issues a fresh registration rather than
     // validating the stale one. Keep the original context explicit: workspace
     // restore resolves by cwd, while standalone restore must use its dedicated
-    // route and never fall back to the primary runtime.
+    // route and never fall back to the primary runtime. The workspace route
+    // also re-applies the retained `restore` request (which may carry an
+    // extension pairing credential) so reattach is indistinguishable from the
+    // original load.
     const resume =
       this.restoreStrategy.kind === 'standalone'
         ? this.client.resumeStandaloneSession(this.sessionId)
         : this.client.resumeSession(this.sessionId, {
+            ...this.restore,
             workspaceCwd: this.restoreStrategy.workspaceCwd,
           });
     this.reattaching = resume.then(async (session) => {

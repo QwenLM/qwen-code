@@ -3,11 +3,11 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Daemon CDP client — the entire extension service worker (Plan C, issue #5626).
+ * Qwen browser-tools service worker (issue #5626).
  *
- * A dumb CDP-tunnel pipe: connects to the local `qwen serve` daemon's `/acp`
- * WebSocket and bridges `cdp_*` frames into `chrome.debugger` via
- * {@link handleCdpFrame}. No chat UI — chat lives in the daemon web UI.
+ * Connects to the local `qwen serve` daemon's `/acp` WebSocket, registers the
+ * extension-hosted browser MCP server, and retains the legacy `cdp_*` tunnel
+ * for operators who explicitly configure an external adapter.
  *
  * On open we send an ACP `initialize`: the daemon closes the socket on a 30s
  * timeout otherwise, and registers this connection as the CDP bridge at that
@@ -19,8 +19,19 @@ import {
   handleCdpFrame,
   shutdownCdpBridge,
 } from './cdp-bridge';
+import { BrowserTools } from './browser-mcp/browser-tools.js';
+import {
+  BROWSER_MCP_SERVER_NAME,
+  registerBrowserMcp,
+  routeBrowserMcpFrame,
+} from './browser-mcp/connection.js';
+import { ChromeDebuggerSession } from './browser-mcp/debugger-session.js';
+import { BrowserMcpServer } from './browser-mcp/server.js';
 import { getDaemonConfig } from '../daemon/config.js';
-import { checkDaemonHealth } from '../daemon/discovery.js';
+import {
+  checkExtensionPairing,
+  getDaemonFeatures,
+} from '../daemon/discovery.js';
 
 /* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
 
@@ -51,6 +62,7 @@ function bearerSubprotocol(token: string): string {
 
 /** Correlation id for the ACP `initialize` sent right after the socket opens. */
 const ACP_INIT_ID = 'browser-tools-acp-init';
+const DAEMON_READY_MESSAGE_TYPE = 'qwen-daemon-ready';
 
 /**
  * `clientInfo.name` this extension sends so the daemon routes the reverse CDP
@@ -59,7 +71,6 @@ const ACP_INIT_ID = 'browser-tools-acp-init';
  * module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
-
 /** Reconnect backoff bounds (ms). */
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -68,6 +79,11 @@ let socket: WebSocket | null = null;
 let started = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
+let cleanupPromise: Promise<void> = Promise.resolve();
+const browserSession = new ChromeDebuggerSession();
+const browserTools = new BrowserTools(browserSession);
+const browserMcpServer = new BrowserMcpServer(browserTools);
+let nativeBrowserToolsEnabled = true;
 
 /** Translate the daemon's HTTP base URL into the `/acp` WebSocket URL. */
 function toWebSocketUrl(baseUrl: string): string {
@@ -90,7 +106,7 @@ function sendRaw(ws: WebSocket, message: unknown): void {
 }
 
 /** Parse and route an inbound WS frame. */
-function onWsMessage(ws: WebSocket, data: unknown): void {
+async function onWsMessage(ws: WebSocket, data: unknown): Promise<void> {
   if (socket !== ws) return;
   let msg: Record<string, unknown>;
   try {
@@ -115,8 +131,39 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
       );
       ws.close();
     } else {
-      console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
+      if (nativeBrowserToolsEnabled) {
+        console.log(LOG_PREFIX, 'ACP initialized; registering browser tools');
+        registerBrowserMcp((frame) => sendRaw(ws, frame));
+      } else {
+        console.log(
+          LOG_PREFIX,
+          'ACP initialized; external browser adapter active',
+        );
+        reconnectDelay = RECONNECT_MIN_MS;
+      }
     }
+    return;
+  }
+
+  if (
+    msg['type'] === 'mcp_registered' &&
+    msg['server'] === BROWSER_MCP_SERVER_NAME
+  ) {
+    console.log(LOG_PREFIX, 'Native browser tools registered');
+    reconnectDelay = RECONNECT_MIN_MS;
+    return;
+  }
+
+  if (
+    await routeBrowserMcpFrame(browserMcpServer, msg, (frame) =>
+      sendRaw(ws, frame),
+    )
+  )
+    return;
+
+  if (msg['type'] === 'mcp_error') {
+    console.warn(LOG_PREFIX, 'Browser MCP registration error:', msg);
+    ws.close(4001, 'Browser MCP registration failed');
     return;
   }
 
@@ -141,8 +188,19 @@ function scheduleReconnect(): void {
   }, delay);
 }
 
+function reconnectNow(): void {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (started) void connect();
+  else void start();
+}
+
 /** Open the WebSocket and wire up handlers. */
 async function connect(): Promise<void> {
+  if (!started) return;
+  await cleanupPromise;
   if (!started) return;
   // Skip when a socket is already OPEN *or* still CONNECTING — a rapid
   // reconnect (e.g. config change) must not orphan an in-flight handshake.
@@ -156,10 +214,27 @@ async function connect(): Promise<void> {
 
   let url: string;
   let token: string | undefined;
+  let extensionPairingCredential: string | undefined;
   try {
     const config = await getDaemonConfig();
     url = toWebSocketUrl(config.baseUrl);
     token = config.token;
+    extensionPairingCredential = config.extensionPairingCredential;
+    const pairing = await checkExtensionPairing(config);
+    if (!pairing.paired) {
+      console.log(
+        LOG_PREFIX,
+        'Daemon reachable but extension is not paired:',
+        pairing.reason,
+      );
+      scheduleReconnect();
+      return;
+    }
+    // Pairing authenticates the daemon before a bearer token is sent to any
+    // HTTP endpoint or WebSocket handshake. This prevents a process that
+    // temporarily occupies the configured port from collecting stored tokens.
+    const features = await getDaemonFeatures(config);
+    nativeBrowserToolsEnabled = !features.has('browser_automation_mcp');
   } catch (error) {
     console.warn(LOG_PREFIX, 'Failed to read daemon config:', error);
     scheduleReconnect();
@@ -188,7 +263,6 @@ async function connect(): Promise<void> {
       ws.close();
       return;
     }
-    reconnectDelay = RECONNECT_MIN_MS;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
     sendRaw(ws, {
       jsonrpc: '2.0',
@@ -197,12 +271,20 @@ async function connect(): Promise<void> {
       // `clientInfo.name` gates which /acp connection becomes the CDP bridge
       // (vs web UI / Zed clients sharing /acp); must match the daemon's gate.
       params: {
-        clientInfo: { name: CDP_BRIDGE_CLIENT_NAME, version: '1.0.0' },
+        clientInfo: {
+          name: CDP_BRIDGE_CLIENT_NAME,
+          version: '1.0.0',
+          extensionPairingCredential,
+        },
       },
     });
   };
 
-  ws.onmessage = (event: MessageEvent) => onWsMessage(ws, event.data);
+  ws.onmessage = (event: MessageEvent) => {
+    void onWsMessage(ws, event.data).catch((error) => {
+      console.warn(LOG_PREFIX, 'Failed to handle daemon message:', error);
+    });
+  };
 
   ws.onerror = (event: Event) => {
     console.warn(LOG_PREFIX, 'WebSocket error', event);
@@ -223,34 +305,25 @@ async function connect(): Promise<void> {
     // would yank the debugger banner and break the live `/cdp` client.
     if (socket !== ws) return;
     socket = null;
-    shutdownCdpBridge();
+    cleanupPromise = cleanupPromise
+      .then(async () => {
+        await browserTools.shutdown();
+        shutdownCdpBridge();
+      })
+      .catch((error) => {
+        console.warn(LOG_PREFIX, 'Browser tools cleanup failed:', error);
+      });
     scheduleReconnect();
   };
 }
 
 /**
- * Start the daemon CDP client: probe `/health` to avoid spamming reconnects
- * when no daemon is up, then open the `/acp` WebSocket (which owns its own
- * reconnect loop once started). Idempotent.
+ * Start the daemon CDP client. Pairing verification inside `connect()` doubles
+ * as discovery and authenticates the local daemon before bearer credentials
+ * are used. Idempotent.
  */
 async function start(): Promise<void> {
   if (started) return;
-  try {
-    const config = await getDaemonConfig();
-    const health = await checkDaemonHealth(config);
-    if (!health.reachable) {
-      console.log(
-        LOG_PREFIX,
-        'Daemon not reachable; CDP client idle:',
-        health.error,
-      );
-      return;
-    }
-    console.log(LOG_PREFIX, 'Daemon reachable; starting CDP client');
-  } catch (error) {
-    console.warn(LOG_PREFIX, 'Daemon health probe failed:', error);
-    return;
-  }
   started = true;
   reconnectDelay = RECONNECT_MIN_MS;
   void connect();
@@ -273,6 +346,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // a still-alive worker whose socket dropped has started===true.
   if (started) void connect();
   else void start();
+});
+
+chrome.runtime.onMessage.addListener((message: unknown) => {
+  if (
+    message &&
+    typeof message === 'object' &&
+    (message as Record<string, unknown>)['type'] === DAEMON_READY_MESSAGE_TYPE
+  ) {
+    reconnectNow();
+  }
 });
 
 // No UI of its own: clicking the toolbar icon opens the side panel, which hosts

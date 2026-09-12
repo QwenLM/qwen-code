@@ -264,17 +264,19 @@ export class ClientMcpWsConnection {
     if (scope) this.serverScopes.set(server, scope);
     const attempt = {};
     this.registerAttemptIds.set(server, attempt);
+    const registration = this.provider.registerClientMcpServer(
+      server,
+      this.registrar.sendSdkMcpMessage,
+      scope,
+    );
     try {
-      const { toolCount } = await this.provider.registerClientMcpServer(
-        server,
-        this.registrar.sendSdkMcpMessage,
-        scope,
-      );
-      // The WS may have closed (dispose() ran) while we awaited the provider
-      // round-trip. dispose() snapshots its server set before this register
-      // resolves, so the provider would otherwise be left holding a zombie
-      // runtime MCP server. Re-check and tear it back down.
-      if (this.disposed) {
+      const { toolCount } = await registration;
+      // The WS may have closed, or an mcp_unregister frame may have removed the
+      // registrar entry, while we awaited the provider round-trip. Neither path
+      // can wait for this registration (that would deadlock the very frame
+      // tearing us down), so re-check and tear the provider entry back down
+      // ourselves. Do not acknowledge a server cancelled mid-handshake.
+      if (this.disposed || !this.registrar.hasServer(server)) {
         if (this.registerAttemptIds.get(server) === attempt) {
           this.registrar.unregisterServer(server);
           this.serverScopes.delete(server);
@@ -284,7 +286,7 @@ export class ClientMcpWsConnection {
         return {
           kind: 'error',
           code: 'closed',
-          message: 'connection disposed during register',
+          message: 'connection closed during register',
         };
       }
       this.registerAttemptIds.delete(server);
@@ -389,12 +391,12 @@ export class ClientMcpWsConnection {
     this.registrar.close(reason);
     if (this.provider) {
       await Promise.allSettled(
-        servers.map((server) =>
-          this.provider!.unregisterClientMcpServer(
+        servers.map(async (server) => {
+          await this.provider!.unregisterClientMcpServer(
             server,
             this.serverScopes.get(server),
-          ),
-        ),
+          );
+        }),
       );
     }
     this.serverScopes.clear();

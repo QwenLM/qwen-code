@@ -192,7 +192,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
-        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens. A second ' +
+        'whole-object read resolves the CDP MCP adapter command that decides whether the Chrome extension ' +
+        'browser-automation tunnel is active by default.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
@@ -207,7 +209,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 6,
+        whole: 7,
       },
     },
   ],

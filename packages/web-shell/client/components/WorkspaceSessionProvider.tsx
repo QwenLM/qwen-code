@@ -28,6 +28,7 @@ interface WorkspaceSessionProviderProps {
   sessionContext?: DaemonProductSessionContext;
   lockWorkspaceCwd?: string;
   clientId?: string;
+  extensionPairingCredential?: string;
   restartSseOnPrompt?: boolean;
   historyPageSize?: number;
   webShellProps: WebShellProps;
@@ -123,6 +124,7 @@ function WorkspaceSessionProviderWorkspace({
   sessionContext,
   lockWorkspaceCwd,
   clientId,
+  extensionPairingCredential,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
   webShellProps,
@@ -346,6 +348,9 @@ function WorkspaceSessionProviderWorkspace({
           : undefined
       }
       clientId={clientId}
+      createSessionRequest={
+        extensionPairingCredential ? { extensionPairingCredential } : undefined
+      }
       historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}

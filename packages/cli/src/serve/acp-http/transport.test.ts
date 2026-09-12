@@ -4069,6 +4069,37 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await sess.body?.cancel(); // release the long-lived SSE socket
   });
 
+  it('session/load rejects a persisted Chrome extension session', async () => {
+    await withRuntimeDir(async () => {
+      await writeStoredSession(
+        'extension-session',
+        'active',
+        undefined,
+        'default',
+        'chrome_extension',
+      );
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'session/load',
+        params: { sessionId: 'extension-session' },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; message: string };
+      }>;
+      expect(frame.id).toBe(21);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('paired extension');
+    });
+  });
+
   it('session/fork owns the restored v1 branch', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -6901,6 +6932,28 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');
+  });
+
+  it('session/new rejects reserved Chrome extension source metadata', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'session/new',
+      params: { sourceType: 'default', sourceId: 'chrome_extension' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(45);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('reserved session metadata');
   });
 
   it('session/new validates, normalizes, and forwards caller-supplied sessionId meta', async () => {
@@ -11537,6 +11590,9 @@ describe('ACP WebSocket transport security', () => {
           ? {
               cdpTunnelOverWs: true,
               cdpTunnelRegistry: new CdpTunnelRegistry(),
+              // These cases drive CDP-tunnel registration; the bridge presents
+              // no pairing credential, so the daemon accepts the extension.
+              verifyExtensionPairingCredential: () => true,
             }
           : {}),
       });
@@ -11813,7 +11869,7 @@ describe('ACP WebSocket transport security', () => {
       command: process.execPath,
       args: expect.arrayContaining([
         '--wsEndpoint',
-        `ws://127.0.0.1:${port}/cdp`,
+        expect.stringContaining(`ws://127.0.0.1:${port}/cdp?access_token=`),
       ]),
     });
 
