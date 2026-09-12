@@ -1676,6 +1676,28 @@ function markdownFenceRangesForToolCallLeak(
   return markdownFenceRanges(text, computeToolCallBlockRanges(text));
 }
 
+function markdownIndentedCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let lineStart = 0;
+  for (const line of text.split('\n')) {
+    const lineEnd = lineStart + line.length;
+    if (/^(?: {4}|\t)/.test(line)) {
+      ranges.push([lineStart, lineEnd]);
+    }
+    lineStart = lineEnd + 1;
+  }
+  return ranges;
+}
+
+function markdownCodeRangesForToolCallLeak(
+  text: string,
+): Array<[number, number]> {
+  return [
+    ...markdownFenceRangesForToolCallLeak(text),
+    ...markdownIndentedCodeRanges(text),
+  ].sort(([leftStart], [rightStart]) => leftStart - rightStart);
+}
+
 function hasJsonBufferToolCallLeak(text: string): boolean {
   let inString = false;
   let escaped = false;
@@ -1742,23 +1764,23 @@ function scanToolCallTagLeaks(
   let jsonDepth = 0;
   let inlineCodeTicks = 0;
   const openToolCallTags = initialOpenToolCallTags.map((tag) => ({ ...tag }));
-  const fencedRanges = markdownFenceRangesForToolCallLeak(text);
-  let fenceRangeIndex = 0;
+  const codeRanges = markdownCodeRangesForToolCallLeak(text);
+  let codeRangeIndex = 0;
   for (let i = 0; i < text.length; i++) {
     while (
-      fenceRangeIndex < fencedRanges.length &&
-      i > fencedRanges[fenceRangeIndex]![1]
+      codeRangeIndex < codeRanges.length &&
+      i > codeRanges[codeRangeIndex]![1]
     ) {
-      fenceRangeIndex++;
+      codeRangeIndex++;
     }
     if (
       openToolCallTags.length === 0 &&
-      fenceRangeIndex < fencedRanges.length &&
-      i >= fencedRanges[fenceRangeIndex]![0]
+      codeRangeIndex < codeRanges.length &&
+      i >= codeRanges[codeRangeIndex]![0]
     ) {
       jsonDepth = 0;
       inlineCodeTicks = 0;
-      i = fencedRanges[fenceRangeIndex]![1];
+      i = codeRanges[codeRangeIndex]![1];
       continue;
     }
     const char = text[i];
@@ -1783,7 +1805,7 @@ function scanToolCallTagLeaks(
       jsonDepth--;
     } else if (char === '`') {
       const ticks = countBackticks(text, i);
-      if (hasClosingBacktickRun(text, i, ticks, fencedRanges)) {
+      if (hasClosingBacktickRun(text, i, ticks, codeRanges)) {
         inlineCodeTicks = ticks;
       }
       i += ticks - 1;

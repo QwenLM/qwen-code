@@ -14795,6 +14795,27 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('does not retry XML closing tags inside indented code blocks', async () => {
+    const response = 'Example:\n\n    </parameter>\n    </invoke>\nDone.';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-indented-xml-closing-tag-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
   it('does not retry fenced XML examples that contain line-initial fences', async () => {
     const response = [
       'Example:',
