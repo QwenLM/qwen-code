@@ -69,13 +69,12 @@ describe('modifier cleanup', () => {
     expect(keyboard.up.mock.calls).toEqual([['Shift'], ['Control']]);
   });
 
-  it('reports failed cleanup even when the action succeeded', async () => {
+  it('does not rewrite a completed action into a failure when a release fails', async () => {
     const { page, keyboard } = fixture();
-    const failure = new Error('keyup failed');
-    keyboard.up.mockRejectedValueOnce(failure);
+    keyboard.up.mockRejectedValueOnce(new Error('keyup failed'));
     await expect(
       withModifiers(page, ['Control', 'Shift'], async () => undefined),
-    ).rejects.toBe(failure);
+    ).resolves.toBeUndefined();
     expect(keyboard.up.mock.calls).toEqual([['Shift'], ['Control']]);
   });
 });
@@ -93,12 +92,21 @@ describe('key chord press', () => {
       'Unknown key',
     );
     expect(keyboard.press).toHaveBeenCalledExactlyOnceWith('Control+Bogus');
-    expect(keyboard.up.mock.calls).toEqual([
-      ['Shift'],
-      ['Control'],
-      ['Alt'],
-      ['Meta'],
-    ]);
+    expect(keyboard.up.mock.calls).toEqual([['Bogus'], ['Control']]);
+  });
+
+  it('releases a held non-modifier token when a later chord token is rejected', async () => {
+    const keyboard = {
+      up: vi.fn(async (_key: string) => undefined),
+      press: vi.fn(async (_chord: string) => {
+        throw new Error('Unknown key: "Bogus"');
+      }),
+    };
+    const page = { keyboard } as unknown as Page;
+    await expect(
+      pressKeyChord(page, ['Control', 'a', 'Bogus']),
+    ).rejects.toThrow('Unknown key');
+    expect(keyboard.up.mock.calls).toEqual([['Bogus'], ['a'], ['Control']]);
   });
 
   it('leaves the keyboard untouched after a successful chord', async () => {

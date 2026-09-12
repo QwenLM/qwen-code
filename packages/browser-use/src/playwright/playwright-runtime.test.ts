@@ -365,7 +365,7 @@ describe('PlaywrightRuntime command contracts', () => {
       {
         kind: 'getByRole' as const,
         role: 'button',
-        name: { regex: 'save', flags: 'i' },
+        name: 'Save',
         exact: true,
       },
       { kind: 'first' as const },
@@ -393,7 +393,7 @@ describe('PlaywrightRuntime command contracts', () => {
     });
 
     expect(fixture.page.getByRole).toHaveBeenCalledWith('button', {
-      name: /save/i,
+      name: 'Save',
       exact: true,
     });
     expect(fixture.locator.first).toHaveBeenCalled();
@@ -901,7 +901,7 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.locator.dispatchEvent).not.toHaveBeenCalled();
     expect(fixture.locator.evaluate).toHaveBeenCalledWith(
       expect.any(Function),
-      undefined,
+      16,
       { timeout: 16 },
     );
     expect(fixture.locator.selectOption).toHaveBeenCalledWith(

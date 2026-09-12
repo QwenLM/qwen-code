@@ -7,6 +7,7 @@
  */
 
 import type { BridgeEvent, ChromeBridge } from '../bridge/index.js';
+import { CDP_REQUEST_TIMEOUT_MS } from '../bridge/protocol.js';
 
 export interface CdpMessage {
   id?: number;
@@ -266,14 +267,18 @@ export class BrowserModel {
   ): Promise<unknown> {
     const explicit = this.explicitPageSessions.get(sessionId);
     if (explicit !== undefined) {
-      return await this.bridge.request('cdp.send', {
-        tabId: explicit.tabSession.tabId,
-        method,
-        params,
-        ...(explicit.sourceSessionId === undefined
-          ? {}
-          : { sessionId: explicit.sourceSessionId }),
-      });
+      return await this.bridge.request(
+        'cdp.send',
+        {
+          tabId: explicit.tabSession.tabId,
+          method,
+          params,
+          ...(explicit.sourceSessionId === undefined
+            ? {}
+            : { sessionId: explicit.sourceSessionId }),
+        },
+        CDP_REQUEST_TIMEOUT_MS,
+      );
     }
     let session = this.findSession(
       (candidate) => candidate.sessionId === sessionId,
@@ -287,12 +292,16 @@ export class BrowserModel {
     }
     if (session === undefined)
       throw new Error(`No tab found for CDP session: ${sessionId}`);
-    return await this.bridge.request('cdp.send', {
-      tabId: session.tabId,
-      method,
-      params,
-      ...(childSessionId === undefined ? {} : { sessionId: childSessionId }),
-    });
+    return await this.bridge.request(
+      'cdp.send',
+      {
+        tabId: session.tabId,
+        method,
+        params,
+        ...(childSessionId === undefined ? {} : { sessionId: childSessionId }),
+      },
+      CDP_REQUEST_TIMEOUT_MS,
+    );
   }
 
   private async attachTab(tabId: number): Promise<TabSession> {
@@ -312,6 +321,16 @@ export class BrowserModel {
     this.assertOpen();
     this.assertOwned(tabId);
     const info = targetInfo(response.targetInfo);
+    // Playwright never enables CDP download events here (noDefaults), so the
+    // bridge must: without this, Page.downloadWillBegin never fires and
+    // waitForEvent('download') cannot resolve.
+    await this.bridge.request('cdp.send', {
+      tabId,
+      method: 'Page.setDownloadBehavior',
+      params: { behavior: 'default', eventsEnabled: true },
+    });
+    this.assertOpen();
+    this.assertOwned(tabId);
     const session: TabSession = {
       tabId,
       sessionId: `pw-tab-${this.nextSessionId++}`,

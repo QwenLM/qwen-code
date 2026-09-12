@@ -7,6 +7,7 @@
 import vm from 'node:vm';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
+import { serializeJson } from '../core/serialize-json.js';
 import type { BrowserSdkContext } from './context.js';
 import { TabProxy } from './tab.js';
 import type { BrowserTab, JsonSerializable } from './types.js';
@@ -19,13 +20,15 @@ function fixture() {
     elements: [{ tagName: 'DIV' }, { tagName: 'DIV' }],
   });
   const context = {
-    call: vi.fn(
-      async (_method: string, args: { script: string }) =>
-        await (vm.runInContext(
-          `(async () => {\n${args.script}\n})()`,
-          realm,
-        ) as Promise<unknown>),
-    ),
+    // Mirror the production pipeline: the completion value is ??-ed to null,
+    // serialized in the page, and parsed back here.
+    call: vi.fn(async (_method: string, args: { script: string }) => {
+      const value = await (vm.runInContext(
+        `(async () => {\n${args.script}\n})()`,
+        realm,
+      ) as Promise<unknown>);
+      return JSON.parse(serializeJson(value ?? null)) as unknown;
+    }),
   } as unknown as BrowserSdkContext;
   const tab = new TabProxy(context, 'chrome', {
     id: 'tab-1',
@@ -81,7 +84,7 @@ describe.each(['page', 'one', 'all'] as const)(
       ['document.title;', 'Fixture'],
       ['document.title // comment', 'Fixture'],
       ['var x = 1;\nx + 1;', 2],
-      [' ', undefined],
+      [' ', null],
       ['Promise.resolve(3);', 3],
       ['({ answer: 42 });', { answer: 42 }],
       [
@@ -109,11 +112,11 @@ describe.each(['page', 'one', 'all'] as const)(
       const source = '() => { document.calls++; return 7; }';
       const result =
         mode === 'page'
-          ? await f.page.evaluate(source)
+          ? f.page.evaluate(source)
           : mode === 'one'
-            ? await f.locator.evaluate(source)
-            : await f.locator.evaluateAll(source);
-      expect(typeof result).toBe('function');
+            ? f.locator.evaluate(source)
+            : f.locator.evaluateAll(source);
+      await expect(result).rejects.toThrow('Value must be JSON-serializable');
       expect(f.document.calls).toBe(0);
     });
   },

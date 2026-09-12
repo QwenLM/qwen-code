@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { clearTimeout, setTimeout } from 'node:timers';
 
 import {
+  CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   defaultChromeBridgeSocketPath,
@@ -143,6 +144,14 @@ export class ChromeExtensionTransport implements ChromeBridge {
   ): Promise<unknown> {
     if (this.stopPromise !== undefined || !this.server?.listening)
       throw disconnectedError();
+    // A CDP command carries an operation deadline up to the 120s schema
+    // ceiling, so its default response budget must outlive that and let the
+    // caller's own deadline report first. The connection wait stays capped
+    // only by an explicit caller budget: with none, discovery may legitimately
+    // take the whole connect timeout.
+    const budget =
+      timeoutMs ??
+      (method === 'cdp.send' ? CDP_REQUEST_TIMEOUT_MS : this.requestTimeoutMs);
     await this.waitForConnection(
       Math.min(this.connectTimeoutMs, timeoutMs ?? this.connectTimeoutMs),
     );
@@ -167,7 +176,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             `Chrome bridge request timed out: ${method}`,
           ),
         );
-      }, timeoutMs ?? this.requestTimeoutMs);
+      }, budget);
       this.pending.set(id, {
         resolve,
         reject,

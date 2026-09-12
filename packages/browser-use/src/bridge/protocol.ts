@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { join } from 'node:path';
+import { posix } from 'node:path';
 
 export const CHROME_BRIDGE_PROTOCOL_VERSION = 2;
 export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+
+// Operation deadlines (core/schemas.ts timeoutMs) may reach 120s, and every
+// Playwright CDP command rides one bridge request: the request must outlive
+// the operation's own timeout so the caller's deadline reports first.
+export const CDP_REQUEST_TIMEOUT_MS = 130_000;
 
 export function defaultChromeBridgeSocketPath(
   environment: NodeJS.ProcessEnv = process.env,
@@ -23,7 +28,9 @@ export function defaultChromeBridgeSocketPath(
   }
   const uid =
     typeof process.getuid === 'function' ? process.getuid() : 'default';
-  return join('/tmp', `qwen-browser-use-${uid}`, 'bridge.sock');
+  // The win32 branch returned above; keep the remaining join POSIX so the
+  // derived path is a pure function of uid and platform on every host.
+  return posix.join('/tmp', `qwen-browser-use-${uid}`, 'bridge.sock');
 }
 
 export interface BridgeHello {

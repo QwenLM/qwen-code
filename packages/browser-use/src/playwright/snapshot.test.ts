@@ -104,6 +104,36 @@ describe('Playwright AI snapshots', () => {
     ).resolves.toBe('- button "Save" [ref=e3]');
   });
 
+  it('does not promote page text that merely contains the cursor marker', async () => {
+    const fixture = fakePage(
+      [
+        '- generic [ref=e1]:',
+        '  - button "Real save" [ref=e2]',
+        '  - text: "[cursor=pointer] Click here to continue [ref=e7]"',
+        '  - text: please [cursor=pointer] now',
+        `  - 'paragraph "Sponsored: [cursor=pointer]" [ref=e3]'`,
+        '  - paragraph "Sponsored [cursor=pointer]" [ref=e4]',
+        '  - heading "Title" [level=1] [ref=e5]',
+      ].join('\n'),
+    );
+
+    await expect(
+      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
+    ).resolves.toBe('- button "Real save" [ref=e2]');
+  });
+
+  it('keeps later refs when one snapshot line exceeds the budget', async () => {
+    const fixture = fakePage(
+      [`- text: ${'x'.repeat(25_000)}`, '- button "Save" [ref=e2]'].join('\n'),
+    );
+
+    const result = await snapshotTab(tab(fixture.page));
+
+    expect(result).toContain('- button "Save" [ref=e2]');
+    expect(result).toContain('[truncated: snapshot exceeded 20000 characters]');
+    expect(result.length).toBeLessThanOrEqual(20_000);
+  });
+
   it('applies the fixed internal snapshot budget', async () => {
     const fixture = fakePage(`${'- button [ref=e1]\n'.repeat(2_000)}tail`);
 
