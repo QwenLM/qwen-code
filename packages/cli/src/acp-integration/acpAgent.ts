@@ -1834,7 +1834,10 @@ function readProviderSetupInputs(
     readOptionalString(params['baseUrl'], 'baseUrl'),
   ).trim();
   if (!baseUrl && config.baseUrl === undefined) {
-    baseUrl = getDefaultBaseUrlForProtocol(protocol ?? config.protocol);
+    // Default to the EFFECTIVE route's endpoint: a Responses selection dials
+    // the /v1-less default, so deriving from the raw bucket protocol would
+    // persist the Chat Completions endpoint on the Responses wire.
+    baseUrl = getDefaultBaseUrlForProtocol(effectiveProtocol);
   }
   if (!baseUrl) {
     throw RequestError.invalidParams(
@@ -5190,22 +5193,27 @@ class QwenAgent implements Agent {
     const currentAuthType =
       this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
     // The wire resolver throws on a hand-edited invalid `api` anywhere in
-    // modelProviders; re-authentication is the repair path, so fall back to
-    // the requested method instead of rejecting it outright.
+    // modelProviders; re-authentication is the repair path, so tolerate the
+    // failure instead of rejecting it outright. The fallback must preserve
+    // the wire the session is actually on — falling back to the requested
+    // method would re-authenticate onto a wire that may hold no models and
+    // persist that downgrade to security.auth.selectedType.
     let authType = method;
     if (method === AuthType.USE_OPENAI) {
+      const seeded =
+        currentAuthType === AuthType.USE_OPENAI_RESPONSES
+          ? currentAuthType
+          : method;
       try {
         authType = resolveModelSelectionAuthType(
-          currentAuthType === AuthType.USE_OPENAI_RESPONSES
-            ? currentAuthType
-            : method,
+          seeded,
           this.config.getModel(),
           this.settings.merged.modelProviders,
           this.settings.merged.providerProtocol,
           this.config.getCurrentModelRegistryBaseUrl?.(),
         );
       } catch {
-        authType = method;
+        authType = seeded;
       }
     }
 

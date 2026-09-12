@@ -300,15 +300,21 @@ export function resolveCliGenerationConfig(
     }
   }
 
-  const authType = selectedAuthType
-    ? resolveModelSelectionAuthType(
-        selectedAuthType,
-        resolvedModel,
-        settings.modelProviders,
-        settings.providerProtocol,
-        resolvedFromSettings ? settings.model?.baseUrl : undefined,
-      )
-    : undefined;
+  // Only derive the wire when a model selection exists to derive it from:
+  // the resolver's no-model branch would let an unrelated `api: 'responses'`
+  // entry anywhere in the map flip an `openai` selection to openai-responses,
+  // which has no DEFAULT_MODELS entry — the session would then start on a
+  // wire and a fallback model id no config file contains.
+  const authType =
+    selectedAuthType && resolvedModel !== undefined
+      ? resolveModelSelectionAuthType(
+          selectedAuthType,
+          resolvedModel,
+          settings.modelProviders,
+          settings.providerProtocol,
+          resolvedFromSettings ? settings.model?.baseUrl : undefined,
+        )
+      : selectedAuthType;
 
   // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
   // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,

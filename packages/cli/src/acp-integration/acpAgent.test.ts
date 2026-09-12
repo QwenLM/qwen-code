@@ -1117,6 +1117,7 @@ import {
   McpBudgetWouldExceedError,
   buildInstallPlan,
   findExistingProviderModels,
+  getDefaultBaseUrlForProtocol,
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
@@ -20210,6 +20211,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('authenticate tolerates an invalid api elsewhere in modelProviders and stays on the session wire', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core')
+    >('@qwen-code/qwen-code-core');
+    const baseUrl = 'https://api.example/v1';
+    // The session's own models are valid; an unrelated bucket carries a
+    // hand-edited invalid `api`, so the wire resolver throws over the merged
+    // settings even though the session itself is healthy.
+    const cleanProviders = {
+      openai: [{ id: 'same', baseUrl, api: 'responses' as const }],
+    };
+    const modelProviders = {
+      ...cleanProviders,
+      idealab: [
+        {
+          id: 'other',
+          baseUrl: 'https://other.example/v1',
+          api: 'invalid' as never,
+        },
+      ],
+    };
+    const providerProtocol = { idealab: 'openai' as const };
+    const models = new actual.ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      generationConfig: { model: 'same', baseUrl },
+      modelProvidersConfig: cleanProviders,
+    });
+    const refreshAuth = vi.fn(async (authType: AuthType) => {
+      models.syncAfterAuthRefresh(authType, models.getModel());
+    });
+    mockConfig = {
+      ...mockConfig,
+      getModel: () => models.getModel(),
+      getAuthType: () => undefined,
+      getCurrentAuthType: () => models.getCurrentAuthType(),
+      getCurrentModelRegistryBaseUrl: () => models.getCurrentRegistryBaseUrl(),
+      refreshAuth,
+    } as unknown as Config;
+    const settings = {
+      ...makeSessionSettings({ modelProviders, providerProtocol }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await agent.initialize({ clientCapabilities: {} });
+      await agent.authenticate({ methodId: AuthType.USE_OPENAI });
+      // The invalid unrelated entry must not re-authenticate the session onto
+      // the requested wire: the fallback preserves the wire the session's
+      // models actually live on.
+      expect(refreshAuth).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI_RESPONSES,
+        undefined,
+      );
+      expect(models.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(settings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it.each([
     { protocol: 'openai', api: 'responses' },
     { protocol: 'openai-responses' },
@@ -20236,6 +20302,29 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     },
   );
+
+  it('qwen/providers/connect defaults a blank baseUrl to the effective route endpoint', async () => {
+    const { agent, agentPromise } = await bootCoreSettingsAgent(
+      makeSessionSettings(),
+    );
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        modelIds: ['same'],
+        protocol: 'openai',
+        api: 'responses',
+      }),
+    ).resolves.toMatchObject({ success: true });
+    // The Responses wire dials the /v1-less default endpoint; the blank-input
+    // default must be derived from the EFFECTIVE route, not the raw bucket
+    // protocol (which would hand the Chat Completions default).
+    expect(getDefaultBaseUrlForProtocol).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it.each([
     { protocol: 'openai', api: 'invalid' },

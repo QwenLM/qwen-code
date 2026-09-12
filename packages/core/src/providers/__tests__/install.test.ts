@@ -558,6 +558,86 @@ describe('applyProviderInstallPlan', () => {
     });
   });
 
+  it('does not let a non-array legacy openai-responses bucket abort an install', async () => {
+    // A hand-edited (or reverted-V5-shaped) bucket is a present but non-array
+    // value; the registry skips such buckets, and the install path must leave
+    // the malformed bucket byte-identical instead of throwing TypeError.
+    const malformed = {
+      protocol: 'openai-responses',
+      models: [{ id: 'm' }],
+    } as unknown as ModelProvidersConfig[string];
+    const adapter = createAdapter({
+      'openai-responses': malformed,
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'gpt-5.1', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        'openai-responses': malformed,
+        openai: [{ id: 'gpt-5.1', envKey: 'TEST_API_KEY' }],
+      },
+    });
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      expect.anything(),
+    );
+  });
+
+  it('does not let an invalid api elsewhere in settings abort an OpenAI-family install', async () => {
+    // The pre-install wire probe walks every bucket of the previous providers
+    // map with the throwing resolver; an invalid `api` in a bucket the plan
+    // never touches must skip the probe, not refuse the install.
+    const adapter = createAdapter({
+      idealab: [{ id: 'q1', envKey: 'A', api: 'resp' as ModelConfig['api'] }],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'q1',
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan: ProviderInstallPlan = {
+      providerId: 'openai',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      modelSelection: { modelId: 'q1' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [
+            {
+              id: 'q1',
+              envKey: 'TEST_API_KEY',
+              api: 'responses' as const,
+            },
+          ],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: [{ id: 'q1', envKey: 'TEST_API_KEY', api: 'responses' }],
+      },
+    });
+  });
+
   it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
     const preset: ProviderConfig = {
       id: 'test',

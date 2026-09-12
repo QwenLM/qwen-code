@@ -66,9 +66,14 @@ function getProtocolOptions(
   ];
 }
 
-function defaultBaseUrl(protocol: string): string {
+function defaultBaseUrl(protocol: string, api?: ModelApi): string {
   if (protocol === 'anthropic') return 'https://api.anthropic.com/v1';
   if (protocol === 'gemini') return 'https://generativelanguage.googleapis.com';
+  // The Responses wire dials the /v1-less default endpoint (the pipeline
+  // appends /v1/responses itself); the Chat Completions wire keeps /v1.
+  if (protocol === 'openai-responses' || api === 'responses') {
+    return 'https://api.openai.com';
+  }
   return 'https://api.openai.com/v1';
 }
 
@@ -244,18 +249,18 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setSetupBackView(backView);
       const nextProtocol =
         nextProvider.protocolOptions?.[0] ?? nextProvider.protocol;
+      const nextApi: ModelApi =
+        nextProtocol === 'openai-responses' ? 'responses' : 'chat-completions';
       setProtocol(
         nextProtocol === 'openai-responses' ? 'openai' : nextProtocol,
       );
-      setApi(
-        nextProtocol === 'openai-responses' ? 'responses' : 'chat-completions',
-      );
+      setApi(nextApi);
       if (typeof nextProvider.baseUrl === 'string') {
         setBaseUrl(nextProvider.baseUrl);
       } else if (Array.isArray(nextProvider.baseUrl)) {
         setBaseUrl(nextProvider.baseUrl[0]?.url ?? '');
       } else {
-        setBaseUrl(defaultBaseUrl(nextProtocol));
+        setBaseUrl(defaultBaseUrl(nextProtocol, nextApi));
       }
       setApiKey('');
       setModels(modelIds(nextProvider));
@@ -382,7 +387,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const goNext = useCallback(() => {
     if (!provider) return;
     if (currentStep === 'baseUrl') {
-      const effective = baseUrl.trim() || defaultBaseUrl(protocol);
+      const effective = baseUrl.trim() || defaultBaseUrl(protocol, api);
       if (!effective) {
         setError(t('auth.baseUrlRequired'));
         return;
@@ -413,6 +418,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setOptionIndex(0);
     }
   }, [
+    api,
     apiKey,
     baseUrl,
     currentStep,
@@ -502,7 +508,14 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       return;
     }
     if (currentStep === 'api') {
-      setApi(optionIndex === 1 ? 'responses' : 'chat-completions');
+      const nextApi: ModelApi =
+        optionIndex === 1 ? 'responses' : 'chat-completions';
+      // A wire change re-derives the default endpoint; a no-op re-selection
+      // must not clobber a baseUrl the user already typed.
+      if (nextApi !== api && !provider.baseUrl) {
+        setBaseUrl(defaultBaseUrl(protocol, nextApi));
+      }
+      setApi(nextApi);
       goNext();
       return;
     }
@@ -518,6 +531,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     goNext();
   }, [
+    api,
     currentStep,
     catalog,
     goNext,
@@ -526,6 +540,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     optionIndex,
     provider,
     providerIndex,
+    protocol,
     protocolOptions,
     providers,
     save,
@@ -580,7 +595,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'api') {
-        setApi(index === 1 ? 'responses' : 'chat-completions');
+        const nextApi: ModelApi =
+          index === 1 ? 'responses' : 'chat-completions';
+        if (nextApi !== api && !provider.baseUrl) {
+          setBaseUrl(defaultBaseUrl(protocol, nextApi));
+        }
+        setApi(nextApi);
         goNext();
         return;
       }
@@ -595,6 +615,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       }
     },
     [
+      api,
       currentStep,
       catalog,
       goNext,
@@ -602,6 +623,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       activateAdvancedOption,
       advancedOptionValues,
       provider,
+      protocol,
       protocolOptions,
       providers,
       save,
@@ -663,7 +685,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           <input
             className={styles.input}
             value={baseUrl}
-            placeholder={defaultBaseUrl(protocol)}
+            placeholder={defaultBaseUrl(protocol, api)}
             onChange={(event) => {
               setBaseUrl(event.target.value);
               setError(null);

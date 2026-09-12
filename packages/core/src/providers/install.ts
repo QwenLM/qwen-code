@@ -108,7 +108,11 @@ function applyModelProvidersPatch(
     patch.mergeStrategy !== 'append'
   ) {
     const ownsModel = patch.ownsModel;
-    const legacyModels = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
+    // A hand-edited (or reverted-V5-shaped) bucket can be a present but
+    // non-array value; the registry skips such buckets with a warning, and
+    // the install path must not abort on them either.
+    const legacyRaw = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
+    const legacyModels = Array.isArray(legacyRaw) ? legacyRaw : undefined;
     const preservedLegacy = legacyModels?.filter((model) => {
       // The same ownership gate as the canonical bucket above: when the patch
       // declares ownership, a legacy entry owned by another provider's
@@ -134,7 +138,8 @@ function applyModelProvidersPatch(
     if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
       updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
     }
-    const survivingLegacy = updated[AuthType.USE_OPENAI_RESPONSES] ?? [];
+    const survivingRaw = updated[AuthType.USE_OPENAI_RESPONSES];
+    const survivingLegacy = Array.isArray(survivingRaw) ? survivingRaw : [];
     collidingLegacy = survivingLegacy.filter((legacy) =>
       patch.models.some(
         (newModel) =>
@@ -378,28 +383,32 @@ export async function applyProviderInstallPlan(
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
         // Resolved lazily and only for OpenAI-family plans (the only ones a
-        // wire switch applies to): the resolver validates every modelProviders
-        // entry, so a hand-edited invalid `api` sitting in an unrelated bucket
-        // must not abort another provider's install ahead of the plan's own
-        // error contract.
-        const previousAuthType =
+        // wire switch applies to). The selection resolver walks EVERY bucket
+        // of the pre-install providers map with the throwing per-model
+        // resolver, so a hand-edited invalid `api` sitting in an unrelated
+        // bucket must not abort this install: skip the route-resync probe
+        // instead. The plan's own write path still validates the buckets it
+        // writes with the throwing resolver.
+        let previousAuthType: AuthType | undefined;
+        if (
           (plan.authType === AuthType.USE_OPENAI ||
             plan.authType === AuthType.USE_OPENAI_RESPONSES) &&
           typeof selectedAuthType === 'string'
-            ? resolveModelSelectionAuthType(
-                selectedAuthType as AuthType,
-                typeof previousModelId === 'string'
-                  ? previousModelId
-                  : undefined,
-                previousRuntimeProviders,
-                settings.getValue('providerProtocol') as
-                  | ProviderProtocolConfig
-                  | undefined,
-                typeof previousBaseUrl === 'string'
-                  ? previousBaseUrl
-                  : undefined,
-              )
-            : undefined;
+        ) {
+          try {
+            previousAuthType = resolveModelSelectionAuthType(
+              selectedAuthType as AuthType,
+              typeof previousModelId === 'string' ? previousModelId : undefined,
+              previousRuntimeProviders,
+              settings.getValue('providerProtocol') as
+                | ProviderProtocolConfig
+                | undefined,
+              typeof previousBaseUrl === 'string' ? previousBaseUrl : undefined,
+            );
+          } catch {
+            previousAuthType = undefined;
+          }
+        }
         if (
           previousAuthType !== undefined &&
           previousAuthType !== plan.authType

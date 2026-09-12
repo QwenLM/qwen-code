@@ -245,6 +245,57 @@ describe('AuthMessage API selection', () => {
     );
   });
 
+  it('re-derives the default endpoint when the API choice moves to the Responses wire', async () => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom-openai-compatible',
+          label: 'Custom OpenAI',
+          description: '',
+          protocol: 'openai',
+          protocolOptions: ['openai', 'anthropic'],
+          steps: ['protocol', 'api', 'baseUrl', 'models'],
+          showAdvancedConfig: true,
+          models: [{ id: 'same' }],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: '',
+          providerIds: ['custom-openai-compatible'],
+        },
+      ],
+    });
+    await openAndSave(async (click) => {
+      // The custom group auto-starts its single provider at the protocol step.
+      await click('OpenAI-compatible');
+      await click('Responses');
+      // The Responses wire dials the /v1-less default endpoint (the pipeline
+      // appends /v1/responses itself); the baseUrl step must show and submit
+      // it, not the Chat Completions /v1 default.
+      const input = container?.querySelector('input');
+      expect(input?.getAttribute('placeholder')).toBe('https://api.openai.com');
+      expect(input?.value).toBe('https://api.openai.com');
+      await click('next');
+      await click('next');
+      expect(container?.textContent).toContain(
+        '"baseUrl": "https://api.openai.com"',
+      );
+      expect(container?.textContent).not.toContain('https://api.openai.com/v1');
+    });
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        protocol: 'openai',
+        api: 'responses',
+        baseUrl: 'https://api.openai.com',
+      }),
+    );
+  });
+
   it('uses the displayed protocol index and omits API for Anthropic', async () => {
     await openAndSave(async (click) => {
       await click('Anthropic');

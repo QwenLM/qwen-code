@@ -271,6 +271,40 @@ describe('AuthMessageHandler', () => {
     expect(authInteractiveHandler).not.toHaveBeenCalled();
   });
 
+  it('falls back to the Responses default endpoint when the URL input is blank after picking Responses', async () => {
+    // The API step's pick is part of the effective route: a blank URL after
+    // choosing Responses must fall back to the /v1-less Responses default,
+    // not the Chat Completions /v1 default.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'responses' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce('') // blank URL → fallback to the wire's default
+      .mockResolvedValueOnce('sk-test')
+      .mockResolvedValueOnce('model');
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    const submit = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(submit);
+    await handler.handle({ type: 'auth' });
+
+    expect(submit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        protocol: 'openai',
+        api: 'responses',
+        baseUrl: 'https://api.openai.com',
+      }),
+    );
+  });
+
   it('collects Responses as an API choice within OpenAI setup', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })

@@ -15,6 +15,7 @@ import {
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  resolveModelProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   type ModelApi,
@@ -303,7 +304,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // doesn't silently write the OpenAI endpoint when the user hits
         // Enter on the OpenAI default. Defaults come from core's shared
         // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
-        const effectiveProtocol = protocol ?? provider.protocol;
+        // The effective route includes the API step's pick: a Responses
+        // choice dials the /v1-less default endpoint, so deriving the
+        // fallback from the raw bucket protocol would persist the Chat
+        // Completions endpoint on the Responses wire.
+        const effectiveProtocol =
+          resolveModelProtocol(protocol ?? provider.protocol, { api }) ??
+          protocol ??
+          provider.protocol;
         // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
         // Adding an OpenAI fallback here would silently mask a new AuthType
         // that core hadn't been taught about, diverging from the CLI flow

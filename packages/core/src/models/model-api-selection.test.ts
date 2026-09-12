@@ -315,6 +315,117 @@ describe('model API selection', () => {
     expect(config.getGenerationConfig().model).toBe('shared');
   });
 
+  it('adopts a same-endpoint sibling when the session has no registry baseUrl', () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: { model: 'shared' },
+      modelProvidersConfig: {
+        openai: [{ id: 'shared', envKey: 'SHARED_KEY' }],
+      },
+    });
+    expect(config.getCurrentRegistryBaseUrl()).toBeNull();
+    // The model moved onto the sibling wire with an explicit default-equivalent
+    // baseUrl; the session's own entry pinned no endpoint. The sibling lookup
+    // must tolerate the representation difference, still gated on the same
+    // dialed origin.
+    config.reloadModelProvidersConfig({
+      openai: [
+        {
+          id: 'shared',
+          baseUrl: 'https://api.openai.com/v1',
+          api: 'responses',
+          envKey: 'SHARED_KEY',
+        },
+      ],
+    });
+    expect(() =>
+      config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared'),
+    ).not.toThrow();
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(config.getGenerationConfig().model).toBe('shared');
+  });
+
+  it('does not adopt a sibling entry at a genuinely different origin', () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: { model: 'shared' },
+      modelProvidersConfig: {
+        openai: [{ id: 'shared', envKey: 'SHARED_KEY' }],
+      },
+    });
+    config.reloadModelProvidersConfig({
+      openai: [
+        {
+          id: 'shared',
+          baseUrl: 'https://other.example/v1',
+          api: 'responses',
+          envKey: 'SHARED_KEY',
+        },
+      ],
+    });
+    expect(() =>
+      config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared'),
+    ).toThrow("Model 'shared' is no longer configured for authType 'openai'");
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+  });
+
+  it('keeps a settings-sourced key when a reload adopts a baseUrl-less sibling entry', () => {
+    vi.stubEnv('UNSET_KEY', undefined);
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'gpt-5',
+        apiKey: 'settings-api-key',
+        apiKeyEnvKey: 'UNSET_KEY',
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      generationConfigSources: {
+        apiKey: { kind: 'settings' },
+        baseUrl: { kind: 'modelProviders' },
+      },
+      modelProvidersConfig: {
+        openai: [{ id: 'gpt-5', envKey: 'UNSET_KEY' }],
+      },
+    });
+    // Stamping `api` onto the same baseUrl-less entry moves it onto the
+    // sibling wire, whose resolved default baseUrl is '' — one endpoint, two
+    // representations. The adoption must not read that as a provider change
+    // and drop the session's key.
+    config.reloadModelProvidersConfig({
+      openai: [{ id: 'gpt-5', envKey: 'UNSET_KEY', api: 'responses' }],
+    });
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'gpt-5');
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(config.getGenerationConfig().apiKey).toBe('settings-api-key');
+  });
+
+  it('setModel follows a model registered on the sibling wire', async () => {
+    vi.stubEnv('SHARED_KEY', undefined);
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'chat',
+        apiKey: 'injected',
+        apiKeyEnvKey: 'CHAT_KEY',
+      },
+      modelProvidersConfig: {
+        openai: [
+          { id: 'chat', envKey: 'CHAT_KEY' },
+          { id: 'shared', api: 'responses', baseUrl, envKey: 'SHARED_KEY' },
+        ],
+      },
+    });
+    // The registry buckets `shared` under the Responses wire (its `api`), so
+    // the setModel registry check against the session's current wire misses;
+    // without the sibling probe the model id would be bound to the current
+    // wire's credentials instead of its own entry.
+    await config.setModel('shared');
+    expect(config.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(config.getGenerationConfig().model).toBe('shared');
+    expect(config.getGenerationConfig().baseUrl).toBe(baseUrl);
+    expect(config.getGenerationConfig().apiKeyEnvKey).toBe('SHARED_KEY');
+  });
+
   it('adopts a surviving same-endpoint sibling wire instead of failing closed', () => {
     const config = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI_RESPONSES,

@@ -102,6 +102,32 @@ describe('modelConfigUtils', () => {
       },
     );
 
+    it('keeps the selected wire when no model selection exists to derive one from', () => {
+      // No model.name, no --model, no model env var: the wire resolver's
+      // no-model branch would let an unrelated api:'responses' entry flip an
+      // `openai` selection to openai-responses, which has no DEFAULT_MODELS
+      // entry — the session would then run a wire and fallback model id that
+      // no config file contains.
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: {
+          modelProviders: {
+            openai: [
+              {
+                id: 'gpt-5',
+                api: 'responses',
+                baseUrl: 'https://api.example/v1',
+                envKey: 'RESPONSES_KEY',
+              },
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { OPENAI_API_KEY: 'openai-key' },
+      });
+      expect(result.generationConfig.authType).toBe(AuthType.USE_OPENAI);
+    });
+
     it.each([
       [AuthType.USE_OPENAI, 'chat-key'],
       [AuthType.USE_OPENAI_RESPONSES, 'responses-key'],
