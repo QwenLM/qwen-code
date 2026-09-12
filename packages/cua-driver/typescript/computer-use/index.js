@@ -4,6 +4,7 @@
  * authorization, transport, and cleanup.
  */
 import { randomUUID } from "node:crypto";
+import { ComputerUseApp, appIdentity, resolveApp } from "./app.js";
 
 const OBSERVATION_REVISION_CAPABILITY = "accessibility.observation_revision.v1";
 const ACCESSIBILITY_SERIALIZER_VERSION = "accessibility-render-v1";
@@ -348,6 +349,7 @@ export class ComputerUse {
   #closed = false;
   #revisionSupport;
   #defaultDeliveryMode;
+  #apps = new Map();
 
   /** Internal injection seam for hermetic tests. Use create/connect in applications. */
   constructor(
@@ -530,6 +532,31 @@ export class ComputerUse {
 
   get connectionGeneration() {
     return this.#connectionGeneration;
+  }
+
+  async getPlatform(options = {}) {
+    this.#requireOpen();
+    requireDispatchableSignal("getPlatform", options.signal);
+    if (typeof this.#owner?.listToolsJson !== "function") {
+      throw new ComputerUseError("the connected driver does not report its platform", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    const raw = await awaitNativeTerminal(this.#owner.listToolsJson(), options.signal);
+    let platform;
+    try {
+      platform = JSON.parse(raw)?.platform;
+    } catch {
+      throw new ComputerUseError("the connected driver returned invalid platform metadata", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    if (!["macos", "windows", "linux"].includes(platform)) {
+      throw new ComputerUseError("the connected driver did not report a supported platform; update the driver and SDK", {
+        code: "driver_platform_unavailable",
+      });
+    }
+    return platform;
   }
 
   async sessionInfo(options = {}) {
@@ -754,7 +781,7 @@ export class ComputerUse {
   async listApps(options = {}) {
     const { structured } = await this.#invoke(
       "listApps",
-      {},
+      options.runningOnly ? { runningOnly: true } : {},
       {
         readOnly: true,
         signal: options.signal,
@@ -763,10 +790,20 @@ export class ComputerUse {
     return structured?.apps ?? structured ?? [];
   }
 
-  async listWindows({ pid, onScreenOnly, signal } = {}) {
+  async getApp(selector, options = {}) {
+    const app = resolveApp(await this.listApps(options), selector, { allowStopped: true });
+    const identity = appIdentity(app);
+    if (!this.#apps.has(identity)) {
+      this.#apps.set(identity, new ComputerUseApp(this, app, (signal) => this.#invoke("launchApp", { name: identity }, { signal })));
+    }
+    return this.#apps.get(identity);
+  }
+
+  async listWindows({ pid, onScreenOnly, appContext, signal } = {}) {
     const input = {};
     if (pid !== undefined) input.pid = requirePid(pid);
     if (onScreenOnly !== undefined) input.onScreenOnly = Boolean(onScreenOnly);
+    if (appContext) input.appContext = true;
     const { structured } = await this.#invoke("listWindows", input, {
       readOnly: true,
       signal,
@@ -802,12 +839,13 @@ export class ComputerUse {
     }
     const target = exactWindow(options?.pid, options?.windowId);
     const surface = `${target.pid}:${target.windowId}`;
+    const cursorKey = `${surface}${options?.appContext ? ":app" : ""}`;
     const previous = this.#observationQueues.get(surface);
     const queued = (async () => {
       if (previous) {
         await previous.catch(() => undefined);
       }
-      return this.#observeWindow(options ?? {}, target, surface);
+      return this.#observeWindow(options ?? {}, target, cursorKey);
     })();
     this.#observationQueues.set(surface, queued);
     try {
@@ -835,6 +873,8 @@ export class ComputerUse {
       windowId: target.windowId,
       includeScreenshot,
     };
+    if (options.appContext) input.appContext = true;
+    const projectionVersion = options.appContext ? "app-tree-v1" : ACCESSIBILITY_PROJECTION_VERSION;
     if (screenshotOutFile !== undefined) input.screenshotOutFile = screenshotOutFile;
     if (maxElements !== undefined) {
       input.maxElements = requirePositiveInteger("maxElements", maxElements);
@@ -845,7 +885,7 @@ export class ComputerUse {
       input.observationRevision = {
         version: 1,
         serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-        projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
+        projectionVersion,
       };
       if (disableDiff) {
         input.observationRevision.forceFull = true;
@@ -915,7 +955,7 @@ export class ComputerUse {
           observationRevision: {
             version: 1,
             serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-            projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
+            projectionVersion,
           },
         };
         retriedIncompleteCapture = true;
@@ -1006,6 +1046,7 @@ export class ComputerUse {
 
   async click(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     const { button, count, signal } = options ?? {};
     if (button !== undefined) input.button = this.#clickButton(button);
     if (count !== undefined) input.count = requireIntegerRange("count", count, 1, 3);
@@ -1015,6 +1056,7 @@ export class ComputerUse {
 
   async doubleClick(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     input.deliveryMode = this.#actionDeliveryMode(options);
     return actionResult(
       await this.#invoke("doubleClick", input, {
@@ -1025,6 +1067,7 @@ export class ComputerUse {
 
   async rightClick(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     if (options?.modifier !== undefined) {
       input.modifier = requireStringList("modifier", options.modifier);
     }
@@ -1062,6 +1105,7 @@ export class ComputerUse {
       pid: target.pid,
       windowId: target.windowId,
     };
+    if (options.appContext) input.appContext = true;
     if (durationMs !== undefined) {
       input.durationMs = BigInt(requireIntegerRange("durationMs", durationMs, 0, 10000));
     }
@@ -1106,6 +1150,7 @@ export class ComputerUse {
   async typeText(options) {
     const input = this.#windowAddress(options, { coordinates: false });
     if (typeof options?.text !== "string") throw new ComputerUseError("text must be a string");
+    if (options?.appContext === true) input.appContext = true;
     input.text = options.text;
     if (options.delayMs !== undefined) {
       input.delayMs = BigInt(
@@ -1118,6 +1163,41 @@ export class ComputerUse {
         signal: options.signal,
       }),
     );
+  }
+
+  async paste(options) {
+    const input = exactWindow(options?.pid, options?.windowId);
+    if (typeof options?.text !== "string") throw new ComputerUseError("text must be a string");
+    const format = options.format ?? "text";
+    const formats = { text: "Text", md: "Md", html: "Html" };
+    if (typeof format !== "string" || !Object.hasOwn(formats, format)) throw new ComputerUseError("format must be text, md, or html");
+    input.text = options.text;
+    input.format = this.#sdk.PasteFormat?.[formats[format]] ?? format;
+    if (options?.appContext === true) input.appContext = true;
+    if (await this.getPlatform({ signal: options.signal }) !== "macos") {
+      throw new ComputerUseError("paste is supported only by the macOS driver", { code: "unsupported_platform" });
+    }
+    return actionResult(await this.#invoke("paste", input, { signal: options.signal }));
+  }
+
+  async selectText(options) {
+    const input = this.#windowAddress(options, { coordinates: false, tokenRequired: true });
+    Object.assign(input, exactWindow(options?.pid, options?.windowId));
+    input.text = requireNonEmptyString("text", options?.text);
+    for (const field of ["prefix", "suffix"]) {
+      if (options[field] !== undefined) {
+        if (typeof options[field] !== "string") throw new ComputerUseError(`${field} must be a string`);
+        input[field] = options[field];
+      }
+    }
+    const selection = options.selection ?? "text";
+    const selections = { text: "Text", cursor_before: "CursorBefore", cursor_after: "CursorAfter" };
+    if (typeof selection !== "string" || !Object.hasOwn(selections, selection)) throw new ComputerUseError("selection must be text, cursor_before, or cursor_after");
+    input.selection = this.#sdk.TextSelection?.[selections[selection]] ?? selection;
+    if (await this.getPlatform({ signal: options.signal }) !== "macos") {
+      throw new ComputerUseError("selectText is supported only by the macOS driver", { code: "unsupported_platform" });
+    }
+    return actionResult(await this.#invoke("selectText", input, { signal: options.signal }));
   }
 
   async pressKey(options) {

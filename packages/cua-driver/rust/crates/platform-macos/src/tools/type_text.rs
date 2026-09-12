@@ -35,7 +35,8 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_string_attr, focused_element_of_pid, kAXErrorSuccess, set_string_attr, AXUIElementRef,
+    copy_string_attr, focused_element_of_pid, kAXErrorAttributeUnsupported, kAXErrorSuccess,
+    set_string_attr, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -112,6 +113,7 @@ fn def() -> &'static ToolDef {
                     "maximum": 200,
                     "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds."
                 },
+                "app_context": { "type": "boolean", "description": "App-bound input uses key events at the current insertion point." },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "Use desktop with no pid/window_id to type into the frontmost application." },
                 "delivery_mode": {
                     "type": "string",
@@ -366,18 +368,24 @@ impl Tool for TypeTextTool {
         // helper windows. Wrap so callers see them in the result suffix
         // and the wildcard suppressor catches reflex activations.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let foreground = delivery_mode.is_foreground() && window_id.is_some();
+        let snapshot = if foreground {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         // Terminal-emulator short-circuit: when the target pid belongs
         // to a known terminal (Ghostty / Terminal.app / iTerm2 / …), the
         // AX value-set is silently dropped — see crate::terminal docs.
         // Skip the AX path entirely so the caller never sees the
         // "success but nothing typed" symptom.
-        let is_terminal_target = crate::terminal::is_terminal_pid(pid);
+        let synthesize_only = crate::terminal::is_terminal_pid(pid)
+            || args.get("app_context").and_then(Value::as_bool) == Some(true);
 
         let blocking_policy = keyboard_policy.clone();
         let result = focus_guard::with_focus_suppressed(
-            Some(pid),
+            if foreground { None } else { Some(pid) },
             prior_front,
             "type_text.AXSelectedText",
             || async move {
@@ -387,7 +395,7 @@ impl Tool for TypeTextTool {
                         &text_clone,
                         element_ptr,
                         delay_ms,
-                        is_terminal_target,
+                        synthesize_only,
                         delivery_mode,
                         window_id,
                         blocking_policy,
@@ -418,22 +426,6 @@ impl Tool for TypeTextTool {
         };
 
         match result {
-            Ok(Ok(outcome)) if outcome.delivered_chars.is_some_and(|n| n < char_count) => {
-                let delivered_chars = outcome.delivered_chars.unwrap_or_default();
-                ToolResult::error(format!(
-                    "type_text incomplete: delivered {delivered_chars} of {char_count} character(s){}; retry only the remaining suffix",
-                    outcome.detail
-                ))
-                .with_structured(serde_json::json!({
-                    "code": "type_text_incomplete",
-                    "path": outcome.path,
-                    "effect": "partial",
-                    "requested_chars": char_count,
-                    "delivered_chars": delivered_chars,
-                    "retryable": true,
-                    "retry_from_character": delivered_chars,
-                }))
-            }
             Ok(Ok(outcome)) => {
                 let TypeTextOutcome {
                     detail,
@@ -612,6 +604,10 @@ enum AxAttempt {
 }
 
 impl AxAttempt {
+    fn permits_synthesis(self) -> bool {
+        matches!(self, Self::NotAttempted | Self::Rejected)
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::NotAttempted => "not_attempted",
@@ -665,12 +661,12 @@ fn synthesis_refusal_result(
     refusal: &SynthesisRefusal,
     ax_attempt: AxAttempt,
 ) -> ToolResult {
-    let effect = if ax_attempt == AxAttempt::Unverifiable {
-        "indeterminate"
-    } else {
+    let retryable = ax_attempt.permits_synthesis();
+    let effect = if retryable {
         "refused"
+    } else {
+        "indeterminate"
     };
-    let retryable = ax_attempt != AxAttempt::Unverifiable;
     let escalation = if retryable {
         serde_json::json!({
             "recommended": "chunk",
@@ -699,7 +695,7 @@ fn synthesis_refusal_result(
         "retryable": retryable,
         "escalation": escalation,
     });
-    if ax_attempt != AxAttempt::Unverifiable {
+    if retryable {
         structured["delivered_chars"] = serde_json::json!(0);
         structured["retry_from_character"] = serde_json::json!(0);
     }
@@ -761,12 +757,12 @@ const DELIVERY_DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::f
 const FOCUS_REAPPLY_DELAY: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// Keyboard-rung policy for one window-addressed background insert, decided
-/// once by the pure exact-target core before any input is posted.
+/// initially by the pure exact-target core; PID delivery revalidates after focus.
 #[derive(Clone, Debug)]
 enum BackgroundKeyboardPolicy {
     /// The full ladder may run: foreground requests, pid-only targets, and
-    /// window targets whose exact keyboard delivery is proven (singleton
-    /// same-pid destination).
+    /// window targets whose keyboard route is allowed by the current target
+    /// and focus facts.
     Allowed,
     /// Only the semantic AX write on the proven exact element may run. The
     /// process-scoped CGEvent rung is refused with this refusal — carried so
@@ -836,15 +832,14 @@ struct TypeTextOutcome {
     detail: String,
     path: &'static str,
     verified: bool,
-    /// Exact when AX exposed the target value. `None` means delivery could not
-    /// be observed, so the existing unverifiable contract remains in force.
+    /// Present only for a verified complete insertion, never an inferred prefix.
     delivered_chars: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TypedProgress {
     Complete,
-    Partial(usize),
+    Changed,
     Unchanged,
     Unverifiable,
 }
@@ -874,32 +869,26 @@ fn verify_typed(before: Option<&str>, after: Option<&str>, text: &str) -> bool {
     matches!(typed_progress(before, after, text), TypedProgress::Complete)
 }
 
-/// Classify an observable insertion without mistaking a prefix for complete
-/// delivery. A positive length delta is an exact delivered-character count for
-/// insert-at-cursor typing; it is capped at the request size defensively.
+/// Confirm only a complete insertion that explains the before/after change.
+/// A length delta alone cannot locate a retry suffix when text was selected.
 fn typed_progress(before: Option<&str>, after: Option<&str>, text: &str) -> TypedProgress {
     if text.is_empty() {
         return TypedProgress::Complete;
     }
-    let Some(after) = after else {
+    let (Some(before), Some(after)) = (before, after) else {
         return TypedProgress::Unverifiable;
     };
-    if after.contains(text) {
+    if before == after {
+        return TypedProgress::Unchanged;
+    }
+    if after.len().checked_sub(before.len()) == Some(text.len())
+        && after.match_indices(text).any(|(offset, _)| {
+            before.strip_prefix(&after[..offset]) == Some(&after[offset + text.len()..])
+        })
+    {
         return TypedProgress::Complete;
     }
-    let Some(before) = before else {
-        return TypedProgress::Unverifiable;
-    };
-    let delivered = after
-        .chars()
-        .count()
-        .saturating_sub(before.chars().count())
-        .min(text.chars().count());
-    if delivered == 0 {
-        TypedProgress::Unchanged
-    } else {
-        TypedProgress::Partial(delivered)
-    }
+    TypedProgress::Changed
 }
 
 /// Read the focused/target field's `AXValue`, for before/after read-back.
@@ -1062,14 +1051,16 @@ fn cgevent_type_verified(
         }
         crate::input::keyboard::type_text_global(text, delay_ms)?;
     } else {
+        if let Some(wid) = window_id {
+            crate::input::skylight::prepare_background_keyboard(pid, wid)?;
+        }
         crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
     }
 
     // CGEvent posting is asynchronous with respect to the renderer. In
     // particular, Chromium can acknowledge the posting process while a long
-    // tail remains queued. Poll the AX value until the complete payload is
-    // visible instead of treating any growth as success. If the deadline
-    // expires after observable growth, surface the exact partial count.
+    // tail remains queued. Poll until a complete insertion is observable;
+    // partial-looking changes do not establish a safe retry offset.
     let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
     Ok(await_typed_delivery(before, text, deadline, || {
         read_axvalue_bound(pid, element_ptr_and_idx, window_id)
@@ -1089,24 +1080,15 @@ fn await_typed_delivery(
     if text.contains(['\n', '\r']) {
         return (false, None);
     }
-    let mut best_partial = None;
     loop {
         let after = read_value();
         match typed_progress(before, after.as_deref(), text) {
             TypedProgress::Complete => return (true, Some(text.chars().count())),
-            TypedProgress::Partial(delivered) => {
-                best_partial =
-                    Some(best_partial.map_or(delivered, |best: usize| best.max(delivered)));
-            }
+            TypedProgress::Changed | TypedProgress::Unchanged => {}
             TypedProgress::Unverifiable => return (false, None),
-            TypedProgress::Unchanged => {
-                // A readable unchanged value is an observed zero-character
-                // delivery, not an unverifiable success.
-                best_partial.get_or_insert(0);
-            }
         }
         if std::time::Instant::now() >= deadline {
-            return (false, best_partial);
+            return (false, None);
         }
         std::thread::sleep(DELIVERY_DRAIN_POLL_INTERVAL);
     }
@@ -1114,20 +1096,21 @@ fn await_typed_delivery(
 
 /// Best-effort-background ladder for `type_text`.
 ///
-/// - `delivery_mode == Background` (default): AX insert → read-back; on a
-///   silent/unreadable accept, CGEvent keystrokes → read-back. Never fronts.
-/// - `delivery_mode == Foreground`: the agent's explicit last resort — briefly
-///   front `window_id`, insert at the current cursor, restore, then read-back.
+/// - `delivery_mode == Background` (default): AX insert → read-back. Only an
+///   unsupported AX attribute or no AX attempt permits CGEvent synthesis;
+///   revalidate the exact keyboard target after focus and before sending.
+/// - `delivery_mode == Foreground`: briefly front the explicit `window_id`,
+///   insert at the current cursor, restore, then read-back.
 ///
 /// Returns `(detail, path, verified)`. `verified` is `true` only when a
 /// read-back positively confirmed the text; `false` means the agent must
-/// confirm via screenshot (and, for background, can escalate to foreground).
+/// confirm the result from a fresh observation before deciding what to do next.
 fn type_text_blocking(
     pid: i32,
     text: &str,
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     delay_ms: u64,
-    is_terminal_target: bool,
+    synthesize_only: bool,
     delivery_mode: super::DeliveryMode,
     window_id: Option<u32>,
     keyboard_policy: BackgroundKeyboardPolicy,
@@ -1235,8 +1218,10 @@ fn type_text_blocking(
         }));
     }
 
-    // --- Background rung 0: terminal emulator → CGEvent only (AX is dropped). ---
-    if is_terminal_target {
+    // App-bound typing targets the insertion point through key events, as does
+    // terminal input. An AXSelectedText write is a different actuator and can
+    // report success without inserting anything in LibreOffice.
+    if synthesize_only {
         // A terminal insert has no semantic AX rung: when the exact-target
         // decision restricted this request to semantic-only, there is nothing
         // safe to run — refuse before posting anything.
@@ -1254,10 +1239,7 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
-        tracing::debug!(
-            "type_text: pid {pid} is a terminal emulator; skipping AX value-set, \
-             using CGEvent key-event synthesis"
-        );
+        tracing::debug!("type_text: pid {pid} uses insertion-point key-event synthesis");
         let (verified, delivered_chars) = cgevent_type_verified(
             pid,
             text,
@@ -1269,7 +1251,7 @@ fn type_text_blocking(
             false,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-            detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
+            detail: format!(" via CGEvent ({delay_ms}ms delay)"),
             path: PATH_KEY_EVENTS,
             verified,
             delivered_chars,
@@ -1295,22 +1277,14 @@ fn type_text_blocking(
         let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
         let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
         let err = unsafe { set_string_attr(element, "AXSelectedText", text) };
-        // Classify the atomic write before considering synthesis. Complete AX
-        // delivery returns immediately. Partial delivery is surfaced as such
-        // instead of appending the full payload again. When synthesis would
-        // exceed its transport-safe budget, rejected/unchanged AX writes fail
-        // safely and unreadable AX state is reported as indeterminate.
+        // Even an unchanged value can mean selection was replaced by identical
+        // text. A successful AX write must not be replayed through CGEvent.
         let after = unsafe { copy_string_attr(element, "AXValue") };
         let ax_progress = if err == kAXErrorSuccess {
             Some(typed_progress(before.as_deref(), after.as_deref(), text))
         } else {
             None
         };
-        // AXValue is not renderer evidence in web content. An unchanged echo
-        // there cannot prove that zero characters landed, so blind retry is
-        // unsafe even though no synthesis has run yet.
-        let unchanged_web_readback = ax_progress == Some(TypedProgress::Unchanged)
-            && target_in_web_area(pid, Some((element as usize, idx_opt)), window_id);
         if owns {
             unsafe {
                 CFRelease(element as _);
@@ -1325,22 +1299,21 @@ fn type_text_blocking(
                 delivered_chars: Some(text.chars().count()),
             }));
         }
-        if let Some(TypedProgress::Partial(delivered_chars)) = ax_progress {
-            let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
+        ax_attempt = match ax_progress {
+            Some(TypedProgress::Unchanged) => AxAttempt::Unchanged,
+            Some(TypedProgress::Changed | TypedProgress::Unverifiable) => AxAttempt::Unverifiable,
+            None if err == kAXErrorAttributeUnsupported => AxAttempt::Rejected,
+            None => AxAttempt::Unverifiable,
+            Some(TypedProgress::Complete) => unreachable!(),
+        };
+        if !ax_attempt.permits_synthesis() {
             return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-                detail: format!(" via partial AX write into{idx_str} {role} \"{title}\""),
+                detail: format!(" via AX write into {role} \"{title}\"; input was not replayed"),
                 path: PATH_AX,
                 verified: false,
-                delivered_chars: Some(delivered_chars),
+                delivered_chars: None,
             }));
         }
-        ax_attempt = match ax_progress {
-            Some(TypedProgress::Unchanged) if unchanged_web_readback => AxAttempt::Unverifiable,
-            Some(TypedProgress::Unchanged) => AxAttempt::Unchanged,
-            Some(TypedProgress::Unverifiable) => AxAttempt::Unverifiable,
-            None => AxAttempt::Rejected,
-            Some(TypedProgress::Complete | TypedProgress::Partial(_)) => unreachable!(),
-        };
         tracing::debug!(
             "AX write did not land for {role} \"{title}\" (err={err}); \
              falling back to CGEvent keystrokes"
@@ -1369,8 +1342,7 @@ fn type_text_blocking(
     }
 
     // --- Background rung 2: CGEvent keystrokes with read-back. ---
-    // Never clear here: a partial AX write is rare, and clearing would violate
-    // insert-at-cursor semantics.
+    // Never clear here: clearing would violate insert-at-cursor semantics.
     let (verified, delivered_chars) = cgevent_type_verified(
         pid,
         text,
@@ -1392,6 +1364,22 @@ fn type_text_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_synthesis_revalidates_the_window_before_posting() {
+        let error = cgevent_type_verified(
+            i32::MAX,
+            "must not be sent",
+            0,
+            None,
+            None,
+            0,
+            Some(u32::MAX),
+            false,
+        )
+        .expect_err("a stale exact window must stop synthesis");
+        assert!(error.to_string().contains("window_not_found"));
+    }
 
     /// Sanity-check that the terminal short-circuit can be expressed as a
     /// pure function of `is_terminal_target`: when true, the code goes
@@ -1492,7 +1480,7 @@ mod tests {
     fn large_atomic_ax_payloads_are_not_subject_to_the_synthesis_budget() {
         assert!(synthesis_preflight(TextDeliveryRoute::AtomicAx, 100_000, 200).is_none());
         assert_eq!(
-            typed_progress(None, Some(&"x".repeat(11_500)), &"x".repeat(11_500)),
+            typed_progress(Some(""), Some(&"x".repeat(11_500)), &"x".repeat(11_500)),
             TypedProgress::Complete,
             "a successful one-call AX insertion remains eligible regardless of size"
         );
@@ -1511,16 +1499,19 @@ mod tests {
         assert_eq!(safe["retryable"], true);
         assert_eq!(safe["escalation"]["recommended"], "chunk");
 
-        let indeterminate =
-            synthesis_refusal_result(PATH_KEY_EVENTS, &refusal, AxAttempt::Unverifiable);
-        let indeterminate = indeterminate
-            .structured_content
-            .expect("structured indeterminate result");
-        assert_eq!(indeterminate["effect"], "indeterminate");
-        assert!(indeterminate.get("delivered_chars").is_none());
-        assert_eq!(indeterminate["synthesized_chars"], 0);
-        assert_eq!(indeterminate["retryable"], false);
-        assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+        for attempt in [AxAttempt::Unchanged, AxAttempt::Unverifiable] {
+            assert!(!attempt.permits_synthesis());
+            let indeterminate = synthesis_refusal_result(PATH_KEY_EVENTS, &refusal, attempt);
+            let indeterminate = indeterminate
+                .structured_content
+                .expect("structured indeterminate result");
+            assert_eq!(indeterminate["effect"], "indeterminate");
+            assert!(indeterminate.get("delivered_chars").is_none());
+            assert!(indeterminate.get("retry_from_character").is_none());
+            assert_eq!(indeterminate["synthesized_chars"], 0);
+            assert_eq!(indeterminate["retryable"], false);
+            assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+        }
     }
 
     #[test]
@@ -1531,16 +1522,31 @@ mod tests {
     }
 
     #[test]
-    fn verify_typed_contains_full_request_is_verified() {
-        assert!(verify_typed(Some(""), Some("hi"), "hi")); // contains
-        assert!(verify_typed(Some("ab"), Some("ab hi"), "hi")); // contains, appended
+    fn full_insertion_must_explain_the_entire_change() {
+        for (before, after, text) in [
+            ("", "hi", "hi"),
+            ("ab", "ab hi", " hi"),
+            ("left-right", "left-中🙂_right", "中🙂_"),
+            ("a", "aba", "ab"),
+        ] {
+            assert!(verify_typed(Some(before), Some(after), text));
+        }
+        for (before, after, text) in [
+            ("prefix TOKEN", "prefix TOKEN", "TOKEN"),
+            ("prefix TOKEN", "other TOKEN", "TOKEN"),
+            ("ab", "ab hi", "hi"),
+            ("selected old text", "replacement", "replacement"),
+        ] {
+            assert!(!verify_typed(Some(before), Some(after), text));
+        }
+        assert!(!verify_typed(None, Some("TOKEN"), "TOKEN"));
     }
 
     #[test]
-    fn observable_prefix_is_partial_not_verified() {
+    fn observable_prefix_does_not_establish_a_retry_offset() {
         assert_eq!(
             typed_progress(Some(""), Some("BEGINpayload"), "BEGINpayloadEND"),
-            TypedProgress::Partial(12)
+            TypedProgress::Changed
         );
         assert!(!verify_typed(
             Some(""),
@@ -1571,14 +1577,27 @@ mod tests {
     }
 
     #[test]
-    fn drained_prefix_reports_the_delivered_character_count() {
+    fn drained_prefix_does_not_report_a_retryable_character_count() {
         let delivery = await_typed_delivery(
             Some(""),
             "BEGIN-payload-END",
             std::time::Instant::now(),
             || Some("BEGIN".to_owned()),
         );
-        assert_eq!(delivery, (false, Some(5)));
+        assert_eq!(delivery, (false, None));
+    }
+
+    #[test]
+    fn selected_replacement_and_unrelated_growth_do_not_invent_progress() {
+        for after in ["XYsuffix", "unrelated growth", "oldprefixXYsuffix"] {
+            let delivery = await_typed_delivery(
+                Some("oldprefixsuffix"),
+                "XYZ",
+                std::time::Instant::now(),
+                || Some(after.to_owned()),
+            );
+            assert_eq!(delivery, (false, None));
+        }
     }
 
     #[test]

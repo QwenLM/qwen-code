@@ -7,14 +7,15 @@
 //! top-level keyboard destinations, and addressed-element ancestry. All reads are
 //! bounded and fail closed — an unreadable fact never unlocks a route.
 
-use core_foundation::base::{CFRelease, CFTypeRef};
+use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
 use cua_driver_core::background_input::{
     BackgroundTargetFacts, ElementAncestry, WindowServerOwnership,
 };
 
 use super::bindings::{
     ax_get_window_id, copy_ax_windows, copy_bool_attr, copy_element_attr, copy_string_attr,
-    focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
+    focused_element_of_pid, kAXErrorSuccess, AXUIElementCreateApplication, AXUIElementGetPid,
+    AXUIElementRef, AXUIElementSetMessagingTimeout,
 };
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 
@@ -31,6 +32,7 @@ const MAX_ANCESTRY_DEPTH: usize = 40;
 ///
 /// `element` must be a valid `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
+    let _ = AXUIElementSetMessagingTimeout(element, 0.1);
     if let Some(window) = copy_element_attr(element, "AXWindow") {
         let window_id = ax_get_window_id(window);
         CFRelease(window as CFTypeRef);
@@ -43,6 +45,7 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
     let mut owned = false;
     let mut resolved = None;
     for _ in 0..MAX_ANCESTRY_DEPTH {
+        let _ = AXUIElementSetMessagingTimeout(current, 0.1);
         match copy_string_attr(current, "AXRole").as_deref() {
             Some("AXWindow") | Some("AXSheet") => {
                 resolved = ax_get_window_id(current);
@@ -69,6 +72,55 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
     resolved
 }
 
+unsafe fn is_app_menu(
+    element: AXUIElementRef,
+    app: AXUIElementRef,
+    pid: i32,
+    window_id: u32,
+) -> bool {
+    let mut owner = 0;
+    if AXUIElementGetPid(element, &mut owner) != kAXErrorSuccess
+        || owner != pid
+        || !matches!(
+            copy_string_attr(element, "AXRole").as_deref(),
+            Some("AXMenuBarItem" | "AXMenuItem" | "AXMenu")
+        )
+        || super::bindings::focused_window_id_of_pid(pid) != Some(window_id)
+    {
+        return false;
+    }
+    if super::menu::contains(pid, element) {
+        return true;
+    }
+    let Some(bar) = copy_element_attr(app, "AXMenuBar") else {
+        return false;
+    };
+    let _ = AXUIElementSetMessagingTimeout(bar, 0.1);
+    let valid_bar = AXUIElementGetPid(bar, &mut owner) == kAXErrorSuccess
+        && owner == pid
+        && copy_string_attr(bar, "AXRole").as_deref() == Some("AXMenuBar");
+    CFRetain(element as CFTypeRef);
+    let mut current = element;
+    let mut matched = false;
+    if valid_bar {
+        for _ in 0..MAX_ANCESTRY_DEPTH {
+            let _ = AXUIElementSetMessagingTimeout(current, 0.1);
+            if CFEqual(current as CFTypeRef, bar as CFTypeRef) != 0 {
+                matched = true;
+                break;
+            }
+            let Some(parent) = copy_element_attr(current, "AXParent") else {
+                break;
+            };
+            CFRelease(current as CFTypeRef);
+            current = parent;
+        }
+    }
+    CFRelease(current as CFTypeRef);
+    CFRelease(bar as CFTypeRef);
+    matched
+}
+
 /// The process's focused AX element, but only when it provably belongs to the
 /// requested window. Returns a retained element the caller must release.
 ///
@@ -86,6 +138,36 @@ pub unsafe fn focused_element_in_window(pid: i32, window_id: u32) -> Option<AXUI
     } else {
         CFRelease(element as CFTypeRef);
         None
+    }
+}
+
+fn keyboard_focus_matches_target(pid: i32, window_id: u32) -> bool {
+    if super::bindings::focused_window_id_of_pid(pid) != Some(window_id) {
+        return false;
+    }
+    unsafe {
+        let Some(element) = focused_element_in_window(pid, window_id) else {
+            return false;
+        };
+        let focused = copy_bool_attr(element, "AXFocused") == Some(true);
+        CFRelease(element as CFTypeRef);
+        focused
+    }
+}
+
+pub(crate) fn validate_keyboard_target(pid: i32, window_id: u32) -> anyhow::Result<()> {
+    use cua_driver_core::background_input::{
+        decide_background_input, BackgroundAction, BackgroundInputDecision, ExactWindowTarget,
+    };
+    match decide_background_input(
+        ExactWindowTarget { pid, window_id },
+        &gather_background_facts(pid, window_id, None),
+        BackgroundAction::GenericKey,
+    ) {
+        BackgroundInputDecision::Execute { .. } => Ok(()),
+        BackgroundInputDecision::Refuse(refusal) => {
+            anyhow::bail!("{}: {}", refusal.code, refusal.reason)
+        }
     }
 }
 
@@ -170,6 +252,7 @@ pub fn gather_background_facts(
                 element_ptr.map(|_| ElementAncestry::Unproven),
             )
         } else {
+            let _ = AXUIElementSetMessagingTimeout(app, 0.1);
             // Electron/Chromium apps may need per-process-lifetime enablement
             // before their AX windows and subtrees are materialized.
             super::enablement::ensure_chromium_ax_enabled(pid, app);
@@ -177,6 +260,9 @@ pub fn gather_background_facts(
             let app_hidden = copy_bool_attr(app, "AXHidden");
             let element = element_ptr.map(|ptr| match element_window_id(ptr as AXUIElementRef) {
                 Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
+                _ if is_app_menu(ptr as AXUIElementRef, app, pid, window_id) => {
+                    ElementAncestry::ProvenAppMenu
+                }
                 Some(_) => ElementAncestry::OutsideTargetWindow,
                 None => ElementAncestry::Unproven,
             });
@@ -201,6 +287,7 @@ pub fn gather_background_facts(
         target_minimized: target.and_then(|record| record.minimized),
         app_hidden,
         competing_keyboard_destinations,
+        keyboard_focus_matches_target: keyboard_focus_matches_target(pid, window_id),
         element: element.unwrap_or(ElementAncestry::NotAddressed),
     }
 }

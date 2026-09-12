@@ -862,6 +862,7 @@ impl ToolRegistry {
         // `tools` keep working unchanged.
         let mut result = serde_json::json!({
             "tools": list,
+            "platform": std::env::consts::OS,
             "capability_version": CAPABILITY_VERSION,
             "schema_version": TOOLS_LIST_SCHEMA_VERSION,
             "enforcement_adapters": crate::authorization::enforcement_adapter_inventory_json(),
@@ -2524,6 +2525,8 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "paste"
+            | "select_text"
             | "bring_to_front"
             | "set_window_frame"
     )
@@ -5456,6 +5459,7 @@ mod capability_tests {
         // between server start and first tool register.
         let reg = ToolRegistry::new();
         let v = reg.tools_list();
+        assert_eq!(v["platform"], std::env::consts::OS);
         assert_eq!(v["capability_version"], "1");
         assert_eq!(v["schema_version"], "1");
         assert!(v["tools"].is_array(), "tools array must still be present");

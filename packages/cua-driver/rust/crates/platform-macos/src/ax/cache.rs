@@ -160,6 +160,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: Vec::new(),
             element_ptr: ptr,
@@ -174,6 +179,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 

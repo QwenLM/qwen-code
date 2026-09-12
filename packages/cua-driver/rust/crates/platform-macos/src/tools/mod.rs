@@ -12,9 +12,12 @@ mod kill_app;
 mod launch_app;
 mod list_apps;
 mod list_windows;
+mod paste;
+mod pasteboard;
 mod press_key;
 mod right_click;
 mod scroll;
+mod select_text;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -730,6 +733,7 @@ pub struct ToolState {
     pub zoom_registry: Arc<ZoomRegistry>,
     pub resize_registry: Arc<ResizeRegistry>,
     pub observation_revisions: Arc<MacObservationRevisions>,
+    app_monitors: std::sync::Mutex<std::collections::HashMap<i32, AppMonitors>>,
     watched_targets: std::sync::Mutex<std::collections::HashSet<(i32, u32)>>,
     watcher_started: std::sync::atomic::AtomicBool,
     /// Global, disk-persisted config — the base layer and the only one the
@@ -754,6 +758,11 @@ pub struct ToolState {
     pub host_bundle_id: Option<String>,
 }
 
+struct AppMonitors {
+    focus: crate::input::app_focus::FocusLease,
+    menu: Option<Arc<crate::ax::menu::MenuMonitor>>,
+}
+
 impl Default for ToolState {
     fn default() -> Self {
         Self::new(false, false, None)
@@ -772,6 +781,7 @@ impl ToolState {
             zoom_registry: Arc::new(ZoomRegistry::new()),
             resize_registry: Arc::new(ResizeRegistry::new()),
             observation_revisions: Arc::new(MacObservationRevisions::new()),
+            app_monitors: std::sync::Mutex::new(Default::default()),
             watched_targets: std::sync::Mutex::new(Default::default()),
             watcher_started: std::sync::atomic::AtomicBool::new(false),
             // Load persisted config from ~/.cua-driver/config.json so that
@@ -783,6 +793,30 @@ impl ToolState {
             host_owns_permission_ux,
             host_bundle_id,
         }
+    }
+
+    pub(crate) fn watch_app(&self, pid: i32) -> anyhow::Result<()> {
+        let mut monitors = self
+            .app_monitors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("app monitor registry poisoned"))?;
+        monitors.retain(|_, monitor| monitor.focus.is_current());
+        if let Some(monitor) = monitors.get_mut(&pid) {
+            if monitor.menu.as_ref().is_some_and(|menu| !menu.is_current()) {
+                monitor.menu = crate::ax::menu::track(pid).ok();
+            }
+            return Ok(());
+        }
+        let focus = crate::input::app_focus::track(pid)?;
+        let menu = match crate::ax::menu::track(pid) {
+            Ok(menu) => Some(menu),
+            Err(error) => {
+                tracing::debug!(pid, %error, "app menu notifications unavailable");
+                None
+            }
+        };
+        monitors.insert(pid, AppMonitors { focus, menu });
+        Ok(())
     }
 
     pub(crate) fn watch_target(self: &Arc<Self>, pid: i32, window_id: u32) {
@@ -1043,6 +1077,8 @@ pub fn register_all(
     registry.register(Box::new(cursor_tools::SetAgentCursorEnabledTool::new(
         state.clone(),
     )));
+    registry.register(Box::new(paste::PasteTool::new(state.clone())));
+    registry.register(Box::new(select_text::SelectTextTool::new(state.clone())));
     registry.register(Box::new(cursor_tools::SetAgentCursorMotionTool::new(
         state.clone(),
     )));

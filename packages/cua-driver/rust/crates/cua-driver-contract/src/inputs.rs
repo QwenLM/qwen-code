@@ -496,10 +496,25 @@ impl ToolInput for GetDesktopStateInput {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
-pub struct ListAppsInput {}
+pub struct ListAppsInput {
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_only: Option<bool>,
+}
 
 impl ToolInput for ListAppsInput {
     const TOOL_NAME: &'static str = "list_apps";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchAppInput {
+    /// Application name or absolute installation path discovered by list_apps.
+    pub name: String,
+}
+
+impl ToolInput for LaunchAppInput {
+    const TOOL_NAME: &'static str = "launch_app";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
@@ -510,6 +525,10 @@ pub struct ListWindowsInput {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_screen_only: Option<bool>,
+    /// Resolve the macOS application's current AX window and attached sheet.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
 }
 
 impl ToolInput for ListWindowsInput {
@@ -575,6 +594,10 @@ pub struct GetWindowStateInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "positive_integer_schema")]
     pub max_depth: Option<u32>,
+    /// Use the compact macOS application observation with contextual menus.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     /// Opt in to `accessibility.observation_revision.v1`. Requires a bound
     /// driver session. Omit to preserve the legacy full-snapshot contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -723,6 +746,8 @@ impl ToolInput for ClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct WindowClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -755,6 +780,8 @@ impl ToolInput for WindowClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct DoubleClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,6 +808,8 @@ impl ToolInput for DoubleClickInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct RightClickInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -856,6 +885,10 @@ pub struct WindowDragInput {
     pub pid: u32,
     #[schemars(schema_with = "positive_integer_schema")]
     pub window_id: u64,
+    /// Let the macOS app workflow select the supported native drag route.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[schemars(schema_with = "number_schema")]
     pub from_x: f64,
     #[schemars(schema_with = "number_schema")]
@@ -984,6 +1017,8 @@ pub struct WindowTypeTextInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "delivery_mode_schema")]
     pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u64>,
@@ -1008,6 +1043,69 @@ pub struct SetValueInput {
 
 impl ToolInput for SetValueInput {
     const TOOL_NAME: &'static str = "set_value";
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteFormat {
+    #[default]
+    Text,
+    Md,
+    Html,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct PasteInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    pub text: String,
+    #[serde(default)]
+    pub format: PasteFormat,
+    #[serde(default)]
+    #[uniffi(default = None)]
+    pub app_context: Option<bool>,
+}
+
+impl ToolInput for PasteInput {
+    const TOOL_NAME: &'static str = "paste";
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSelection {
+    #[default]
+    Text,
+    CursorBefore,
+    CursorAfter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct SelectTextInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    #[schemars(schema_with = "element_token_schema")]
+    pub element_token: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub selection: TextSelection,
+}
+
+impl ToolInput for SelectTextInput {
+    const TOOL_NAME: &'static str = "select_text";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]

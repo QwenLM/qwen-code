@@ -78,6 +78,7 @@ fn def() -> &'static ToolDef {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
+                "app_context": { "type": "boolean", "description": "Capture the app interaction context with native compact AX projection." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_screenshot": {
@@ -268,20 +269,32 @@ impl Tool for GetWindowStateTool {
             .map(|v| v.max(1) as usize)
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
 
+        let app_context = args
+            .get("app_context")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
         // Always walk the AX tree (perception returns both tree + screenshot).
         let tree_result = {
             let q = query.clone();
+            let state = Arc::clone(&self.state);
             // Keep the product deadline below the public client's 25-second
             // deadline so callers receive a structured driver error. The AX
             // walker also applies a native per-element messaging timeout because
             // dropping a spawn_blocking JoinHandle cannot cancel a blocked AX call.
             let walk_future = tokio::task::spawn_blocking(move || {
-                crate::ax::tree::walk_tree_bounded(
+                if app_context {
+                    if let Err(error) = state.watch_app(pid) {
+                        tracing::debug!(pid, %error, "app focus monitor unavailable");
+                    }
+                }
+                crate::ax::tree::walk_tree_with_context(
                     pid,
                     Some(window_id),
                     q.as_deref(),
                     max_elements,
                     max_depth,
+                    app_context,
                 )
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
@@ -337,6 +350,7 @@ impl Tool for GetWindowStateTool {
                         window_id,
                         max_elements,
                         max_depth,
+                        app_context,
                         &tree.nodes,
                         tree.complete && scope_matched,
                         request,
@@ -663,7 +677,7 @@ impl Tool for GetWindowStateTool {
                 "capability": "accessibility.observation_revision.v1",
                 "version": cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
                 "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
-                "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                "projection_version": if app_context { cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION } else { cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION },
                 "mode": revision.mode.as_str(),
                 "lineage_id": revision.lineage_id,
                 "revision_id": revision.revision_id,
@@ -1207,6 +1221,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: vec![],
             element_ptr: 0,
@@ -1221,6 +1240,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 

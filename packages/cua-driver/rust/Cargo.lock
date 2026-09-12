@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-bindgen"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "cbindgen",
  "uniffi",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-contract"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "schemars",
  "serde",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-core"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-sdk"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "async-trait",
  "core-foundation",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-testkit"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "core-foundation",
  "libc",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "cua-driver-uia"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "cua-driver-core",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "cursor-overlay"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "cua-driver-contract",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "cursor-theme-cli"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "cursor-overlay",
@@ -2900,7 +2900,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pip-preview"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2960,7 +2960,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform-linux"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3028,6 +3028,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "objc2-quartz-core 0.2.2",
  "pip-preview",
+ "pulldown-cmark",
  "screencapturekit",
  "serde",
  "serde_json",
@@ -3041,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3154,6 +3155,24 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.11.1",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pxfm"
@@ -4304,6 +4323,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-general-category"

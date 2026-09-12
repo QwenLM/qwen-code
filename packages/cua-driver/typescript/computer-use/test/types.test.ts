@@ -43,6 +43,45 @@ export async function exerciseComputerUseTypes(
   signal: AbortSignal,
 ): Promise<ActAndVerifyResult> {
   await computer.listApps({ signal });
+  const app = await computer.getApp("org.example.fixture", { signal });
+  const appState = await app.getState({ includeScreenshot: true, signal });
+  appState.screenshot?.images.at(0)?.dataBase64;
+  await app.click(37, { signal });
+  await app.setValue(37, "draft");
+  await app.pressKey("Return", { modifiers: ["shift"] });
+  await app.hotkey(["super", "s"]);
+  await app.scroll(37, { direction: "down" });
+  const platform: "macos" | "windows" | "linux" = await computer.getPlatform({ signal });
+  void platform;
+  await app.paste("plain");
+  await app.paste("**formatted**", { format: "md", signal });
+  await app.paste("<b>formatted</b>", { format: "html" });
+  await app.selectText(37, "draft", { prefix: "Status: ", suffix: ".", signal });
+  await app.selectText(37, "draft", { selection: "cursor_before" });
+  await app.selectText(37, "draft", { selection: "cursor_after" });
+  const textAction: ComputerUseActionResult = await computer.paste({ pid: 42, windowId: 7, text: "new", format: "text", signal });
+  void textAction;
+  await computer.selectText({ pid: 42, windowId: 7, elementToken: "rv1:l_a:1", text: "draft", selection: "text", signal });
+  // @ts-expect-error only the documented clipboard formats are accepted
+  await app.paste("text", { format: "rtf" });
+  // @ts-expect-error app targeting stays internal
+  await app.paste("text", { pid: 42 });
+  // @ts-expect-error app text operations do not expose delivery routing
+  await app.selectText(37, "draft", { deliveryMode: "foreground" });
+  // @ts-expect-error public text selection uses selection, not native naming
+  await app.selectText(37, "draft", { selection_type: "text" });
+  // @ts-expect-error selection requires a current short numeric element ID
+  await app.selectText("rv1:l_a:1", "draft");
+  // @ts-expect-error the exact-window operation requires a window ID
+  await computer.selectText({ pid: 42, elementToken: "rv1:l_a:1", text: "draft" });
+  // @ts-expect-error paste uses a native route without a delivery option
+  await computer.paste({ pid: 42, windowId: 7, text: "new", deliveryMode: "foreground" });
+  // @ts-expect-error app routing is internal
+  await app.click(37, { deliveryMode: "foreground" });
+  // @ts-expect-error app observations do not expose native identities
+  appState.pid;
+  // @ts-expect-error opaque tokens are not app action targets
+  await app.click({ elementToken: "private" });
   const observation = await computer.observeWindow({
     pid: 42,
     windowId: 7,

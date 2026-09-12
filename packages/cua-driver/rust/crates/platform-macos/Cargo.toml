@@ -25,6 +25,7 @@ pip-preview = { path = "../pip-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clipboard-rs = "0.3.5"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 # macOS system bindings
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
@@ -37,12 +38,12 @@ objc2-foundation = { version = "0.2", features = [
     "NSArray", "NSString", "NSDictionary", "NSRunLoop",
     "NSThread", "NSObject", "NSValue",
     "NSAppleEventDescriptor", "NSNotification", "NSOperation",
-    "NSURL", "NSDate", "NSError",
+    "NSURL", "NSDate", "NSError", "NSData", "NSAttributedString", "NSRange",
     "block2", "libc",
 ] }
 objc2-app-kit = { version = "0.2", features = [
     "NSApplication", "NSWindow", "NSScreen", "NSColor",
-    "NSEvent", "NSRunningApplication", "NSWorkspace",
+    "NSEvent", "NSRunningApplication", "NSWorkspace", "NSPasteboard", "NSPasteboardItem", "NSAttributedString",
     "NSView", "NSGraphicsContext", "NSResponder",
     # Picture-in-picture preview window (experimental) — NSImageView /
     # NSImage for the post-action screenshot, NSTextField for the

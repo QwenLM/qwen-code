@@ -65,6 +65,7 @@ fn def() -> &'static ToolDef {
                     "items": { "type": "string" },
                     "description": "Modifier keys held during the right-click: cmd/shift/option/ctrl. Pixel path only."
                 },
+                "app_context": { "type": "boolean", "description": "Use app-bound native click routing." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -84,6 +85,12 @@ impl Tool for RightClickTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.bool_or("app_context", false) {
+            let mut args = args;
+            args["button"] = serde_json::json!("right");
+            args["count"] = serde_json::json!(1);
+            return super::click::invoke_app_click(Arc::clone(&self.state), args).await;
+        }
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,

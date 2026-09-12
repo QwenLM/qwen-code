@@ -8,6 +8,8 @@
 //!    public `CGEventPostToPid` to reach Catalyst/Chromium apps and trigger
 //!    the activity-monitor tickle required for live-input detection.
 
+pub(crate) mod app_focus;
+pub(crate) mod app_pointer;
 pub mod ax_actions;
 pub mod interactive;
 pub mod keyboard;

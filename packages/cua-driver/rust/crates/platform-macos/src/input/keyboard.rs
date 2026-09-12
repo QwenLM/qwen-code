@@ -764,6 +764,39 @@ mod tests {
     }
 
     #[test]
+    fn synthesized_text_preserves_exact_unicode_and_punctuation_payloads() {
+        extern "C" {
+            fn CGEventKeyboardGetUnicodeString(
+                event: *mut std::ffi::c_void,
+                max_length: usize,
+                actual_length: *mut usize,
+                unicode_string: *mut u16,
+            );
+        }
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        for ch in "aA_~!@#$%^&*()+-={}[]|:;\"'<>,.?/中🙂".chars() {
+            for down in [true, false] {
+                let event = text_event(&source, ch, down).unwrap();
+                let mut units = [0u16; 4];
+                let mut length = 0;
+                unsafe {
+                    CGEventKeyboardGetUnicodeString(
+                        event.as_ptr().cast(),
+                        units.len(),
+                        &mut length,
+                        units.as_mut_ptr(),
+                    );
+                }
+                assert_eq!(
+                    String::from_utf16(&units[..length]).unwrap(),
+                    ch.to_string()
+                );
+                assert_eq!(event.get_flags(), CGEventFlags::CGEventFlagNull);
+            }
+        }
+    }
+
+    #[test]
     fn common_key_aliases_preserve_native_codes_and_flags() {
         for alias in ["meta", "super", "Meta"] {
             assert_eq!(

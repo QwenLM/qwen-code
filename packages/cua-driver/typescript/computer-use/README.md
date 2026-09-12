@@ -1,12 +1,113 @@
 # @qwen-code/cua-sdk/computer-use
 
-Thin Computer Use wrapper included in the single `@qwen-code/cua-sdk` npm
-package. It calls that package's typed driver API directly and does not depend
-on Qwen Code, a Node REPL, or a Skill.
+Computer Use API included in `@qwen-code/cua-sdk`. It uses the typed native
+SDK and works in ordinary Node.js or a persistent Node REPL.
 
-The wrapper exposes a small surface — application discovery, exact-window
-observation, opaque element-token actions, and state verification — while
-keeping raw SDK constructors and arbitrary tool dispatch out of its public API.
+## Platform workflows
+
+`await computer.getPlatform()` returns `macos`, `windows`, or `linux` from the
+connected driver's inventory. It does not infer the target from the CLI or Node
+host and does not capture the desktop. Missing or invalid platform metadata
+raises `driver_platform_unavailable`; update the driver and SDK before continuing.
+
+The single [Computer Use Skill](./SKILL.md) routes to one platform resource:
+
+- [macOS](./references/macos.md): App handles, compact app state and text operations.
+- [Windows/Linux](./references/windows-linux.md): existing exact-window targeting.
+
+Skill resources stay beside the entrypoint on the CLI host. Read the selected
+resource relative to the Skill's displayed base directory, even when the driver
+controls another machine. After changing connections, query the platform again.
+
+## App workflow
+
+On macOS, bind an application by name, identifier or installation path. The
+handle resolves its current native AX window and owns targeting internally:
+
+```js
+import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
+
+const computer = await ComputerUse.create();
+const app = await computer.getApp("Microsoft Excel");
+console.log((await app.getState()).text);
+// Use an ID from the returned state.
+await app.click(37);
+await app.typeText("hello");
+console.log((await app.getState()).text);
+await computer.close();
+```
+
+`getApp()` binds identity without launching. `getState()` can open a discovered
+stopped app through the native background launcher; actions never restart an app.
+Ambiguous names or identifiers require a unique installation path from
+`listApps()`. Different installations sharing a bundle ID have different handles.
+Native selection uses the focused AX window, main window, then last AX window,
+including attached sheets and the actual owning process.
+
+App methods accept short observed IDs or screenshot coordinates, and do not
+accept process IDs, window IDs, opaque tokens or delivery options.
+`getState()` returns `{ app, window, mode, text, screenshot? }`. Native AX
+projection preserves controls, meaningful disabled state and text, removes
+redundant layout/text structure, and renders compact full/diff/no-change output.
+Normal window observations include immediate menu-bar items. A selected open
+menu supplies its own context, including nested and disabled commands.
+Normal actions do not emit another full tree or image.
+
+Call `getState()` after a dialog, sheet or menu opens or closes before acting
+on its IDs. A process/window/session change invalidates prior IDs. Every App
+observation captures a current screenshot internally so a later AX-only
+diff/no-change does not discard the coordinate frame. The default return omits
+that image; use `getState({ includeScreenshot: true })` when the caller needs to
+inspect it.
+
+Native code selects semantic or synthesized input after checking the target.
+App clicks and keyboard input start on the native background path. When native
+preflight proves that no actuator ran and recommends foreground delivery, the
+App handle makes one guarded foreground attempt and restores the prior app.
+Native drag and App paste select their guarded foreground route before dispatch.
+Failed, partial, unverifiable and cancelled possible-dispatch actions are never replayed.
+Errors request fresh observation before another action; they do not ask the
+model to choose a delivery mode. Argument errors detected before native dispatch
+retain their specific correction; uncertain post-dispatch failures retain the
+cautious observe-before-retry message.
+
+## macOS text operations
+
+`app.paste(text, { format?, signal? })` pastes once into the current app window.
+`format` defaults to `text`; `md` and `html` supply formatted content, and the
+receiving app chooses which supplied format it accepts. The clipboard is restored
+only while the transaction still owns it, preserving newer external clipboard
+changes.
+The App method activates the exact window only for the Command-V dispatch and
+restores the previous foreground app. The exact-window `computer.paste(...)`
+method retains PID-addressed background delivery.
+
+`app.selectText(element, text, { prefix?, suffix?, selection?, signal? })` uses a
+current short element ID and selects one exact, case-sensitive text match. Prefix
+and suffix are optional immediately adjacent context; no match or multiple matches
+fail. `selection` defaults to `text`; `cursor_before` and `cursor_after` place the
+insertion point at that boundary. The element must support writable text selection.
+
+```js
+await app.selectText(37, "draft", { prefix: "Status: " });
+console.log((await app.getState()).text);
+// After confirming the intended selection:
+await app.paste("ready");
+console.log((await app.getState()).text);
+```
+
+Both methods return the native action effect. An error, cancellation or completed
+dispatch does not establish what changed; observe before deciding whether to retry.
+Neither method accepts delivery options. Exact-window callers can use
+`computer.paste({ pid, windowId, text, format? })` or
+`computer.selectText({ pid, windowId, elementToken, text, prefix?, suffix?, selection? })`.
+These operations are macOS-only and reject other driver platforms before mutation.
+
+## Exact-window SDK compatibility
+
+The lower-level `ComputerUse` methods remain available to programmatic clients.
+The bundled model Skill uses this workflow on Windows/Linux and the App workflow
+on macOS. The rest of this document describes the existing exact-window contract.
 
 ## Observation revisions
 
@@ -124,7 +225,7 @@ identity and permissions.
 
 ## Tests
 
-- `npm test` — hermetic unit tests against a fake driver handle.
+- `npm test` — hermetic facade tests against a fake driver handle and Skill packaging checks.
 - `npm run test:e2e` — standalone high-level wrapper run against a real target;
   set `COMPUTER_USE_PID` and `COMPUTER_USE_WINDOW`. It uses an isolated
   configured runtime by default; set `COMPUTER_USE_SOCKET` only when testing a

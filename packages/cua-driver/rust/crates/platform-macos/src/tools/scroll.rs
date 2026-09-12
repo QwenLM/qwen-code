@@ -792,6 +792,7 @@ mod tests {
             target_minimized: Some(false),
             app_hidden: Some(false),
             competing_keyboard_destinations: 0,
+            keyboard_focus_matches_target: false,
             element: ElementAncestry::OutsideTargetWindow,
         };
         let refusal = match decide_background_input(target, &facts, BackgroundAction::AxSemantic) {

@@ -50,6 +50,7 @@ pub const kAXValueIllegalType: AXValueType = 1_000;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -82,6 +83,7 @@ extern "C" {
         timeout_in_seconds: f32,
     ) -> AXError;
     pub fn AXUIElementGetTypeID() -> CFTypeID;
+    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     pub fn AXIsProcessTrusted() -> bool;
     /// `AXIsProcessTrustedWithOptions(options)` — when called with
     /// `{kAXTrustedCheckOptionPrompt: true}` raises the system Accessibility
@@ -664,6 +666,7 @@ pub unsafe fn focused_element_of_pid(pid: i32) -> Option<AXUIElementRef> {
     if app.is_null() {
         return None;
     }
+    let _ = AXUIElementSetMessagingTimeout(app, 0.1);
     let attr = CFStr::new("AXFocusedUIElement");
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value);
@@ -691,12 +694,100 @@ pub fn focused_window_id_of_pid(pid: i32) -> Option<u32> {
         if app.is_null() {
             return None;
         }
+        let _ = AXUIElementSetMessagingTimeout(app, 0.1);
         let window = copy_element_attr(app, "AXFocusedWindow");
         CFRelease(app as CFTypeRef);
         let window = window?;
         let window_id = ax_get_window_id(window);
         CFRelease(window as CFTypeRef);
         window_id
+    }
+}
+
+pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        let _ = AXUIElementSetMessagingTimeout(app, 2.0);
+        super::enablement::ensure_chromium_ax_enabled(pid, app);
+        let mut selection = copy_element_attr_with_status(app, "AXFocusedWindow");
+        if selection.complete && selection.value.is_none() {
+            selection = copy_element_attr_with_status(app, "AXMainWindow");
+        }
+        if selection.complete && selection.value.is_none() {
+            let mut windows = copy_ax_windows_with_status(app);
+            selection.complete = windows.complete;
+            if windows.complete {
+                selection.value = windows.elements.pop();
+            }
+            for window in windows.elements {
+                CFRelease(window as CFTypeRef);
+            }
+        }
+        CFRelease(app as CFTypeRef);
+        let window = selection.value?;
+        let _ = AXUIElementSetMessagingTimeout(window, 2.0);
+        let (sheets, complete) = super::sheets::copy_attached_sheets(&[window]);
+        let id = if complete && sheets.len() == 1 {
+            sheets[0].window_id.or_else(|| ax_get_window_id(window))
+        } else if complete && sheets.is_empty() {
+            ax_get_window_id(window)
+        } else {
+            None
+        };
+        CFRelease(window as CFTypeRef);
+        id
+    }
+}
+
+/// The returned menu-bar item owns its retain. Only an explicitly selected
+/// item establishes menu context; cached children of a closed menu do not.
+pub unsafe fn copy_open_menu_context(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
+    let (bar, complete) = copy_selected_menu_bar_item(app);
+    if bar.is_some() || !complete {
+        return (bar, complete);
+    }
+    let mut pid = 0;
+    if AXUIElementGetPid(app, &mut pid) == kAXErrorSuccess {
+        (super::menu::copy_current(pid), true)
+    } else {
+        (None, false)
+    }
+}
+
+unsafe fn copy_selected_menu_bar_item(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
+    let bar = copy_element_attr_with_status(app, "AXMenuBar");
+    let Some(bar_element) = bar.value else {
+        return (None, bar.complete);
+    };
+    let _ = AXUIElementSetMessagingTimeout(bar_element, 0.1);
+    let items = copy_children_with_status(bar_element);
+    CFRelease(bar_element as CFTypeRef);
+    let mut complete = items.complete;
+    let mut selected = Vec::new();
+    for item in items.elements {
+        let _ = AXUIElementSetMessagingTimeout(item, 0.1);
+        let read = copy_bool_attr_with_status(item, "AXSelected");
+        complete &= read.complete;
+        if read.value == Some(true) {
+            selected.push(item);
+        } else {
+            CFRelease(item as CFTypeRef);
+        }
+    }
+    if complete && selected.len() == 1 {
+        (selected.pop(), true)
+    } else {
+        complete &= selected.len() <= 1;
+        for item in selected {
+            CFRelease(item as CFTypeRef);
+        }
+        if !complete {
+            note_incomplete("AXMenuBar", "menu context unavailable or ambiguous");
+        }
+        (None, complete)
     }
 }
 
@@ -803,6 +894,39 @@ pub unsafe fn copy_element_attr(
         return None;
     }
     Some(value as AXUIElementRef)
+}
+
+pub unsafe fn copy_element_attr_with_status(
+    element: AXUIElementRef,
+    attr_name: &str,
+) -> CopiedAXAttribute<AXUIElementRef> {
+    let attr = CFStr::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if error != kAXErrorSuccess {
+        return CopiedAXAttribute {
+            value: None,
+            complete: attribute_error_is_complete(attr_name, error),
+        };
+    }
+    if value.is_null() {
+        return CopiedAXAttribute {
+            value: None,
+            complete: null_value_incomplete(attr_name),
+        };
+    }
+    if core_foundation::base::CFGetTypeID(value) != AXUIElementGetTypeID() {
+        CFRelease(value);
+        note_incomplete(attr_name, "expected AX element");
+        return CopiedAXAttribute {
+            value: None,
+            complete: false,
+        };
+    }
+    CopiedAXAttribute {
+        value: Some(value as AXUIElementRef),
+        complete: true,
+    }
 }
 
 /// Perform an AX action using a string attribute name.
@@ -932,8 +1056,12 @@ pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool
     set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
 }
 
-/// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.
-/// Returns `None` if the element is not a composited window.
+/// Get the CGWindowID of an AX window element.
+///
+/// The private SPI is the fast path. Some native apps return a valid AX window
+/// but reject that SPI, so fall back to the unique same-process WindowServer
+/// window with matching AX bounds. A title match may disambiguate identical
+/// bounds; otherwise the fallback refuses to guess.
 ///
 /// # Safety
 ///
@@ -942,10 +1070,21 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
     let mut wid: u32 = 0;
     let err = _AXUIElementGetWindow(element, &mut wid);
     if err == kAXErrorSuccess && wid != 0 {
-        Some(wid)
-    } else {
-        None
+        return Some(wid);
     }
+
+    let mut pid = 0;
+    if AXUIElementGetPid(element, &mut pid) != kAXErrorSuccess || pid <= 0 {
+        return None;
+    }
+    let frame = element_screen_rect(element)?;
+    let title = copy_string_attr(element, "AXTitle");
+    crate::windows::match_ax_window(
+        pid,
+        title.as_deref(),
+        frame,
+        &crate::windows::all_windows_any_layer(),
+    )
 }
 
 /// Read the `AXWindows` attribute of an application element.
