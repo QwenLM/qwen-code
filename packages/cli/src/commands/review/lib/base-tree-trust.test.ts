@@ -363,6 +363,12 @@ describe('base-tree trust store', () => {
     const rotated = establishTrust(p, runIdentity(worktree).identity, SHA_B);
     expect(rotated.established).toBe('rotated');
     expect(rotated.nonce).not.toBe(first.nonce);
+    // `conflict: false` is the half that makes the rotation USABLE: the arm
+    // re-pins at the new base, so the caller proceeds. Reporting a conflict
+    // here instead would decline the very rebase this path exists to let
+    // through, and nothing pinned it.
+    expect(rotated.conflict).toBe(false);
+    expect(JSON.parse(readFileSync(p, 'utf8')).baseSha).toBe(SHA_B);
     expect(builtTreeRecord(p, tree)).toBeNull();
   });
 

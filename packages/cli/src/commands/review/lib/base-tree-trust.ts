@@ -77,6 +77,14 @@ export interface BuiltTreeStat {
    */
   targetSize?: number;
   targetCtimeMs?: number;
+  /**
+   * The escaping target is a DIRECTORY, whose own size and ctime do not move
+   * when a child is rewritten in place — so the pair describes nothing about
+   * what the A/B's base side would run through that link. Recorded as a flag
+   * rather than papered over, and the reuse arm refuses to certify a tree
+   * that holds one.
+   */
+  targetUndescribable?: boolean;
 }
 
 /** What a build of one tree left behind, recorded host-side. */

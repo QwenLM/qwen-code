@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -1505,6 +1506,136 @@ describe('lease acquisition is atomic (#9205)', () => {
     const after = readReviewWorktreeLease(root, 'pr-1');
     expect(after?.promptId).toBe('prompt-b');
     expect(after?.identity).not.toBe(before);
+  });
+
+  it('records the merge base even when the base fetch FAILED (R3-5)', () => {
+    // The anchor has to belong to the capture that owns the plan. Skipping
+    // the record on a failed base fetch left a PREVIOUS round's value
+    // standing in the lease — and the anchor then AUTHENTICATED a plan the
+    // mount had rewritten back to that stale sha, so the run reused and
+    // certified a base tree at a commit that was not this round's base at
+    // all. Whether a stale fetch makes the sha untrustworthy is
+    // `base-tree`'s to judge from `plan.baseFetchFailed`; it is not a reason
+    // to leave the anchor pointing at someone else's round.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'a'.repeat(40));
+    const first = readReviewWorktreeLease(root, 'pr-1')?.identity;
+
+    // Round 2 re-captures after a rebase; its base fetch fails, and it
+    // resolves a different (possibly stale) sha. The lease must follow it.
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'prompt-b' }));
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'b'.repeat(40));
+
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.mergeBaseSha).toBe('b'.repeat(40));
+    expect(after?.identity).not.toBe(first);
+  });
+
+  it('reclaims the base-tree trust state from the FINALIZER too (R3-9)', () => {
+    // A session that ends through `cleanupReviewWorktreeLeases` never passes
+    // through `clearReviewWorktreeLease`, so the reclaim on that path alone
+    // left a ~9 MB file per plan path behind forever.
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      '--detach',
+      worktree,
+      'HEAD',
+    ]);
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+    const trustDir = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    mkdirSync(trustDir, { recursive: true });
+    writeFileSync(join(trustDir, 'deadbeefdeadbeef.json'), '{"identity":1}');
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      repositoryRoot: root,
+    });
+
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull(); // it finalized
+    expect(existsSync(trustDir)).toBe(false);
+  });
+
+  it("refuses to write the merge base over ANOTHER session's lease (R3-11)", () => {
+    // A capture that lost the acquisition race, or one still running after an
+    // operator handed the target to a new session, would otherwise write its
+    // merge base — and a fresh identity — over the lease the live review is
+    // keyed on, rotating that review's trust state and sweeping the base tree
+    // it is mid-A/B in.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root)); // session-a holds it
+    const before = readReviewWorktreeLease(root, 'pr-1');
+
+    recordReviewWorktreeLeaseMergeBase(root, 'pr-1', 'f'.repeat(40), 'other');
+
+    const after = readReviewWorktreeLease(root, 'pr-1');
+    expect(after?.mergeBaseSha).toBeUndefined();
+    expect(after?.identity).toBe(before?.identity);
+
+    // The owner's own write lands.
+    recordReviewWorktreeLeaseMergeBase(
+      root,
+      'pr-1',
+      'f'.repeat(40),
+      before!.sessionId,
+    );
+    expect(readReviewWorktreeLease(root, 'pr-1')?.mergeBaseSha).toBe(
+      'f'.repeat(40),
+    );
+  });
+
+  it('never leaves a torn lease for the lock-free reader (R3-10)', () => {
+    // `base-tree`'s `runIdentity` reads this file with no lock on every ask,
+    // and every reader treats a torn lease as NO lease — which makes that ask
+    // refuse and costs the review its A/B for that shard. Every writer here
+    // publishes by rename, so a reader sees the old file or the new one.
+    const root = createRepository();
+    createReviewWorktreeLease(leaseParams(root));
+    const path = reviewLeasePath(root, 'pr-1');
+    const seen: Array<string | undefined> = [];
+    // The refresh and the merge-base write are the two in-place writers this
+    // diff adds a lock-free reader to; read between every one of them.
+    for (let i = 0; i < 6; i++) {
+      createReviewWorktreeLease(leaseParams(root, { promptId: `p-${i}` }));
+      seen.push(readReviewWorktreeLease(root, 'pr-1')?.promptId);
+      recordReviewWorktreeLeaseMergeBase(
+        root,
+        'pr-1',
+        `${i}`.repeat(40),
+        'session-a',
+      );
+      seen.push(readReviewWorktreeLease(root, 'pr-1')?.promptId);
+    }
+    // Never a torn read, and never a leftover tmp file for a sweep to meet.
+    expect(seen.every((v) => typeof v === 'string')).toBe(true);
+    expect(
+      readdirSync(dirname(path)).filter((f) => f.endsWith('.tmp')),
+    ).toEqual([]);
+
+    // The mechanism, measured rather than inferred: publishing by RENAME
+    // replaces the directory entry, so the inode moves. A truncate in place
+    // keeps it — and keeps the window where a lock-free reader sees a file
+    // that is neither the old content nor the new. A single-threaded test
+    // cannot catch that window directly, so it pins the property that makes
+    // the window impossible.
+    const inodeBefore = lstatSync(path).ino;
+    createReviewWorktreeLease(leaseParams(root, { promptId: 'after' }));
+    expect(lstatSync(path).ino).not.toBe(inodeBefore);
+    expect(readReviewWorktreeLease(root, 'pr-1')?.promptId).toBe('after');
   });
 
   it('reclaims the base-tree trust state for the target it clears, and only that one', () => {

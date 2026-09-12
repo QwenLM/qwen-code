@@ -1174,13 +1174,29 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // resolved. Not recorded when there is no merge base: `base-tree`
     // reports the A/B unavailable for that case on its own.
     //
-    // Advisory and never fatal — a capture that cannot write it leaves
-    // `base-tree` reading the plan, which is where it was.
-    if (mergeBaseSha !== null && !baseFetchFailed) {
+    // Never fatal HERE — but not harmless either, and this comment used to
+    // claim it was: `base-tree` now REFUSES when the lease carries no merge
+    // base, because the alternative is the mount-writable plan being the sole
+    // authority again. So a capture that cannot record it costs this review
+    // its A/B lane, and the note `base-tree` prints says how to get it back
+    // (re-run this command). Debug-logged rather than thrown, because the
+    // fetch itself succeeded and failing the capture over this write would be
+    // the worse trade.
+    //
+    // UNCONDITIONALLY when a merge base was resolved at all — the
+    // `baseFetchFailed` half used to skip it, and that skip is what let a
+    // PREVIOUS round's value survive in the lease and then AUTHENTICATE a
+    // plan rewritten back to it. The anchor has to belong to the capture
+    // that owns the plan, so a capture that resolved a (possibly stale)
+    // merge base records it; `base-tree` refuses the stale-base round on
+    // `plan.baseFetchFailed` separately, which is where that judgement
+    // belongs.
+    if (mergeBaseSha !== null) {
       recordReviewWorktreeLeaseMergeBase(
         process.cwd(),
         leaseTarget,
         mergeBaseSha,
+        sessionId,
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');

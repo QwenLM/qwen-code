@@ -24,6 +24,7 @@ import {
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
+  recordReviewWorktreeLeaseMergeBase,
 } from '../../services/review-worktree-lease.js';
 import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
@@ -1308,6 +1309,55 @@ describe('fetch-pr report assembly', () => {
       expect(producerMocks.gitOpt.mock.invocationCallOrder[0]!).toBeLessThan(
         vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('records the resolved merge base host-side, fetch failure or not (R3-5, R3-7)', async () => {
+      // The only production caller of the host-side anchor `base-tree` rules
+      // on. The anchor has to belong to the capture that OWNS the plan:
+      // skipping the record on a failed base fetch left a previous round's
+      // value standing in the lease, and the anchor then AUTHENTICATED a plan
+      // the mount had rewritten back to that stale sha.
+      const recorded = vi.mocked(recordReviewWorktreeLeaseMergeBase);
+
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-resolved',
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      // The session id is passed too, so a capture that lost the
+      // acquisition race cannot write its base over the live review's lease.
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-resolved',
+        expect.any(String),
+      );
+
+      // The failed-fetch round records too. Whether a stale fetch makes the
+      // sha untrustworthy is `base-tree`'s to judge from the plan's
+      // `baseFetchFailed`; it is not a reason to leave the anchor pointing at
+      // someone else's round.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: 'mb-stale',
+        baseFetchFailed: true,
+      }));
+      await reportFor({});
+      expect(recorded).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+        'mb-stale',
+        expect.any(String),
+      );
+
+      // No merge base at all: nothing to anchor, and nothing recorded.
+      recorded.mockClear();
+      producerMocks.resolveMergeBase.mockImplementation(() => ({
+        sha: null,
+        baseFetchFailed: false,
+      }));
+      await reportFor({});
+      expect(recorded).not.toHaveBeenCalled();
     });
 
     it('lets the step-4 launch-dir refusal propagate unwrapped, with no rollback', async () => {

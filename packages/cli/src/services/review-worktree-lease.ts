@@ -182,23 +182,7 @@ export function clearReviewWorktreeLease(
   // never throwing — reporting failure over a cleanup that succeeded, with
   // every retry re-throwing on a file no message names. Loud instead, the
   // same contract the mirror write carries.
-  // The base-tree trust artifacts for this target, which nothing else
-  // reclaims: they are keyed by the plan's PATH, which no other module can
-  // reconstruct, and a real built tree's per-file inventory measures ~9 MB.
-  // Host-side and this session's own state, so a plain recursive remove is
-  // right here — and it is best-effort like every other removal on this
-  // path.
-  try {
-    rmSync(join(leaseDirectory(root), 'base-tree', target), {
-      recursive: true,
-      force: true,
-    });
-  } catch (error) {
-    debugLogger.debug(
-      `Failed to reclaim base-tree trust state for ${target}:`,
-      error,
-    );
-  }
+  reclaimBaseTreeTrust(root, target);
   const legacy = legacyLeasePath(root, target);
   try {
     rmSync(legacy, { force: true, recursive: true });
@@ -282,12 +266,19 @@ export function recordReviewWorktreeLeaseMergeBase(
   repositoryRoot: string,
   target: string,
   mergeBaseSha: string,
+  sessionId?: string,
 ): void {
   if (!validTarget(target) || !mergeBaseSha) return;
   const root = resolve(repositoryRoot);
   const path = leasePath(root, target);
   const existing = readLease(path);
   if (!existing) return;
+  // Only this session's own lease. A capture that lost the acquisition race,
+  // or one still running after an operator handed the target to a new
+  // session, would otherwise write its merge base — and its fresh identity —
+  // over the lease the live review is keyed on, rotating that review's trust
+  // state and sweeping the base tree it is mid-A/B in.
+  if (sessionId !== undefined && existing.sessionId !== sessionId) return;
   if (existing.mergeBaseSha === mergeBaseSha) return;
   const next: ReviewWorktreeLease = {
     ...existing,
@@ -306,12 +297,24 @@ export function recordReviewWorktreeLeaseMergeBase(
   // reader that catches this mid-write would read a torn file, and every
   // reader treats a torn lease as NO lease — which makes `runIdentity`
   // refuse and `base-tree` report itself unavailable for that ask.
+  try {
+    atomicWriteLease(path, `${JSON.stringify(next, null, 2)}\n`);
+  } catch (error) {
+    debugLogger.debug(`Failed to record the merge base in ${path}:`, error);
+  }
+}
+
+/**
+ * tmp-then-rename, for a file read lock-free by `base-tree`'s `runIdentity`.
+ *
+ * A truncate in place lets a reader land inside the write and see a torn
+ * file, which every reader treats as NO lease — and that costs the review
+ * its A/B for that shard.
+ */
+function atomicWriteLease(path: string, data: string): void {
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, {
-      encoding: 'utf8',
-      flag: 'wx',
-    });
+    writeFileSync(tmp, data, { encoding: 'utf8', flag: 'wx' });
     renameSync(tmp, path);
   } catch (error) {
     try {
@@ -319,7 +322,30 @@ export function recordReviewWorktreeLeaseMergeBase(
     } catch {
       // Litter, not a verdict.
     }
-    debugLogger.debug(`Failed to record the merge base in ${path}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Reclaim the base-tree trust artifacts for a target.
+ *
+ * Nothing else can: they are keyed by the plan's PATH, a digest no other
+ * module reconstructs, and a real built tree's per-file inventory measures
+ * ~9 MB — one file per plan path per review, kept forever. Host-side and this
+ * session's own state, so a plain recursive remove is right, and best-effort
+ * like every other removal on the release paths.
+ */
+function reclaimBaseTreeTrust(root: string, target: string): void {
+  try {
+    rmSync(join(leaseDirectory(root), 'base-tree', target), {
+      recursive: true,
+      force: true,
+    });
+  } catch (error) {
+    debugLogger.debug(
+      `Failed to reclaim base-tree trust state for ${target}:`,
+      error,
+    );
   }
 }
 
@@ -404,7 +430,11 @@ export function createReviewWorktreeLease(params: {
         existing.mergeBaseSha,
       );
     }
-    writeFileSync(path, data, 'utf8');
+    // tmp-then-rename, not a truncate in place: `runIdentity` reads this file
+    // lock-free on every `base-tree` ask, and a reader landing inside a
+    // truncate sees a torn file — which every reader treats as NO lease, so
+    // that ask refuses and the review loses its A/B for that shard.
+    atomicWriteLease(path, data);
   }
   mirrorLeaseAtLegacyPath(legacy, data, params.sessionId, params.target);
 }
@@ -786,6 +816,12 @@ export function cleanupReviewWorktreeLeases(params: {
         continue;
       }
       rmSync(path, { force: true });
+      // ...and the base-tree trust artifacts for that target, which this is
+      // the last call in a session that can name them. `clearReviewWorktreeLease`
+      // reclaims them on the ordinary release path; a session that ends
+      // through the FINALIZER instead reached here without passing through
+      // it, and left a ~9 MB file per plan path behind forever.
+      reclaimBaseTreeTrust(repositoryRoot, lease.target);
       // The legacy twin goes with it — but only when it IS the twin. The
       // mirror is READABLE from inside the mount, so reviewed code can copy
       // its sessionId/promptId into a planted lease naming a victim
