@@ -458,7 +458,7 @@ describe('AcpConnection stale responses', () => {
     void load.catch(() => {});
     void prompt.catch(() => {});
     conn.sdkConnection = {};
-    conn.sessionId = 'replacement';
+    conn.sessionId = 'old-session';
     resolveNew({ sessionId: 'created-session' });
     resolveLoad({});
     resolvePrompt({ stopReason: 'end_turn' });
@@ -466,7 +466,7 @@ describe('AcpConnection stale responses', () => {
     await expect(create).rejects.toThrow('connection superseded');
     await expect(load).rejects.toThrow('connection superseded');
     await expect(prompt).rejects.toThrow('connection superseded');
-    expect(conn.sessionId).toBe('replacement');
+    expect(conn.sessionId).toBe('old-session');
     expect(onEndTurn).not.toHaveBeenCalled();
   });
 });
