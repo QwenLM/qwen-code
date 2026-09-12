@@ -2992,6 +2992,18 @@ export async function runAcpAgent(
               result.status === 'rejected',
           )
           .map((result) => result.reason);
+        // A SessionEnd hook that outlives the 30s budget is cancelled rather
+        // than rejected: `fireSessionEndEvent` resolves to `undefined` for a
+        // cancelled hook (the `{ success: false, outcome: 'cancelled' }`
+        // result never rejects), so `Promise.allSettled` cannot observe it and
+        // `failures` above stays empty. Detect the abort directly so a
+        // cancelled hook still surfaces as a shutdown failure (non-zero exit)
+        // instead of the CLI exiting 0 as though every hook had run.
+        if (controller.signal.aborted) {
+          failures.push(
+            new Error('SessionEnd hook did not complete within 30s (cancelled)'),
+          );
+        }
         for (const failure of failures) {
           debugLogger.warn(
             `SessionEnd hook failed: ${failure instanceof Error ? failure.message : String(failure)}`,

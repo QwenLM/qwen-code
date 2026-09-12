@@ -118,6 +118,7 @@ async function runExitCleanupPass(
  */
 export function _resetCleanupFunctionsForTest(): void {
   cleanupFunctions.length = 0;
+  exitCleanupPromise = undefined;
 }
 
 export async function cleanupCheckpoints() {
