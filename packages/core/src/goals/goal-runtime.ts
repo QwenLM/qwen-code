@@ -16,15 +16,23 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
+  InvalidGoalCheckpointError,
   isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
 } from './goal-checkpoint.js';
-import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
+  GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimCountError,
+  GoalCheckpointClaimLengthError,
+  GoalCheckpointVerifierInputTooLargeError,
+} from './goal-checkpoint-verifier.js';
+import {
+  capGoalCheckpointFailure,
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
-  GOAL_CHECKPOINT_STALLED_REASON,
+  goalCheckpointStalledReason,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_INFEASIBLE_NEXT_STEP,
@@ -38,6 +46,7 @@ import {
   isGoalTokenBudgetSpent,
   isGoalTurnBudgetSpent,
   isRepeatedBlockerProposal,
+  type GoalCheckpointFailureShape,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalLimitKind,
@@ -73,6 +82,56 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GOAL_RUNTIME');
+
+/**
+ * What a failed checkpoint check ran into. The shape decides the advice a
+ * stall stop carries; the detail is the one-line diagnostic the record keeps.
+ */
+interface CheckpointFailure {
+  shape: GoalCheckpointFailureShape;
+  detail: string;
+}
+
+/**
+ * Classifies a checkpoint check that threw. A claim-count, claim-budget or
+ * claim-length overrun is well-formed output that could not fit the window
+ * within the checkpoint's bounds -- the same capacity failure as a full claim
+ * list, with the same remedy -- so those three subclasses are tested before
+ * their base class. Any other `InvalidGoalCheckpointError` means the verifier answered
+ * with output that is not usable claims. Anything else means no answer
+ * arrived to judge: a provider error, the check's own timeout, or a failure
+ * inside the check.
+ */
+function describeCheckpointFailure(error: unknown): CheckpointFailure {
+  return {
+    shape:
+      error instanceof GoalCheckpointClaimCountError ||
+      error instanceof GoalCheckpointClaimBudgetError ||
+      error instanceof GoalCheckpointClaimLengthError
+        ? 'capacity'
+        : error instanceof InvalidGoalCheckpointError
+          ? 'unusable'
+          : 'unreachable',
+    detail: capGoalCheckpointFailure(
+      error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error),
+    ),
+  };
+}
+
+/** The stall a checkpoint that came back at the claim ceiling spends. */
+const FULL_CLAIM_LIST_FAILURE: CheckpointFailure = {
+  shape: 'capacity',
+  detail: `checkpoint came back with a full claim list (${GOAL_CHECKPOINT_CLAIM_LIMIT} claims) while the evidence window overflowed`,
+};
+
+/**
+ * What a checkpoint check tells the record about checkpoint health: a failure
+ * to report, `'clear'` after a check that succeeded, or `undefined` when the
+ * check proved nothing either way and the previous diagnostic stays.
+ */
+type CheckpointHealthUpdate = CheckpointFailure | 'clear' | undefined;
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -559,12 +618,32 @@ export function createGoalRuntime(
     }).catch(() => undefined);
   };
 
-  const withCheckpointStalls = (
+  /**
+   * The Goal record with its checkpoint health brought up to date: the stall
+   * streak (zero is spelled as no field) and the last failure diagnostic,
+   * which moves only when the check actually learned something.
+   */
+  const withCheckpointHealth = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
     checkpointStalls: number,
+    update: CheckpointHealthUpdate,
   ): NonNullable<GoalSnapshotV2['goal']> => {
-    const { checkpointStalls: _previous, ...rest } = goal;
-    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
+    const {
+      checkpointStalls: _previousStalls,
+      lastCheckpointFailure: previousFailure,
+      ...rest
+    } = goal;
+    const lastCheckpointFailure =
+      update === 'clear'
+        ? undefined
+        : update === undefined
+          ? previousFailure
+          : update.detail;
+    return {
+      ...rest,
+      ...(checkpointStalls > 0 ? { checkpointStalls } : {}),
+      ...(lastCheckpointFailure ? { lastCheckpointFailure } : {}),
+    };
   };
 
   const assertAvailable = () => {
@@ -1094,6 +1173,7 @@ export function createGoalRuntime(
   const finishCheckpointCheck = async (
     attempt: CheckpointAttempt,
     outcome: 'room' | 'stalled' | 'inconclusive' = 'inconclusive',
+    failure?: CheckpointFailure,
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
@@ -1109,11 +1189,18 @@ export function createGoalRuntime(
           : outcome === 'stalled'
             ? (snapshot.goal.checkpointStalls ?? 0) + 1
             : (snapshot.goal.checkpointStalls ?? 0);
+      // The diagnostic follows what the check learned, not the streak: a
+      // check that found room clears it, a check that failed reports why
+      // whether or not it spent a stall, and a check that never ran leaves
+      // the previous one standing.
+      const health: CheckpointHealthUpdate =
+        outcome === 'room' ? 'clear' : failure;
       if (
         await settleIfCheckpointStalled(
           attempt,
           snapshot.goal,
           checkpointStalls,
+          health,
         )
       ) {
         return;
@@ -1124,7 +1211,7 @@ export function createGoalRuntime(
       const checkedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
+          ...withCheckpointHealth(snapshot.goal, checkpointStalls, health),
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
         },
@@ -1170,32 +1257,56 @@ export function createGoalRuntime(
 
   /**
    * Stops the Goal once its stall streak reaches the limit, persisting the
-   * streak with the stop so the record explains itself. Returns whether the
-   * attempt was settled.
+   * streak and the last failure with the stop so the record explains itself.
+   * The stop reason follows the check that spent the last stall: narrowing
+   * the objective is the remedy for a full claim list, not for a verifier
+   * that answered unusably or never answered. Every arm that spends a stall
+   * reports its failure; a streak reaching the limit without one falls back
+   * to the compaction reading. Returns whether the attempt was settled.
    */
   const settleIfCheckpointStalled = async (
     attempt: CheckpointAttempt,
     goal: NonNullable<GoalSnapshotV2['goal']>,
     checkpointStalls: number,
+    health: CheckpointHealthUpdate,
   ): Promise<boolean> => {
     if (checkpointStalls < GOAL_CHECKPOINT_STALL_LIMIT) return false;
+    const shape: GoalCheckpointFailureShape =
+      health !== undefined && health !== 'clear' ? health.shape : 'capacity';
     await settleCheckpointFailure(
       attempt,
-      withCheckpointStalls(goal, checkpointStalls),
-      GOAL_CHECKPOINT_STALLED_REASON,
+      withCheckpointHealth(goal, checkpointStalls, health),
+      goalCheckpointStalledReason(shape),
       'evidence_catalog',
     );
     return true;
   };
 
+  /**
+   * Stops the Goal at a checkpoint bound other than the stall breaker. The
+   * record's diagnostic is scoped to this stop: an arm whose cause is itself a
+   * failed check (the request that was too large) records that failure, and
+   * every other arm clears whatever an earlier, unrelated check left, since
+   * its own `lastReason` already says what happened.
+   */
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
     limitKind?: GoalLimitKind,
+    health: CheckpointHealthUpdate = 'clear',
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      await settleCheckpointFailure(attempt, snapshot.goal, reason, limitKind);
+      await settleCheckpointFailure(
+        attempt,
+        withCheckpointHealth(
+          snapshot.goal,
+          snapshot.goal.checkpointStalls ?? 0,
+          health,
+        ),
+        reason,
+        limitKind,
+      );
     });
   };
 
@@ -1210,6 +1321,9 @@ export function createGoalRuntime(
       const checkpointStalls = stalled
         ? (snapshot.goal.checkpointStalls ?? 0) + 1
         : 0;
+      const health: CheckpointHealthUpdate = stalled
+        ? FULL_CLAIM_LIST_FAILURE
+        : 'clear';
       // A stopped Goal discards the checkpoint it would have written: a
       // resumed window restarts from a fresh cursor anyway.
       if (
@@ -1217,6 +1331,7 @@ export function createGoalRuntime(
           attempt,
           snapshot.goal,
           checkpointStalls,
+          health,
         )
       ) {
         return;
@@ -1227,7 +1342,7 @@ export function createGoalRuntime(
       const checkpointSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
+          ...withCheckpointHealth(snapshot.goal, checkpointStalls, health),
           evidenceCursor: { recordId: attempt.recordUuid },
           evidenceCheckpoint: checkpoint,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
@@ -1327,6 +1442,7 @@ export function createGoalRuntime(
             attempt,
             GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
             'checkpoint_request',
+            describeCheckpointFailure(error),
           );
           return;
         }
@@ -1336,6 +1452,10 @@ export function createGoalRuntime(
           error,
           `replay=${replay}`,
         );
+        // The trace above is for an investigation; this is what the record
+        // keeps, on every arm, so the failure is visible before the stall
+        // breaker stops the Goal and still readable after it has.
+        const failure = describeCheckpointFailure(error);
         // A restore replay is exempt: it runs no turn of its own, so a
         // transient failure at startup must not spend a streak the restored
         // session never re-earned. The replay mints a continuation whose own
@@ -1350,13 +1470,13 @@ export function createGoalRuntime(
           // overflowing window run a Goal in circles: each turn paid the
           // call, kept the same cursor, and was told to retry, with nothing
           // but the token budget left to stop it.
-          await finishCheckpointCheck(attempt, 'stalled');
+          await finishCheckpointCheck(attempt, 'stalled', failure);
           return;
         }
         // A failure while the window still has room must not abort a
         // healthy Goal: settle the attempt as bookkeeping so the evidence
         // stays citable and a later turn retries the checkpoint.
-        await finishCheckpointCheck(attempt);
+        await finishCheckpointCheck(attempt, 'inconclusive', failure);
         return;
       }
       await recordCheckpoint(

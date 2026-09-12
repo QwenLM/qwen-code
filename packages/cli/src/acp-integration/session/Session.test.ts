@@ -4863,6 +4863,10 @@ describe('Session', () => {
       const result = await session.continueLastTurn();
 
       expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
@@ -4879,6 +4883,10 @@ describe('Session', () => {
       expect(result).toEqual({
         accepted: true,
         interruption: 'interrupted_prompt',
+      });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
       });
       // continueLastTurn is now a pure accept/reject pre-check — the daemon
       // bridge drives the actual turn through sendPrompt, so the agent must NOT
@@ -4907,6 +4915,10 @@ describe('Session', () => {
         accepted: true,
         interruption: 'interrupted_turn',
       });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_turn',
+        canContinue: true,
+      });
       // continueLastTurn is decision-only for interrupted_turn too — the bridge
       // drives the turn, so the agent must not fire its own prompt() here.
       await Promise.resolve();
@@ -4924,6 +4936,103 @@ describe('Session', () => {
       expect(result).toEqual({ accepted: false, interruption: 'none' });
       expect(promptSpy).not.toHaveBeenCalled();
     });
+
+    it.each(['runtime', 'legacy'] as const)(
+      'rejects %s history gaps both in the status and before execution',
+      async (source) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unanswered' }] },
+        ]);
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        });
+
+        const historyGaps = [
+          { childUuid: 'child', missingParentUuid: 'missing' },
+        ];
+        Object.assign(mockConfig, {
+          getSessionRestoreRuntime: vi.fn().mockReturnValue({
+            historyGaps: source === 'runtime' ? historyGaps : [],
+          }),
+          getResumedSessionData: vi.fn().mockReturnValue({
+            historyGaps: source === 'legacy' ? historyGaps : [],
+          }),
+        });
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'degraded_history',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+        expect(
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [],
+            _meta: { 'qwen.daemon.continueLastTurn': true },
+          }),
+        ).toEqual({ stopReason: 'end_turn' });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChat.stripOrphanedUserEntriesFromHistory,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      '550e8400-e29b-41d4-a716-446655440000',
+      '550E8400-E29B-41D4-A716-446655440000',
+    ])(
+      'retains finalized history gaps for %s only in its original session',
+      async (storageSessionId) => {
+        const restoreRuntime = vi.fn().mockReturnValue({
+          historyGaps: [{ childUuid: 'child', missingParentUuid: 'missing' }],
+        });
+        Object.assign(mockConfig, {
+          getSessionRestoreRuntime: restoreRuntime,
+          getResumedSessionData: vi.fn().mockReturnValue(undefined),
+        });
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(storageSessionId);
+        session.dispose();
+        session = new Session(
+          storageSessionId.toLowerCase(),
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        restoreRuntime.mockReturnValue(undefined);
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unanswered' }] },
+        ]);
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'degraded_history',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+        await session.prompt({
+          sessionId: storageSessionId.toLowerCase(),
+          prompt: [],
+          _meta: { 'qwen.daemon.continueLastTurn': true },
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChat.stripOrphanedUserEntriesFromHistory,
+        ).not.toHaveBeenCalled();
+
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+      },
+    );
 
     it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
       // An interrupted prompt: an orphaned user turn the model never answered.
@@ -5016,6 +5125,10 @@ describe('Session', () => {
         accepted: false,
         interruption: 'interrupted_prompt',
       });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: false,
+      });
       expect(promptSpy).not.toHaveBeenCalled();
     });
   });
@@ -5055,6 +5168,20 @@ describe('Session', () => {
         },
       ];
     }
+
+    it('does not classify a restorable question as an interrupted tool turn', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(danglingAuqHistory());
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
 
     it('requests permission and continues with the real function response', async () => {
       mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
@@ -6655,13 +6782,57 @@ describe('Session', () => {
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
-      expect(
-        mockFileHistoryService.restoreFromSnapshots,
-      ).not.toHaveBeenCalled();
+      // One turn survives, so one snapshot may: every rewind surface resolves
+      // a turn through this array's positions.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
-        undefined,
+        expect.arrayContaining([expect.objectContaining({ promptId: 'p1' })]),
+      );
+    });
+
+    it('drops snapshot positions along with the turns a rewind discards', () => {
+      // A rewind resolves a turn through the snapshot array's POSITION
+      // (`getRewindSnapshots` hands out `idx`, the agent resolves a promptId
+      // with `findIndex`). Leaving an abandoned turn's snapshot behind makes
+      // the position point at a turn the history no longer has, so the next
+      // rewind cuts the wrong turn and the recorded branch disagrees with the
+      // live view.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      const snapshots = ['p1', 'p2', 'p3'].map((promptId) => ({
+        promptId,
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {},
+      }));
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(snapshots);
+
+      session.rewindToTurn(2, { rewindFiles: false });
+
+      // Two turns survive the cut to the third prompt.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        snapshots[0],
+        snapshots[1],
+      ]);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        2,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
       );
     });
 
@@ -8614,6 +8785,57 @@ describe('Session', () => {
         update.update.availableCommands.map((command) => command.name),
       ).not.toContain('disabled-extension-skill');
       expect(update.update._meta).toBeUndefined();
+    });
+
+    it('omits inactive extension skills whose slash command carries the qualified registry name', async () => {
+      // The loader qualifies extension skill commands as `<ext>:<authored>`
+      // and carries the authored spelling on skillDetail, while the
+      // inactive-extension refs key on the manifest's authored spelling.
+      // Dropping the authoredName propagation into
+      // isInactiveExtensionSkill would miss that lookup and leak the
+      // inactive skill into the snapshot.
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'disabled-ext:pdf',
+          description: 'Inactive skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'disabled-ext:pdf',
+            authoredName: 'pdf',
+            description: 'Inactive skill',
+            body: 'Hidden instructions',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Inactive skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as { update: { availableCommands: Array<{ name: string }> } };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).not.toContain('disabled-ext:pdf');
     });
 
     it('keeps active extension slash commands that share a skill name with inactive extensions', async () => {
@@ -28426,7 +28648,7 @@ describe('Session', () => {
         );
         expect(sentText).toContain('Browser automation');
         expect(sentText).toContain(
-          '- Skills: browser-skill (invoke via /<skill-name>)',
+          '- Skills: browser:browser-skill (invoke via /<skill-name>)',
         );
         expect(sentText).toContain('- MCP Servers: browser-mcp');
         expect(sentText).toContain('extension context file');
@@ -34586,6 +34808,139 @@ describe('Session', () => {
         };
       }>;
     };
+
+    it('re-enters the ACP tool chain and preserves native result metadata', async () => {
+      const onResult = vi.fn();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedExecute = vi.fn().mockImplementation(async () => {
+        expect(core.getToolCallRuntime()).toBeUndefined();
+        return {
+          llmContent: [
+            { text: 'nested ACP output' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'QUJD',
+              },
+            },
+          ],
+          returnDisplay: 'nested ACP output',
+          modelOverride: undefined,
+          terminateTurn: true,
+        };
+      });
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/example.txt' },
+          execute: nestedExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            const runtime = core.getToolCallRuntime();
+            if (!runtime) throw new Error('missing runtime');
+            const nested = await runtime.dispatch(
+              'read_file',
+              { path: '/tmp/example.txt' },
+              signal,
+              onResult,
+            );
+            expect(nested.content).toEqual([
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+            ]);
+            return {
+              llmContent: nested.output,
+              returnDisplay: nested.output,
+            };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-acp', [
+        {
+          id: 'exec-acp-parent',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(onResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelOverride: undefined,
+          terminateTurn: true,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+                ],
+              }),
+            }),
+          ],
+        }),
+      );
+      expect(Object.hasOwn(onResult.mock.calls[0][0], 'modelOverride')).toBe(
+        true,
+      );
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(mockToolRegistry.getTool).toHaveBeenCalledWith('read_file');
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse?.name).toBe(core.ToolNames.EXEC);
+      expect(result.parts[0].functionResponse?.response?.['output']).toBe(
+        'nested ACP output',
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ name: 'read_file' }),
+          }),
+        ]),
+        expect.anything(),
+      );
+
+      const direct = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-direct', [
+        {
+          id: 'read-acp-direct',
+          name: 'read_file',
+          args: { path: '/tmp/example.txt' },
+        },
+      ]);
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(direct.parts[0].functionResponse?.response?.['error']).toContain(
+        'unavailable on this CodeModeOnly call surface',
+      );
+    });
 
     function emitNestedAskUserQuestion(
       eventEmitter: EventEmitter,

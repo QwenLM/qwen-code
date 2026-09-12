@@ -2443,7 +2443,6 @@ export class QQChannel extends ChannelBase {
     cleanText: string;
     commandText: string;
     text: string;
-    displayText: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2556,12 +2555,12 @@ export class QQChannel extends ChannelBase {
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
     const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
-    const displayText = sanitizePromptText(
+    const body = sanitizePromptText(
       this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `${head}${displayText}${suffixFromBotOpenId}`;
+      : `${head}${body}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2570,7 +2569,6 @@ export class QQChannel extends ChannelBase {
       cleanText,
       commandText,
       text,
-      displayText,
       senderName,
     };
   }
@@ -2612,17 +2610,14 @@ export class QQChannel extends ChannelBase {
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const isSlash = safeContent.startsWith('/');
-    const displayText = sanitizePromptText(safeContent);
-    const text = isSlash
-      ? displayText
-      : `[atMention=true] [${safeName}]: ${displayText}`;
+    const body = sanitizePromptText(safeContent);
+    const text = isSlash ? body : `[atMention=true] [${safeName}]: ${body}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
-      displayText,
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2675,8 +2670,7 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, displayText, commandText, senderName, safeName } =
-      result;
+    const { isSlash, text, commandText, senderName, safeName } = result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2710,7 +2704,6 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
-      displayText,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2756,15 +2749,8 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const {
-      isSlash,
-      text,
-      displayText,
-      commandText,
-      senderName,
-      isAtBot,
-      safeName,
-    } = result;
+    const { isSlash, text, commandText, senderName, isAtBot, safeName } =
+      result;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2862,7 +2848,6 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
-      displayText,
       senderId,
       senderName,
       messageId: event.id,

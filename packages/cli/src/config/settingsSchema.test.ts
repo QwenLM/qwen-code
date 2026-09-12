@@ -11,6 +11,7 @@ import {
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
+  HookEventName,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -43,6 +44,30 @@ describe('SettingsSchema', () => {
       ]);
       expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
       expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
+    it('should declare a hooks setting for every hook event', () => {
+      expect(
+        Object.keys(getSettingsSchema().hooks.properties ?? {}).sort(),
+      ).toEqual([...Object.values(HookEventName)].sort());
+    });
+
+    it('should concatenate every hook event across settings scopes', () => {
+      const hookProperties = getSettingsSchema().hooks.properties ?? {};
+      const eventNames = Object.values(HookEventName);
+
+      expect(
+        Object.fromEntries(
+          eventNames.map((eventName) => [
+            eventName,
+            hookProperties[eventName]?.mergeStrategy,
+          ]),
+        ),
+      ).toEqual(
+        Object.fromEntries(
+          eventNames.map((eventName) => [eventName, MergeStrategy.CONCAT]),
+        ),
+      );
     });
 
     it('should contain all expected top-level settings', () => {
@@ -693,6 +718,16 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should expose tool call details as a live UI setting', () => {
+      const showToolCallDetails =
+        getSettingsSchema().ui.properties.showToolCallDetails;
+      expect(showToolCallDetails).toBeDefined();
+      expect(showToolCallDetails.type).toBe('boolean');
+      expect(showToolCallDetails.default).toBe(true);
+      expect(showToolCallDetails.showInDialog).toBe(true);
+      expect(showToolCallDetails.requiresRestart).toBe(false);
     });
 
     it('should have showToolCallArgs in ui settings', () => {
