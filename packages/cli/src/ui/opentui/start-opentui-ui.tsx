@@ -246,10 +246,11 @@ function OpenTuiEntryApp({
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
+          showToolCallArgs={settings.merged.ui?.showToolCallArgs === true}
         />
       </box>
     ),
-    [live.items, width, height, thoughtsExpanded],
+    [live.items, width, height, thoughtsExpanded, settings],
   );
 
   const handleRenderError = useCallback(

@@ -53,6 +53,7 @@ import {
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
   getCachedStringWidth,
   sanitizeTerminalText,
@@ -79,6 +80,9 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
   /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
   thoughtsExpanded?: boolean;
+  /** `ui.showToolCallArgs`: ink draws each call's raw arguments on their own
+   * line under the card header. */
+  showToolCallArgs?: boolean;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -105,8 +109,12 @@ export function OpenTuiTranscriptView({
   availableWidth = 80,
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
+  showToolCallArgs = false,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const awaitingId = items.find(
+    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  )?.id;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -121,6 +129,8 @@ export function OpenTuiTranscriptView({
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
             thoughtsExpanded={thoughtsExpanded}
+            showToolCallArgs={showToolCallArgs}
+            awaitingApproval={item.id === awaitingId}
           />
         </box>
       ))}
@@ -134,12 +144,16 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -155,6 +169,9 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          fullDetail={thoughtsExpanded}
+          showToolCallArgs={showToolCallArgs}
+          awaitingApproval={awaitingApproval}
         />
       );
     case 'task':
@@ -296,11 +313,17 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  fullDetail,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  fullDetail: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -328,6 +351,19 @@ function ToolCard({
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // ink measures the args row against the header's own inner width (the status
+  // glyph's columns are not available to it), so the wrapped-row cap bounds
+  // what actually reaches the screen.
+  const innerWidth = width - STATUS_INDICATOR_WIDTH;
+  const argsRow =
+    showToolCallArgs && item.args
+      ? formatInlineToolArgsJson(
+          item.args,
+          description,
+          fullDetail,
+          innerWidth > 0 ? innerWidth : undefined,
+        )
+      : undefined;
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -348,7 +384,7 @@ function ToolCard({
           </text>
         ) : null}
         {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
-        {item.confirm === 'pending' && !item.done ? (
+        {awaitingApproval ? (
           // ink's TrailingIndicator: a primary-coloured arrow at the end of the
           // awaiting call's own row, not a row of its own.
           <text fg={C.text}>{' ←'}</text>
@@ -357,6 +393,13 @@ function ToolCard({
       {cap.hiddenRows > 0 && (
         <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
       )}
+      {argsRow ? (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <text fg={C.dim} {...selectionProps()}>
+            {argsRow}
+          </text>
+        </box>
+      ) : null}
       <ToolCardBody item={item} maxRows={maxRows} width={width} />
     </box>
   );

@@ -56,7 +56,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       type: 'tool_call_request',
       value: { callId: 'c1', name: 'shell' },
     } as unknown as AnyEv);
-    expect(s[0].type).toBe('tool-start');
+    expect(s).toEqual([
+      { type: 'tool-start', id: 'c1', tool: 'shell', title: 'shell' },
+    ]);
+    // ink's `ui.showToolCallArgs` row reads the call's raw arguments, so they
+    // ride the stream right behind the card that opens.
+    expect(
+      map({
+        type: 'tool_call_request',
+        value: { callId: 'c2', name: 'shell', args: { command: 'ls -la' } },
+      } as unknown as AnyEv),
+    ).toEqual([
+      { type: 'tool-start', id: 'c2', tool: 'shell', title: 'shell' },
+      { type: 'tool-args', id: 'c2', args: '{"command":"ls -la"}' },
+    ]);
     expect(
       map({
         type: 'tool_call_response',

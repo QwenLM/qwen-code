@@ -57,14 +57,16 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Nineteen scenarios cover boot, a
+rather than at the same wall-clock moment. Twenty-one scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
 and exit, a long hold that cycles the loading phrases, a to-do card, the
 question dialog on its own, the same dialog across three questions with a
 multi-select and a typed answer, the release of a parked confirmation when the
-approval mode changes, and the approval of a gated server at startup.
+approval mode changes, the approval of a gated server at startup, a tool call
+whose arguments are long enough to be capped, and a control arm that repeats
+that call with the arguments row switched off.
 
 Three properties of the comparison matter for reading the results.
 
@@ -578,12 +580,120 @@ it. The residuals are the three recorded elsewhere — where a long path wraps,
 which phase the loading spinner happens to be in, and the update notice this
 renderer words differently — plus vertical anchoring.
 
+## Decision 22 — the confirmation is drawn where the conversation is
+
+A tool confirmation arrived as a modal: a bordered box at full width, a title
+row naming the tool, its own row announcing that the call was waiting, and a
+hint about navigating a list. ink draws none of that chrome. Its confirmation is
+a sibling in the transcript, directly below the row of the call that is waiting,
+with no border, no title row and no navigation hint. Approving a command
+therefore read here as answering a dialog rather than as continuing the
+conversation, and the box pushed the question and its options several columns
+past where ink puts them.
+
+The chrome is gone, and the body, the question and the outcome list sit at the
+columns ink uses. Two consequences were checked rather than assumed. The row
+budgets that had reserved space for the removed chrome shrink with it, and those
+bounds turn out to be inert at the viewport heights the harness uses, so the
+change was verified against ink's frames at a hundred columns instead of against
+the arithmetic: the confirmation's row sequence now matches ink line for line.
+And while a call is parked, the loading indicator swaps to ink's waiting phrase
+and drops its elapsed-time, token and cancel suffixes — there is no in-flight
+request to cancel and no tokens to count. That waiting row renders for a tool
+confirmation only: the server-startup approval, the trust gate and the action
+confirmations all arrive while the session is idle, where ink's own indicator
+renders nothing, and the captured frames agree on both halves.
+
+## Decision 23 — a card's rendering preference is re-derived per event
+
+The tool card prefers a structured payload over the flattened text beside it,
+which is what lets a shell run paint a styled token grid, a diff render its
+coloured lines and a todo write render its status list. The fold that feeds the
+card only ever added those payloads and never cleared one, so the preference
+could outlive the payload it was chosen for.
+
+A shell command reaches exactly that state. It streams styled output while it
+runs, and if the stream then trips binary detection the accumulated output is
+replaced by a plain string. The card kept showing the last grid it had seen,
+after the call settled as well, so the user learned nothing about the binary
+output and never saw the byte counts that followed. Any tool whose display
+changes kind mid-flight has the same shape, since a result carries at most one
+structured payload.
+
+Each event carries the whole display, so the structured fields are now derived
+from the event instead of accumulated onto the card. The three producers of
+these events each pick the structured form or the flattened form and never emit
+both for one result, so re-deriving loses nothing; and the trailing flush that
+could have delivered a late update after completion is cancelled before the call
+returns, so no path regains a payload a later event legitimately dropped. The
+egress disclosure keeps its existing sticky behaviour — it is an additional
+notice under the result rather than an alternative rendering of it, and it takes
+no part in the preference.
+
+## Decision 24 — the same mirror guards the authentication inputs
+
+The endpoint and API-key steps share one line-input helper, and it built each
+next value from the value the render that registered it had captured. Keystrokes
+read out of one pty buffer can be delivered inside a single React batch, where
+no render separates them, so every character in the burst appended to the same
+stale snapshot and the field kept only the last one. A pasted string was safe,
+because a bracketed paste arrives as one event carrying the whole text, and
+typing at human speed was safe, because each keystroke flushed a render first —
+which is why the existing tests, one act per character, never saw it.
+
+The helper now keeps a mirror of its value, written synchronously on every
+change and re-synced on render, so each event appends to what the previous one
+produced while a value set from anywhere else is still picked up. Both steps
+reach it through plain state setters that store exactly what they are given, so
+the mirror converges with the parent on the next render and the fix stays inside
+the helper, leaving ink's own wizard untouched. Taking the mirror out fails the
+burst test alone, with a twelve-character key arriving as its final character.
+As with the dialog row above, no truncation was observed on a machine and no
+scenario drives the authentication wizard, so this is correctness by
+construction with unit coverage only.
+
+## Decision 25 — the arguments row, and one arrow rather than a row per card
+
+With `ui.showToolCallArgs` on, ink writes the call's raw arguments on a dim row
+under the card header, capped to two wrapped rows with the remainder collapsed
+into `… +N chars (ctrl+o)`, and prints them in full once the session is in the
+detail state that key toggles. Here nothing read the setting and no such row
+existed. The policy is not reimplemented: serialisation, the deduplication
+against a description that already is the payload, the character budget scaled by
+the header's own inner width, the surrogate-safe walk and the prompt-injection
+sanitisation all come from the helper ink uses, which was split so that both
+renderers read one source of truth. The row is placed between the header and the
+body, as ink orders them.
+
+Investigation corrected the premise before a line was written. The claim was that
+no path carried a call's arguments; in fact the live path always had, in the
+event that opens the card, which is the same value ink's setting reads. Only two
+carriers were missing — the steering card raised by an `@`-mentioned file, and a
+resumed session's transcript — and the row still rendered nowhere, because
+nothing read the field off the item. A first attempt at the carriers added a
+fourth source in the scheduler loop and was reverted once the tests showed it
+emitting the same row twice per call; what it exposed is that the pre-existing
+carrier had no test at all, so a fold that dropped it would have passed. That
+carrier is pinned now, along with the two that were filled in.
+
+On a machine, both legs draw the row, and the collapsed remainder is the same
+number of characters on both. The row costs this renderer more physical rows
+than ink's, which is the wrap-rule divergence recorded below and not this row's
+own.
+
+The arrow that marks an awaiting call was drawn on every pending card. ink draws
+it on one: its gate is the first call awaiting approval, and this renderer shows
+only that call's dialog, so every other arrow marked a call the user could not
+act on. The flag now comes from the first pending id, and a test asserts that a
+second pending call gets none — checked by removing the gate, which fails that
+test with both arrows on screen.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for nineteen scenarios at 100×40 and, for the narrow
+  reconstructed screen, for twenty-one scenarios at 100×40 and, for the narrow
   and resize scenarios, at 60×24. Both legs from one bundle and one set of
   boot arguments.
 - **Colour was not verified.** The reconstruction is text. Several rows are
@@ -622,23 +732,28 @@ What was verified, and how far the verification reaches:
   ink, which is a product decision inherited from the restore work rather than
   a defect introduced by it. The same overlay model has a second symptom: a
   dialog here does not reflow the conversation, so rows that ink pushes out of
-  the viewport when a tall dialog opens stay visible underneath it here. The
-  tool confirmation is drawn as a bordered box below the conversation here and
-  inline within it in ink; matching that means relocating the confirmation into
-  the transcript and rerouting focus while the composer stays mounted, which is
-  a change to the approval path rather than to its appearance.
+  the viewport when a tall dialog opens stay visible underneath it here.
 - **One divergence is intentional.** The update check reports a skipped check
   with its reason here, while ink reports a failed automatic update. Both
   renderers share the emission path; ink's subscriber is registered after the
   background task emits, so ink loses the soft warning and shows the later
   hard failure instead. Removing a legitimate warning to match a subscription
   race is not what aligning to ink means, so the warning stays.
-- **One cosmetic divergence is recorded, not fixed.** When the context-file
-  list contains a path longer than the terminal width, ink moves that path to
-  a line of its own and then breaks it; this renderer breaks it in place. Both
-  produce three rows with the same hanging indent and the same text. Matching
-  the break points would mean reimplementing the wrap algorithm the renderer
-  already provides.
+- **One cosmetic divergence is recorded, not fixed.** The two renderers break a
+  long row at different columns. ink's default wrap is a word wrap that hard
+  breaks whatever still overflows and trims nothing, so a row fills to the edge
+  and its continuation starts at the item's own indent; this renderer's text
+  nodes break on word boundaries, which inside a path include its slashes and
+  hyphens, so a token too long for the rest of the row moves to the next one and
+  leaves the row short. The context-file list shows one face of it and a tool
+  card's header and arguments row another: at a hundred columns the same
+  arguments collapse to the same number of hidden characters on both legs and
+  still cost this renderer one more physical row. Matching the break points would
+  mean reimplementing the wrap algorithm the renderer already provides. A wrapped
+  header also loses the space between the tool's display name and its
+  description, which a scenario raising the same header with the arguments row
+  switched off reproduces unchanged — the control arm that keeps this last part
+  separate from the row added above.
 - **One last resort is deliberately not reproduced.** The kept-model
   announcement reads the runtime snapshot's identifier and falls back to the
   configured one, which is what ink does. ink then falls back a third time, to
@@ -687,6 +802,23 @@ What was verified, and how far the verification reaches:
   neither is the list of servers that approve-all prints — the scenario declares
   one server, so the branch that renders that list is never taken. What the
   branches do is the shared hook's own behaviour, unchanged here.
+- **The arguments row is frame-verified for a call that needs approval, at one
+  width.** The scenario turning the setting on parks a shell call, so its frames
+  carry the row while the call is pending — with the single arrow that marks it —
+  once the call settles, and in the untruncated state the toggle key reaches.
+  Every other scenario leaves the setting at its default, so the row is absent
+  from the rest of the matrix by construction. Not checked in a frame: a call
+  whose description already prints the payload its arguments would repeat, which
+  is the case the shared helper deduplicates, and asserted in a unit test with a
+  positive control instead; and any width but a hundred columns.
+- **ink's per-group height reservation is not ported.** ink subtracts two rows
+  for every tool that will print an arguments row from the budget each result in
+  that group is given, because the row is drawn outside the result budget. This
+  renderer distributes no such budget: every card is handed the same per-item
+  ceiling, derived from the viewport height, so there is nothing for the arguments
+  rows to be subtracted from and they only add rows here. The two differ where ink
+  would have squeezed a long result, and closing that gap means introducing a
+  distribution this architecture never had.
 
 ## Follow-ups
 

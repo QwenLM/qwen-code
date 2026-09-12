@@ -55,6 +55,7 @@ import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
   extractStructuredResult,
+  formatToolArgs,
   renderResultDisplay,
   toolResultEvent,
   type OpenTuiStreamEvent,
@@ -253,6 +254,8 @@ function atMentionCardEvents(
       title: display.description,
     },
   ];
+  const args = formatToolArgs(display.args);
+  if (args) events.push({ type: 'tool-args', id: display.callId, args });
   const result = toolResultEvent(display.callId, display.resultDisplay);
   if (result) events.push(result);
   const failed = display.status === ToolCallStatus.Error;
