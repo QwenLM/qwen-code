@@ -309,7 +309,14 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 function TextBody({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
   const { width, height } = useTerminalDimensions();
-  const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
+  // The renderer advances TAB exactly 2 columns while string widths count it
+  // as 0 (customBanner's detab convention): window the detabbed rows —
+  // visually identical on screen, and the pending card's dialog-body price
+  // (messages.tsx's dialogBodyMeasure) models the same detabbed rows.
+  const rows = useMemo(
+    () => sanitizeTerminalText(text).replace(/\t/g, '  ').split('\n'),
+    [text],
+  );
   const window = useMemo(
     () => headWindowPhysical(rows, width, CONFIRM_BODY_COLLAPSED_ROWS),
     [rows, width],

@@ -249,12 +249,24 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
  * shows (≈ 3), the prompt echo with its turn margin (2), and the card's own
  * hidden-tail and awaiting rows (2). In the dialog itself, around the body:
  * the frame's border and padding (4), title (1), body margins (2), question
- * row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24, padded to
- * 26 against notice timing) is what an 80-row viewport measured: at 14 the
- * expanded tail and the outcome list ran off the bottom of the screen (mem0
- * e2e regression). dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS prices the
- * same region from the dialog's side; keep the two consistent when the
- * dialog chrome changes.
+ * row (1), outcome list (2 — 4 when a trusted folder adds the
+ * always-allow rows, a difference the padding below absorbs), footer hint
+ * (1) ≈ 11. The sum (≈ 24, padded to 26 against notice timing) is what an
+ * 80-row viewport measured: at 14 the expanded tail and the outcome list
+ * ran off the bottom of the screen (mem0 e2e regression).
+ * dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS prices the same region from
+ * the dialog's side; keep the two consistent when the dialog chrome
+ * changes.
+ *
+ * Known limit: the transcript region above the card is priced at its
+ * FRESH-session height (the ≈ 13 rows enumerated above); nothing recomputes
+ * it as the session grows, so from the second exchange onward the card
+ * keeps budget rows the viewport no longer has — measured on the mcp shape
+ * at h=80 with 7 parked cards, 16 painted rows above the card already clip
+ * the mounted dialog's bottom border and 20 put it off screen. Charging the
+ * painted height needs a per-item transcript height model (or a
+ * layout-level transcript window), a follow-up beyond this PR; until then
+ * the padded reserve covers a fresh session only.
  */
 export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
 
@@ -353,8 +365,13 @@ function dialogBodyMeasure(
     dialog?.body !== undefined
   ) {
     const cols = Math.max(dialogWidth - 2, 10);
+    // String widths count TAB as 0 columns while the renderer advances it
+    // exactly 2 (customBanner's detab convention), so measure the detabbed
+    // text — the same detabbed rows TextBody windows in dialogs-confirm.
+    const detabbed = (text: string) =>
+      sanitizeTerminalText(text).replace(/\t/g, '  ');
     const rows = physicalRowsTotal(
-      sanitizeTerminalText(dialog.body).split('\n'),
+      detabbed(dialog.body).split('\n'),
       cols,
       measureCap,
     );
@@ -362,7 +379,7 @@ function dialogBodyMeasure(
       dialog.extra === undefined
         ? 0
         : physicalRowsTotal(
-            sanitizeTerminalText(dialog.extra).split('\n'),
+            detabbed(dialog.extra).split('\n'),
             cols,
             measureCap,
           );
@@ -397,8 +414,13 @@ function dialogBodyMeasure(
  * below the settled cap (the short-terminal fallback), but once siblings
  * share the region the floor drops to one row — a floor at the settled cap
  * would lift the divided bound back up from the batch size where it falls
- * below it (floor(34.3/7) = 4), and N cards at the cap grow the region
- * linearly past the viewport with nothing left to give.
+ * below it, and N cards at the cap grow the region linearly past the
+ * viewport with nothing left to give. Before the division the shared region
+ * also spends each sibling card's own chrome — the hidden-tail label and
+ * awaiting row a parked card paints outside its budgeted description rows,
+ * two rows per card past the first (the reserve already charges one
+ * card's) — or eight cards priced at 4 budget rows would still paint 7 rows
+ * each and overflow a 49-row region.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
@@ -412,23 +434,35 @@ export function pendingCardMaxRows(
     descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
   );
   // The card's payload folds on the transcript's width, but the dialog's
-  // TextBody measures on the full terminal width — start-opentui-ui passes
-  // availableWidth as terminalWidth - 4, so the dialog's column basis here
-  // is width + 4 (the headWindowPhysical-style measure then subtracts its
-  // own 2 columns). The measure stops once the count can no longer change
-  // the clamped outcome: every total past h - DIALOG_EXPANDED_RESERVE_ROWS
-  // bottoms the expanded bound out at the floor.
+  // body measures on the dialog's own content columns: the frame's border
+  // and padding spend 4 columns (dialogs-shared's "one column of border and
+  // one of padding on each side"), and start-opentui-ui passes
+  // availableWidth as terminalWidth - 4 — so the dialog's column basis here
+  // IS width (dialogWidth = width + 2, minus the headWindowPhysical-style
+  // measure's own 2 columns). The measure stops once the count can no
+  // longer change the clamped outcome: every total past
+  // h - DIALOG_EXPANDED_RESERVE_ROWS bottoms the expanded bound out at the
+  // floor.
   const body = dialogBodyMeasure(
     dialog,
     payloadRows,
-    width + 4,
+    width + 2,
     Math.max(h - DIALOG_EXPANDED_RESERVE_ROWS, CONFIRM_BODY_COLLAPSED_ROWS),
   );
+  // Each parked card also paints its hidden-tail label and awaiting row
+  // OUTSIDE the budgeted description rows; the reserve charges those two
+  // chrome rows once, so every sibling past the first spends them from the
+  // shared region before it is divided (eight cards priced at 4 budget rows
+  // would otherwise paint 7 rows each and overflow a 49-row region).
+  const siblingChromeRows = Math.max(pendingCount - 1, 0) * 2;
   const expandedDialogBound =
     body.expanded === null
       ? Number.POSITIVE_INFINITY
       : Math.floor(
-          ((h - DIALOG_EXPANDED_RESERVE_ROWS - body.expanded) *
+          ((h -
+            DIALOG_EXPANDED_RESERVE_ROWS -
+            body.expanded -
+            siblingChromeRows) *
             CARD_DESC_WRAP_RATIO) /
             Math.max(pendingCount, 1),
         );
@@ -436,7 +470,10 @@ export function pendingCardMaxRows(
     body.collapsed === undefined
       ? Number.POSITIVE_INFINITY
       : Math.floor(
-          ((h - COLLAPSED_DIALOG_CHROME_ROWS - body.collapsed) *
+          ((h -
+            COLLAPSED_DIALOG_CHROME_ROWS -
+            body.collapsed -
+            siblingChromeRows) *
             CARD_DESC_WRAP_RATIO) /
             Math.max(pendingCount, 1),
         );

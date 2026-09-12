@@ -289,8 +289,9 @@ describe('OpenTuiTranscriptView', () => {
     // against the whole viewport (34 rows ≈ 3544 visible columns), and two
     // ~45-row cards push the first call's confirmation dialog — the only
     // actionable surface — off an 80-row alt screen. Sharing the transcript
-    // region halves each budget (17 rows ≈ 1708 columns), so the marker
-    // past that cut leaves the screen.
+    // region halves each budget after charging the sibling's chrome rows
+    // (16 rows ≈ 1600 columns), so the marker past that cut leaves the
+    // screen.
     const description =
       '{"content":"' +
       'a'.repeat(900) +
@@ -324,18 +325,22 @@ describe('OpenTuiTranscriptView', () => {
   });
 
   it('keeps eight parked sibling cards inside the shared region (R4-8)', () => {
-    // floor((80-26-5)*0.7/8) = 4 rows each — if the settled 5-row floor
-    // lifted the divided bound back up, eight cards would paint 8*5/0.7 = 57
-    // physical rows against the 80-26-5 = 49-row region and push the one
-    // mounted dialog off the alt screen. N8_MARKER at ~351 sits past the
-    // 4-row budget's 304 visible columns but inside the 5-row floor's 412,
-    // so only the released floor hides it; HEAD_MARKER at ~52 stays either
-    // way, so an over-yielding card fails too.
+    // floor((80-26-5-14)*0.7/8) = 3 rows each — the region also spends each
+    // sibling's hidden-tail and awaiting rows (2 per card past the first)
+    // before dividing. If the settled 5-row floor lifted the divided bound
+    // back up, eight cards would paint 8*5/0.7 + 14 ≈ 71 physical rows
+    // against the 80-26-5 = 49-row region and push the one mounted dialog
+    // off the alt screen. N8_MARKER at ~351 sits past the 3-row budget's
+    // 196 visible columns but inside the lifted floor's 412, so only the
+    // released floor shows it; HEAD_MARKER at ~150 sits inside the 196 but
+    // past the 1-row floor's 88, so an over-yielding card fails too. (An
+    // under-yield to exactly 4 rows — 304 columns — hides N8_MARKER as
+    // well; the arithmetic pins in messages.test.tsx discriminate that.)
     const description =
       '{"content":"' +
-      'h'.repeat(40) +
+      'h'.repeat(138) +
       'HEAD_MARKER' +
-      'a'.repeat(288) +
+      'a'.repeat(190) +
       'N8_MARKER' +
       'b'.repeat(300) +
       '"}';
@@ -472,17 +477,33 @@ describe('OpenTuiTranscriptView', () => {
     rerender(view([withExtra, sibling]));
     expect(mainCardCalls()).not.toHaveLength(0);
 
+    // The card's own description only (the `text` dep).
+    const desc2 = '{"content":"' + 'a'.repeat(3200) + '"}';
+    const renamed = {
+      ...withExtra,
+      description: desc2,
+      tool: 'mcp__other__write_a_much_longer_tool_name',
+    };
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([{ ...withExtra, description: desc2 }, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The card's display name only (the `name` dep).
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([renamed, sibling]));
+    expect(mainCardCalls()).not.toHaveLength(0);
+
     // The terminal height only: a resize with the dialog up. toolCardText
     // is width-independent, so nothing but the terminalHeight dep can fire
     // here — removing it from the memo's dep array leaves the stale 80-row
     // cap in place and this assertion fails.
     from = mocks.pendingSpy.mock.calls.length;
-    rerender(view([withExtra, sibling], 110, 40));
+    rerender(view([renamed, sibling], 110, 40));
     expect(mainCardCalls()).not.toHaveLength(0);
 
     // The width only.
     from = mocks.pendingSpy.mock.calls.length;
-    rerender(view([withExtra, sibling], 100, 40));
+    rerender(view([renamed, sibling], 100, 40));
     expect(mainCardCalls()).not.toHaveLength(0);
   });
 
@@ -619,6 +640,47 @@ describe('OpenTuiTranscriptView', () => {
         body: 'echo $(date)',
         extra: '⚠ Command substitution detected',
       });
+    }
+
+    // While the gated-MCP approval dialog owns the shell's popup slot no
+    // tool confirmation is mounted: the same parked cards must price the
+    // body-less payload proxy, not a dialog that is not painting.
+    const preemptedBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        activeWaitingCallId="t2"
+        pendingDialogMounted={false}
+        items={[
+          toolItem({
+            id: 't1',
+            tool: 'mcp__fs__write_file',
+            description: '{"a":"b"}',
+            confirm: 'pending',
+            confirmType: 'info',
+            confirmBody: hookBody,
+          }),
+          toolItem({
+            id: 't2',
+            tool: 'run_shell_command',
+            description: '{"c":"d"}',
+            confirm: 'pending',
+            confirmType: 'exec',
+            confirmBody: 'echo $(date)',
+            confirmExtra: '⚠ Command substitution detected',
+          }),
+        ]}
+      />,
+    );
+    const preemptedDialogs = mocks.pendingSpy.mock.calls
+      .slice(preemptedBefore)
+      .map((call) => call[3]);
+    expect(preemptedDialogs.length).toBeGreaterThanOrEqual(2);
+    for (const dialog of preemptedDialogs) {
+      expect(dialog?.type).toBeUndefined();
+      expect(dialog?.body).toBeUndefined();
+      expect(dialog?.extra).toBeUndefined();
     }
   });
 

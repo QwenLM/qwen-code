@@ -241,7 +241,7 @@ function OpenTuiEntryApp({
   // renderMain must not re-create for it.
   const activeWaitingCallId = live.waitingCalls[0]?.callId;
   const renderMain = useCallback(
-    () => (
+    (popup: { toolDialogPreempted: boolean }) => (
       <box flexDirection="column" flexGrow={1}>
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
@@ -251,6 +251,7 @@ function OpenTuiEntryApp({
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
           activeWaitingCallId={activeWaitingCallId}
+          pendingDialogMounted={!popup.toolDialogPreempted}
         />
       </box>
     ),

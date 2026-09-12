@@ -205,9 +205,11 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // wide the args payload is.
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' })).toBe(34);
     // ...but N pending siblings share the transcript region: two parked mcp
-    // calls halve the collapsed bound (34.3 / 2 = 17), so two 45-row cards
-    // cannot push the first call's dialog off an 80-row alt screen.
-    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2)).toBe(17);
+    // calls halve the collapsed bound after charging the second card's
+    // hidden-tail and awaiting rows ((80 - 26 - 5 - 2) * 0.7 / 2 = 16), so
+    // two 45-row cards cannot push the first call's dialog off an 80-row
+    // alt screen.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2)).toBe(16);
     // A hook-bounced info confirmation whose reason exactly fills the
     // collapsed window prices the collapsed dialog's real 20-row body
     // ((80 - 26 - 20) * 0.7 = 23); an unconverted physical-row term would
@@ -233,18 +235,48 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
       pendingCardMaxRows(80, 259, 110, { type: 'info', body: planBody }),
     ).toBe(20);
     // The body measure is taken on the dialog's own column basis — the
-    // terminal width, which start-opentui-ui's availableWidth = width - 4
-    // makes width + 4 here: 12 lines of 106 columns are 12 collapsed rows
-    // there (no ctrl-s offered), so both bounds coincide at
-    // ((80 - 26 - 12) * 0.7 = 29). On the card's narrower 104-column basis
-    // the same body would miscount 24 rows and wrongly bind the expanded
-    // bound.
+    // terminal width minus the frame's 4 columns of border and padding,
+    // which start-opentui-ui's availableWidth = width - 4 makes width
+    // itself: 12 lines of 106 columns are 12 collapsed rows there (no
+    // ctrl-s offered), so both bounds coincide at ((80 - 26 - 12) * 0.7 =
+    // 29). On the card's narrower 104-column basis the same body would
+    // miscount 24 rows and wrongly bind the expanded bound.
     const dialogFits = Array.from({ length: 12 }, () => 'x'.repeat(106)).join(
       '\n',
     );
     expect(
       pendingCardMaxRows(80, 0, 106, { type: 'plan', body: dialogFits }),
     ).toBe(29);
+    // The band just past the dialog's content width: a 107-column line
+    // paints 2 rows at the dialog's 106 columns, so 12 lines charge a
+    // 24-row body and the expanded bound binds — (80 - 26 - 24) * 0.7 = 21.
+    // A measure priced 2 columns wider than the painted surface charges 12
+    // rows and hands back 29.
+    const bandBody = Array.from({ length: 12 }, () => 'x'.repeat(107)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 106, { type: 'plan', body: bandBody }),
+    ).toBe(21);
+    // The renderer advances TAB exactly 2 columns while string widths count
+    // it as 0, so the measure detabs before counting: 20 lines of
+    // TAB + 105 columns are 107-column lines — 2 rows each at the dialog's
+    // 106 columns, a 40-row body ((80 - 26 - 40) * 0.7 = 9) — priced
+    // identically to their detabbed selves.
+    const tabbed = Array.from(
+      { length: 20 },
+      () => '\t' + 'x'.repeat(105),
+    ).join('\n');
+    const detabbed = Array.from(
+      { length: 20 },
+      () => '  ' + 'x'.repeat(105),
+    ).join('\n');
+    expect(pendingCardMaxRows(80, 0, 106, { type: 'info', body: tabbed })).toBe(
+      9,
+    );
+    expect(pendingCardMaxRows(80, 0, 106, { type: 'info', body: tabbed })).toBe(
+      pendingCardMaxRows(80, 0, 106, { type: 'info', body: detabbed }),
+    );
     // The body measure keeps the same collapsed-window boundary: a 20-row
     // body fits the window and both bounds coincide ((81-26-20)*0.7 = 24);
     // a 21-row body overflows and the expanded bound binds tighter
@@ -275,13 +307,14 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     ).toBe(8);
     // Parked siblings share BOTH dialog bounds: with two pending cards the
     // expanded bound halves too — a 30-row info body prices
-    // (80-26-30)*0.7/2 = 8, not the undivided 16.
+    // (80-26-30-2)*0.7/2 = 7 (the second card's chrome rows charged before
+    // dividing), not the undivided 16.
     const sharedBody = Array.from({ length: 30 }, () => 'x'.repeat(10)).join(
       '\n',
     );
     expect(
       pendingCardMaxRows(80, 3900, 110, { type: 'info', body: sharedBody }, 2),
-    ).toBe(8);
+    ).toBe(7);
   });
 
   it('charges the rows a dialog renders outside its body window (R4-1)', () => {
@@ -312,19 +345,23 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     ).toBe(35);
   });
 
-  it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8)', () => {
-    // The settled 5-row floor must not lift the divided bound back up: at
-    // N=8 (mcp dialogs) floor((80-26-5)*0.7/8) = 4, and eight 5-row cards
-    // would paint 8*5/0.7 = 57 physical rows against the 80-26-5 = 49-row
-    // region, pushing the mounted dialog off the alt screen; at 4 the sum
-    // fits (8*4/0.7 = 45.7). The tall-body dialogs (collapsed body 20)
-    // cross one batch size earlier: floor((80-26-20)*0.7/5) = 4 and
-    // 5*4/0.7 = 28.6 <= 34, where 5*5/0.7 = 35.7 would not.
+  it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8, R4-1)', () => {
+    // The settled 5-row floor must not lift the divided bound back up, and
+    // each sibling past the first spends its hidden-tail and awaiting rows
+    // (2 per card — the reserve charges one card's) from the region before
+    // it is divided: at N=8 (mcp dialogs) floor((80-26-5-14)*0.7/8) = 3,
+    // and eight cards paint 8*3/0.7 + 14 ≈ 48.3 physical rows against the
+    // 80-26-5 = 49-row region. A floor-lifted 5-row budget would paint
+    // 8*5/0.7 + 14 ≈ 71, and even a chrome-free 4-row price would paint
+    // 8*4/0.7 + 14 ≈ 59.7 — both push the mounted dialog off the alt
+    // screen. The tall-body dialogs (collapsed body 20) cross one batch
+    // size earlier: floor((80-26-20-8)*0.7/5) = 3 and
+    // 5*3/0.7 + 8 ≈ 29.4 <= 34, where 5*5/0.7 + 8 ≈ 43.7 would not.
     const mcp = pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 8);
-    expect(mcp).toBe(4);
-    expect((8 * mcp) / 0.7).toBeLessThanOrEqual(80 - 26 - 5);
+    expect(mcp).toBe(3);
+    expect((8 * mcp) / 0.7 + 2 * (8 - 1)).toBeLessThanOrEqual(80 - 26 - 5);
     const tall = pendingCardMaxRows(80, 0, 110, undefined, 5);
-    expect((5 * tall) / 0.7).toBeLessThanOrEqual(80 - 26 - 20);
+    expect((5 * tall) / 0.7 + 2 * (5 - 1)).toBeLessThanOrEqual(80 - 26 - 20);
   });
 
   it('falls back to the settled cap on short terminals', () => {

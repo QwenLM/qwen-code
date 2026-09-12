@@ -151,6 +151,32 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             })),
           );
           await this.opts.onToolCallsUpdate?.(cancelled);
+        } else if (
+          calls.some(
+            (c) =>
+              (
+                c.args as
+                  | { __confirmDetails?: Record<string, unknown> }
+                  | undefined
+              )?.__confirmDetails,
+          )
+        ) {
+          // A call parked with caller-chosen confirmation details (an exec
+          // carrying warnings, an info carrying urls): the dialog renders
+          // those rows OUTSIDE its windowed body, so the confirm event must
+          // forward them as confirmExtra for the pending card to price.
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((c) => ({
+              status: 'awaiting_approval',
+              request: c,
+              confirmationDetails: {
+                title: 'Confirm',
+                onConfirm: async () => {},
+                ...((c.args as { __confirmDetails?: Record<string, unknown> })
+                  .__confirmDetails ?? {}),
+              },
+            })),
+          );
         } else {
           // Emit one awaiting_approval update per call (twice, to prove the
           // live-session dedupe). A call with `__invocationDesc` args also
@@ -1932,6 +1958,107 @@ describe('livePromptEvents', () => {
         title: 'Hook requested confirmation to run mcp__fs__write_file',
         confirmType: 'info',
         confirmBody: 'hook said no\nsecond line',
+      },
+    ]);
+  });
+
+  it("carries an exec confirmation's warnings as the confirm event's extra (R5-5)", async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'w9',
+            name: 'run_shell_command',
+            args: {
+              __confirmDetails: {
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'echo $(date)',
+                warnings: ['Command substitution detected'],
+              },
+            },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // The exec dialog renders one ⚠ row per warning OUTSIDE the command
+    // body (dialogs-confirm.tsx:410-416), so the pending card prices them as
+    // confirmExtra — the production-only field a toEqual on the shared
+    // bounce fixture cannot see (undefined keys are ignored there).
+    expect(events.filter((e) => e.type === 'confirm')).toEqual([
+      {
+        type: 'confirm',
+        id: 'w9',
+        tool: 'run_shell_command',
+        title: 'Confirm Shell Command',
+        confirmType: 'exec',
+        confirmBody: 'echo $(date)',
+        confirmExtra: '⚠ Command substitution detected',
+      },
+    ]);
+  });
+
+  it("carries an info confirmation's urls block as the confirm event's extra (R5-5)", async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'w10',
+            name: 'web_fetch',
+            args: {
+              __confirmDetails: {
+                type: 'info',
+                title: 'Confirm Web Fetch',
+                prompt:
+                  'Fetch content from https://example.com/docs and process with: summarize',
+                urls: ['https://example.com/docs'],
+              },
+            },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // The info dialog renders a `URLs to fetch:` block (margin row, header
+    // row, one row per URL) outside the prompt's window — the block must
+    // reach the card as confirmExtra or its rows go unpriced.
+    expect(events.filter((e) => e.type === 'confirm')).toEqual([
+      {
+        type: 'confirm',
+        id: 'w10',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody:
+          'Fetch content from https://example.com/docs and process with: summarize',
+        confirmExtra: '\nURLs to fetch:\n - https://example.com/docs',
       },
     ]);
   });

@@ -253,6 +253,41 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ]);
   });
 
+  it('fails the dialog body back to the payload proxy on version-skewed details (R5-2)', () => {
+    // A field present in an unexpected shape means the rest of the dialog
+    // may differ too (a skewed 'exec' could window its command): the
+    // confirm event keeps the type but drops body and extra to undefined,
+    // so the pending card prices its own folded payload. Asserted with
+    // toBeUndefined — toEqual ignores undefined keys and would pass
+    // vacuously.
+    const map = createEventMapper();
+    const confirmOf = (details: Record<string, unknown>) =>
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'sk1', name: 'some_tool' },
+          details: { title: 'Confirm?', ...details },
+        },
+      } as unknown as AnyEv)[0] as {
+        confirmType?: string;
+        confirmBody?: unknown;
+        confirmExtra?: unknown;
+      };
+    for (const [details, type] of [
+      [{ type: 'info', prompt: 42 }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: 'https://example.com' }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: ['a', 7] }, 'info'],
+      [{ type: 'plan', plan: null }, 'plan'],
+      [{ type: 'exec', command: 'ls', warnings: 'nope' }, 'exec'],
+      [{ type: 'exec', command: 42 }, 'exec'],
+    ] as const) {
+      const ev = confirmOf(details);
+      expect(ev.confirmType).toBe(type);
+      expect(ev.confirmBody).toBeUndefined();
+      expect(ev.confirmExtra).toBeUndefined();
+    }
+  });
+
   it('carries FileDiff resultDisplay as a structured diff payload', () => {
     const map = createEventMapper();
     const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';
