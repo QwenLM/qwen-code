@@ -14621,10 +14621,12 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       act(() => {
         harness.result().removeQueuedPrompt(row.id);
       });
-      // The replay consults only the stash, a payload-complete bound row,
-      // and the parked rendering. This row rebuilt summary-only because its
-      // media hydrated to a loss placeholder, so all three reduce to the
-      // daemon's placeholder for an image this client no longer holds.
+      // The replay consults the stash, a payload-complete bound row, and the
+      // parked rendering. This row rebuilt summary-only because its media
+      // hydrated to a loss placeholder, so the first two are out — the one
+      // independently refused by `appendLocalQueuedPrompt` — and the third
+      // is the daemon's placeholder for an image this client no longer
+      // holds.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -15449,6 +15451,170 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       // echoes here at all.
       expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
       expect(harness.reportError).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+  it('does not re-echo a bound row whose settle beat its own admission', async () => {
+    let resolveAdmission: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAdmission = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        harness.result().enqueuePrompt('hello');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      // A refresh binds the still-unbound row by its exact text before the
+      // admission response lands.
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'hello',
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      // The prompt starts and the bound row echoes it. That route records the
+      // echo in the displayed marker alone — no park, because the row is
+      // bound, and no `appendedBeforeResponse` entry, because the marker is
+      // only written for an unbound row.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'hello',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      // The turn ends before the admission response lands, and the settle
+      // clears the displayed marker that was the echo's only record.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            promptId: 'prompt-1',
+            data: { sessionId: 'session-a', promptId: 'prompt-1' },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      // The body reads the completion as a licence to echo, and the dedupe
+      // that would have refused it is gone.
+      await act(async () => {
+        resolveAdmission?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        { promptId: 'prompt-1' },
+        undefined,
+      );
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+  it('echoes a hydrated image row without the daemon placeholder as a caption', async () => {
+    let resolveRemoval: ((value: { removed: boolean }) => void) | undefined;
+    sdkMock.actions.removePendingPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRemoval = resolve;
+        }),
+    );
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'prompt-1',
+          text: '[image]',
+          content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      const row = harness.result().queuedPrompts[0]!;
+      expect(row.serverPromptId).toBe('prompt-1');
+      // The media hydrated, so the row is payload-complete and the replay can
+      // source it — and its text is the daemon's rendering of an image-only
+      // message, not a caption the user typed.
+      expect(row.payloadCompleteness).not.toBe('summary-only');
+      expect(row.text).toBe('[image]');
+      act(() => {
+        harness.result().removeQueuedPrompt(row.id);
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: '[image]',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        resolveRemoval?.({ removed: false });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        '',
+        [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
+        { promptId: 'prompt-1' },
+        undefined,
+      );
     } finally {
       await harness.dispose();
     }

@@ -937,10 +937,15 @@ export function useQueuedPrompts({
 
   const appendLocalQueuedPrompt = useCallback(
     (prompt: QueuedPrompt, promptId: string) => {
+      // A row rebuilt from a snapshot carries the daemon's rendering of an
+      // attachment-only message as its text. That placeholder is not user
+      // content, so it never becomes a caption: the attachments it stands for
+      // speak for it, and with none of them left there is nothing to echo.
+      const caption = prompt.text === IMAGE_ONLY_PROMPT_TEXT ? '' : prompt.text;
       if (
         displayedServerPromptIdsRef.current.has(promptId) ||
         prompt.payloadCompleteness === 'summary-only' ||
-        (!prompt.text &&
+        (!caption &&
           (prompt.images?.length ?? 0) === 0 &&
           (prompt.files?.length ?? 0) === 0)
       ) {
@@ -949,7 +954,7 @@ export function useQueuedPrompts({
       displayedServerPromptIdsRef.current.add(promptId);
       pendingEchoByPromptIdRef.current.delete(promptId);
       store.appendLocalUserMessage(
-        prompt.text,
+        caption,
         toStoreImages(prompt.images),
         {
           promptId,
@@ -1074,9 +1079,15 @@ export function useQueuedPrompts({
       // never ours to echo. Either way the park beside it is a bare "already
       // started" record: drop it with the marker, or a submit body still in
       // flight reads that park as an echo it owes and appends the message a
-      // second time.
+      // second time. For the same reason the echo has to leave a record that
+      // outlives this marker: an echo sourced from a bound row writes neither
+      // a park nor the flag below, so a body whose admission resolves after
+      // this settle would read the completion as a licence to echo again.
       if (displayedServerPromptIdsRef.current.delete(promptId)) {
         pendingStartedByPromptIdRef.current.delete(promptId);
+        if (!returnedUnboundPromptIdsRef.current.has(promptId)) {
+          appendedBeforeResponsePromptIdsRef.current.add(promptId);
+        }
       }
       // A settled prompt will never start, so no echo is owed for it and its
       // stashed attachments must not stay reachable — unless a start is
@@ -1937,8 +1948,9 @@ export function useQueuedPrompts({
           }
           // A summary-only bound row shadows the text matcher and refuses to
           // echo, so it leaves nothing behind either: park on it as well, or
-          // a payload its body stashes afterwards has no consumer at settle
-          // and the message the daemon ran reaches no transcript.
+          // the body that resolves afterwards has no record that its own
+          // prompt started, and the message the daemon ran reaches no
+          // transcript.
           if (
             !prompt?.serverPromptId ||
             prompt.payloadCompleteness === 'summary-only'
