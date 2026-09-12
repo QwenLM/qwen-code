@@ -92,8 +92,14 @@ export function buildExtensionContextText(extension: Extension): string {
   const capabilities: string[] = [];
 
   if (extension.skills && extension.skills.length > 0) {
+    const extensionName = sanitizeDisplayText(extension.name);
     const skillNames = extension.skills
-      .map((s) => sanitizeDisplayText(s.name) ?? 'unnamed')
+      .map((s) => {
+        const skillName = sanitizeDisplayText(s.name);
+        return extensionName && skillName
+          ? `${extensionName}:${skillName}`
+          : 'unnamed';
+      })
       .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
