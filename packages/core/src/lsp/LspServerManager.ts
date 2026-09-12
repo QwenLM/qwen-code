@@ -31,6 +31,7 @@ import type {
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
+import { isPublishDiagnosticsParams } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
 
@@ -83,6 +84,7 @@ export class LspServerManager {
       this.serverHandles.set(config.name, {
         config,
         status: 'NOT_STARTED',
+        cachedDiagnostics: new Map(),
       });
       this.serverConfigHashes.set(config.name, lspServerConfigHash(config));
     }
@@ -208,6 +210,7 @@ export class LspServerManager {
         const nextHandle: LspServerHandle = {
           config: nextConfig,
           status: 'NOT_STARTED',
+          cachedDiagnostics: new Map(),
         };
         this.serverHandles.set(name, nextHandle);
         await this.startServer(name, nextHandle);
@@ -232,6 +235,7 @@ export class LspServerManager {
       const handle: LspServerHandle = {
         config,
         status: 'NOT_STARTED',
+        cachedDiagnostics: new Map(),
       };
       this.serverHandles.set(name, handle);
       await this.startServer(name, handle);
@@ -461,6 +465,16 @@ export class LspServerManager {
       handle.process = connection.process;
       handle.processDiagnostics = connection.processDiagnostics;
 
+      handle.connection.onNotification((msg) => {
+        if (
+          msg &&
+          msg.method === 'textDocument/publishDiagnostics' &&
+          isPublishDiagnosticsParams(msg.params)
+        ) {
+          handle.cachedDiagnostics.set(msg.params.uri, msg.params.diagnostics);
+        }
+      });
+
       const startupExit = this.createStartupExitWatcher(name, handle);
       try {
         // Initialize LSP server
@@ -526,6 +540,7 @@ export class LspServerManager {
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
+    handle.cachedDiagnostics.clear();
     debugLogger.info(`LSP server ${name} stopped`);
   }
 
@@ -743,6 +758,7 @@ export class LspServerManager {
     handle.error = undefined;
     handle.warmedUp = false;
     handle.stopRequested = false;
+    handle.cachedDiagnostics.clear();
     handle.processExitedUnexpectedly = false;
   }
 
@@ -1172,6 +1188,12 @@ export class LspServerManager {
           references: { dynamicRegistration: true },
           documentSymbol: { dynamicRegistration: true },
           codeAction: { dynamicRegistration: true },
+          publishDiagnostics: {
+            relatedInformation: true,
+            tagSupport: { valueSet: [1, 2] },
+            codeDescriptionSupport: true,
+            dataSupport: true,
+          },
         },
         workspace: {
           workspaceFolders: true,
