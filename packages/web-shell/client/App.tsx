@@ -143,6 +143,7 @@ import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
+import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -1377,6 +1378,8 @@ export interface WebShellProps {
    * direct or queued logical submit, after local command routing and before
    * session creation, composer commit, optimistic rendering, or admission.
    * Retries reuse the previously prepared payload and skip this callback.
+   * If this callback rejects, the submission is cancelled and the rejection's
+   * `Error.message` is surfaced to the user, so hosts must localize it.
    */
   prepareSubmit?: (
     submission: WebShellSubmitSnapshot,
@@ -1386,6 +1389,8 @@ export interface WebShellProps {
    * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
    * `sessionId` is `undefined` when the session has not yet been created (deferred).
    * Also called for queued prompts (submitted while a turn is streaming).
+   * A rejection's `Error.message` is surfaced to the user, so hosts must
+   * localize it.
    */
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
@@ -9710,6 +9715,25 @@ export function App({
   // to be recreated on every render, cascading into downstream effect chains.
   const dispatchSessionChangeRef = useRef(dispatchSessionChange);
   dispatchSessionChangeRef.current = dispatchSessionChange;
+  // Single error-to-toast helper: suppresses aborts, daemon-turn errors and
+  // already-dispatched notices before surfacing anything. Declared above
+  // sendPrompt / enqueuePrompt so their dep arrays can reference it (a
+  // reference below those callbacks would be a TDZ error).
+  const reportError = useCallback(
+    (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        return;
+      }
+      if (isAlreadyDispatched(error)) {
+        return;
+      }
+      const message = formatError(error, fallback);
+      console.error('[web-shell]', message, error);
+      pushToast('error', message);
+    },
+    [pushToast],
+  );
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -9828,10 +9852,17 @@ export function App({
           }
         } catch (err) {
           if (!appMountedRef.current) return;
-          console.warn(
-            '[web-shell] prompt preflight rejected, prompt cancelled',
-            err,
-          );
+          // Say so. Hosts put user-facing text in these errors — the VS Code
+          // companion's message-edit rewind throws localized failures here —
+          // and cancelling silently leaves the user in front of a composer
+          // that appeared to do nothing (#9911). Only when the user is still
+          // on the session this submission belonged to; a toast for a session
+          // they have left would be noise. reportError suppresses aborts and
+          // logs the error itself, so this catch no longer warns (that would
+          // double-log a real failure).
+          if (admissionOwnerIsCurrent()) {
+            reportError(err, 'Message could not be submitted');
+          }
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
@@ -10034,6 +10065,7 @@ export function App({
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
+      reportError,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10293,21 +10325,6 @@ export function App({
     ]),
   );
 
-  const reportError = useCallback(
-    (error: unknown, fallback: string) => {
-      if (isAbortError(error)) return;
-      if (isDaemonTurnError(error)) {
-        return;
-      }
-      if (isAlreadyDispatched(error)) {
-        return;
-      }
-      const message = formatError(error, fallback);
-      console.error('[web-shell]', message, error);
-      pushToast('error', message);
-    },
-    [pushToast],
-  );
   const handleFailedPromptRetry = useCallback(() => {
     if (
       sessionWriteBlockedRef.current ||
@@ -10564,13 +10581,22 @@ export function App({
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
         const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
-        const submissionOwnerIsCurrent = () =>
+        // Narrower than submissionOwnerIsCurrent below: it answers "is the user
+        // still looking at the session this submission belonged to", which is
+        // what decides whether a failure is worth telling them about. The full
+        // guard also tracks composer identity, and submitting is itself what
+        // moves that — so reusing it here would suppress the very message the
+        // user needs (#9911). The full guard is composed on this base rather
+        // than restating the same four conjuncts, so the two cannot drift.
+        const submissionSessionIsCurrent = () =>
           appMountedRef.current &&
           sourceOwner.isCurrent() &&
+          connectionRef.current.sessionId === sourceSessionId &&
+          getComposerWorkspaceCwd() === sourceWorkspaceCwd;
+        const submissionOwnerIsCurrent = () =>
+          submissionSessionIsCurrent() &&
           !sessionWriteBlockedRef.current &&
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
-          connectionRef.current.sessionId === sourceSessionId &&
-          getComposerWorkspaceCwd() === sourceWorkspaceCwd &&
           composerSourceVersionRef.current === sourceVersion;
         void (async () => {
           let preparedPrompt = text;
@@ -10607,10 +10633,18 @@ export function App({
               sourceWorkspaceCwd,
             );
           } catch (err) {
-            console.warn(
-              '[web-shell] queued prompt preflight rejected, cancelled',
-              err,
-            );
+            // A rejected preflight cancels the submission, so it has to say so.
+            // Hosts put user-facing text in these errors — the VS Code
+            // companion's rewind failures are localized strings — and a silent
+            // cancel leaves the user in front of a composer that did nothing
+            // (#9911). Stay quiet only when this submission is no longer the
+            // current one, where the toast would belong to a session the user
+            // has already left. reportError suppresses aborts and logs the
+            // error itself, so this catch no longer warns (that would
+            // double-log a real failure).
+            if (submissionSessionIsCurrent()) {
+              reportError(err, 'Message could not be submitted');
+            }
           }
         })();
         return false;
@@ -10626,6 +10660,7 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      reportError,
       rawEnqueuePrompt,
       sessionCatalogController,
       sessionOwnerGuard,
@@ -19201,6 +19236,15 @@ export function App({
                             />
                           </div>
                         )}
+                        <SessionRecoveryBanner
+                          blocked={
+                            isDisabled ||
+                            isStartingNewSessionSuggestion ||
+                            interactionBlocked ||
+                            sessionHasActivePrompt ||
+                            unknownPromptAdmission?.payloadAvailable === true
+                          }
+                        />
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}
