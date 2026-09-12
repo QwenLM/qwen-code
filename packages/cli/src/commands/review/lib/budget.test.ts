@@ -15,6 +15,7 @@ import {
   launchToolBudget,
   reverseAuditRoundCap,
   reverseAuditRoundTier,
+  sizeTier,
   cappedRoundTier,
   reviewBudget as deriveReviewBudget,
   type BudgetContext,
@@ -1264,5 +1265,48 @@ describe('the huge reduction applies only where there is a wall to fit inside', 
     const withClock = { ...HUGE, budget: { reverseAuditRounds: 3 } };
     expect(reverseAuditRoundCap(withClock, true)).toBe(3);
     expect(reverseAuditRoundCap(withClock, false)).toBe(3); // in [3,5], honoured
+  });
+});
+
+describe('sizeTier — the one topology reading the caps and the default wall share', () => {
+  it('names the three tiers by the same arithmetic the round cap uses', () => {
+    expect(sizeTier({ srcDiffLines: 100, diffLines: 100 })).toBe('small');
+    expect(sizeTier({ srcDiffLines: 500, diffLines: 3200 })).toBe('small'); // at both floors
+    expect(sizeTier({ srcDiffLines: 501, diffLines: 501 })).toBe('large'); // src past the floor
+    expect(sizeTier({ srcDiffLines: 10, diffLines: 3201 })).toBe('large'); // total past the floor
+    expect(sizeTier({ srcDiffLines: 2999, diffLines: 2999 })).toBe('large');
+    expect(sizeTier({ srcDiffLines: 3000, diffLines: 3000 })).toBe('huge');
+    // An all-non-source diff counts at an eighth: 24,000 total → 3,000 effective.
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 24_000 })).toBe('huge');
+    expect(sizeTier({ srcDiffLines: 0, diffLines: 23_999 })).toBe('large');
+  });
+
+  it('reads garbled or missing sizes as the large tier, like the cap does', () => {
+    for (const bad of [
+      {},
+      { srcDiffLines: 100 },
+      { diffLines: 100 },
+      { srcDiffLines: -1, diffLines: 100 },
+      { srcDiffLines: Number.NaN, diffLines: 100 },
+      { srcDiffLines: '100' as unknown as number, diffLines: 100 },
+    ]) {
+      expect(sizeTier(bad)).toBe('large');
+    }
+  });
+
+  it('agrees with reverseAuditRoundTier on every tier, both sides of the clock', () => {
+    const byTier = { small: 10, large: 5, huge: 3 } as const;
+    for (const size of [
+      { srcDiffLines: 100, diffLines: 100 },
+      { srcDiffLines: 900, diffLines: 900 },
+      { srcDiffLines: 5000, diffLines: 5000 },
+      {},
+    ]) {
+      const tier = sizeTier(size);
+      expect(reverseAuditRoundTier(size, true)).toBe(byTier[tier]);
+      expect(reverseAuditRoundTier(size, false)).toBe(
+        tier === 'huge' ? 5 : byTier[tier],
+      );
+    }
   });
 });

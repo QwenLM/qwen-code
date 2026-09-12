@@ -4994,6 +4994,182 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
   });
 });
 
+describe('the plan-recorded wall — a local run has a clock too', () => {
+  // Step 2 of the termination roadmap: without `QWEN_REVIEW_DEADLINE_EPOCH`
+  // the gates used to be inert, so a local loop that stopped converging had
+  // no bound but the round cap — and the cap counts rounds, not time. The
+  // capture now records a wall in the plan; these drive the real handler
+  // against such plans with NO env clock.
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Write `plan` captured `agoSeconds` ago and run the handler on it. */
+  function callOn(
+    plan: Record<string, unknown>,
+    agoSeconds: number,
+    role: string,
+    extra: Record<string, unknown> = {},
+  ): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-wall-'));
+    dirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify(plan));
+    const capturedMs = Date.now() - agoSeconds * 1000;
+    utimesSync(planPath, capturedMs / 1000, capturedMs / 1000);
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '- x.test.ts:3 — off-by-one in retry cap\n');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan: planPath,
+      role,
+      findings,
+      ...extra,
+    });
+    return planPath;
+  }
+  const stderr = () =>
+    (writeStderrLine as unknown as Mock).mock.calls.map((c) => c[0]).join('\n');
+
+  it('refuses a reverse-audit round the plan’s default wall no longer holds — no env clock at all', () => {
+    // A 3,600s wall captured 1,000s ago: 2,600s remain, under the 1,200s
+    // reserve a wall that short implies plus the 1,800s round-1 estimate.
+    const planPath = callOn(
+      { ...PLAN, deadlineSeconds: 3600, deadlineSource: 'default' },
+      1000,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('BUDGET:');
+    expect(stderr()).toContain(
+      '`reverse audit — stopped before round 2 by the review time budget`',
+    );
+    expect(readBudgetStop(planPath)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(planPath)).toHaveLength(0);
+  });
+
+  it('admits the round while the wall holds, and a `--deadline none` plan is unclocked', () => {
+    // 8 hours of wall captured an hour ago: plenty.
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      3600,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    // No wall recorded (`--deadline none`) and no env: the gate is inert even
+    // for a plan captured long ago.
+    (writeStdoutLine as unknown as Mock).mockClear();
+    callOn({ ...PLAN }, 48 * 3600, 'reverse-audit', { round: 2 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('the env clock still wins over the plan’s wall when both are present', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      0,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect(stderr()).toContain('BUDGET:');
+  });
+
+  it('the default wall does not flip the huge tier; an explicit --deadline does', () => {
+    // A huge plan at the 3B cap of 5. Under the default wall round 4 is
+    // inside the cap; under a flag wall the cap is the huge tier's 3 and
+    // round 4 is past it — refused as a ROUND CAP, not a budget stop.
+    const huge = {
+      ...PLAN,
+      srcDiffLines: 9000,
+      diffLines: 9000,
+      budget: { reverseAuditRounds: 5 },
+    };
+    callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'default' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    const flagged = callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'flag' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('ROUND CAP:');
+    expect(readBudgetStop(flagged)?.cause).toBe('round-cap');
+
+    // The --all-chunks round builder and the per-chunk build each read the
+    // cap at their own site; pin all three.
+    for (const [source, exit] of [
+      ['default', undefined],
+      ['flag', 4],
+    ] as const) {
+      for (const form of [{ 'all-chunks': true }, { chunk: 13 }]) {
+        (writeStdoutLine as unknown as Mock).mockClear();
+        (writeStderrLine as unknown as Mock).mockClear();
+        process.exitCode = undefined;
+        callOn(
+          { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: source },
+          60,
+          'reverse-audit',
+          { ...form, round: 4 },
+        );
+        expect(process.exitCode).toBe(exit);
+        if (exit === 4) expect(stderr()).toContain('ROUND CAP:');
+        else expect(stderr()).not.toContain('ROUND CAP:');
+      }
+    }
+  });
+
+  it('the verifier’s compose floor reads the plan’s wall too', () => {
+    // 2,000s of wall captured 1,000s ago: 1,000s remain, under the 1,200s
+    // compose floor.
+    callOn(
+      { ...PLAN, deadlineSeconds: 2000, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('VERIFY BUDGET:');
+
+    (writeStderrLine as unknown as Mock).mockClear();
+    process.exitCode = undefined;
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+});
+
 describe('the reverse-audit budget gate — the loop must end by reporting', () => {
   // Measured on CI run #8368 (+1699 lines): the audit loop ran to the 5-round
   // cap, spent 3.5 of the job's 4 budgeted hours, and the outer kill arrived
@@ -5994,6 +6170,40 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(clocked).toContain('certificate final');
     expect(clocked).toContain('3-round cap leaves');
     expect(clocked).not.toContain('next cold check round 4');
+
+    // The plan's own wall, no env: a `--deadline` flag is an explicit clock
+    // and closes the certificate; the default wall is not, and does not.
+    delete process.env[DEADLINE_ENV];
+    for (const [source, closes] of [
+      ['flag', true],
+      ['default', false],
+    ] as const) {
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          srcDiffLines: 5000,
+          diffLines: 5000,
+          deadlineSeconds: 16 * 3600,
+          deadlineSource: source,
+        }),
+      );
+      // Recent, so the wall has hours left, but before the round records.
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(plan, recent, recent);
+      answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+      answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+      const walled = runRound(3);
+      expect(process.exitCode).toBeUndefined();
+      expect(walled).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+      if (closes) {
+        expect(walled).toContain('3-round cap leaves');
+        expect(walled).not.toContain('next cold check round 4');
+      } else {
+        expect(walled).toContain('next cold check round 4');
+        expect(walled).not.toContain('certificate final');
+      }
+    }
   });
 
   it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {

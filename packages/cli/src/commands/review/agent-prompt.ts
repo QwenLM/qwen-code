@@ -2923,8 +2923,9 @@ function admitReverseAuditRound(
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. One value per topology (`reverseAuditRoundTier`) —
   // ten on a 3A diff, where a round is one auditor; five on a 3B one, where
-  // it is one per non-retired chunk; and — only in a run that has a deadline,
-  // since the reduction answers a ceiling — a reduced three for a huge
+  // it is one per non-retired chunk; and — only in a run with an EXPLICIT
+  // deadline (CI epoch or `--deadline`), since the reduction answers a
+  // ceiling and the plan's default wall is not one — a reduced three for a huge
   // diff, where a single reverse-audit round is ~90 minutes and the full
   // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
   // were 4,000-5,300-line PRs). A round past the cap writes a marker so
@@ -2955,6 +2956,8 @@ function admitReverseAuditRound(
   const spent = reverseAuditBudgetExhausted(
     process.env,
     expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
+    undefined,
+    planPath,
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -3184,7 +3187,10 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
+      reverseAuditRoundCap(
+        report,
+        hasReviewDeadline(process.env, planPath, report),
+      ),
       chunks.length,
     )
   ) {
@@ -3250,7 +3256,7 @@ function runAllChunks(
         `says which — relay it to the terminal)`;
   const planRoundCap = reverseAuditRoundCap(
     report,
-    hasReviewDeadline(process.env),
+    hasReviewDeadline(process.env, planPath, report),
   );
   const retirementNote =
     skipped.length === 0
@@ -3671,7 +3677,10 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
+      reverseAuditRoundCap(
+        report,
+        hasReviewDeadline(process.env, args.plan, report),
+      ),
       1,
     )
   ) {
@@ -3690,7 +3699,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // left, then spent all of it on a re-verification battery and was killed
   // before compose ran — ~20 confirmed Critical bypasses never posted.
   if (args.role === 'verify') {
-    const spent = verifyBudgetExhausted(process.env);
+    const spent = verifyBudgetExhausted(
+      process.env,
+      undefined,
+      args.plan,
+      report,
+    );
     if (spent !== null) {
       writeStderrLine(verifyBudgetMessage(spent));
       process.exitCode = 4;
@@ -3774,7 +3788,10 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
+        reverseAuditRoundCap(
+          report,
+          hasReviewDeadline(process.env, args.plan, report),
+        ),
         planChunkIds.length,
       )
     )

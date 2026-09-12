@@ -179,6 +179,7 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
  * byte-identical copies that can silently diverge. `run` and `save-artifact`
  * keep their own shapes (per-target defaults; a resolved value without `low`).
  */
+
 export const EFFORT_OPTION = {
   type: 'string',
   choices: [...EFFORT_LEVELS],
@@ -189,6 +190,25 @@ export const EFFORT_OPTION = {
     'required roster; recorded in the plan ' +
     'so check-coverage, agent-prompt --roster and compose-review all ' +
     'read one value. Omit for the full (high) roster.',
+} as const;
+
+/**
+ * `--deadline`, shared by the three capture commands so the wall is one
+ * option with one grammar everywhere: a whole number of minutes, or `none`.
+ * Omitted, the capture records the tier's default wall (lib/deadline.ts).
+ */
+export const DEADLINE_OPTION = {
+  type: 'string',
+  describe:
+    "The review's wall, in minutes, recorded in the plan as a duration from " +
+    "the attempt's start — the round builder refuses a reverse-audit round " +
+    'that no longer fits inside it plus the tail reserve, and a `--resume` ' +
+    "from a new session renews it. Omit for the topology's default (8h on a 3A diff, 12h on a " +
+    '3B one, 16h when huge), which bounds a run that has stopped converging ' +
+    'without touching a healthy one; `none` records no wall. A ' +
+    'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
+    "explicit deadline, like the environment's, applies the huge tier's " +
+    'round reduction; the default does not.',
 } as const;
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([

@@ -27,7 +27,11 @@ import {
 } from '../../services/review-worktree-lease.js';
 import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
-import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
+import {
+  DEADLINE_ENV,
+  hasReviewDeadline,
+  DEFAULT_DEADLINE_SECONDS,
+} from './lib/deadline.js';
 import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
@@ -869,6 +873,11 @@ describe('fetch-pr report assembly', () => {
       expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
       expect(noClock.budget.reverseAuditRounds).toBe(5);
 
+      // The default wall rides along, and is why the tier still reads 5: a
+      // default is not an explicit clock.
+      expect(noClock.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(noClock.deadlineSource).toBe('default');
+
       process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
       producerMocks.writeFileSync.mockClear();
       const withClock = await reportFor({});
@@ -877,6 +886,40 @@ describe('fetch-pr report assembly', () => {
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
     }
+  });
+  it('records an explicit --deadline as a flag wall — and `none` as no wall', async () => {
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
+    );
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const flagged = await reportFor({ deadline: '90' });
+      expect(flagged.deadlineSeconds).toBe(5400);
+      expect(flagged.deadlineSource).toBe('flag');
+      // The flag is an explicit clock: it flips the huge tier like the env.
+      expect(flagged.budget.reverseAuditRounds).toBe(3);
+
+      producerMocks.writeFileSync.mockClear();
+      const none = await reportFor({ deadline: 'none' });
+      expect(none).not.toHaveProperty('deadlineSeconds');
+      expect(none).not.toHaveProperty('deadlineSource');
+      expect(none.budget.reverseAuditRounds).toBe(5);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+  it('refuses a malformed --deadline before any side effect', async () => {
+    await expect(reportFor({ deadline: 'soon' })).rejects.toThrow(
+      /--deadline must be a whole number of minutes or `none`, got "soon"/,
+    );
+    expect(producerMocks.git).not.toHaveBeenCalled();
   });
 
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
@@ -4325,6 +4368,25 @@ describe('fetch-pr --resume', () => {
     );
     expect(vi.mocked(recordResume)).toHaveBeenCalledWith(OUT);
     expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+  });
+
+  it('says so when a --deadline rides a resume — the plan is not rewritten, so the flag cannot land', async () => {
+    producerMocks.writeStderrLine.mockClear();
+    await run({ deadline: '90' });
+    expect(reportWritten()).toBe(false);
+    const err = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain('--deadline is ignored on a resumed run');
+
+    // The default carries no such note: there is nothing being dropped.
+    producerMocks.writeStderrLine.mockClear();
+    await run();
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).not.toContain('--deadline is ignored');
   });
 
   it('falls through to a fresh fetch when the head moved, and says so', async () => {

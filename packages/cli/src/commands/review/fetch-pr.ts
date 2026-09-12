@@ -44,7 +44,11 @@ import {
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  DEADLINE_OPTION,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -102,7 +106,8 @@ import {
   type ResumeRefusal,
 } from './lib/resume.js';
 import {
-  hasReviewDeadline,
+  captureDeadline,
+  parseDeadlineOption,
   readBudgetStop,
   clearBudgetStop,
   clearRoundStamps,
@@ -138,6 +143,8 @@ interface FetchPrArgs {
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   /**
    * The incremental anchor — the head the last clean round reviewed. Typed
    * as possibly-repeated because yargs collapses a repeated flag into an
@@ -765,8 +772,10 @@ function tryResume(
     };
   }
 
-  // Budget hygiene: the continuation runs under a fresh deadline, so a
-  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // Budget hygiene: the continuation runs under a fresh deadline (CI
+  // recomputes its epoch per attempt; a plan-recorded wall restarts from the
+  // new session's ledger entry), so a time-budget stop is the dead attempt's,
+  // not this run's, and is cleared.
   // A round-cap stop is about rounds, not time — it is the trusted CLI's own
   // record that the audit reached its round cap, so it stands, and the round
   // stamps stay with it. Any other stop is cleared with the stamps: the span
@@ -783,6 +792,14 @@ function tryResume(
   }
   appendRunSession(out);
   recordResume(out);
+  // The plan is not rewritten on resume, so a `--deadline` passed now cannot
+  // land in it; say so rather than let the flag look honoured.
+  if (parseDeadlineOption(args.deadline) !== 'default') {
+    writeStderrLine(
+      'fetch-pr: --deadline is ignored on a resumed run — the plan keeps ' +
+        'the wall it recorded at capture.',
+    );
+  }
   // Read the marker back: `recordResume` deduplicates by session, so a
   // second `--resume` in the SAME session is the same resume, and deriving
   // the number from the pre-write count would announce attempt 2 for it.
@@ -835,6 +852,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
+  // A malformed --deadline is a usage error, and it must fail here with the
+  // other argument checks — before detection, auth, and the worktree lease —
+  // not at the plan write after all of that. The same parse runs again inside
+  // `captureDeadline`; it is pure.
+  parseDeadlineOption(args.deadline);
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
   // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
@@ -1734,6 +1756,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       baseFetchFailed,
       diffText: fullText ?? '',
     });
+    const wall = captureDeadline(process.env, args.deadline, plan);
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1822,8 +1845,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-        hasDeadline: hasReviewDeadline(process.env),
+        hasDeadline: wall.explicit,
       }),
+      ...wall.fields,
       ...planEffortField(args.effort),
       ...(automaticReviewRequested() &&
       !args.resume &&
@@ -2113,6 +2137,7 @@ export const fetchPrCommand: CommandModule = {
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', DEADLINE_OPTION)
       .option('since', {
         type: 'string',
         describe:

@@ -1709,8 +1709,9 @@ export function verificationGaps(
   //
   // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
   // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
-  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
-  // refuse it at all — the monotone-refusal premise fails twice. So a
+  // (rebuild `--round 1`) is admitted, and a run whose wall still holds —
+  // every healthy local run — has nothing to refuse it either: the
+  // monotone-refusal premise fails twice. So a
   // round-cap marker leaves the not-built gap and its rebuild remediation
   // owed, exactly as if no marker were present.
   const stop = readBudgetStop(planPath);
