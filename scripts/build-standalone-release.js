@@ -15,7 +15,10 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import {
+  TARGETS,
   TARGET_CLIPBOARD_PACKAGE,
+  formatStandaloneArchiveName,
+  readOfflineLicense,
   standaloneArchiveName,
   writeSha256Sums,
 } from './create-standalone-package.js';
@@ -158,6 +161,7 @@ async function main() {
           nodeDistUrl,
           nodeVersion,
           outDir,
+          licenseFile: args.licenseFile,
           releaseVersion: args.version,
           runtimeDir,
           checksums: checksums[flavor],
@@ -168,7 +172,7 @@ async function main() {
     }
 
     await writeSha256Sums(outDir);
-    assertStandaloneOutput(outDir, flavors);
+    assertStandaloneOutput(outDir, flavors, args.licenseFile);
   } finally {
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
@@ -187,6 +191,7 @@ async function packageTarget({
   bunDistUrl,
   nodeDistUrl,
   nodeVersion,
+  licenseFile,
   outDir,
   releaseVersion,
   runtimeDir,
@@ -231,6 +236,9 @@ async function packageTarget({
   }
   if (releaseVersion) {
     args.push('--version', releaseVersion);
+  }
+  if (licenseFile) {
+    args.push('--license-file', licenseFile);
   }
 
   execFileSync(process.execPath, args, {
@@ -394,14 +402,27 @@ async function sha256File(filePath) {
   return hash.digest('hex');
 }
 
-function assertStandaloneOutput(outDir, runtimes = ['node']) {
+function assertStandaloneOutput(outDir, runtimes = ['node'], licenseFile) {
   const checksumPath = path.join(outDir, 'SHA256SUMS');
   if (!fs.existsSync(checksumPath)) {
     fail(`Standalone SHA256SUMS was not created at ${checksumPath}`);
   }
 
+  const license = licenseFile ? readOfflineLicense(licenseFile) : undefined;
+  // An unlicensed build must keep the canonical helper's names: that is what
+  // verify-installation-release.js independently derives for a release. Only a
+  // licensed customer delivery is stamped with the customer and expiry.
   const expectedArchiveNames = RELEASE_TARGETS.flatMap(({ qwenTarget }) =>
-    runtimes.map((runtime) => standaloneArchiveName(qwenTarget, runtime)),
+    runtimes.map((runtime) =>
+      license
+        ? formatStandaloneArchiveName({
+            license,
+            outputExtension: TARGETS.get(qwenTarget).outputExtension,
+            runtime,
+            target: qwenTarget,
+          })
+        : standaloneArchiveName(qwenTarget, runtime),
+    ),
   ).sort();
   const archiveNames = fs
     .readFileSync(checksumPath, 'utf8')
@@ -441,6 +462,7 @@ function parseArgs(argv) {
   const args = {
     help: false,
     includeOpentuiPreview: false,
+    licenseFile: undefined,
     nodeVersion: undefined,
     bunVersion: undefined,
     runtime: undefined,
@@ -461,6 +483,10 @@ function parseArgs(argv) {
         break;
       case '--node-version':
         args.nodeVersion = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--license-file':
+        args.licenseFile = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--bun-version':
@@ -506,6 +532,7 @@ Usage:
 
 Options:
   --version VERSION      Release version written to standalone manifests.
+  --license-file PATH    Signed customer license JSON to inject.
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
