@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveVoiceTransport } from '../../services/voice-model.js';
+
 import * as net from 'node:net';
 import { ALL_PROVIDERS, shouldShowStep } from '@qwen-code/qwen-code-core';
 import type {
@@ -311,6 +313,49 @@ export function parseAuthProviderInstallRequest(
     body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
       ? (body['advancedConfig'] as Record<string, unknown>)
       : undefined;
+  const purpose = rawAdvanced?.['purpose'];
+  if (purpose !== undefined && purpose !== 'image' && purpose !== 'voice') {
+    return {
+      ok: false,
+      code: 'invalid_model_purpose',
+      error: 'Invalid model purpose',
+    };
+  }
+  if (purpose && providerId.trim() !== 'custom-openai-compatible') {
+    return {
+      ok: false,
+      code: 'invalid_model_purpose',
+      error: 'Model purpose requires a custom provider',
+    };
+  }
+  if (
+    purpose === 'voice' &&
+    ((protocol ?? 'openai') !== 'openai' ||
+      !baseUrl ||
+      !modelIds?.length ||
+      modelIds.some((id) => resolveVoiceTransport(id) === 'unsupported'))
+  ) {
+    return {
+      ok: false,
+      code: 'invalid_voice_model',
+      error:
+        'Voice transcription requires OpenAI protocol and a supported ASR model ID',
+    };
+  }
+  if (
+    purpose === 'image' &&
+    (!modelIds?.length ||
+      !baseUrl?.startsWith('https://') ||
+      new URL(baseUrl).search ||
+      new URL(baseUrl).hash)
+  ) {
+    return {
+      ok: false,
+      code: 'invalid_image_model',
+      error:
+        'Image generation requires an HTTPS endpoint without query or fragment',
+    };
+  }
   const rawMultimodal =
     rawAdvanced?.['multimodal'] && typeof rawAdvanced['multimodal'] === 'object'
       ? (rawAdvanced['multimodal'] as Record<string, unknown>)
@@ -323,33 +368,38 @@ export function parseAuthProviderInstallRequest(
     rawAdvanced?.['maxTokens'],
     10_000_000,
   );
-  const advancedConfig = rawAdvanced
-    ? {
-        ...(typeof rawAdvanced['enableThinking'] === 'boolean'
-          ? { enableThinking: rawAdvanced['enableThinking'] }
-          : {}),
-        ...(rawMultimodal
-          ? {
-              multimodal: {
-                ...(typeof rawMultimodal['image'] === 'boolean'
-                  ? { image: rawMultimodal['image'] }
-                  : {}),
-                ...(typeof rawMultimodal['pdf'] === 'boolean'
-                  ? { pdf: rawMultimodal['pdf'] }
-                  : {}),
-                ...(typeof rawMultimodal['audio'] === 'boolean'
-                  ? { audio: rawMultimodal['audio'] }
-                  : {}),
-                ...(typeof rawMultimodal['video'] === 'boolean'
-                  ? { video: rawMultimodal['video'] }
-                  : {}),
-              },
-            }
-          : {}),
-        ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
-      }
-    : undefined;
+  const advancedConfig: ServeAuthProviderInstallRequest['advancedConfig'] =
+    rawAdvanced
+      ? {
+          ...(rawAdvanced['replaceExisting'] === true
+            ? { replaceExisting: true }
+            : {}),
+          ...(purpose ? { purpose } : {}),
+          ...(typeof rawAdvanced['enableThinking'] === 'boolean'
+            ? { enableThinking: rawAdvanced['enableThinking'] }
+            : {}),
+          ...(rawMultimodal
+            ? {
+                multimodal: {
+                  ...(typeof rawMultimodal['image'] === 'boolean'
+                    ? { image: rawMultimodal['image'] }
+                    : {}),
+                  ...(typeof rawMultimodal['pdf'] === 'boolean'
+                    ? { pdf: rawMultimodal['pdf'] }
+                    : {}),
+                  ...(typeof rawMultimodal['audio'] === 'boolean'
+                    ? { audio: rawMultimodal['audio'] }
+                    : {}),
+                  ...(typeof rawMultimodal['video'] === 'boolean'
+                    ? { video: rawMultimodal['video'] }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
+          ...(maxTokens !== undefined ? { maxTokens } : {}),
+        }
+      : undefined;
   return {
     ok: true,
     value: {
