@@ -223,8 +223,9 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // debugLogger.error() uses async fs.appendFile — the write would be
     // abandoned by the process.exit() below. Write synchronously instead.
     let logged = false;
+    let logPath: string | undefined;
     try {
-      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      logPath = Storage.getDebugLogPath(config.getSessionId());
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(logPath, line, 'utf8');
       logged = true;
@@ -258,8 +259,23 @@ export function setupUncaughtExceptionHandler(config: Config) {
     // fire-and-forget for the same reason.)
     try {
       config.getMonitorRegistry().abortAll({ notify: false });
-    } catch {
-      // The debug log and stderr line above are the record.
+    } catch (reapError) {
+      // A failed reap means monitors still leak — the one distinguishing
+      // fact this path can produce. The crash lines above were written
+      // before the reap ran, so record the failure separately.
+      try {
+        if (logPath) {
+          const detail =
+            reapError instanceof Error ? reapError.stack : String(reapError);
+          fs.appendFileSync(
+            logPath,
+            `${new Date().toISOString()} [ERROR] [STARTUP] [MONITOR_REAP_FAILED] ${detail ?? ''}\n`,
+            'utf8',
+          );
+        }
+      } catch {
+        // Nothing safe left to do.
+      }
     }
     process.exit(1);
   };

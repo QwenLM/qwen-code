@@ -3691,6 +3691,11 @@ describe('setupUncaughtExceptionHandler', () => {
 
     expect(() => handler(new Error('boom'))).not.toThrow();
     expect(exitSpy).toHaveBeenCalledWith(1);
+    // A failed reap means monitors still leak; that fact must be recorded,
+    // not swallowed (the crash line above cannot contain it).
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[MONITOR_REAP_FAILED]');
+    expect(log).toContain('registry broken');
   });
 });
 
