@@ -72,9 +72,16 @@ export function buildWebShellCsp(
 }
 
 export function remoteDaemonConnectOrigins(raw: unknown): string[] {
-  if (typeof raw !== 'string') return [];
+  // A repeated `?daemon=` parses to an array under Express's qs parser, so it is
+  // not a string. The client reads the same parameter first-value-wins
+  // (`URLSearchParams.get`), so agree with it rather than failing the whole
+  // header closed on multiplicity — that would let the client try to connect to
+  // an origin this CSP does not allow, and the shell would loop on "cannot
+  // reach the daemon" with only a console CSP violation as evidence.
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return [];
   try {
-    const url = new URL(raw);
+    const url = new URL(value);
     if (
       (url.protocol !== 'https:' && url.protocol !== 'http:') ||
       url.username ||

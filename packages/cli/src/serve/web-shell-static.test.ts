@@ -60,6 +60,37 @@ describe('Web Shell sandbox framing', () => {
       remoteDaemonConnectOrigins('https://daemon.example.com/path'),
     ).toEqual([]);
 
+    // A repeated `?daemon=` arrives as an array (Express qs). The client reads
+    // the same parameter first-value-wins, so the header must allow that value
+    // instead of emitting a CSP with no remote origin at all.
+    expect(
+      remoteDaemonConnectOrigins([
+        'https://daemon.example.com:4170',
+        'https://other.example',
+      ]),
+    ).toEqual([
+      'https://daemon.example.com:4170',
+      'wss://daemon.example.com:4170',
+    ]);
+    expect(
+      remoteDaemonConnectOrigins([
+        'file:///tmp/daemon',
+        'https://daemon.example.com:4170',
+      ]),
+    ).toEqual([]);
+    expect(remoteDaemonConnectOrigins([])).toEqual([]);
+    expect(
+      buildWebShellCsp(
+        [],
+        remoteDaemonConnectOrigins([
+          'https://daemon.example.com:4170',
+          'https://other.example',
+        ]),
+      ),
+    ).toContain(
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    );
+
     expect(remoteDaemonConnectOrigins('http://evil.example%3Bsandbox')).toEqual(
       [],
     );
