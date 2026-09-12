@@ -18242,9 +18242,14 @@ describe('terminalState — coverage, not verdict', () => {
     );
     expect(r.cappedBy).toContain('chunk-nobody-read');
     const line = verdictLine(r);
-    expect(line).toContain('could not be credited to this plan');
+    // Neither the "never read" clause (two agents read the window) nor the
+    // "could not be credited to this plan" one (nothing was refused on plan
+    // grounds) — the neutral clause, which is the only one true here.
+    expect(line).toContain('went uncovered — see the disclosures');
     expect(line).not.toContain('was never read');
     expect(r.body).not.toContain('nobody read');
+    // The two channels still agree, which is what this test is about.
+    expect(r.body).toContain('went uncovered; see the disclosures');
   });
 
   it('keeps "never read" in the verdict line for a chunk nothing was launched for', () => {
@@ -18302,7 +18307,53 @@ describe('terminalState — coverage, not verdict', () => {
       'unknown',
     );
     expect(r.body).not.toContain('nobody read');
-    expect(r.body).toContain('could be accepted for this plan');
+    // Not the "could not be accepted for this plan" clause either: nothing
+    // was refused on plan grounds here — the two declarations stood each
+    // other down. A clause that names a refusal is a positive claim, and
+    // the complement of "read nothing" does not establish one (R38-119).
+    expect(r.body).toContain('went uncovered; see the disclosures');
+  });
+
+  it('does not post a relayed uncoverable the run\u2019s own records refute', () => {
+    // The caller carries Step 3B's `Uncoverable:` lines into compose, and
+    // coverage may have refused that declaration — the ledger then records
+    // the chunk `covered`. Rendered unconditionally, the body told the PR
+    // author those lines were never reviewed in a report whose own ledger
+    // said they were and whose `terminalState` said `complete` (R38-148).
+    for (const relay of ['chunk 2 (src/a.ts)', 'chunk 2']) {
+      const r = composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: coveredPlan(['verify', 'reverse-audit']),
+        env: ENV,
+        modelId: MODEL,
+        uncoverableChunks: [relay],
+      });
+      expect(r.chunkLedger.find((i) => i.id === 2)?.outcome).toBe('covered');
+      // The cap still fires — this changes what the body says, not what the
+      // verdict allows.
+      expect(r.cappedBy).toContain('uncoverable-chunk');
+      expect(r.body).not.toContain('a line there exceeds the read limit');
+      // Disclosed, not swallowed.
+      // And it does not open with a 'Not reviewed:' claim of its own —
+      // this entry says the chunk WAS read.
+      expect(r.body).toContain('Relay not credited: chunk 2');
+    }
+  });
+
+  it('still posts a relayed uncoverable the ledger cannot refute', () => {
+    // The other direction: an id this plan does not carry has no ledger
+    // entry to contradict it, so the relay renders verbatim as before.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 5 (src/big.min.js)'],
+    });
+    expect(r.body).toContain('a line there exceeds the read limit');
+    expect(r.body).not.toContain('Relay not credited');
   });
 
   it('holds `complete` beside a coverage cap when the relay names a chunk the ledger COVERED', () => {

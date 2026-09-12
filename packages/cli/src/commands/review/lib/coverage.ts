@@ -216,6 +216,23 @@ const READ_SOMETHING_CLASSES = new Set<ChunkFailureClass>([
  * nothing it carries says otherwise. With no named cause at all the
  * collapsed class is `no-agent` or `unknown`, which answer this directly.
  */
+/**
+ * Did this chunk's agents positively report a READ? The other direction,
+ * and not the complement of `chunkReadNothing`.
+ *
+ * Only `declared-uncoverable` asserts one: an admitted declaration is an
+ * agent reporting what it found in the window it was pointed at. Everything
+ * else either asserts nothing was read or asserts nothing either way, so a
+ * chunk that fails `chunkReadNothing` has not thereby been shown to have
+ * been read — which is what reading the complement as a positive did
+ * (R38-119).
+ */
+export function chunkReadSomething(item: {
+  causes?: readonly ChunkFailureClass[];
+}): boolean {
+  return (item.causes ?? []).some((c) => READ_SOMETHING_CLASSES.has(c));
+}
+
 export function chunkReadNothing(item: {
   classification?: ChunkFailureClass;
   causes?: readonly ChunkFailureClass[];
@@ -626,6 +643,8 @@ interface Plan {
      * the refutation guard below fails closed on the absence.
      */
     maxLineChars?: number;
+    /** Characters in the whole window. Above the cap, ONE read truncates. */
+    chars?: number;
   }>;
 }
 
@@ -1096,6 +1115,49 @@ export function coverageFromTranscripts(
       ([s, e]) => s <= c.endLine && e >= c.startLine,
     );
   };
+  /**
+   * Is this record one this run SENT for these lines — the naming-grade
+   * seal, weaker than `sealedToThisPlan`'s credit-grade one?
+   *
+   * Extracted so the two things that ask it cannot answer differently. The
+   * ledger's `agents` asks it, and so do the causes that are facts about the
+   * RECORD rather than about which plan delivered it (`idle`,
+   * `blind-prompt`): gating those on the credit seal left a chunk whose
+   * agent demonstrably read nothing with `causes: []`, so `chunkReadNothing`
+   * answered false and all three channels reported it as read (R38-2).
+   */
+  const namedForThisPlan = (rec: AgentRecord, c: number): boolean => {
+    const countAgrees = assignedChunkTotal(rec) === plan.chunks.length;
+    // No fail-open on absent reads: an empty `diffReads` proves nothing
+    // about which plan this record served.
+    const reachedTheseLines =
+      rec.diffReads.length > 0 && readsReachChunk(rec.diffReads, c);
+    if (
+      !plan.chunks.some((k) => k.id === c) ||
+      (!countAgrees && !reachedTheseLines) ||
+      // Marker ABSENCE is not marker MISMATCH, and only the second says the
+      // record was sent for another plan's lines. A launch that keeps this
+      // plan's identity line and `of M` count but lost its `Plan identity:`
+      // line — a relay that dropped one line — was refused here, so
+      // `classify()` answered `no-agent` while the same report's
+      // `rewrittenPrompts` named that chunk's agent one line earlier: the
+      // exact contradiction this gate was widened to remove, still reachable
+      // through the token conjunct (R36-2). A positive FOREIGN token still
+      // refuses — that record belongs to the plan that wrote it.
+      //
+      // Credit keeps the whole seal: `sealedToThisPlan`, the credit gate, the
+      // budget-gap gate and the roster rescue all still ride
+      // `markedOfThisPlan`, so a marker-less record earns no coverage and the
+      // run still refuses it. This widens only who the ledger NAMES.
+      (!identityUnreadable &&
+        launchPlanToken(rec.launchPrompt) !== null &&
+        !markedOfThisPlan(rec.launchPrompt))
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   const noteChunkAgent = (
     rec: AgentRecord,
     c: number | null,
@@ -1147,44 +1209,50 @@ export function coverageFromTranscripts(
     // case, whose reads are empty and whose window is 700 lines away. So
     // the escape needs REACHED, with no fail-open on absent reads: an
     // empty `diffReads` proves nothing about which plan this record served.
-    const countAgrees = assignedChunkTotal(rec) === plan.chunks.length;
-    // No fail-open on absent reads: an empty `diffReads` proves nothing
-    // about which plan this record served.
-    const reachedTheseLines =
-      rec.diffReads.length > 0 && readsReachChunk(rec.diffReads, c);
-    if (
-      !plan.chunks.some((k) => k.id === c) ||
-      (!countAgrees && !reachedTheseLines) ||
-      // Marker ABSENCE is not marker MISMATCH, and only the second says the
-      // record was sent for another plan's lines. A launch that keeps this
-      // plan's identity line and `of M` count but lost its `Plan identity:`
-      // line — a relay that dropped one line — was refused here, so
-      // `classify()` answered `no-agent` while the same report's
-      // `rewrittenPrompts` named that chunk's agent one line earlier: the
-      // exact contradiction this gate was widened to remove, still reachable
-      // through the token conjunct (R36-2). A positive FOREIGN token still
-      // refuses — that record belongs to the plan that wrote it.
-      //
-      // Credit keeps the whole seal: `sealedToThisPlan`, the credit gate, the
-      // budget-gap gate and the roster rescue all still ride
-      // `markedOfThisPlan`, so a marker-less record earns no coverage and the
-      // run still refuses it. This widens only who the ledger NAMES.
-      (!identityUnreadable &&
-        launchPlanToken(rec.launchPrompt) !== null &&
-        !markedOfThisPlan(rec.launchPrompt))
-    ) {
-      return;
-    }
+    if (!namedForThisPlan(rec, c)) return;
     const seen = chunkAgents.get(c);
     if (seen === undefined) chunkAgents.set(c, [name]);
     else if (!seen.includes(name)) seen.push(name);
   };
+  /**
+   * Sealed to this plan by DELIVERY — membership, the `of M` count, the
+   * token, and territory over the MERGED told-and-read ranges.
+   *
+   * The two channels that say "the delivery stands" — the drifted-launch
+   * NOTE and the roster's drift rescue — both ask this, and both asked it
+   * with `sealedToThisPlan`, whose territory conjunct reads the told-range
+   * alone. That is the credit gate's question, not theirs: this arm's drift
+   * is IN the read line, so a told-only test refuses exactly the records
+   * these channels exist for, and a run whose every chunk was covered came
+   * back `ok: false` with a rebuild prescribed for a covered chunk
+   * (R38-126). Spelled once, so the NOTE and the rescue cannot disagree
+   * about what a standing delivery is.
+   */
+  const sealedByDelivery = (rec: AgentRecord, chunkId: number): boolean =>
+    plan.chunks.some((k) => k.id === chunkId) &&
+    assignedChunkTotal(rec) === plan.chunks.length &&
+    markedOfThisPlan(rec.launchPrompt) &&
+    declarationStillOnTerritory(
+      [...pointedAt(rec.launchPrompt, plan), ...rec.diffReads],
+      chunkId,
+    );
   const noteChunkCause = (
     rec: AgentRecord,
     c: number | null,
     cls: ChunkFailureClass,
   ): void => {
-    if (c === null || !sealedToThisPlan(rec, c)) return;
+    if (c === null) return;
+    // `idle` and `blind-prompt` are facts about the RECORD — it made no
+    // successful tool call; its launch never named the diff — not about
+    // which plan delivered it, so they ride the naming-grade seal, the same
+    // distinction R36-2 drew for `agents`. The rest keep the credit-grade
+    // one: `rewritten-prompt`, `unopened` and `declared-uncoverable` each
+    // compare the record against THIS plan's built prompt, window or
+    // measurement, so a record the credit seal refuses has not earned them.
+    const recordFact = cls === 'idle' || cls === 'blind-prompt';
+    if (recordFact ? !namedForThisPlan(rec, c) : !sealedToThisPlan(rec, c)) {
+      return;
+    }
     const seen = chunkCauses.get(c);
     if (seen === undefined) chunkCauses.set(c, new Set([cls]));
     else seen.add(cls);
@@ -1524,13 +1592,48 @@ export function coverageFromTranscripts(
    * absent-metadata shape rides; the truncatable shape (`> cap`) is the
    * honest declarer's, and stays admitted.
    */
+  /**
+   * Does the plan's own measurement say ONE read cannot return this window?
+   *
+   * `maxLineChars` answers a different question — can a read reach the TAIL
+   * of the longest line — and both are needed. An `oversized` chunk (one the
+   * planner could find no safe interior boundary to split) can have every
+   * line well under the cap and a window of 45 000 characters: one read
+   * returns a truncated view, `rangeOf` records the REQUESTED range, and the
+   * chunk was certified `covered` off it (R38-124). The planner writes
+   * `chars` for exactly this, and `MAX_CHUNK_CHARS` is below the cap, so the
+   * conjunct can only fire on the oversized shape and leaves every ordinary
+   * chunk where it was.
+   */
+  const windowExceedsOneRead = (chunkId: number): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    return (
+      c !== undefined && c.chars !== undefined && c.chars > READ_FILE_CHAR_CAP
+    );
+  };
+  /**
+   * Did this record cover the window with reads that each fit one read?
+   *
+   * The escape from `windowExceedsOneRead`: an agent that PAGES an oversized
+   * chunk — which is what its brief tells it to do — covers the window with
+   * several reads, none of which truncates. One read of the whole window
+   * does not, however much range it records.
+   */
+  const pagedAcross = (
+    rec: AgentRecord,
+    c: { id: number; startLine: number; endLine: number },
+  ): boolean =>
+    rec.diffReads.filter(([s, e]) => s <= c.endLine && e >= c.startLine)
+      .length > 1;
   const planContradictsDeclaration = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
     return (
       c !== undefined &&
       c.maxLineChars !== undefined &&
       c.maxLineChars > 0 &&
-      c.maxLineChars <= READ_FILE_CHAR_CAP
+      c.maxLineChars <= READ_FILE_CHAR_CAP &&
+      // Every LINE fits is not every WINDOW fits.
+      !windowExceedsOneRead(chunkId)
     );
   };
   // The truncatable shape the refutation guard's `> CAP` arm names, reused
@@ -1914,7 +2017,19 @@ export function coverageFromTranscripts(
           // token conjunct through, so a count-changed or window-moved
           // record must fail the geometry conjuncts here the same way it
           // does in the note arms it claims parity with.
-          sealedToThisPlan(rec, chunk) &&
+          // Sealed — but over the MERGED told-and-read ranges, the way the
+          // credit gate seals, not over the told-range alone. This arm's drift
+          // is in the read line itself, so a told-only territory test refuses
+          // exactly the records the NOTE was written for: a relay that altered
+          // the read line, opened its brief and paged the chunk was routed into
+          // the capping `rewrittenPrompts` channel, and a run whose every chunk
+          // was covered came back `ok: false` with a rebuild-and-relaunch
+          // prescribed for a chunk already in `coveredChunks` (R38-126). A
+          // record the credit gate will credit cannot be refused here.
+          //
+          // The staleness conjuncts this seal was added for are untouched:
+          // membership, the `of M` count and the token all still apply.
+          sealedByDelivery(rec, chunk) &&
           openedBriefOf(rec, `chunk-${chunk}`) &&
           rec.diffToolCalls > 0
         ) {
@@ -2036,17 +2151,23 @@ export function coverageFromTranscripts(
       if (!rewrittenThisRecord && !superseded(rec, chunk)) {
         unopenedAgents.push(name);
       }
-      // The cause the operator is handed is the one whose repair subsumes the
-      // other, matching the push above: a rewritten prompt is rebuilt, and a
-      // rebuild already relaunches. Reporting both would hand two conflicting
-      // repairs for one chunk. Gated like the push and the note above: a
-      // superseding relaunch already reopened the diff or rebuilt the prompt.
+      // BOTH causes, like the idle arm two blocks up — `classify()` does the
+      // ranking, and it already ranks the rebuild above the relaunch, so the
+      // operator is still handed one repair. Recording only the winner
+      // collapsed the FACT axis at the point it is written: a record that
+      // made zero diff calls carried `causes: ['rewritten-prompt']`, so
+      // `chunkReadNothing` answered false and all three channels reported a
+      // chunk nobody opened the diff for as one that was read (R38-1). The
+      // `causes` field exists precisely so the repair precedence and the
+      // fact can stop competing for one slot.
+      //
+      // Gated like the push above: a superseding relaunch already reopened
+      // the diff or rebuilt the prompt.
       if (!superseded(rec, chunk)) {
-        noteChunkCause(
-          rec,
-          chunk,
-          rewrittenThisRecord ? 'rewritten-prompt' : 'unopened',
-        );
+        noteChunkCause(rec, chunk, 'unopened');
+        if (rewrittenThisRecord) {
+          noteChunkCause(rec, chunk, 'rewritten-prompt');
+        }
       }
       continue;
     }
@@ -2183,23 +2304,25 @@ export function coverageFromTranscripts(
         uncoverable.add(chunk);
         noteChunkCause(rec, chunk, 'declared-uncoverable');
       }
-      // Withheld PER ID, and the record walks on — the same rule its
-      // chunk-less twin follows, for the same reason and now on the same
-      // mechanism. The unconditional `continue` that stood here stopped the
-      // whole record, so a chunk agent that declared its own chunk and
-      // demonstrably read its neighbours' lines forfeited those too:
-      // measured on identical facts, the ASSIGNED record reported
-      // `covered []` where the paraphrased one — the shape this file trusts
-      // LESS — reported `covered [1, 3]`. Fixing R36-6 on one arm and
-      // leaving the other inverted the asymmetry rather than removing it
-      // (undirected audit).
+      // Withheld whenever the record RETURNED a declaration of this chunk —
+      // admitted or refused, and whatever refused it.
       //
-      // Withheld whether the declaration was admitted or refused: an
-      // admitted one must not credit what it declared, and a refused one is
-      // a record whose own return says it could not read those lines. The
-      // credit gate's own seals still decide everything else — a record
-      // whose territory conjunct fails earns nothing here either way.
-      withheldFromCredit.add(chunk);
+      // The declarer's own read is not evidence that the chunk was read:
+      // it is the read the launch spelled out and the declaration ANSWERED.
+      // `refutedByReturnedSpanningRead` states the same rule from the other
+      // side, excluding a declarer from refuting its own declaration
+      // because "every production declaration would otherwise refute
+      // itself". So a declaration the plan's measurement contradicts leaves
+      // the chunk the relaunchable gap that measurement shows it is, rather
+      // than certified off the read the agent said it could not complete
+      // (R38-3 asked for the opposite unification; the two pins here and
+      // that exclusion are the evidence against it — answered on the
+      // thread).
+      //
+      // `rec.returned` is the one exemption, and it is R31-1's: narration
+      // emitted between tool calls is not a declaration, so it withholds
+      // nothing.
+      if (rec.returned) withheldFromCredit.add(chunk);
     }
 
     // The anchored CHUNK_RE de-assigns a launch the orchestrator
@@ -2319,30 +2442,12 @@ export function coverageFromTranscripts(
               // cost R34-13 removed from the seal-REFUSED path, left behind
               // on the admitted one.
               withheldFromCredit.add(declared);
-            } else if (
-              // The declaration was refused — and WHY decides whether the
-              // record may still certify the chunk it named. Refused on the
-              // record's own EVIDENCE (no spelled reads where the plan does
-              // not corroborate one, or ranged reads that avoid the window)
-              // means the record is not a declarer this run can adjudicate
-              // AND is not a reader of those lines either: letting its
-              // told-range presumption certify the chunk turned a paraphrased
-              // identity line into MORE coverage than the identity-intact
-              // twin earns, on a chunk whose only agent returned
-              // `Uncoverable:` and demonstrably read elsewhere (R36-3).
-              //
-              // Not withheld when the refusal was `!rec.returned` — mid-flight
-              // narration is not a declaration (R31-1) — and not when the PLAN
-              // contradicts the declaration, where the measurement proves the
-              // declaration a lie and the read it made is the evidence
-              // (R34-13's pinned case).
-              rec.returned &&
-              !planContradictsDeclaration(declared) &&
-              (!(
-                rec.diffReads.length > 0 || chunkTruncatableByPlan(declared)
-              ) ||
-                !declarerReadItsChunk(rec, declared))
-            ) {
+            } else if (rec.returned) {
+              // The twin of the assigned arm's rule, and the same reason: a
+              // returned declaration of this chunk withholds it whatever
+              // refused the declaration, because the declarer's own read is
+              // the one the declaration answered. Mid-flight narration
+              // (R31-1) withholds nothing.
               withheldFromCredit.add(declared);
             }
             break;
@@ -2401,6 +2506,11 @@ export function coverageFromTranscripts(
         // otherwise, never `covered`; the per-record exclusion this replaces
         // (a declared truncatable chunk, R28-1) is a subset of this rule.
         if (chunkTruncatableByPlan(c.id)) continue;
+        // Same rule reached by the window rather than the line: `rangeOf`
+        // records the REQUESTED range, so a single read of an oversized
+        // window records the whole thing while returning a truncated view
+        // (R38-124).
+        if (windowExceedsOneRead(c.id) && !pagedAcross(rec, c)) continue;
         // The same rule for the chunk the plan CANNOT measure: a spanning
         // read does not outrank the unanimous verdict of the agents sent to
         // the chunk (R34-10). Placed beside the truncatable skip because it
@@ -2613,8 +2723,10 @@ export function coverageFromTranscripts(
             // plan delivered them — so the arm fails closed on a
             // marker-less launch over an identity plan, mirroring the
             // credit gate (R20-7).
+            // The rescue's own question is delivery, not credit — the same
+            // one the NOTE asks, through the same predicate (R38-126).
             (c !== null
-              ? sealedToThisPlan(r, c)
+              ? sealedByDelivery(r, c)
               : markedOfThisPlan(r.launchPrompt)) &&
             !matchedRec.has(r) &&
             !rescued.has(r) &&

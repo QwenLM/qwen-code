@@ -34,6 +34,7 @@ import {
   TranscriptsUnavailableError,
   ChunkPartitionError,
   chunkReadNothing,
+  chunkReadSomething,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
 import {
@@ -7431,10 +7432,24 @@ function composeReviewBody(
                 en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
                 zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
               }
-            : {
-                en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be accepted for this plan.`,
-                zh: `未审查：${gap.phraseZh}——没有任何针对它的读取能被本 plan 采信。`,
-              },
+            : // The same rule the verdict line's third arm follows: "could
+              // not be accepted for this plan" is a positive claim about a
+              // refusal, and the complement of "read nothing" does not
+              // establish one. A chunk whose record cleared every guard and
+              // simply never spanned its lines had nothing refused (R38-119).
+              unexplainedReceipts.every((id) =>
+                  chunkReadSomething(
+                    chunkLedger.find((i) => i.id === id) ?? {},
+                  ),
+                )
+              ? {
+                  en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be accepted for this plan.`,
+                  zh: `未审查：${gap.phraseZh}——没有任何针对它的读取能被本 plan 采信。`,
+                }
+              : {
+                  en: `Not reviewed: ${gap.phrase} — ${gap.plural ? 'they went' : 'it went'} uncovered; see the disclosures above for each.`,
+                  zh: `未审查：${gap.phraseZh}——未被覆盖，具体原因见上方各条披露。`,
+                },
       );
     }
   }
@@ -7444,10 +7459,32 @@ function composeReviewBody(
     // gap; a caller's entry may already carry the file (`chunk 5
     // (src/big.min.js)`) and renders verbatim — its structure is not ours to
     // reparse.
+    // A relay the run's OWN records refute does not get posted as fact.
+    //
+    // The caller carries Step 3B's `Uncoverable:` lines into compose, and
+    // coverage may have refused that declaration — `planContradictsDeclaration`
+    // is the documented case — leaving the walk's credited read standing and
+    // the ledger recording the chunk `covered`. Rendered unconditionally,
+    // the body told the PR author those lines were never reviewed while the
+    // same report's ledger said they were and `terminalState` said
+    // `complete`: a public accusation the run's own evidence contradicts
+    // (R38-148). The cap still fires on the relay — this changes what the
+    // body SAYS, not what the verdict allows — and the ledger is untouched,
+    // so `save-artifact`'s re-derivation still reproduces `terminalState`.
+    const ledgerRead = (id: number): boolean => {
+      const item = chunkLedger.find((k) => k.id === id);
+      return item?.outcome === 'covered' || item?.outcome === 'recovered';
+    };
     const bareIds: number[] = [];
     const callerNamed: string[] = [];
+    const refutedByLedger: string[] = [];
     for (const e of uncoverable) {
       const m = /^chunk (\d+)$/.exec(e);
+      const named = /^chunk (\d+)\b/.exec(e);
+      if (named !== null && ledgerRead(Number(named[1]))) {
+        refutedByLedger.push(`chunk ${named[1]}`);
+        continue;
+      }
       if (m) bareIds.push(Number(m[1]));
       else callerNamed.push(e);
     }
@@ -7458,10 +7495,24 @@ function composeReviewBody(
     const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
     const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
     const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
-    notReviewedParts.push({
-      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
-      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
-    });
+    if (shown.length > 0) {
+      notReviewedParts.push({
+        en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+        zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      });
+    }
+    if (refutedByLedger.length > 0) {
+      // Disclosed, not swallowed: the operator is told the relay arrived and
+      // why it was not posted as fact.
+      notReviewedParts.push({
+        // NOT opened with "Not reviewed:" like its siblings: this entry says
+        // the opposite — the chunk WAS read — and an opener that claims
+        // otherwise is the same false-public-sentence class the gate above
+        // exists to stop.
+        en: `Relay not credited: ${refutedByLedger.join(', ')} — relayed as uncoverable, but this run's own records credit a read of ${refutedByLedger.length > 1 ? 'them' : 'it'}.`,
+        zh: `转达未被采信：${refutedByLedger.join('、')}——被转达为不可覆盖，但本次运行自己的记录证明它已被读取。`,
+      });
+    }
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
   // reparsing prose. The first cut recovered a subject/reason boundary from
@@ -10004,7 +10055,15 @@ function chunkGapReason(r: ComposeReviewResult): string {
   if (missing.length === 0) return 'part of the diff was never read';
   const readNothing = missing.filter((i) => chunkReadNothing(i)).length;
   if (readNothing === missing.length) return 'part of the diff was never read';
-  if (readNothing === 0) {
+  // Positively reported as read, by a predicate of its own — not by the
+  // complement of the one above. A chunk can fail `chunkReadNothing` because
+  // nothing it carries says either way (`unknown` with no causes: a record
+  // that cleared every guard and simply never spanned its lines), and for
+  // those the "could not be credited to this plan" clause is false twice
+  // over — nothing was refused, and the plan identity is not what failed.
+  // That clause belongs to arm 1, which is the only state where it did
+  // (R38-119).
+  if (missing.every((i) => chunkReadSomething(i))) {
     return 'part of the diff was read but could not be credited to this plan';
   }
   return 'part of the diff went uncovered — see the disclosures for each';

@@ -34,6 +34,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
   assertChunkPartition,
+  chunkReadNothing,
   type ChunkCoverageItem,
 } from './lib/coverage.js';
 import { buildSelectionIdentity, planIdentityToken } from './lib/selection.js';
@@ -392,6 +393,63 @@ function built(planPath: string, c: number, prompt = good(c)): void {
   mkdirSync(d, { recursive: true });
   writeFileSync(join(d, `chunk-${c}.txt`), prompt);
   writeFileSync(chunkBrief(c), `The chunk-${c} brief.`);
+}
+
+/** Chunk `id`'s ledger entry, or a thrown assertion if the plan lacks it. */
+function entryFor(
+  r: ReturnType<typeof coverageFromTranscripts>,
+  id: number,
+): ChunkCoverageItem {
+  const e = r.chunkItems.find((i) => i.id === id);
+  if (e === undefined) throw new Error(`no ledger entry for chunk ${id}`);
+  return e;
+}
+
+/**
+ * An identity-carrying plan whose chunk-2 record kept the identity line and
+ * the count but lost its `Plan identity:` line, and made no tool call.
+ */
+function identityPlanLocal(): string {
+  const diffPath = join(dir, 'd-identity.txt');
+  const text = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+new\n';
+  writeFileSync(diffPath, text);
+  const chunks = [
+    { id: 1, startLine: 1, endLine: 100, maxLineChars: 42 },
+    { id: 2, startLine: 101, endLine: 200, maxLineChars: 42 },
+  ];
+  const sel = buildSelectionIdentity(text, chunks as unknown as DiffChunk[], 3);
+  const p = join(dir, 'plan.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      diffPathAbsolute: diffPath,
+      srcDiffLines: 5000,
+      diffLines: 200,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks,
+      selection: sel,
+    }),
+  );
+  satisfyRoster(p);
+  const token = planIdentityToken(sel) as string;
+  const mk = (c: number, tok: boolean) =>
+    `You are review agent \`chunk ${c} of 2\` — the territory agent.\n` +
+    (tok ? `Plan identity: ${token}\n` : '') +
+    `read_file(file_path="${briefPath(p, `chunk-${c}`)}")\n` +
+    `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+  for (const c of [1, 2]) {
+    built(p, c, mk(c, true));
+    writeFileSync(briefPath(p, `chunk-${c}`), 'b');
+  }
+  const old = new Date(2020, 0, 1);
+  utimesSync(p, old, old);
+  transcript('a1', mk(1, true), {
+    calls: 1,
+    range: [0, 100],
+    toolPath: diffPath,
+  });
+  transcript('a2', mk(2, false), { calls: 0 });
+  return p;
 }
 
 /** A genuine Step 3A plan: a small source change, every dimension walking it all. */
@@ -3176,6 +3234,131 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(c.unopenedAgents).toEqual([]);
   });
 
+  it('withholds nothing for mid-flight narration that never returned', () => {
+    // R31-1's rule, on the withhold rather than on the cause: `finalText`
+    // keeps narration emitted between tool calls, so a record that echoed
+    // the template line and then died has declared nothing — and must not
+    // cost the chunk the read it did make. The declared chunk is withheld
+    // only from a record that RETURNED its declaration.
+    const p = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 2 });
+    // `returned` is false when tool traffic FOLLOWS the text — the agent was
+    // still working when it echoed the template line. Written by hand
+    // because the `transcript` helper always ends on the text.
+    const mid = JSON.parse(
+      readFileSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'), 'utf8')
+        .trim()
+        .split('\n')[1],
+    ) as Record<string, unknown>;
+    const base = {
+      agentId: 'a2',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a2.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: good(2) }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: DIFF, offset: 100, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { text: 'Uncoverable: chunk 2 — line exceeds the read limit' },
+            ],
+          },
+        }),
+        // ...and then it kept working, so it never returned.
+        JSON.stringify(mid),
+      ].join('\n') + '\n',
+    );
+    expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1, 2]);
+
+    // Its RETURNED twin — identical text, nothing after it — declares, and
+    // the chunk becomes the gap.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a2.jsonl'));
+    transcript('a2', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1]);
+  });
+
+  it('records BOTH causes on the unopened arm, like its idle sibling', () => {
+    // The arm recorded only the repair-precedence winner, so a record that
+    // made zero diff calls carried `causes: ['rewritten-prompt']` and
+    // `chunkReadNothing` answered false — all three channels reported a
+    // chunk nobody opened the diff for as one that was read (R38-1).
+    const p = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('the territory agent', 'the chunk agent'),
+      {
+        calls: 2,
+        toolPath: '/abs/other-file.ts',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    const entry = entryFor(r, 2);
+    // The repair axis keeps its precedence winner...
+    expect(entry.classification).toBe('rewritten-prompt');
+    // ...and the fact axis carries what actually happened.
+    expect(entry.causes).toEqual(['unopened', 'rewritten-prompt']);
+    expect(chunkReadNothing(entry)).toBe(true);
+  });
+
+  it('records a record-fact cause through the naming seal, not the credit one', () => {
+    // `idle` and `blind-prompt` are facts about the RECORD, not about which
+    // plan delivered it. Gated on the credit seal, a marker-less record that
+    // made zero calls left `causes: []`, so `chunkReadNothing` answered
+    // false and the report said its reads could not be accepted one line
+    // below saying it read nothing (R38-2).
+    const p = identityPlanLocal();
+    const r = coverageFromTranscripts(p, ENV);
+    const entry = entryFor(r, 2);
+    expect(entry.causes).toContain('idle');
+    expect(entry.classification).toBe('idle');
+    expect(chunkReadNothing(entry)).toBe(true);
+  });
+
   it('reads the FACT axis, not the collapsed repair class', () => {
     // `classify()` ranks causes by which repair subsumes which, so an idle
     // chunk whose prompt was also rewritten reports `rewritten-prompt`.
@@ -3881,7 +4064,7 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(true);
   });
 
-  it('a plan-REFUTED declaration leaves the reads that produced it standing', () => {
+  it('a plan-REFUTED declaration still costs the declarer the chunk it named', () => {
     // The completion of `planContradictsDeclaration`, made visible by moving
     // `declarerRouted` onto the admission branch (R34-13). The plan's own
     // measurement says every line of chunk 2 fits, so the declaration is
@@ -3899,8 +4082,17 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     });
 
     const r = coverageFromTranscripts(p, ENV);
+    // The declaration is refused — the plan's measurement contradicts it...
     expect(r.uncoverableChunks).toEqual([]);
-    expect(r.coveredChunks).toEqual([1, 2]);
+    // ...and the chunk is still a gap, not coverage. A declarer's own read
+    // is the read its declaration ANSWERED, so it is not evidence the chunk
+    // was read; `refutedByReturnedSpanningRead` states the same rule from
+    // the other side when it refuses to let a declarer refute itself. Both
+    // declarer arms charge this price now, and neither charges it for the
+    // chunks the record read and said nothing about (R38-3, answered on the
+    // thread: the two arms were unified the other way).
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
     // ...and the same record over a plan whose measurement CANNOT refute it
     // keeps the declaration instead.
     const q = plan(2, { longLineChunk: 2 });
@@ -3911,6 +4103,91 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
       text: 'Uncoverable: chunk 2 — line exceeds the read limit',
     });
     expect(coverageFromTranscripts(q, ENV).uncoverableChunks).toEqual([2]);
+  });
+
+  it('never certifies an OVERSIZED window off one read', () => {
+    // `maxLineChars` answers whether a read can reach the tail of the
+    // longest LINE; it does not answer whether one read returns the WINDOW.
+    // An oversized chunk can have every line well under the cap and 45 000
+    // characters of window: one read returns a truncated view, `rangeOf`
+    // records the REQUESTED range, and the chunk was certified off it
+    // (R38-124). The planner writes `chars` for exactly this question.
+    const p = join(dir, 'plan.json');
+    const mk = (lim: number) =>
+      `You are review agent \`chunk 1 of 1\` — the territory agent.\n` +
+      `read_file(file_path="${briefPath(p, 'chunk-1')}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=${lim})`;
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 900,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 900,
+            maxLineChars: 120,
+            chars: 45_000,
+            oversized: true,
+          },
+        ],
+      }),
+    );
+    built(p, 1, mk(900));
+    writeFileSync(briefPath(p, 'chunk-1'), 'b');
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', mk(900), { calls: 1, range: [0, 900] });
+
+    expect(coverageFromTranscripts(p, ENV).missingChunks).toEqual([1]);
+
+    // The escape the brief tells such an agent to take: page it. Several
+    // reads, none of which truncates, cover the window.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'));
+    transcript('a1', mk(900), {
+      ranges: [
+        [0, 300],
+        [300, 300],
+        [600, 300],
+      ],
+    });
+    expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1]);
+  });
+
+  it('keeps a drifted read line a NOTE, not a capping rewrite', () => {
+    // The arm's drift is IN the read line, so sealing it on the told-range
+    // alone refused exactly the records the NOTE exists for: a relay that
+    // altered the read line, opened its brief and paged the chunk was
+    // routed into the capping `rewrittenPrompts` channel, and a run whose
+    // every chunk was covered came back `ok: false` with a rebuild
+    // prescribed for a covered chunk (R38-126). The roster's drift rescue
+    // asks the same question and now through the same predicate.
+    const p = plan(1, { maxLineChars: 42 });
+    const mk = (lim: number) =>
+      `You are review agent \`chunk 1 of 1\` — the territory agent.\n` +
+      `read_file(file_path="${chunkBrief(1)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=${lim})`;
+    built(p, 1, mk(100));
+    transcript('a1', mk(99), {
+      ranges: [
+        [0, 50],
+        [50, 50],
+      ],
+      opens: [chunkBrief(1)],
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.ok).toBe(true);
   });
 
   it('never certifies a plan-proven-unspannable chunk off a spanning read', () => {
@@ -5631,9 +5908,14 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     const r = coverageFromTranscripts(p, ENV);
     // The refused declaration buys nothing...
     expect(r.uncoverableChunks).toEqual([]);
-    // ...and costs nothing either: the reads stand, exactly as they do for
-    // the same record with the declaration line removed.
-    expect(r.coveredChunks).toEqual([1, 2, 3]);
+    // ...and costs only the chunk it named. Chunks 1 and 3 — lines this
+    // record demonstrably read and said nothing about — keep their credit,
+    // which is the whole of R34-13's claim. Chunk 2 does not: the read the
+    // declaration ANSWERED is not evidence that the chunk was read, the
+    // same rule `refutedByReturnedSpanningRead` states from the other side
+    // when it refuses to let a declarer refute itself (R38-3, answered).
+    expect(r.coveredChunks).toEqual([1, 3]);
+    expect(r.missingChunks).toEqual([2]);
   });
 
   it('an unassigned declarer with no ranged reads cannot strip a grown window', () => {
