@@ -12,7 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
-import { getHomeEnvFallbackVars } from './environment.js';
+import { getHomeEnvFallbackVars } from './home-env-fallback.js';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
 export const PROJECT_MCP_FILENAME = '.mcp.json';
