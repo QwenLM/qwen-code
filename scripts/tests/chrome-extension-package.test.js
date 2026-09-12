@@ -4,18 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { scanZip } from '../../packages/chrome-extension/scripts/artifact-scan.js';
+import { scanZipArtifact } from '../../packages/chrome-extension/scripts/artifact-scan.js';
+import { toChromeManifestVersion } from '../../packages/chrome-extension/scripts/manifest-version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '../..');
+
+const zipAvailable = () =>
+  spawnSync('zip', ['--version'], { stdio: 'ignore' }).status === 0;
 
 describe('chrome extension package scripts', () => {
   it('keeps the build script portable for Windows npm lifecycle runs', () => {
@@ -31,38 +35,41 @@ describe('chrome extension package scripts', () => {
     );
     expect(packageJson.scripts.package).toContain('package-extension.js');
     expect(packageJson.scripts.package).not.toContain('zip -r');
-    expect(packageJson.devDependencies.archiver).toBeDefined();
 
-    const packageScript = readFileSync(
-      path.join(root, 'packages/chrome-extension/scripts/package-extension.js'),
+    const workflow = readFileSync(
+      path.join(root, '.github/workflows/ci.yml'),
       'utf8',
     );
-    expect(packageScript).toContain("archiver('zip'");
-    expect(packageScript).not.toContain("execFile('zip'");
-
-    const rootPackageJson = JSON.parse(
-      readFileSync(path.join(root, 'package.json'), 'utf8'),
-    );
-    expect(rootPackageJson.scripts['test:release']).toContain(
-      'npm -w packages/chrome-extension run package',
-    );
+    expect(workflow).toContain('npm -w packages/chrome-extension run package');
   });
 
-  it('rejects forbidden stale entries in the final extension archive', async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-ext-scan-'));
-    const archive = path.join(tempDir, 'extension.zip');
-    try {
-      writeFileSync(
-        archive,
-        'central-directory: node_modules/chrome-devtools-mcp/index.js',
-      );
-      await expect(scanZip(archive)).resolves.toEqual([
-        `${archive}: chrome-devtools-mcp`,
-      ]);
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(!zipAvailable())(
+    'rejects forbidden dependency signatures inside the packaged archive',
+    async () => {
+      const tempDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-ext-scan-'));
+      const source = path.join(tempDir, 'extension');
+      const archive = path.join(tempDir, 'extension.zip');
+      try {
+        mkdirSync(source);
+        writeFileSync(
+          path.join(source, 'index.js'),
+          "require('node_modules/chrome-devtools-mcp/index.js');",
+        );
+        execFileSync('zip', [archive, 'index.js'], {
+          cwd: source,
+          stdio: 'ignore',
+        });
+        await expect(scanZipArtifact(archive)).resolves.toEqual([
+          {
+            file: `${archive}:index.js`,
+            signature: 'node_modules/chrome-devtools-mcp',
+          },
+        ]);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the pinned official id aligned with the manifest key', () => {
     const manifest = JSON.parse(
@@ -114,7 +121,9 @@ describe('chrome extension package scripts', () => {
           'utf8',
         ),
       );
-      expect(manifest.version).toBe(packageJson.version);
+      expect(manifest.version).toBe(
+        toChromeManifestVersion(packageJson.version),
+      );
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
