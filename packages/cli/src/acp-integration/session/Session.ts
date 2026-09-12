@@ -251,6 +251,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
@@ -274,7 +275,10 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  type ServeSessionContextStatus,
+} from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -1900,6 +1904,7 @@ export async function buildAvailableCommandsSnapshot(
       isInactiveExtensionSkill(
         {
           name: cmd.skillDetail.name,
+          authoredName: cmd.skillDetail.authoredName,
           level: 'extension',
           extensionName:
             'extensionName' in cmd.skillDetail &&
@@ -2233,6 +2238,7 @@ export class Session implements SessionContext {
   // Implement SessionContext interface
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
+  private readonly restoredHistoryGaps?: HistoryGap[];
 
   constructor(
     id: string,
@@ -2260,6 +2266,8 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    // Config releases the restore projection after this Session is created.
+    this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
@@ -4482,6 +4490,10 @@ export class Session implements SessionContext {
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
+    // Rewinding discards the timeline the active-todo reminder described:
+    // clear the chain head so the next turn starts fresh instead of
+    // continuing work that was rewound away.
+    this.activeTodoWorkChainPromptId = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4491,13 +4503,22 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
+    // Every rewind surface resolves a turn through this array's positions:
+    // `getRewindSnapshots` hands out the index, and the agent resolves a
+    // promptId with `findIndex`. Positions therefore have to keep matching the
+    // current history's turn ordinals. A conversation-only rewind abandons the
+    // later turns without going through `FileHistoryService.rewind` — which
+    // trims inclusively itself — so the trim has to happen here. Without it the
+    // next rewind resolves onto a turn the history no longer has and cuts the
+    // wrong turn, while the recorded branch and the live view disagree.
+    //
+    // The file path keeps the target snapshot: the agent restores files by
+    // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
-      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
-      : undefined;
-
-    if (survivingSnapshots) {
-      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    }
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     this.config
       .getChatRecordingService()
@@ -4536,6 +4557,10 @@ export class Session implements SessionContext {
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
+    // Restoring history discards the timeline the active-todo reminder
+    // described: clear the chain head so the next turn starts fresh instead
+    // of continuing work the restore removed.
+    this.activeTodoWorkChainPromptId = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -5141,6 +5166,55 @@ export class Session implements SessionContext {
     }
   }
 
+  #getRecoveryPlan(fullHistory: boolean) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
+      return undefined;
+    }
+
+    // Classify from a bounded, shallow tail — this accept/reject pre-check does
+    // not need to structuredClone the whole history. The authoritative
+    // re-detection inside the fired prompt() reads full history for the strip.
+    const chat = this.#getCurrentChat();
+    // A trailing restorable ask_user_question is awaiting its restore
+    // prompt, not an interruption to close: `interrupted_turn` would answer
+    // the re-hung question with a synthesized failure functionResponse.
+    if (
+      this.config.getRestoreAskUserQuestion?.() === true &&
+      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
+    ) {
+      return undefined;
+    }
+    const runtimeGaps =
+      this.config.getSessionRestoreRuntime?.()?.historyGaps ??
+      (normalizeSessionIdForLookup(this.config.getSessionId()) ===
+      this.sessionId
+        ? this.restoredHistoryGaps
+        : undefined);
+    return buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory: fullHistory
+        ? chat.getHistory()
+        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
+      historyGaps: runtimeGaps?.length
+        ? runtimeGaps
+        : this.config.getResumedSessionData?.()?.historyGaps,
+    });
+  }
+
+  getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
+    const recoveryPlan = this.#getRecoveryPlan(false);
+    // A prompt (or an earlier continuation) is still in flight: there is no
+    // settled turn to continue. Reject rather than abort the live turn.
+    return {
+      kind: recoveryPlan?.kind ?? 'clean',
+      canContinue:
+        recoveryPlan?.canContinue === true &&
+        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+    };
+  }
+
   /**
    * Classify whether an unfinished previous turn can be resumed — an
    * interrupted prompt (the model never answered) or a turn left with dangling
@@ -5158,52 +5232,15 @@ export class Session implements SessionContext {
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const llmClient = this.config.getLlmClient();
-    if (!llmClient || !llmClient.isInitialized()) {
-      return { accepted: false, interruption: 'none' };
-    }
-
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
-    const chat = this.#getCurrentChat();
-    // A trailing restorable ask_user_question is awaiting its restore
-    // prompt, not an interruption to close: `interrupted_turn` would answer
-    // the re-hung question with a synthesized failure functionResponse.
-    if (
-      this.config.getRestoreAskUserQuestion?.() === true &&
-      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
-    ) {
-      return { accepted: false, interruption: 'none' };
-    }
-    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
-      sessionId: this.sessionId,
-      apiHistory:
-        chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
-        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
-    });
-    if (!recoveryPlan.continuation) {
-      return { accepted: false, interruption: 'none' };
-    }
-    const interruption =
-      recoveryPlan.kind === 'interrupted_prompt'
-        ? 'interrupted_prompt'
-        : 'interrupted_turn';
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
-    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
-      return { accepted: false, interruption };
-    }
-
-    // Accepted. This method only classifies — the daemon bridge drives the
-    // actual continuation through the normal prompt-admission path
-    // (`sendPrompt` with the trusted continue meta), so the turn is tracked
-    // like any other prompt and `prompt()` re-detects/strips authoritatively.
-    // Firing an internal `this.prompt()` here would bypass that tracking (the
-    // daemon would report the session idle and a racing prompt could abort the
-    // continuation), which is exactly what routing through the bridge fixes.
-
-    return { accepted: true, interruption };
+    const recovery = this.getRecoveryStatus();
+    return {
+      accepted: recovery.canContinue,
+      interruption:
+        recovery.kind === 'interrupted_prompt' ||
+        recovery.kind === 'interrupted_turn'
+          ? recovery.kind
+          : 'none',
+    };
   }
 
   /**
@@ -5618,11 +5655,8 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
-                sessionId: this.sessionId,
-                apiHistory: this.#getCurrentChat().getHistory(),
-              });
-              if (!recoveryPlan.continuation) {
+              const recoveryPlan = this.#getRecoveryPlan(true);
+              if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -5902,9 +5936,22 @@ export class Session implements SessionContext {
             if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
               this.#resetTodoStopGuardBackgroundLineage();
             }
+            // A registered reminder means the previous chain's plan still
+            // has unfinished items (todo_write deletes it on completion):
+            // continue that chain instead of discarding its context with the
+            // very turn that may be asking about it (#10953).
+            const continuesTodoWorkChain =
+              continuesCurrentWorkChain ||
+              (this.activeTodoWorkChainPromptId !== undefined &&
+                this.config.getActiveTodoReminder(
+                  this.activeTodoWorkChainPromptId,
+                ) !== undefined &&
+                this.config.getActiveTodoWorkChainOwner(
+                  this.activeTodoWorkChainPromptId,
+                ) === this.config.getActiveTodoPlanWriterOwner());
             this.config.startActiveTodoWorkChain(
               promptId,
-              continuesCurrentWorkChain
+              continuesTodoWorkChain
                 ? this.activeTodoWorkChainPromptId
                 : undefined,
             );
@@ -6011,9 +6058,19 @@ export class Session implements SessionContext {
             // `parts` — the reminder would vanish and then stay suppressed
             // for ACTIVE_TODO_REMINDER_REFRESH_TURNS on the post-answer
             // continuation that actually needs it.
-            const activeTodoReminder = isRestoreAskUserQuestion
-              ? undefined
-              : this.config.takeActiveTodoReminder(promptId, true);
+            // Turn-start injection is for machine continuations, mirroring
+            // core's gate (packages/core/src/core/client.ts:3951-3957:
+            // Retry | Cron | Notification | Teammate). An ordinary user turn
+            // keeps the chain registered so the reminder stays live for the
+            // tool-result and Agent-result paths, without splicing
+            // model-authored plan text ahead of the user's own text into
+            // append-only history on every turn.
+            const isMachineContinuation =
+              isRetry || isContinue || isRuntimeContinuation;
+            const activeTodoReminder =
+              isRestoreAskUserQuestion || !isMachineContinuation
+                ? undefined
+                : this.config.takeActiveTodoReminder(promptId, true);
             if (
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
@@ -6600,6 +6657,10 @@ export class Session implements SessionContext {
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
+    // Whether the turn reaching the next Stop check was forced by a blocking
+    // Stop hook. Kept apart from the iteration count, which also drives the
+    // consecutive-block cap and continuation prompt ids.
+    let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
@@ -6658,6 +6719,12 @@ export class Session implements SessionContext {
               this.todoStopGuard.blockUntilOrdinaryPromptStarts();
             }
           }
+          // User input replaces the turn: it is not hook-forced, and the
+          // consecutive-block count restarts (an intervening allow may have
+          // been discarded by the post-hook drain).
+          stopHookForcedTurn = false;
+          stopHookIterationCount = 0;
+          stopHookReasons = [];
           this.todoStopGuard.acceptMidTurnUserInput();
           blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
@@ -6723,7 +6790,7 @@ export class Session implements SessionContext {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName: 'Stop',
               input: {
-                stop_hook_active: true,
+                stop_hook_active: stopHookForcedTurn,
                 last_assistant_message: responseText,
                 ...contextUsage,
               },
@@ -6763,6 +6830,12 @@ export class Session implements SessionContext {
                 this.todoStopGuard.blockUntilOrdinaryPromptStarts();
               }
             }
+            // User input replaces the turn before this Stop decision is
+            // applied: not hook-forced, and the consecutive-block count
+            // restarts. Each such reset needs real queued user input.
+            stopHookForcedTurn = false;
+            stopHookIterationCount = 0;
+            stopHookReasons = [];
             this.todoStopGuard.acceptMidTurnUserInput();
             blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
@@ -6893,6 +6966,8 @@ export class Session implements SessionContext {
           stopHookCount,
         );
       }
+      // Only a continuation carrying a Stop hook's reason is hook-forced.
+      stopHookForcedTurn = Boolean(externalReason);
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -6922,6 +6997,10 @@ export class Session implements SessionContext {
           ...(channelTurn ? { channelTurn: true } : {}),
         },
       );
+      if (continuation.supersededAutomaticContinuation) {
+        // Queued user input replaced the continuation.
+        stopHookForcedTurn = false;
+      }
       if (continuation.supersededAutomaticContinuation && externalReason) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
@@ -8394,7 +8473,18 @@ export class Session implements SessionContext {
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
-    const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
+    // A top-level Agent tool result means a delegated execution just
+    // returned (#10953): real work advanced while the parent earned a
+    // single tool turn, so the turn budget cannot come due on its own.
+    // Force the reminder exactly where the progress information arrives.
+    const carriesAgentToolResult = toolRun.parts.some(
+      (part) =>
+        canonicalToolName(part.functionResponse?.name ?? '') ===
+        ToolNames.AGENT,
+    );
+    const activeTodoReminder = carriesAgentToolResult
+      ? this.config.takeActiveTodoReminder(promptId, true)
+      : this.config.takeActiveTodoReminder(promptId);
     if (abortSignal.aborted) {
       return {
         message: {
@@ -12098,6 +12188,14 @@ export class Session implements SessionContext {
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
     let executeAttempted = false;
+    // Set when the tool starts executing, so hook durations exclude
+    // validation and permission time. Read from the monotonic clock so a
+    // system clock adjustment during a long tool cannot skew the duration.
+    let executionStartedAt: number | undefined;
+    const elapsedExecutionMs = (): number | undefined =>
+      executionStartedAt === undefined
+        ? undefined
+        : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -13786,6 +13884,7 @@ export class Session implements SessionContext {
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
             executeAttempted = true;
+            executionStartedAt = performance.now();
             try {
               const execute = () =>
                 invocation.execute(
@@ -14077,6 +14176,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              elapsedExecutionMs(),
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -14145,6 +14245,7 @@ export class Session implements SessionContext {
                 permissionMode,
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -14382,6 +14483,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 activeToolAbortSignal,
                 callId,
+                elapsedExecutionMs(),
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -14696,7 +14798,11 @@ export class Session implements SessionContext {
               },
             };
           } else {
-            return { text: `@${part.uri}` };
+            return {
+              text: part.name
+                ? `@${part.uri} (original filename: ${JSON.stringify(part.name)})`
+                : `@${part.uri}`,
+            };
           }
         }
         case 'resource': {

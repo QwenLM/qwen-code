@@ -142,6 +142,76 @@ function recordingFetch(
 }
 
 describe('DaemonClient', () => {
+  describe('continueSession', () => {
+    it('admits continuation over REST with identity and replay anchors', async () => {
+      const body = {
+        accepted: true,
+        interruption: 'interrupted_prompt',
+        promptId: 'continue-1',
+        lastEventId: 17,
+        eventEpoch: 'epoch-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'token-1',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.continueSession('with/slash', { clientId: 'client-1' }),
+      ).resolves.toEqual(body);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/continue',
+        method: 'POST',
+        body: null,
+        headers: {
+          authorization: 'Bearer token-1',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('returns clean no-ops and preserves rejection errors without retry', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        calls.length === 1
+          ? jsonResponse(200, { accepted: false, interruption: 'none' })
+          : jsonResponse(409, { code: 'session_busy', error: 'Turn active' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.continueSession('s-1')).resolves.toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      await expect(client.continueSession('s-1')).rejects.toMatchObject({
+        status: 409,
+        body: { code: 'session_busy', error: 'Turn active' },
+      });
+      expect(calls).toHaveLength(2);
+    });
+
+    it('does not submit an already aborted continuation', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.continueSession('s-1', { signal: AbortSignal.abort() }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   describe('session Goal lifecycle', () => {
     it('reads and controls the authoritative snapshot with client identity', async () => {
       const response: GoalStateResponse = { snapshot: GOAL_SNAPSHOT };
@@ -678,6 +748,41 @@ describe('DaemonClient', () => {
   });
 
   describe('session artifacts', () => {
+    it('reads saved HTML with encoded identities and daemon authentication', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '<h1>Saved</h1>'),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      await expect(
+        client.readSessionArtifactContent('session/1', 'artifact/1', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toBe('<h1>Saved</h1>');
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/content',
+        method: 'GET',
+        headers: {
+          authorization: 'Bearer secret',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+    });
+
+    it('surfaces missing saved HTML without a fallback request', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'artifact_snapshot_unavailable' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.readSessionArtifactContent('s', 'a'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+      expect(calls).toHaveLength(1);
+    });
+
     it('lists session artifacts with an encoded session id', async () => {
       const envelope = {
         v: 1 as const,

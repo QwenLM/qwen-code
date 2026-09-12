@@ -2304,12 +2304,12 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
    * A view-host context whose Memento only answers the keys it is seeded with,
    * and writes through — so a migration that retires an entry is observable.
    */
-  function createSessionStateContext(entries: Record<string, string>) {
+  function createSessionStateContext(entries: Record<string, unknown>) {
     return {
       subscriptions: [],
       workspaceState: {
         get: vi.fn((key: string) => entries[key]),
-        update: vi.fn((key: string, value: string | undefined) => {
+        update: vi.fn((key: string, value: unknown) => {
           if (value === undefined) {
             delete entries[key];
           } else {
@@ -2398,75 +2398,38 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     });
   });
 
-  it('ships restorable legacy conversation ids in the bootstrap payload', async () => {
-    // Pre-cutover conversations whose prompts reached the daemon were renamed
-    // to the ACP session id; entries that never left the panel keep their
-    // conv_*/temp* id and have no daemon transcript to restore.
-    conversationStoreMocks.getAllConversations.mockResolvedValue([
-      {
-        id: 'conv_1757000000000_abc123',
-        title: 'Empty draft',
-        messages: [],
-      },
-      {
-        id: '550e8400-e29b-41d4-a716-446655440201',
-        title: 'Pre-upgrade chat',
-        messages: [{ role: 'user', content: 'hi' }],
-      },
-      {
-        id: 'temp-scratch',
-        title: 'Scratch',
-        messages: [],
-      },
-    ]);
+  it('persists and restores a terminal session without source sidecar state', async () => {
     const context = createSessionStateContext({});
     const setup = await setupAttachedProvider({
       captureMessageHandler: true,
       context,
     });
+    await setup.messageHandler?.({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'terminal-session', workspaceCwd: '/workspace-a' },
+    });
+    expect(
+      context.workspaceState.get(WEB_SHELL_SESSION_KEY_PREFIX + '/workspace-a'),
+    ).toBe('terminal-session');
 
-    await setup.messageHandler?.({ type: 'webShellReady' });
-
-    expect(setup.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'webShellBootstrap',
-        data: expect.objectContaining({
-          legacyConversationIds: ['550e8400-e29b-41d4-a716-446655440201'],
-        }),
-      }),
-    );
-    // The legacy store doubles as the downgrade/recovery path; the bootstrap
-    // must stay read-only against it.
-    expect(conversationStoreMocks.getAllConversations).toHaveBeenCalled();
-  });
-
-  it('omits the legacy allowlist when no restorable conversation exists', async () => {
-    conversationStoreMocks.getAllConversations.mockResolvedValue([
-      {
-        id: 'conv_1757000000000_abc123',
-        title: 'Empty draft',
-        messages: [],
-      },
-    ]);
-    const context = createSessionStateContext({});
-    const setup = await setupAttachedProvider({
+    const reloaded = await setupAttachedProvider({
       captureMessageHandler: true,
       context,
     });
-
-    await setup.messageHandler?.({ type: 'webShellReady' });
-
-    const bootstrap = setup.postMessage.mock.calls
+    await reloaded.messageHandler?.({ type: 'webShellReady' });
+    const bootstrap = reloaded.postMessage.mock.calls
       .map(
         ([message]) =>
-          message as {
-            type?: string;
-            data?: { legacyConversationIds?: string[] };
-          },
+          message as { type?: string; data?: Record<string, unknown> },
       )
       .find((message) => message.type === 'webShellBootstrap');
-    expect(bootstrap).toBeDefined();
-    expect(bootstrap?.data?.legacyConversationIds).toBeUndefined();
+    expect(bootstrap?.data?.sessionId).toBe('terminal-session');
+    expect(bootstrap?.data).not.toHaveProperty('sessionHistorySource');
+    expect(
+      context.workspaceState.update.mock.calls.map(([key]) => key),
+    ).not.toContain(
+      'qwenCode.webShellSessionSource:/workspace-a:terminal-session',
+    );
   });
 
   it('restores a session id persisted under the pre-canonicalization key', async () => {
@@ -2839,6 +2802,20 @@ describe('WebViewProvider web-shell permission bridge', () => {
     provider.respondToPendingPermission('allow');
 
     expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('relays a permission diff dismissal to the webview under requestId', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.notifyPermissionDiffClosed('req-1');
+
+    // The receiver in the webview reads data.requestId only and treats any
+    // other key as "not a dismissal", so the rename this wire invites has to
+    // be pinned here.
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionDiffClosed',
+      data: { requestId: 'req-1' },
+    });
   });
 
   it('does not vote before permission ownership state arrives', async () => {
