@@ -29,6 +29,15 @@
  * there rather than degrade to a plain open — the same fail-closed posture
  * used for unverifiable inode identities elsewhere (#8290, #9857).
  *
+ * Both variants also open with `O_NONBLOCK`. A FIFO planted at the path
+ * (the monitor/shell output paths resolve under the workspace's own
+ * `.qwen/` directory, writable by any command the agent runs there) would
+ * otherwise block `open(2)` on the caller's thread until a writer appears
+ * — a daemon-wide stall, since the post-open `!stat.isFile()` guard only
+ * runs after the open returns. The flag is a no-op for regular files, and
+ * for a FIFO the open returns immediately so the caller's fstat check
+ * fails closed.
+ *
  * Symlink refusals and identity races are reported as errors with
  * `code: 'ELOOP'` — the same code POSIX `O_NOFOLLOW` produces — so
  * existing `ELOOP` handling in callers applies to the fallback path
@@ -131,7 +140,8 @@ function getNoFollowFlag(): number | undefined {
 export function openSyncNoFollow(filePath: string): number {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.openSync(filePath, baseFlags | noFollowFlag);
@@ -174,7 +184,8 @@ export function openSyncNoFollow(filePath: string): number {
 export async function openNoFollow(filePath: string): Promise<FileHandle> {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.promises.open(filePath, baseFlags | noFollowFlag);

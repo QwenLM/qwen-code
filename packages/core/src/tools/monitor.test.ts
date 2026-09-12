@@ -8,6 +8,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockOsPlatform = vi.hoisted(() =>
   vi.fn<() => NodeJS.Platform>(() => 'linux'),
@@ -131,6 +134,20 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
   };
 });
 
+const atomicFileWriteMock = vi.hoisted(() => ({
+  mock: vi.fn(),
+  real: undefined as
+    | undefined
+    | (typeof import('../utils/atomicFileWrite.js'))['atomicWriteFile'],
+}));
+vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/atomicFileWrite.js')>();
+  atomicFileWriteMock.real = actual.atomicWriteFile;
+  atomicFileWriteMock.mock.mockImplementation(actual.atomicWriteFile);
+  return { ...actual, atomicWriteFile: atomicFileWriteMock.mock };
+});
+
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
 const mockExtractCommandRules = vi.hoisted(() => vi.fn());
 vi.mock('../utils/shellAstParser.js', () => ({
@@ -141,6 +158,10 @@ vi.mock('../utils/shellAstParser.js', () => ({
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import {
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail,
+} from '../services/backgroundShellRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
@@ -191,6 +212,7 @@ describe('MonitorTool', () => {
   let monitorRegistry: MonitorRegistry;
   let mockChild: ReturnType<typeof createMockChild>;
   let mockIsPathWithinWorkspace: ReturnType<typeof vi.fn>;
+  let tempProjectDir: string;
   let originalPager: string | undefined;
   let originalGitPager: string | undefined;
 
@@ -202,8 +224,12 @@ describe('MonitorTool', () => {
 
     vi.clearAllMocks();
     mockOsPlatform.mockReturnValue('linux');
+    if (atomicFileWriteMock.real) {
+      atomicFileWriteMock.mock.mockImplementation(atomicFileWriteMock.real);
+    }
 
     monitorRegistry = new MonitorRegistry();
+    tempProjectDir = mkdtempSync(join(tmpdir(), 'qwen-monitor-tool-'));
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
     mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
     mockExtractCommandRules.mockImplementation(async (command: string) => {
@@ -224,7 +250,7 @@ describe('MonitorTool', () => {
         getUserSkillsDirs: vi
           .fn()
           .mockReturnValue(['/home/user/.claude/skills']),
-        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
+        getProjectDir: vi.fn().mockReturnValue(tempProjectDir),
       },
     } as unknown as Config;
 
@@ -234,8 +260,20 @@ describe('MonitorTool', () => {
     mockSpawn.mockReturnValue(mockChild);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     monitorRegistry.abortAll();
+    // Join in-flight capture writes before removing the tree: the capture
+    // writer stages its temp file inside it, so racing the removal loses
+    // to ENOTEMPTY on rmdir. The rmSync retry stays as belt-and-braces.
+    await Promise.all(
+      monitorRegistry.getAll().map((entry) => entry.outputCaptureClosed),
+    );
+    rmSync(tempProjectDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 20,
+    });
 
     if (originalPager === undefined) {
       delete process.env['PAGER'];
@@ -692,6 +730,419 @@ describe('MonitorTool', () => {
       expect(result.returnDisplay).toContain('watch app logs');
     });
 
+    it('captures stdout and stderr in the task output file', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      mockChild.stdout.emit('data', Buffer.from('stdout line\n'));
+      mockChild.stderr.emit(
+        'data',
+        Buffer.from('\u001b[31mstderr line\u001b[0m\n'),
+      );
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe(
+          'stdout line\nstderr line\n',
+        );
+      });
+    });
+
+    it('settles outputCaptureClosed only after in-flight capture writes drain', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      mockChild.stdout.emit('data', Buffer.from('final line\n'));
+      monitorRegistry.abortAll();
+
+      // The afterEach teardown joins on this promise before removing the
+      // project tree: it must stay pending while a capture write is in
+      // flight and settle only once the persisted tail is complete.
+      expect(task.outputCaptureClosed).toBeInstanceOf(Promise);
+      await task.outputCaptureClosed;
+      expect(readFileSync(task.outputFile, 'utf8')).toBe('final line\n');
+    });
+
+    it('records a capture write failure and stops retrying after a bounded number of failures', async () => {
+      const callback = vi.fn();
+      monitorRegistry.setNotificationCallback(callback);
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+
+      // The initial creation used the synchronous writer; every later
+      // flush fails. The failure must reach the registration and the
+      // terminal notification instead of only the debug log, and the
+      // writer must stop re-attempting after a bounded run of failures.
+      atomicFileWriteMock.mock.mockRejectedValue(
+        Object.assign(new Error('no space left on device'), {
+          code: 'ENOSPC',
+        }),
+      );
+
+      mockChild.stdout.emit('data', Buffer.from('line one\n'));
+      await vi.waitFor(() => {
+        expect(task.outputCaptureError).toBe('no space left on device');
+      });
+      expect(atomicFileWriteMock.mock).toHaveBeenCalledTimes(1);
+
+      mockChild.stdout.emit('data', Buffer.from('line two\n'));
+      await vi.waitFor(() => {
+        expect(atomicFileWriteMock.mock).toHaveBeenCalledTimes(2);
+      });
+      mockChild.stdout.emit('data', Buffer.from('line three\n'));
+      await vi.waitFor(() => {
+        expect(atomicFileWriteMock.mock).toHaveBeenCalledTimes(3);
+      });
+      mockChild.stdout.emit('data', Buffer.from('line four\n'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(atomicFileWriteMock.mock).toHaveBeenCalledTimes(3);
+
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(task.status).toBe('completed');
+      });
+      const terminal = callback.mock.calls.find(
+        (call) =>
+          typeof call[1] === 'string' &&
+          (call[1] as string).includes('<status>completed</status>'),
+      );
+      expect(terminal).toBeDefined();
+      expect(terminal![1]).toContain(
+        'Output capture failed: no space left on device',
+      );
+    });
+
+    it('decodes multi-byte UTF-8 split across stdout chunks intact', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // Split the first 3-byte character across two pipe chunks: a raw
+      // per-chunk toString bakes U+FFFD replacements into the capture file
+      // that every task-output surface serves.
+      const encoded = Buffer.from('日本語のログ\n', 'utf8');
+      mockChild.stdout.emit('data', encoded.subarray(0, 2));
+      mockChild.stdout.emit('data', encoded.subarray(2));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('日本語のログ\n');
+      });
+    });
+
+    it('strips an ANSI escape split across stdout chunks from the capture', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A CSI sequence straddling two pipe chunks: ansi-regex leaves the
+      // trailing '\u001b[' of the first chunk intact and the second chunk
+      // reconstitutes the whole sequence inside the persisted file.
+      mockChild.stdout.emit('data', Buffer.from('plain\n\u001b['));
+      mockChild.stdout.emit('data', Buffer.from('31mred\u001b[0m done\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('plain\nred done\n');
+      });
+    });
+
+    it('strips a whole DCS sequence from the capture and the served tail', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // strip-ansi matches a DCS leader `ESC P` as a complete two-byte
+      // escape, so a writer composing stripAnsi persists the payload as
+      // plain text. The capture must strip the whole sequence so the
+      // payload never reaches the served tail.
+      mockChild.stdout.emit('data', Buffer.from('\u001bPtmux;payload\u001b\\'));
+      mockChild.stdout.emit('data', Buffer.from('real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+      expect(
+        readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toEqual({ text: 'real line', truncated: false });
+    });
+
+    it('reassembles a DCS split across stdout chunks before stripping', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // The hold-back must hold an in-flight string sequence, not just a
+      // bare leader: stripping a chunk-final fragment would persist the
+      // reassembled payload's remainder as text.
+      mockChild.stdout.emit('data', Buffer.from('\u001bPtmux;pay'));
+      mockChild.stdout.emit('data', Buffer.from('load\u001b\\real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('releases a held unterminated OSC leader when a newline arrives', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // An OSC leader whose BEL terminator was lost (a log line cut
+      // mid-escape, a child killed mid-sequence): the hold-back is bounded
+      // to printable bytes, and once the following newline proves the
+      // terminator never comes the capture stripper removes the leader
+      // whole — the payload must not persist as ordinary text.
+      mockChild.stdout.emit('data', Buffer.from('\u001b]0;deploy started'));
+      mockChild.stdout.emit('data', Buffer.from('\nINFO build ok\n'));
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('\nINFO build ok\n');
+      });
+      expect(
+        readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toEqual({ text: '\nINFO build ok', truncated: false });
+      expect(task.eventCount).toBeGreaterThan(0);
+      mockChild._emitClose(0);
+    });
+
+    it('strips a charset designation split across stdout chunks from the capture', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // ESC ( B designates the ASCII charset; split after ESC (, the first
+      // chunk must be held back so the reassembled sequence is stripped
+      // whole rather than persisted raw.
+      mockChild.stdout.emit('data', Buffer.from('plain\n\u001b('));
+      mockChild.stdout.emit('data', Buffer.from('B)done\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('plain\n)done\n');
+      });
+    });
+
+    it('does not hold back a trailing partial escape longer than the cap', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // An unterminated OSC longer than PARTIAL_LINE_BUFFER_CAP (4096)
+      // cannot be accumulated in memory waiting for a terminator that may
+      // never arrive: the leader is stripped at end-of-input and the
+      // remaining payload is discarded until the BEL, so only the real
+      // bytes that followed it persist.
+      const overlongPartial = '\u001b]' + 'a'.repeat(5000);
+      mockChild.stdout.emit('data', Buffer.from(overlongPartial));
+      mockChild.stdout.emit('data', Buffer.from('\u0007c\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('c\n');
+      });
+    });
+
+    it('strips an OSC with a UTF-8 payload split across stdout chunks', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A window title in a CJK path is not printable ASCII: the hold-back
+      // must cover the stripper's whole payload class, or a chunk boundary
+      // inside the UTF-8 payload defeats the hold and the payload's
+      // remainder persists as ordinary text.
+      mockChild.stdout.emit('data', Buffer.from('\u001b]0;/tmp/\u672c\u8bed'));
+      mockChild.stdout.emit('data', Buffer.from('/project\u0007real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('discards an over-cap string payload that grew across small chunks', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A multi-KB OSC 52 clipboard write arriving in chunks each smaller
+      // than PARTIAL_LINE_BUFFER_CAP: the cap is reached by accumulation,
+      // so once the hold exceeds it the payload must be discarded until
+      // the terminator instead of the remainder persisting as fabricated
+      // output.
+      mockChild.stdout.emit(
+        'data',
+        Buffer.from('\u001b]52;c=' + 'A'.repeat(2000)),
+      );
+      mockChild.stdout.emit('data', Buffer.from('B'.repeat(2100)));
+      mockChild.stdout.emit(
+        'data',
+        Buffer.from('C'.repeat(100) + '\u0007real line\n'),
+      );
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('discards an over-cap payload whose ST straddles a chunk boundary', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // The discard ends at the ST, but the ST's ESC arrived as the last
+      // byte of a payload chunk: it must stay held with the discard, or
+      // the next chunk's backslash persists as ordinary text.
+      mockChild.stdout.emit(
+        'data',
+        Buffer.from('\u001b]52;c=' + 'A'.repeat(5000)),
+      );
+      mockChild.stdout.emit('data', Buffer.from('tail-of-payload\u001b'));
+      mockChild.stdout.emit('data', Buffer.from('\\real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('keeps an over-cap string payload terminator ESC held for the next chunk', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // The payload crosses the hold cap in the very chunk that ends with
+      // the ST's ESC: the ESC must stay held so the next chunk's
+      // backslash reconstitutes the terminator. Slicing it away with the
+      // payload lets the discard scan past the ST and eat the real line
+      // that follows the sequence.
+      mockChild.stdout.emit(
+        'data',
+        Buffer.from('\u001b]52;c=' + 'A'.repeat(5000) + '\u001b'),
+      );
+      mockChild.stdout.emit('data', Buffer.from('\\real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('discards an over-cap CSI payload until its final byte', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A CSI whose parameter run outgrows the hold cap across chunks can
+      // no longer be held: its payload must be discarded until the final
+      // byte like a string sequence's, or the final byte is fabricated
+      // into the capture as real output.
+      mockChild.stdout.emit('data', Buffer.from('\u001b[' + '0'.repeat(3000)));
+      mockChild.stdout.emit('data', Buffer.from('0'.repeat(2000)));
+      mockChild.stdout.emit('data', Buffer.from('mreal line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('discards an over-cap Fe payload until its final byte', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // Same shape with an Fe leader: intermediates past the hold cap are
+      // discarded and the final byte (0x30-0x7e) ends the discard.
+      mockChild.stdout.emit('data', Buffer.from('\u001b(' + ' '.repeat(5000)));
+      mockChild.stdout.emit('data', Buffer.from('Breal line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('strips a DCS split inside its ST terminator across stdout chunks', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A chunk boundary between the ST's ESC and its backslash: the hold
+      // must keep the in-flight ST suffix with the sequence, or the lone
+      // backslash persists as ordinary text.
+      mockChild.stdout.emit('data', Buffer.from('\u001bPtmux;payload\u001b'));
+      mockChild.stdout.emit('data', Buffer.from('\\real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
+    it('strips a dangling CSI leader flushed at close from the capture', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // A teardown whose last chunk ends mid-CSI: the held leader is
+      // flushed through the capture stripper at close, whose end-of-input
+      // arm must consume it instead of persisting the bracket and
+      // parameters as text.
+      mockChild.stdout.emit('data', Buffer.from('tail \u001b[31'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('tail ');
+      });
+    });
+
+    it('flushes held escape and decoder tails into the capture at close', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // Ends mid-escape and mid-codepoint: both tails are released at close
+      // rather than silently dropped from the capture file. The held CSI
+      // leader is stripped on its own so the decoder's replacement
+      // character cannot defeat the stripper's end-of-input arm; only the
+      // U+FFFD survives.
+      const chunk = Buffer.concat([
+        Buffer.from('tail \u001b['),
+        Buffer.from([0xe6]),
+      ]);
+      mockChild.stdout.emit('data', chunk);
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('tail \ufffd');
+      });
+    });
+
+    it('bounds the task output file while preserving the latest output', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      const stdoutPrefix = 'old marker\n';
+      const stdoutBody = 'x'.repeat(MAX_TASK_OUTPUT_TAIL_BYTES);
+      const stderr = 'latest marker\n';
+      const output = stdoutPrefix + stdoutBody + stderr;
+      mockChild.stdout.emit('data', Buffer.from(stdoutPrefix));
+      mockChild.stdout.emit('data', Buffer.from(stdoutBody));
+      mockChild.stderr.emit('data', Buffer.from(stderr));
+      expect(task.status).toBe('running');
+      expect(task.eventCount).toBeGreaterThan(0);
+      mockChild._emitClose(0);
+
+      const captureLimit = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
+      const expected = Buffer.from(output).subarray(-captureLimit);
+      await vi.waitFor(() => {
+        expect(statSync(task.outputFile).size).toBe(captureLimit);
+        expect(readFileSync(task.outputFile)).toEqual(expected);
+        expect(
+          readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+        ).toEqual({
+          text: Buffer.from(output)
+            .subarray(-MAX_TASK_OUTPUT_TAIL_BYTES)
+            .toString('utf8')
+            .trimEnd(),
+          truncated: true,
+        });
+      });
+    });
+
     it('uses default pager env for spawned processes when pager is unset', async () => {
       const invocation = createInvocation({
         command: 'tail -f /var/log/app.log',
@@ -1137,11 +1588,15 @@ describe('MonitorTool', () => {
       });
 
       await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
       mockChild._emitExit(0);
       mockChild.stdout.emit('data', Buffer.from('final line\n'));
       mockChild._emitClose(0);
 
-      expect(callback).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => {
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('final line\n');
+      });
       const [, eventModelText] = callback.mock.calls[0] as [string, string];
       const [, terminalModelText] = callback.mock.calls[1] as [string, string];
       expect(eventModelText).toContain('final line');

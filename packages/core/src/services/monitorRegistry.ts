@@ -37,12 +37,8 @@ export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 /**
  * Resolves a per-monitor reserved output path.
  *
- * Today no writer is attached at this path — monitors deliver their
- * events through the parent's chat record via the notification callback.
- * The path is reserved on every `MonitorTask` so the `TaskBase` contract
- * ("every task has a path it would write to if it produces a primary
- * stream") holds, and so a future per-monitor file writer can land
- * without changing the type signature.
+ * Monitor stdout and stderr are captured at this path while notifications
+ * continue to deliver throttled line events to the owning agent.
  */
 export function getMonitorOutputPath(
   projectDir: string,
@@ -60,8 +56,7 @@ export function getMonitorOutputPath(
 /**
  * Monitor kind of `TaskState`. Tracks one long-running monitor process
  * whose stdout lines are pushed to the parent agent as event
- * notifications. `outputFile` is reserved on registration but no writer
- * is attached today — events stream into the parent's chat record.
+ * notifications. Its stdout and stderr are also captured in `outputFile`.
  */
 export interface MonitorTask extends TaskBase {
   kind: 'monitor';
@@ -81,6 +76,16 @@ export interface MonitorTask extends TaskBase {
   idleTimeoutMs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   droppedLines: number;
+  /**
+   * First output-capture write failure, when one occurred. A write that
+   * fails after the initial creation (disk full, project dir turned
+   * read-only) otherwise leaves the capture file silently stale while
+   * every reader presents its last line as the task's complete output;
+   * the writer gives up after a bounded number of consecutive failures
+   * and the reason is surfaced in the terminal notification and the
+   * served status beside `droppedLines`.
+   */
+  outputCaptureError?: string;
   /** Exit code from the underlying process, when known. */
   exitCode?: number;
   /**
@@ -97,6 +102,14 @@ export interface MonitorTask extends TaskBase {
    * Surfaced in the dialog's `MonitorDetailBody`.
    */
   error?: string;
+  /**
+   * Resolves once the output capture is closed and its last in-flight
+   * write has drained, so teardown can join pending writes instead of
+   * racing a staged temp file with `rmSync` (ENOTEMPTY). Runtime-only
+   * handle, like `abortController`; wire snapshots are built by
+   * field-picking serializers and never see it.
+   */
+  outputCaptureClosed?: Promise<void>;
 }
 
 /**
@@ -550,7 +563,10 @@ export class MonitorRegistry {
       entry.droppedLines > 0
         ? `, ${entry.droppedLines} lines dropped due to throttling`
         : '';
-    const displayLine = `Monitor "${desc}" ${statusText}. (${entry.eventCount} events${droppedSuffix})`;
+    const captureSuffix = entry.outputCaptureError
+      ? `, output capture failed: ${stripDisplayControlChars(entry.outputCaptureError)}`
+      : '';
+    const displayLine = `Monitor "${desc}" ${statusText}. (${entry.eventCount} events${droppedSuffix}${captureSuffix})`;
 
     const xmlParts: string[] = [
       '<task-notification>',
@@ -563,7 +579,7 @@ export class MonitorRegistry {
       '<kind>monitor</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
       `<event-count>${entry.eventCount}</event-count>`,
-      `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.${entry.droppedLines > 0 ? ` ${entry.droppedLines} lines dropped due to throttling.` : ''}</summary>`,
+      `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.${entry.droppedLines > 0 ? ` ${entry.droppedLines} lines dropped due to throttling.` : ''}${entry.outputCaptureError ? ` Output capture failed: ${escapeXml(stripDisplayControlChars(entry.outputCaptureError))}. The output file may be incomplete.` : ''}</summary>`,
       `<command>${escapeXml(stripDisplayControlChars(entry.command))}</command>`,
     );
     if (detail) {

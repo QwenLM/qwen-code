@@ -90,6 +90,7 @@ import {
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
+  type ServeSessionTaskOutputStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
@@ -12758,6 +12759,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionAgentTrace,
         rootAgentId === undefined ? undefined : { rootAgentId },
+      );
+    },
+
+    async getSessionTaskOutputStatus(sessionId, taskId, taskKind) {
+      return requestSessionStatus<ServeSessionTaskOutputStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+        { taskId, taskKind },
       );
     },
 

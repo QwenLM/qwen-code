@@ -469,6 +469,23 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
   });
 
+  it('GET /session/:id/tasks/:taskId/output maps to _qwen/session/tasks/output', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/output', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/output');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('kind=monitor'),
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      taskKind: 'monitor',
+    });
+  });
+
   it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
     const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
     expect(result).not.toBeNull();

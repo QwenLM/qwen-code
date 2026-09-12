@@ -365,6 +365,14 @@ const {
     sessionStats: vi.fn().mockResolvedValue({}),
     sessionContextUsage: vi.fn().mockResolvedValue({}),
     sessionTaskCancel: vi.fn().mockResolvedValue({ cancelled: true }),
+    sessionTaskOutput: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      kind: 'monitor',
+      output: '',
+      truncated: false,
+    }),
     renameStandaloneSession: vi.fn().mockResolvedValue(undefined),
     unarchiveStandaloneSessions: vi.fn().mockResolvedValue({
       unarchived: [],
@@ -669,6 +677,15 @@ const {
         includeWorkflows?: boolean;
         onWorkflowRunStarted?: () => void;
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
+      } | null,
+      latestMonitorTaskDetailProps: null as {
+        task?: DaemonSessionMonitorTaskStatus;
+        actions?: {
+          getTaskOutput?: (
+            taskId: string,
+            kind: 'shell' | 'monitor',
+          ) => Promise<unknown>;
+        };
       } | null,
       settings: [] as DaemonSettingDescriptor[],
       settingsLoading: false,
@@ -2260,7 +2277,18 @@ vi.doMock('./components/messages/TasksStatusMessage', async () => {
       testState.latestTasksStatusProps = props;
       return React.createElement('div');
     },
-    MonitorTaskDetail: () => React.createElement('div'),
+    MonitorTaskDetail: (props: {
+      task?: DaemonSessionMonitorTaskStatus;
+      actions?: {
+        getTaskOutput?: (
+          taskId: string,
+          kind: 'shell' | 'monitor',
+        ) => Promise<unknown>;
+      };
+    }) => {
+      testState.latestMonitorTaskDetailProps = props;
+      return React.createElement('div');
+    },
     ShellTaskDetail: (props: { task: DaemonSessionShellTaskStatus }) =>
       React.createElement(
         'div',
@@ -6106,12 +6134,28 @@ describe('task activity key', () => {
       }),
     );
 
+    mockConnection.capabilities.features = ['session_task_output'];
     const { container } = renderApp();
     await flush();
     expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledTimes(1);
     expect(container.querySelector('button[title="npm test"]')).not.toBeNull();
     expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledWith(
       'nested-session',
+    );
+
+    // The restored tab must rebind its task-output reads to the source
+    // session: reading through the live session's actions makes the daemon
+    // look the task up in the wrong per-session registry and latch the
+    // pane on "Output is unavailable".
+    const detailProps = testState.latestMonitorTaskDetailProps;
+    expect(detailProps?.actions?.getTaskOutput).toBeDefined();
+    await act(async () => {
+      await detailProps!.actions!.getTaskOutput!('monitor-1', 'monitor');
+    });
+    expect(mockWorkspace.client.sessionTaskOutput).toHaveBeenCalledWith(
+      'nested-session',
+      'monitor-1',
+      'monitor',
     );
 
     await act(async () => {
@@ -10422,6 +10466,15 @@ beforeEach(() => {
   mockPaneSessionActions.getContextUsage.mockResolvedValue(paneContextFixture);
   mockWorkspace.client.sessionTaskCancel.mockReset();
   mockWorkspace.client.sessionTaskCancel.mockResolvedValue({ cancelled: true });
+  mockWorkspace.client.sessionTaskOutput.mockReset();
+  mockWorkspace.client.sessionTaskOutput.mockResolvedValue({
+    v: 1,
+    sessionId: 'session-1',
+    taskId: 'task-1',
+    kind: 'monitor',
+    output: '',
+    truncated: false,
+  });
   mockWorkspace.client.renameStandaloneSession.mockReset();
   mockWorkspace.client.renameStandaloneSession.mockResolvedValue(undefined);
   mockWorkspace.client.unarchiveStandaloneSessions.mockReset();
@@ -10476,6 +10529,7 @@ beforeEach(() => {
   testState.latestTodoPanelTodos = [];
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;
+  testState.latestMonitorTaskDetailProps = null;
   testState.latestAskUserQuestionOnError = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];

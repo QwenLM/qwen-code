@@ -53,6 +53,7 @@ import type {
   ServeSessionResourcesStatus,
   ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTaskOutputStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
   ServeWorkspaceExtensionsStatus,
@@ -2017,6 +2018,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     rootAgentId?: string,
   ): Promise<ServeSessionAgentTrace>;
+
+  /** Read the captured output tail for a live Shell or Monitor task. */
+  getSessionTaskOutputStatus(
+    sessionId: string,
+    taskId: string,
+    taskKind: 'shell' | 'monitor',
+  ): Promise<ServeSessionTaskOutputStatus>;
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;

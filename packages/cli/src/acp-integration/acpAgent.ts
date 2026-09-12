@@ -146,6 +146,8 @@ import {
   resolveSavedWorkflowScript,
   extractAndStripMeta,
   listWorkflowSnapshots,
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -369,6 +371,7 @@ import {
   type ServeSessionLspStatus,
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTrace,
+  type ServeSessionTaskOutputStatus,
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowDetail,
   type ServeSessionSavedWorkflowStatus,
@@ -8267,6 +8270,59 @@ class QwenAgent implements Agent {
     return { v: STATUS_SCHEMA_VERSION, sessionId, ...trace };
   }
 
+  private buildSessionTaskOutputStatus(
+    sessionId: string,
+    taskId: string,
+    taskKind: 'shell' | 'monitor',
+  ): ServeSessionTaskOutputStatus {
+    const config = this.sessionOrThrow(sessionId).getConfig();
+    const entry =
+      taskKind === 'shell'
+        ? config.getBackgroundShellRegistry().get(taskId)
+        : config.getMonitorRegistry().get(taskId);
+    if (!entry) {
+      // Fail closed like the sibling readers (task cancel returns
+      // `{cancelled: false, reason: 'not_found'}`, saved-workflow reads
+      // return `workflow: null`): a routine miss on an unknown or evicted
+      // task id must not throw across the bridge, where the forwarded
+      // error maps to a 500 / -32603 server fault.
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        taskId,
+        kind: taskKind,
+        output: '',
+        truncated: false,
+        error: 'Task output is unavailable.',
+      };
+    }
+
+    const tail = readTaskOutputTail(
+      entry.outputFile,
+      MAX_TASK_OUTPUT_TAIL_BYTES,
+    );
+    if (tail && 'error' in tail) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        taskId,
+        kind: taskKind,
+        output: '',
+        truncated: false,
+        error: 'Task output is unavailable.',
+      };
+    }
+
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      taskId,
+      kind: taskKind,
+      output: tail?.text ?? '',
+      truncated: tail?.truncated ?? false,
+    };
+  }
+
   /**
    * Resolve one saved workflow for display. Fails closed to `workflow: null`
    * on every miss — unknown name, illegal name, unreadable file, or Workflow
@@ -9180,6 +9236,34 @@ class QwenAgent implements Agent {
           sessionId,
           rootAgentId,
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTaskOutput: {
+        const sessionId = params['sessionId'];
+        const taskId = params['taskId'];
+        const taskKind = params['taskKind'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        if (taskKind !== 'shell' && taskKind !== 'monitor') {
+          throw RequestError.invalidParams(
+            undefined,
+            'taskKind must be "shell" or "monitor"',
+          );
+        }
+        return this.buildSessionTaskOutputStatus(
+          sessionId,
+          taskId,
+          taskKind,
+        ) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
         const sessionId = params['sessionId'];

@@ -17,9 +17,11 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import stripAnsi from 'strip-ansi';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -57,6 +59,14 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  atomicWriteFile,
+  atomicWriteFileSync,
+} from '../utils/atomicFileWrite.js';
+import {
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  stripOutputControlChars,
+} from '../services/backgroundShellRegistry.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -66,6 +76,71 @@ const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
+// The trailing escape sequence a pipe chunk can end in the middle of:
+// a CSI waiting for its final byte; an Fe escape (charset designation et
+// al.) waiting for its final byte; a lone ESC; an SS2/SS3 leader; or an
+// in-flight OSC or DCS/SOS/PM/APC — the whole sequence is held, not just
+// its leader, so a payload straddling chunks is stripped as one sequence
+// instead of leaking its remainder as text. The string payload classes
+// mirror the capture stripper's own (anything but BEL, ESC, LF, CR), so
+// a lost BEL releases the hold at the next newline instead of swallowing
+// every real line that follows it, and a chunk boundary inside a UTF-8
+// window title or OSC 8 hyperlink cannot defeat the hold. A trailing
+// lone ESC is held with the sequence, so an ST split across the boundary
+// (ESC in one chunk, `\` in the next) reconstitutes instead of
+// persisting the backslash as text.
+/* eslint-disable no-control-regex */
+const TRAILING_PARTIAL_ESCAPE_REGEX =
+  /\x1b(?:\][^\x07\x1b\n\r]*\x1b?|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NO]|[PX^_][^\x07\x1b\n\r]*\x1b?)$/;
+/* eslint-enable no-control-regex */
+
+// The payload-discard state entered when a trailing escape sequence
+// outgrows the hold cap: the payload is not output, so it is dropped
+// until the sequence's terminator instead of being persisted as
+// fabricated text. The kind selects the terminator grammar, mirroring
+// the capture stripper's per-class rules.
+type DiscardedSequenceKind = 'string' | 'csi' | 'fe';
+
+// Where normal processing resumes after discarding an over-cap
+// sequence's payload, mirroring the capture stripper's per-class
+// terminators. A string sequence ends at BEL or ST (`ESC \`), both
+// consumed; a CSI ends at its final byte (0x40-0x7e, consumed) and an Fe
+// escape at its own (0x30-0x7e, consumed); a byte that can no longer
+// belong to the sequence (ESC, LF, CR, …) is left in the stream.
+// undefined when the whole chunk is still payload.
+function findDiscardedPayloadEnd(
+  kind: DiscardedSequenceKind,
+  text: string,
+): number | undefined {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (kind === 'string') {
+      if (code === 0x07) return i + 1;
+      if (code === 0x1b) {
+        return text.charCodeAt(i + 1) === 0x5c ? i + 2 : i;
+      }
+      if (code === 0x0a || code === 0x0d) return i;
+      continue;
+    }
+    if (kind === 'csi') {
+      if (code >= 0x40 && code <= 0x7e) return i + 1;
+      if (code >= 0x20 && code <= 0x3f) continue;
+      return i;
+    }
+    if (code >= 0x30 && code <= 0x7e) return i + 1;
+    if (code >= 0x20 && code <= 0x2f) continue;
+    return i;
+  }
+  return undefined;
+}
+
+// The extra byte preserves readTaskOutputTail's `truncated` signal after the
+// capture starts discarding older output.
+const MAX_MONITOR_OUTPUT_CAPTURE_BYTES = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
+// Consecutive capture-write failures after which the writer stops
+// re-attempting: a full disk or a read-only project dir fails every chunk,
+// and each attempt rewrites the whole retained tail.
+const MAX_OUTPUT_WRITE_FAILURES = 3;
 
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
@@ -325,6 +400,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
     const ownerAgentId = getCurrentAgentId() ?? undefined;
+    const outputFile = getMonitorOutputPath(
+      this.config.storage.getProjectDir(),
+      this.config.getSessionId(),
+      monitorId,
+    );
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
@@ -352,16 +432,121 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
-      // Reserved path for a future per-monitor writer; no file is created
-      // today (events stream into the parent's chat record via the
-      // notification callback).
-      outputFile: getMonitorOutputPath(
-        this.config.storage.getProjectDir(),
-        this.config.getSessionId(),
-        monitorId,
-      ),
+      outputFile,
       ...(ownerAgentId ? { ownerAgentId } : {}),
     };
+
+    try {
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      atomicWriteFileSync(outputFile, Buffer.alloc(0), {
+        flush: false,
+        noFollow: true,
+      });
+    } catch (err) {
+      return {
+        llmContent: `Monitor failed to create its output file: ${getErrorMessage(err)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+      };
+    }
+
+    let outputTail = Buffer.alloc(0);
+    let outputDirty = false;
+    let outputWritePromise: Promise<void> | undefined;
+    let outputCloseRequested = false;
+    let outputCaptureClosed = false;
+    let outputWriteFailures = 0;
+    let outputWriteGaveUp = false;
+    const outputCloseCallbacks: Array<() => void> = [];
+
+    const finishOutputCapture = (): void => {
+      if (
+        !outputCaptureClosed &&
+        outputCloseRequested &&
+        !outputDirty &&
+        !outputWritePromise
+      ) {
+        outputCaptureClosed = true;
+        for (const callback of outputCloseCallbacks.splice(0)) callback();
+      }
+    };
+
+    const flushOutputCapture = (): void => {
+      if (outputWritePromise) return;
+
+      outputWritePromise = (async () => {
+        while (outputDirty) {
+          outputDirty = false;
+          try {
+            await atomicWriteFile(outputFile, outputTail, {
+              flush: false,
+              noFollow: true,
+            });
+            outputWriteFailures = 0;
+          } catch (err) {
+            outputWriteFailures++;
+            // Record the first failure on the registration so the served
+            // status and the terminal notification can tell a stale tail
+            // from a complete one; the debug log alone reaches nobody.
+            registration.outputCaptureError ??= getErrorMessage(err);
+            debugLogger.warn(
+              `Monitor ${monitorId} output write error: ${getErrorMessage(err)}`,
+            );
+            if (outputWriteFailures >= MAX_OUTPUT_WRITE_FAILURES) {
+              outputWriteGaveUp = true;
+              outputDirty = false;
+            }
+          }
+        }
+      })().finally(() => {
+        outputWritePromise = undefined;
+        // A chunk that arrived between the loop's last dirty check and
+        // this reset marked the tail dirty without restarting the loop;
+        // restart it here or the capture silently stops advancing and the
+        // close join never settles. A writer that gave up has forced
+        // outputDirty false, so this never re-arms a doomed write.
+        if (outputDirty) {
+          flushOutputCapture();
+          return;
+        }
+        finishOutputCapture();
+      });
+    };
+
+    const writeOutputCapture = (text: string): void => {
+      if (outputCloseRequested || outputWriteGaveUp || text.length === 0)
+        return;
+
+      const chunk = Buffer.from(text);
+      if (chunk.length >= MAX_MONITOR_OUTPUT_CAPTURE_BYTES) {
+        outputTail = Buffer.from(
+          chunk.subarray(-MAX_MONITOR_OUTPUT_CAPTURE_BYTES),
+        );
+      } else {
+        const bytesToKeep = MAX_MONITOR_OUTPUT_CAPTURE_BYTES - chunk.length;
+        outputTail = Buffer.concat([outputTail.subarray(-bytesToKeep), chunk]);
+      }
+      outputDirty = true;
+      flushOutputCapture();
+    };
+
+    const closeOutputCapture = (onClosed?: () => void): void => {
+      outputCloseRequested = true;
+      if (onClosed) {
+        if (outputCaptureClosed) {
+          onClosed();
+          return;
+        }
+        outputCloseCallbacks.push(onClosed);
+      }
+      finishOutputCapture();
+    };
+
+    // Teardown join handle: resolves when the capture is closed and its
+    // last in-flight write has drained, so removing the project tree can
+    // await it instead of racing a staged temp file into an rmSync walk.
+    registration.outputCaptureClosed = new Promise<void>((resolve) => {
+      outputCloseCallbacks.push(resolve);
+    });
 
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
@@ -383,6 +568,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         },
       });
     } catch (err) {
+      closeOutputCapture();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -405,8 +591,18 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // path — either `entryAc.signal.aborted` already true at registration
     // time, or `registry.register()` throwing — can flush via
     // `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
-    const stdoutBuf = { value: '' };
-    const stderrBuf = { value: '' };
+    const stdoutBuf = {
+      value: '',
+      heldEscape: '',
+      discardingPayload: undefined as DiscardedSequenceKind | undefined,
+      decoder: new StringDecoder('utf8'),
+    };
+    const stderrBuf = {
+      value: '',
+      heldEscape: '',
+      discardingPayload: undefined as DiscardedSequenceKind | undefined,
+      decoder: new StringDecoder('utf8'),
+    };
     let tokenBucket = THROTTLE_BURST_SIZE;
     let lastRefill = Date.now();
 
@@ -454,6 +650,28 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // after flushing.
     const flushPartialLineBuffers = (): void => {
       for (const buf of [stdoutBuf, stderrBuf]) {
+        // Release the held-back partial escape and the decoder's trailing
+        // bytes so a sequence or codepoint straddling the final chunk is
+        // still stripped and captured before the output file closes. When
+        // the capture closed mid-discard, both tails are payload residue
+        // of the unterminated sequence, not text. The held escape is
+        // stripped on its own: concatenating the decoder residue first
+        // would let its U+FFFD defeat the stripper's end-of-input arm and
+        // persist the bracket and parameters as text.
+        const heldEscape = buf.heldEscape;
+        const decoderResidue = buf.decoder.end();
+        const discarding = buf.discardingPayload !== undefined;
+        buf.heldEscape = '';
+        buf.discardingPayload = undefined;
+        if (!discarding) {
+          writeOutputCapture(
+            stripOutputControlChars(heldEscape) + decoderResidue,
+          );
+          const tail = stripAnsi(heldEscape + decoderResidue);
+          if (tail.length > 0) {
+            buf.value += tail;
+          }
+        }
         const trimmed = buf.value.trim();
         if (trimmed.length > 0) {
           throttledEmit(trimmed);
@@ -506,6 +724,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // line(s) the child wrote between the abort signal and process exit.
     const abortHandler = (): void => {
       flushPartialLineBuffers();
+      closeOutputCapture();
       killChildProcessGroup();
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
@@ -526,16 +745,95 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child.removeListener('error', captureEarlySpawnError);
       child.on('error', () => {});
+      closeOutputCapture();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
       };
     }
 
-    const processLines = (buffer: { value: string }, data: Buffer): void => {
+    const processLines = (
+      buffer: {
+        value: string;
+        heldEscape: string;
+        discardingPayload: DiscardedSequenceKind | undefined;
+        decoder: StringDecoder;
+      },
+      data: Buffer,
+    ): void => {
       if (registration.status !== 'running') return;
 
-      const text = stripAnsi(data.toString('utf-8'));
+      // Decode per stream through StringDecoder so a multi-byte codepoint
+      // split across pipe chunks is reassembled instead of baking U+FFFD
+      // replacements into the capture file; the streams share this
+      // function, so each owns a decoder (a shared one would corrupt the
+      // other stream's buffered trailing bytes).
+      let decoded = buffer.heldEscape + buffer.decoder.write(data);
+      buffer.heldEscape = '';
+
+      // An earlier chunk ended inside a sequence too large to hold (a
+      // multi-KB OSC 52 clipboard write, an inline image): its payload is
+      // not output, so discard it until the sequence's terminator instead
+      // of persisting it as fabricated text.
+      if (buffer.discardingPayload !== undefined) {
+        const kind = buffer.discardingPayload;
+        const resumeAt = findDiscardedPayloadEnd(kind, decoded);
+        if (resumeAt === undefined) return;
+        decoded = decoded.slice(resumeAt);
+        if (decoded === '\x1b') {
+          // The terminator straddles the chunk boundary: keep the ESC
+          // held so the next chunk's first byte decides what it starts.
+          // A string sequence may still complete its ST, so its discard
+          // stays armed; for CSI/Fe the ESC already ended the sequence.
+          buffer.heldEscape = '\x1b';
+          if (kind !== 'string') {
+            buffer.discardingPayload = undefined;
+          }
+          return;
+        }
+        buffer.discardingPayload = undefined;
+        if (decoded.length === 0) return;
+      }
+
+      // Hold back a trailing incomplete escape sequence so the next chunk
+      // reconstitutes it before the stripper runs; stripping a
+      // chunk-final fragment would persist the reassembled sequence's
+      // payload as text. A trailing sequence that has outgrown the hold
+      // cap can no longer be held: it is dropped from this chunk and its
+      // remaining payload is discarded until its terminator — whichever
+      // leader class started it, or a CSI's final byte would be fabricated
+      // into the output. A string sequence's trailing ESC is the start of
+      // its terminator and stays held: slicing it away with the payload
+      // would let the discard scan past the reconstituted ST and eat the
+      // real line that follows it. Only the string and CSI/Fe arms of the
+      // hold regex can outgrow the cap; the bare-ESC and SS2/SS3 arms are
+      // bounded at two bytes by construction.
+      const holdMatch = TRAILING_PARTIAL_ESCAPE_REGEX.exec(decoded);
+      let held = holdMatch !== null ? holdMatch[0] : '';
+      if (holdMatch !== null && holdMatch[0].length > PARTIAL_LINE_BUFFER_CAP) {
+        held = holdMatch[0].endsWith('\x1b') ? '\x1b' : '';
+        const drop = holdMatch[0].length - held.length;
+        const leader = holdMatch[0][1];
+        buffer.discardingPayload =
+          leader === ']' ||
+          leader === 'P' ||
+          leader === 'X' ||
+          leader === '^' ||
+          leader === '_'
+            ? 'string'
+            : leader === '['
+              ? 'csi'
+              : 'fe';
+        decoded = decoded.slice(0, -drop);
+      }
+      buffer.heldEscape = held;
+      const stable = held.length > 0 ? decoded.slice(0, -held.length) : decoded;
+      // The capture file is plain text: it shares the served tail's own
+      // stripper so writer and reader agree on one ECMA-48 grammar.
+      // stripAnsi cannot fill that role — it matches a DCS leader `ESC P`
+      // as a complete two-byte escape and would persist the payload.
+      writeOutputCapture(stripOutputControlChars(stable));
+      const text = stripAnsi(stable);
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits
@@ -584,11 +882,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     //     `abortHandler` (so this is a no-op) but removing the guard keeps
     //     cleanup defensive against future status-flip races.
     let cleanedUp = false;
-    const cleanup = (): void => {
-      if (cleanedUp) return;
+    const cleanup = (onOutputClosed?: () => void): void => {
+      if (cleanedUp) {
+        closeOutputCapture(onOutputClosed);
+        return;
+      }
       cleanedUp = true;
 
       flushPartialLineBuffers();
+      closeOutputCapture(onOutputClosed);
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
@@ -626,18 +928,17 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const onClose = (code: number | null, sig: NodeJS.Signals | null): void => {
       exited = true;
-      cleanup();
-
       const result = exitResult ?? { code, sig };
-      settleFromExit(result.code, result.sig);
+      cleanup(() => settleFromExit(result.code, result.sig));
     };
 
     const onError = (err: Error): void => {
       exited = true;
-      cleanup();
-      if (registration.status === 'running') {
-        registry.fail(monitorId, getErrorMessage(err));
-      }
+      cleanup(() => {
+        if (registration.status === 'running') {
+          registry.fail(monitorId, getErrorMessage(err));
+        }
+      });
     };
 
     child.on('exit', onExit);
@@ -661,6 +962,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `description: ${description}\n` +
         `max_events: ${maxEvents}\n` +
         `idle_timeout: ${idleTimeoutMs}ms\n` +
+        `output file: ${outputFile}\n` +
         `Events will be delivered as notifications. ` +
         `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates).`,

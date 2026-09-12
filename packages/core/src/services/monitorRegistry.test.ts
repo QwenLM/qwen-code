@@ -831,6 +831,28 @@ describe('MonitorRegistry', () => {
     expect(modelText).toContain('5 lines dropped due to throttling');
   });
 
+  it('includes an output capture failure in terminal notification text', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = createEntry();
+    registry.register(entry);
+
+    // Set by the Monitor tool when a capture write fails after the
+    // initial creation: the terminal notification is what lets a reader
+    // tell the stale tail from a complete one.
+    entry.outputCaptureError = 'ENOSPC: no space left on device';
+    registry.complete('mon-1', 0);
+
+    const [displayText, modelText] = callback.mock.calls[0] as [string, string];
+    expect(displayText).toContain(
+      'output capture failed: ENOSPC: no space left on device',
+    );
+    expect(modelText).toContain(
+      'Output capture failed: ENOSPC: no space left on device',
+    );
+    expect(modelText).toContain('The output file may be incomplete.');
+  });
+
   describe('setStatusChangeCallback', () => {
     it('fires once on register (nothing → running)', () => {
       const cb = vi.fn();

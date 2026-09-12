@@ -274,6 +274,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
+  MAX_TASK_OUTPUT_TAIL_BYTES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).MAX_TASK_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readTaskOutputTail,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -12327,6 +12333,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('status ext methods expose live session context and supported commands', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
+    const outputDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-task-output-'),
+    );
+    const shellOutputFile = path.join(outputDir, 'shell.log');
+    const monitorOutputFile = path.join(outputDir, 'monitor.log');
+    await fs.writeFile(shellOutputFile, 'shell output\n');
+    await fs.writeFile(
+      monitorOutputFile,
+      `${'x'.repeat(64 * 1024)}monitor tail`,
+    );
+    const shellEntry = {
+      kind: 'shell',
+      id: 'shell-1',
+      shellId: 'shell-1',
+      description: 'npm test',
+      status: 'completed',
+      startTime: 3_000,
+      endTime: 4_500,
+      outputFile: shellOutputFile,
+      outputPath: shellOutputFile,
+      outputOffset: 8,
+      notified: true,
+      abortController: new AbortController(),
+      command: 'npm test',
+      cwd: '/tmp',
+      pid: 123,
+      exitCode: 0,
+    };
+    const monitorEntry = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      monitorId: 'monitor-1',
+      description: 'watch logs',
+      status: 'failed',
+      startTime: 2_000,
+      endTime: 2_500,
+      outputFile: monitorOutputFile,
+      outputOffset: 0,
+      notified: false,
+      abortController: new AbortController(),
+      command: 'tail -f app.log',
+      pid: 456,
+      eventCount: 3,
+      lastEventTime: 2_400,
+      droppedLines: 1,
+      error: 'boom',
+      ownerAgentId: 'agent-1',
+      idleTimer: {},
+    };
     const innerConfig = await setupSessionMocks(sessionId);
     const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000);
     Object.assign(innerConfig, {
@@ -12354,51 +12409,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ]),
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
-        getAll: vi.fn().mockReturnValue([
-          {
-            kind: 'shell',
-            id: 'shell-1',
-            shellId: 'shell-1',
-            description: 'npm test',
-            status: 'completed',
-            startTime: 3_000,
-            endTime: 4_500,
-            outputFile: '/tmp/shell-1.log',
-            outputPath: '/tmp/shell-1.log',
-            outputOffset: 8,
-            notified: true,
-            abortController: new AbortController(),
-            command: 'npm test',
-            cwd: '/tmp',
-            pid: 123,
-            exitCode: 0,
-          },
-        ]),
+        getAll: vi.fn().mockReturnValue([shellEntry]),
+        get: vi.fn((taskId: string) =>
+          taskId === shellEntry.id ? shellEntry : undefined,
+        ),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
-        getAll: vi.fn().mockReturnValue([
-          {
-            kind: 'monitor',
-            id: 'monitor-1',
-            monitorId: 'monitor-1',
-            description: 'watch logs',
-            status: 'failed',
-            startTime: 2_000,
-            endTime: 2_500,
-            outputFile: '/tmp/monitor-1.log',
-            outputOffset: 0,
-            notified: false,
-            abortController: new AbortController(),
-            command: 'tail -f app.log',
-            pid: 456,
-            eventCount: 3,
-            lastEventTime: 2_400,
-            droppedLines: 1,
-            error: 'boom',
-            ownerAgentId: 'agent-1',
-            idleTimer: {},
-          },
-        ]),
+        getAll: vi.fn().mockReturnValue([monitorEntry]),
+        get: vi.fn((taskId: string) =>
+          taskId === monitorEntry.id ? monitorEntry : undefined,
+        ),
       }),
       getLspStatusSnapshot: vi.fn().mockReturnValue({
         enabled: true,
@@ -12480,6 +12500,34 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionAgents,
       { sessionId },
     );
+    const shellOutput = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+      { sessionId, taskId: 'shell-1', taskKind: 'shell' },
+    );
+    const monitorOutput = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+      { sessionId, taskId: 'monitor-1', taskKind: 'monitor' },
+    );
+    // An unknown or evicted task id fails closed with the same in-band
+    // envelope as an unreadable capture: a routine client miss must not be
+    // thrown across the bridge, where the forwarded error maps to a
+    // 500 / -32603 server fault.
+    const missingOutput = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+      {
+        sessionId,
+        taskId: 'missing',
+        taskKind: 'shell',
+      },
+    );
+    expect(missingOutput).toMatchObject({
+      sessionId,
+      taskId: 'missing',
+      kind: 'shell',
+      output: '',
+      truncated: false,
+      error: 'Task output is unavailable.',
+    });
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
@@ -12565,7 +12613,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           startTime: 3_000,
           endTime: 4_500,
           runtimeMs: 1_500,
-          outputFile: '/tmp/shell-1.log',
+          outputFile: shellOutputFile,
           command: 'npm test',
           cwd: '/tmp',
           pid: 123,
@@ -12588,6 +12636,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(tasks)).not.toContain('outputOffset');
     expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
     expect(JSON.stringify(tasks)).not.toContain('idleTimer');
+    expect(shellOutput).toMatchObject({
+      sessionId,
+      taskId: 'shell-1',
+      kind: 'shell',
+      output: 'shell output',
+      truncated: false,
+    });
+    expect(monitorOutput).toMatchObject({
+      sessionId,
+      taskId: 'monitor-1',
+      kind: 'monitor',
+      truncated: true,
+    });
+    expect((monitorOutput as { output: string }).output).toHaveLength(
+      64 * 1024,
+    );
+    expect((monitorOutput as { output: string }).output).toMatch(
+      /monitor tail$/,
+    );
     expect(contextUsage).toMatchObject({
       v: 1,
       sessionId,
@@ -12629,6 +12696,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    await fs.rm(outputDir, { recursive: true, force: true });
     mockConnectionState.resolve();
     await agentPromise;
   });

@@ -81,6 +81,7 @@ vi.mock(
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,
+    useConnection: () => ({ capabilities: undefined }),
     useWorkspace: () => mockWorkspace,
     useConnection: () => ({
       sessionId: 'active-session',
