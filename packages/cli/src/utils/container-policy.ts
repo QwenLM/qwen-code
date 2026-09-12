@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from './env-provenance.js';
+
 /**
  * The whole `info` document is searched rather than one schema path, because
  * the two runtimes spell this in unrelated places — docker as a
@@ -83,7 +85,11 @@ export function trustedProcessEnv(
   // `.env`, which `isFileSourcedEnvKey` cannot tell from the repository's own;
   // that one must move to their shell. Conservative on the right side.
   for (const key of Object.keys(scrubbed)) {
-    if (isFileSourcedEnvKey(key)) delete scrubbed[key];
+    if (
+      key.toLowerCase() === PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase() ||
+      isFileSourcedEnvKey(key)
+    )
+      delete scrubbed[key];
   }
   return scrubbed;
 }

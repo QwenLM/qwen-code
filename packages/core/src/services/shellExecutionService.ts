@@ -828,6 +828,8 @@ export class ShellExecutionService {
 
         let stdout = '';
         let stderr = '';
+        let stdoutPreview = '';
+        let stderrPreview = '';
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
@@ -957,9 +959,21 @@ export class ShellExecutionService {
             stderr += decodedChunk;
           }
           if (streamBufferedOutput) {
-            const separator = stdout.endsWith('\n') ? '' : '\n';
+            if (stream === 'stdout') {
+              stdoutPreview = (
+                stdoutPreview + decodedChunk.slice(-65536)
+              ).slice(-65536);
+            } else {
+              stderrPreview = (
+                stderrPreview + decodedChunk.slice(-65536)
+              ).slice(-65536);
+            }
+            const separator = stdoutPreview.endsWith('\n') ? '' : '\n';
             const snapshot =
-              stdout + (stderr ? (stdout ? separator : '') + stderr : '');
+              stdoutPreview +
+              (stderrPreview
+                ? (stdoutPreview ? separator : '') + stderrPreview
+                : '');
             onOutputEvent({
               type: 'data',
               chunk: stripAnsi(snapshot).slice(-65536),

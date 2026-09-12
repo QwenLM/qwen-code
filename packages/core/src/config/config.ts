@@ -6757,8 +6757,13 @@ export class Config {
     }
     if (resourceError !== undefined) throw resourceError;
     if (!this.initialized) return;
-    await this.cleanupArenaRuntime();
-    await this.cleanupTeamRuntime();
+    try {
+      await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
+    } catch (error) {
+      this.debugLogger.error('Error during session runtime cleanup:', error);
+      throw error;
+    }
   }
 
   getPromptRegistry(): PromptRegistry {
@@ -10345,6 +10350,7 @@ export class Config {
           import('../tools/execution-tool.js'),
         ]);
       for (const [name, tool] of createExecutionTools(this)) {
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
         await registerLazy(name as ToolName, async () =>
           wrapExecutionTool(tool, environment, this),
         );

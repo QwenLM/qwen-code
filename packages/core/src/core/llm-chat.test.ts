@@ -5404,6 +5404,33 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('keeps compressed history and token counts consistent if worker invalidation fails', async () => {
+      chat.setLastPromptTokenCount(1000);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      const newHistory = [{ role: 'user', parts: [{ text: 'summary' }] }];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      expect(
+        (await chat.tryCompress('failed-invalidation', true)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getHistory()).toEqual(newHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
     it('clears the execution environment cache before finishing compression', async () => {
       let completeInvalidation!: () => void;
       const invalidateReadCache = vi.fn(

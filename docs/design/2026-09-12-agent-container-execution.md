@@ -29,15 +29,39 @@ tool advertise `execution_backend: "container"`. Omission keeps existing local
 execution. The existing sandbox image override selects the image; model arguments
 cannot select images, mounts, runtime endpoints, or arbitrary container flags.
 
-For a source checkout, run `npm run build` and `npm run bundle`, then launch
-`QWEN_AGENT_EXECUTION_BACKEND=docker node dist/cli.js`. Ask the Agent tool to use
+This initial backend is available on Unix hosts; Windows does not advertise it.
+
+Use an independently installed, complete CLI bundle. From the target project,
+launch `QWEN_AGENT_EXECUTION_BACKEND=docker qwen`. Ask the Agent tool to use
 `execution_backend: "container"`. Replace `docker` with `podman` when appropriate.
 An operator can export `QWEN_CODE_CUSTOM_SANDBOX_IMAGE` for another toolchain.
+The workspace must not overlap the CLI bundle or its dependency lookup directories
+in either direction, including canonical aliases and currently absent lookup
+directories. Before starting a container, the CLI checks its installation and
+Node's dependency search directories for links escaping those protected roots.
+This prevents a writable workspace alias from changing code the host later loads.
+Hoisted dependencies and package links that stay within the protected roots are
+supported when link targets are normalized (ordinary leading `../` is allowed).
+Symlinked installation/search roots or ancestors, external or dangling links,
+hard-linked installation files, and unreadable directories are rejected.
+Shared hard-link package-store layouts are therefore unsupported.
+This conservative check can also reject unrelated linked packages in a shared
+Node search directory. In that case, use a local installation outside the shared
+global package directory and launch
+`QWEN_AGENT_EXECUTION_BACKEND=docker node --no-global-search-paths /path/to/independent/cli.js`.
+The flag disables Node's global fallback lookups; it does not exclude ancestor
+`node_modules` directories, so the independent installation still matters.
+Source and tsc launches are unsupported. For CLI development, build, bundle and
+prepare the npm package, then install it separately without source-workspace
+links; use the target checkout or a separate worktree as the agent's workspace.
 CLI relaunches preserve environment values for startup-time consumers such as
 Node TLS certificates and settings interpolation. Private parent-to-child
 metadata preserves their file provenance before environment files are loaded;
-no file scope can supply this metadata. Container runtime clients still discard
-all file-sourced values.
+no file scope can supply this metadata. The metadata remains in the process
+environment for ordinary child CLI launches, including Shell and review children,
+and is refreshed on reload without losing the provenance of frozen or retained
+values. Container runtime clients discard both the metadata and all file-sourced
+values.
 
 The option composes with `isolation: "worktree"` and `working_dir`. It does not
 extend the model-visible isolation enum or change `isolation: "remote"`.
@@ -52,7 +76,9 @@ uses a typed execution contract carrying structured preparation information and
 `ToolResult`, not a string-only tool protocol.
 
 The contract includes preparation, confirmation, execution, modification, and
-disposal. Synchronous host tool construction validates the schema without
+disposal. User modifications are bound to the scheduler call ID and discarded
+when that call ends, so identical parameters cannot consume another call's edit.
+Synchronous host tool construction validates the schema without
 calling the original tool's filesystem-dependent build method. Original build
 and path validation run in the worker. The host retains the tool's classifier
 projection. Approval callbacks and modified content cross the same invocation
@@ -77,8 +103,8 @@ model round; revealing a tool never refreshes the parent's model client.
 
 Execution startup is lazy within the explicitly selected environment. The worker
 is bundled with the installed CLI and mounted read-only, avoiding an independently
-versioned worker supplied by the image. Source development must build and bundle
-before exercising this backend.
+versioned worker supplied by the image. Development verification uses a separately
+installed package built from the same source.
 
 ## Execution ownership
 
@@ -109,6 +135,12 @@ primary and installation workers. The harness writes truncated tool output there
 as well, so recovery paths remain readable after an installation worker exits.
 This directory contains tool output only and is removed with the owning agent;
 it does not expose the host runtime directory.
+The temporary root must be outside the writable workspace, including after
+resolving symlinks, so the worker cannot replace the output directory's parents.
+Host persistence creates shared files exclusively, including truncation and
+fallback writes, without reopening entries or changing permissions by path.
+Existing entries are never overwritten by the host; failed writes use the
+existing recovery path. Workers can still modify their shared output contents.
 
 Mask the working tree's `.git` entry with an empty read-only mount. Linked
 worktrees refer to a shared common directory which contains parent and sibling
@@ -157,6 +189,13 @@ with a cleanup warning; the root session keeps ownership of failed resources.
 A cleanup failure is
 not grounds for replaying an already completed command. Automatic history
 compression invalidates the worker cache directly across derived Config layers.
+An invalidation failure is logged without abandoning the already compressed
+history and token bookkeeping; the next tool still requires successful cache
+synchronization. Memory-only cache eviction does not invalidate worker reads.
+Permission preparation receives the caller cancellation signal, and releasing
+an invocation cancels pending preparation. Container creation may pull a cold
+image and has no fixed 30-second limit; it remains cancellable. Runtime metadata
+and removal commands retain their 30-second limit.
 
 The first version does not resume a disposed container subagent. Both discovery
 and direct resume must reject it. Persist a container isolation marker in the

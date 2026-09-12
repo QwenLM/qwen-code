@@ -48,6 +48,7 @@ export interface ContainerExecutionOptions {
   runtime: 'docker' | 'podman';
   image: string;
   bundleDirectory: string;
+  trustedDirectories: readonly string[];
   runtimeEnv: NodeJS.ProcessEnv;
   environment: readonly string[];
   containerHome: string;
@@ -73,6 +74,7 @@ export function isPackageInstallation(command: string): boolean {
 function runtimeCommand(
   options: ContainerExecutionOptions,
   args: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolveResult, reject) => {
     execFile(
@@ -81,7 +83,9 @@ function runtimeCommand(
       {
         env: options.runtimeEnv,
         cwd: tmpdir(),
-        timeout: 30_000,
+        // Creating a cold image can pull it first; the caller controls cancellation.
+        timeout: args[0] === 'create' ? 0 : 30_000,
+        signal,
         maxBuffer: 1024 * 1024,
         encoding: 'utf8',
       },
@@ -89,7 +93,10 @@ function runtimeCommand(
         if (error)
           reject(
             new Error(
-              `${options.runtime} ${args[0]} failed: ${stderr || error.message}`,
+              `${options.runtime} ${args[0]} failed: ${stderr || error.message}` +
+                (args[0] === 'create' && !signal?.aborted
+                  ? ` Check image ${options.image}; try ${options.runtime} pull ${options.image}.`
+                  : ''),
             ),
           );
         else resolveResult(stdout);
@@ -200,6 +207,7 @@ class ContainerWorker {
         gitMask,
         network,
       ),
+      signal,
     );
     signal.throwIfAborted();
     if (this.disposal)
@@ -343,10 +351,12 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     signal.throwIfAborted();
     const workspace = await realpath(config.getWorkingDir());
     const bundleDirectory = await realpath(options.bundleDirectory);
+    const temporaryRoot = await realpath(tmpdir());
     if (
       process.platform === 'win32' ||
       workspace.includes(':') ||
-      bundleDirectory.includes(':')
+      bundleDirectory.includes(':') ||
+      temporaryRoot.includes(':')
     ) {
       throw new Error(
         'Container execution requires Unix paths without volume separators.',
@@ -356,6 +366,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       homedir(),
       Storage.getGlobalQwenDir(),
       Storage.getRuntimeBaseDir(),
+      temporaryRoot,
     ]) {
       const canonical = await realpath(protectedDirectory).catch(() =>
         resolve(protectedDirectory),
@@ -368,17 +379,32 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
           !isAbsolute(fromWorkspace))
       ) {
         throw new Error(
-          'Container workspace must not contain the host home, Qwen credentials or runtime directory.',
+          'Container workspace must not contain the host home, Qwen credentials or runtime directory, or the temporary directory.',
+        );
+      }
+    }
+    for (const directory of [bundleDirectory, ...options.trustedDirectories]) {
+      const overlap = [
+        relative(workspace, directory),
+        relative(directory, workspace),
+      ].some(
+        (path) =>
+          path === '' ||
+          (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path)),
+      );
+      if (overlap) {
+        throw new Error(
+          'Container workspace must not overlap the trusted CLI bundle or dependency directories. Run an independent CLI installation outside the workspace.',
         );
       }
     }
     await access(join(bundleDirectory, 'execution-worker.js'));
     const resolvedOptions = { ...options, bundleDirectory };
-    const info = await runtimeCommand(resolvedOptions, [
-      'info',
-      '--format',
-      '{{json .}}',
-    ]);
+    const info = await runtimeCommand(
+      resolvedOptions,
+      ['info', '--format', '{{json .}}'],
+      signal,
+    );
     const rootless =
       info.includes('"name=rootless"') ||
       info.includes('"rootless":true') ||
@@ -413,7 +439,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     if (gitEntry?.isSymbolicLink())
       throw new Error('A symlinked .git entry cannot be safely mounted.');
     const temporaryDirectory = await mkdtemp(
-      join(tmpdir(), 'qwen-agent-executor-'),
+      join(temporaryRoot, 'qwen-agent-executor-'),
     );
     const gitMask = gitEntry ? join(temporaryDirectory, 'git-mask') : undefined;
     const primary = new ContainerWorker(resolvedOptions);
@@ -435,7 +461,12 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       await primary.start(workerOptions, rootless, gitMask, false, signal);
       return environment;
     } catch (error) {
-      await environment.dispose();
+      await environment.dispose().catch((cleanupError: unknown) => {
+        throw new ExecutionCleanupError(
+          `${String(error)}; cleanup failed: ${String(cleanupError)}`,
+          { cause: error },
+        );
+      });
       throw error;
     }
   }
@@ -466,7 +497,12 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
           signal,
         );
       } catch (error) {
-        await worker.dispose();
+        await worker.dispose().catch((cleanupError: unknown) => {
+          throw new ExecutionCleanupError(
+            `${String(error)}; cleanup failed: ${String(cleanupError)}`,
+            { cause: error },
+          );
+        });
         this.workers.delete(worker);
         throw error;
       }
@@ -475,7 +511,14 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     try {
       return await worker.request({ method: 'prepare', request }, signal);
     } catch (error) {
-      await this.release(request.id, AbortSignal.timeout(30_000));
+      await this.release(request.id, AbortSignal.timeout(30_000)).catch(
+        (cleanupError: unknown) => {
+          throw new ExecutionCleanupError(
+            `${String(error)}; cleanup failed: ${String(cleanupError)}`,
+            { cause: error },
+          );
+        },
+      );
       throw error;
     }
   }

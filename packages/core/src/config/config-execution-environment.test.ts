@@ -6,6 +6,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { Config, deriveConfig } from './config.js';
+import { ToolNames } from '../tools/tool-names.js';
+import type { DebugLogger } from '../utils/debugLogger.js';
 import {
   ExecutionCleanupError,
   type ExecutionEnvironment,
@@ -24,6 +26,51 @@ const shutdownOptions = {
 };
 
 describe('execution environment ownership', () => {
+  it.each([false, true])(
+    'respects the LS tool opt-in with a container registry: %s',
+    async (enabled) => {
+      const parent = new Config({ ...params, lsToolEnabled: enabled });
+      const child = deriveConfig(parent, {
+        getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
+      });
+      const registry = await child.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      const names = registry.getAllToolNames();
+      expect(names.includes(ToolNames.LS)).toBe(enabled);
+      expect(names).toContain(ToolNames.READ_FILE);
+    },
+  );
+
+  it.each(['cleanupArenaRuntime', 'cleanupTeamRuntime'] as const)(
+    'logs %s failures during non-strict shutdown',
+    async (method) => {
+      const config = new Config(params);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      const failure = new Error('runtime cleanup failed');
+      const log = vi
+        .spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'error',
+        )
+        .mockImplementation(() => undefined);
+      vi.spyOn(config, 'cleanupArenaRuntime').mockResolvedValue(undefined);
+      vi.spyOn(config, 'cleanupTeamRuntime').mockResolvedValue(undefined);
+      vi.spyOn(config, method).mockRejectedValue(failure);
+      try {
+        await expect(
+          config.shutdown({ ...shutdownOptions, strictResourceCleanup: false }),
+        ).resolves.toBeUndefined();
+        expect(log).toHaveBeenCalledWith(
+          'Error during session runtime cleanup:',
+          failure,
+        );
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
   it('rejects a code-mode-only container registry for direct derived Config callers', async () => {
     const parent = new Config({ ...params, codeModeOnly: true });
     const child = deriveConfig(parent, {

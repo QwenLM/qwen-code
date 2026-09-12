@@ -3066,6 +3066,7 @@ export class CoreToolScheduler {
               invocation,
               canonicalName,
               toolParams,
+              signal,
             ),
           );
           if (
@@ -4299,7 +4300,10 @@ export class CoreToolScheduler {
         waitingToolCall.confirmationDetails.type === 'edit' &&
         isModifiableDeclarativeTool(waitingToolCall.tool)
       ) {
-        const modifyContext = waitingToolCall.tool.getModifyContext(signal);
+        const modifyContext = waitingToolCall.tool.getModifyContext(
+          signal,
+          callId,
+        );
         const editorType = this.getPreferredEditor();
         if (!editorType) {
           // No editor configured: ModifyWithEditor cannot proceed. Log so
@@ -4553,7 +4557,10 @@ export class CoreToolScheduler {
     }
 
     const currentContent = confirmDetails.originalContent ?? '';
-    const modifyContext = toolCall.tool.getModifyContext(signal);
+    const modifyContext = toolCall.tool.getModifyContext(
+      signal,
+      toolCall.request.callId,
+    );
 
     const updatedParams = modifyContext.createUpdatedParams(
       currentContent,
@@ -6851,6 +6858,7 @@ export class CoreToolScheduler {
               pendingTool.invocation,
               pendingTool.request.name,
               toolParams,
+              signal,
             ),
         );
         if (

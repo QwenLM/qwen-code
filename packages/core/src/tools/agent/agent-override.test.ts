@@ -99,7 +99,9 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
     const registry = child.getToolRegistry();
     expect(registry.getAllToolNames().sort()).toEqual(
-      [...EXECUTION_TOOL_NAMES, ToolNames.TOOL_SEARCH].sort(),
+      [...EXECUTION_TOOL_NAMES, ToolNames.TOOL_SEARCH]
+        .filter((name) => name !== ToolNames.LS)
+        .sort(),
     );
     expect(parent.getExecutionEnvironment()).toBeUndefined();
     expect(registry).not.toBe(parent.getToolRegistry());

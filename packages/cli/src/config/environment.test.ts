@@ -155,6 +155,35 @@ afterEach(() => {
 });
 
 describe('relaunch environment provenance', () => {
+  beforeEach(() => resetEnvironmentTrackingForTesting());
+
+  it('preserves frozen file provenance and publishes newly loaded keys after a partial read failure', () => {
+    const workspace = makeWorkspace();
+    const homeEnv = path.join(os.homedir(), '.env');
+    fs.writeFileSync(homeEnv, 'NODE_EXTRA_CA_CERTS=/operator/file.pem\n');
+    loadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'retained' } }),
+      workspace,
+    );
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['NODE_EXTRA_CA_CERTS']).toBe('/operator/file.pem');
+    expect(
+      JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!).dotEnv,
+    ).toContain('NODE_EXTRA_CA_CERTS');
+
+    fs.rmSync(homeEnv);
+    fs.mkdirSync(homeEnv);
+    fs.writeFileSync(path.join(workspace, '.env'), 'RUNTIME_DOTENV=new\n');
+    const result = reloadEnvironment(testSettings({}), workspace);
+    expect(result.envFileReadFailed).toBe(true);
+    expect(process.env['RUNTIME_DOTENV']).toBe('new');
+    expect(
+      JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!).dotEnv,
+    ).toEqual(
+      expect.arrayContaining(['NODE_EXTRA_CA_CERTS', 'RUNTIME_DOTENV']),
+    );
+  });
+
   it('restores file provenance before loading files while preserving inherited values', async () => {
     vi.resetModules();
     const parent = await import('./environment.js');
@@ -165,13 +194,15 @@ describe('relaunch environment provenance', () => {
       testSettings({ env: { RUNTIME_SETTINGS: 'settings' } }),
       workspace,
     );
-    Object.assign(process.env, parent.getRelaunchEnvProvenance());
+    // Ordinary child-process environment copies must carry provenance too.
 
     vi.resetModules();
     const child = await import('./environment.js');
     expect(process.env['RUNTIME_DOTENV']).toBe('file');
     expect(process.env['RUNTIME_SETTINGS']).toBe('settings');
-    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBeUndefined();
+    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBe(
+      child.getRelaunchEnvProvenance()[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+    );
     expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
     expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(true);
     expect(child.isFileSourcedEnvKey('RUNTIME_PARENT')).toBe(false);
@@ -186,6 +217,11 @@ describe('relaunch environment provenance', () => {
     expect(process.env['RUNTIME_SETTINGS']).toBeUndefined();
     expect(child.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
     expect(child.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    vi.resetModules();
+    const grandchild = await import('./environment.js');
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_DOTENV')).toBe(true);
+    expect(grandchild.isFileSourcedEnvKey('RUNTIME_SETTINGS')).toBe(false);
+    grandchild.resetEnvironmentTrackingForTesting();
     child.resetEnvironmentTrackingForTesting();
   });
 
@@ -197,7 +233,7 @@ describe('relaunch environment provenance', () => {
         PRIVATE_RELAUNCH_ENV_PROVENANCE,
         PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
       ];
-      const forged = JSON.stringify({ dotEnv: [], settingsEnv: [] });
+      const forged = JSON.stringify({ dotEnv: ['FORGED'], settingsEnv: [] });
       const values = Object.fromEntries(keys.map((key) => [key, forged]));
       const settings = testSettings({ advanced: { excludedEnvVars: [] } });
       if (source === 'settings.env') {
@@ -209,9 +245,15 @@ describe('relaunch environment provenance', () => {
         );
       }
       loadEnvironment(settings, workspace);
-      for (const key of keys) expect(process.env[key]).toBeUndefined();
+      expect(JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!)).toEqual(
+        { dotEnv: [], settingsEnv: [] },
+      );
+      expect(process.env[keys[1]]).not.toBe(forged);
       reloadEnvironment(settings, workspace);
-      for (const key of keys) expect(process.env[key]).toBeUndefined();
+      expect(JSON.parse(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]!)).toEqual(
+        { dotEnv: [], settingsEnv: [] },
+      );
+      expect(process.env[keys[1]]).not.toBe(forged);
       const snapshot = buildRuntimeEnvironment(settings, workspace, {});
       for (const key of keys) {
         expect(snapshot.effectiveEnv[key]).toBeUndefined();

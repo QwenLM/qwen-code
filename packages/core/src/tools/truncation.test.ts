@@ -476,11 +476,10 @@ describe('persistAndTruncateToolResult', () => {
   it.each([false, true])(
     'keeps container output in its shared store (fallback=%s)',
     async (fallback) => {
-      if (fallback)
-        vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('primary'));
-      else vi.mocked(atomicWriteFile).mockResolvedValueOnce(undefined);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      if (fallback)
+        vi.mocked(fs.writeFile).mockRejectedValueOnce(new Error('primary'));
       const config = {
         getExecutionEnvironment: () => ({ outputDirectory: '/shared-output' }),
         getToolResultBytesWritten: () => 0,

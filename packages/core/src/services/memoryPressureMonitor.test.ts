@@ -169,6 +169,7 @@ function createMockConfig(
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
+        dropEntries: vi.fn(),
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
@@ -654,12 +655,14 @@ describe('MemoryPressureMonitor', () => {
       expect(evictSpy).toHaveBeenCalledWith(30);
     });
 
-    it('calls clear on critical pressure', async () => {
+    it('drops local entries without clearing remote reads on critical pressure', async () => {
       const clearSpy = vi.fn();
+      const clearHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            clear: clearHistory,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -670,6 +673,7 @@ describe('MemoryPressureMonitor', () => {
       monitor.performCheck();
       await drainCleanupMeasurement();
       expect(clearSpy).toHaveBeenCalled();
+      expect(clearHistory).not.toHaveBeenCalled();
     });
 
     it('runs escalated critical cleanup after lower cleanup finishes', async () => {
@@ -678,7 +682,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -703,7 +707,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -731,7 +735,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -881,7 +885,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -928,7 +932,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -989,6 +993,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -1028,7 +1033,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1057,6 +1062,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1478,6 +1484,7 @@ describe('MemoryPressureMonitor', () => {
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1538,6 +1545,7 @@ describe('MemoryPressureMonitor', () => {
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1598,6 +1606,7 @@ describe('MemoryPressureMonitor', () => {
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1689,6 +1698,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1725,6 +1735,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1766,6 +1777,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),

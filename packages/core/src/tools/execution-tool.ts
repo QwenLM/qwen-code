@@ -53,12 +53,14 @@ async function synchronizeReadCache(
   }
   const generation = config.getFileReadCache().getClearGeneration();
   const current = state;
-  current.pending = current.pending.then(async () => {
-    if (current.generation !== generation) {
-      await environment.invalidateReadCache();
-      current.generation = generation;
-    }
-  });
+  current.pending = current.pending
+    .catch(() => undefined)
+    .then(async () => {
+      if (current.generation !== generation) {
+        await environment.invalidateReadCache();
+        current.generation = generation;
+      }
+    });
   await current.pending;
 }
 
@@ -68,19 +70,20 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
   private details?: PreparedExecution;
   private callId?: string;
   private released?: Promise<void>;
+  private readonly preparationAbort = new AbortController();
+  private modification?: PendingModification;
   private readonly abortListeners = new Map<AbortSignal, () => void>();
 
   constructor(
     private readonly owner: ExecutionTool,
     params: object,
-    private readonly modification?: PendingModification,
   ) {
     super(params);
   }
 
   setCallId(callId: string): void {
     this.callId = callId;
-    this.owner.replaceInvocation(callId, this);
+    this.modification = this.owner.replaceInvocation(callId, this);
   }
 
   release(): Promise<void> {
@@ -88,6 +91,7 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
   }
 
   private async releaseOnce(): Promise<void> {
+    this.preparationAbort.abort();
     for (const [signal, listener] of this.abortListeners)
       signal.removeEventListener('abort', listener);
     this.abortListeners.clear();
@@ -114,8 +118,10 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
 
   private async prepare(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
+    this.preparationAbort.signal.throwIfAborted();
     await synchronizeReadCache(this.owner.environment, this.owner.config);
     signal.throwIfAborted();
+    this.preparationAbort.signal.throwIfAborted();
     if (!this.abortListeners.has(signal)) {
       const listener = () => {
         void this.release().catch(() => undefined);
@@ -139,19 +145,20 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
             }
           : {}),
       },
-      signal,
+      AbortSignal.any([signal, this.preparationAbort.signal]),
     );
     this.details = await this.prepared;
     Object.assign(this.params, this.details.params);
   }
 
-  override async getDefaultPermission(): Promise<PermissionDecision> {
-    const signal = new AbortController().signal;
+  override async getDefaultPermission(
+    signal = new AbortController().signal,
+  ): Promise<PermissionDecision> {
     try {
       await this.prepare(signal);
       const permission = await this.owner.environment.permission(
         this.id,
-        signal,
+        AbortSignal.any([signal, this.preparationAbort.signal]),
       );
       if (permission === 'deny') await this.release();
       return permission;
@@ -222,7 +229,7 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
 }
 
 class ExecutionTool extends DeclarativeTool<object, ToolResult> {
-  private readonly modifications = new Map<string, PendingModification[]>();
+  private readonly modifications = new Map<string, PendingModification>();
   private readonly invocations = new Map<string, ExecutionToolInvocation>();
 
   constructor(
@@ -244,7 +251,12 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
     );
     if (isModifiableDeclarativeTool(original)) {
       Object.defineProperty(this, 'getModifyContext', {
-        value: (signal: AbortSignal): ModifyContext<object> => {
+        value: (
+          signal: AbortSignal,
+          callId?: string,
+        ): ModifyContext<object> => {
+          if (!callId || !this.invocations.has(callId))
+            throw new Error('Container edits require an active tool call.');
           const originalContext = original.getModifyContext(signal);
           const snapshots = new Map<
             string,
@@ -270,6 +282,9 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
             getProposedContent: async (params) =>
               (await content(params)).proposed,
             createUpdatedParams: (oldContent, newContent, params) => {
+              signal.throwIfAborted();
+              if (!this.invocations.has(callId))
+                throw new Error('The tool call is no longer active.');
               const updated =
                 original.name === ToolNames.NOTEBOOK_EDIT
                   ? { ...params }
@@ -278,9 +293,7 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
                       newContent,
                       params,
                     );
-              const key = JSON.stringify(updated);
-              const queue = this.modifications.get(key) ?? [];
-              queue.push({
+              this.modifications.set(callId, {
                 oldContent,
                 newContent,
                 originalParams: structuredClone(params) as Record<
@@ -288,7 +301,6 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
                   unknown
                 >,
               });
-              this.modifications.set(key, queue);
               return updated;
             },
           };
@@ -310,11 +322,17 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
     return this.original.toAutoClassifierInput(params);
   }
 
-  replaceInvocation(callId: string, invocation: ExecutionToolInvocation): void {
+  replaceInvocation(
+    callId: string,
+    invocation: ExecutionToolInvocation,
+  ): PendingModification | undefined {
+    const modification = this.modifications.get(callId);
+    this.modifications.delete(callId);
     const previous = this.invocations.get(callId);
     this.invocations.set(callId, invocation);
     if (previous && previous !== invocation)
       void previous.release().catch(() => undefined);
+    return modification;
   }
 
   currentInvocation(callId?: string): ExecutionToolInvocation | undefined {
@@ -325,8 +343,10 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
     callId: string | undefined,
     invocation: ExecutionToolInvocation,
   ): void {
-    if (callId && this.invocations.get(callId) === invocation)
+    if (callId && this.invocations.get(callId) === invocation) {
       this.invocations.delete(callId);
+      this.modifications.delete(callId);
+    }
   }
 
   override validateToolParams(params: object): string | null {
@@ -336,11 +356,7 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
   build(params: object): ToolInvocation<object, ToolResult> {
     const error = this.validateToolParams(params);
     if (error) throw new Error(error);
-    const key = JSON.stringify(params);
-    const queue = this.modifications.get(key);
-    const modification = queue?.shift();
-    if (!queue?.length) this.modifications.delete(key);
-    return new ExecutionToolInvocation(this, params, modification);
+    return new ExecutionToolInvocation(this, params);
   }
 }
 

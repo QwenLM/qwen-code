@@ -393,6 +393,11 @@ export class FileReadCache {
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
     this.clearGeneration++;
+    this.dropEntries();
+  }
+
+  /** Reclaim local cache memory without invalidating another runtime's reads. */
+  dropEntries(): void {
     this.byInode.clear();
   }
 

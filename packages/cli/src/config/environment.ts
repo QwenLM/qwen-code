@@ -76,7 +76,7 @@ function isReloadExcludedKey(key: string): boolean {
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
 
-// Consume only inherited metadata, before any environment file can be loaded.
+// Validate inherited metadata before loading files, then preserve it for child CLIs.
 const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
 delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
 if (inheritedProvenance) {
@@ -95,6 +95,7 @@ if (inheritedProvenance) {
   }
   for (const key of sources.dotEnv) dotEnvSourcedKeys.add(key);
   for (const key of sources.settingsEnv) settingsEnvSourcedKeys.add(key);
+  Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
 export function getRelaunchEnvProvenance(): Record<string, string> {
@@ -200,6 +201,7 @@ export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
+  delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
 }
@@ -686,6 +688,7 @@ export function loadEnvironment(
     );
   }
   lastReloadSnapshotSeeded = true;
+  Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
 
@@ -819,13 +822,12 @@ export function reloadEnvironment(
     process.env[key] = value;
   }
 
-  // Update tracking sets and snapshot only when the .env file was readable.
-  // A transient read failure must not wipe provenance — the stale tracking
-  // state is needed so the next successful reload can still detect deletions.
+  // Frozen values and values retained after an I/O failure keep their provenance.
   if (!dotEnvReadFailed) {
-    dotEnvSourcedKeys.clear();
-    for (const key of newDotEnvKeys.keys()) {
-      dotEnvSourcedKeys.add(key);
+    for (const sources of [dotEnvSourcedKeys, settingsEnvSourcedKeys]) {
+      for (const key of sources) {
+        if (!isReloadExcludedKey(key)) sources.delete(key);
+      }
     }
     lastReloadSnapshot.clear();
     for (const [key, value] of newDotEnvKeys) {
@@ -835,12 +837,13 @@ export function reloadEnvironment(
       lastReloadSnapshot.set(key, value);
     }
   }
-  // settings.env is always readable (from settings.json, not a file),
-  // so its tracking set is always updated.
-  settingsEnvSourcedKeys.clear();
+  for (const key of newDotEnvKeys.keys()) {
+    dotEnvSourcedKeys.add(key);
+  }
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
+  Object.assign(process.env, getRelaunchEnvProvenance());
 
   return {
     updatedKeys,

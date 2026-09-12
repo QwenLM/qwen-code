@@ -6,11 +6,11 @@
 
 import type { ExecutionEnvironmentFactory } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
-import { access } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { isFileSourcedEnvKey } from './environment.js';
 import { getPackageJson } from '../utils/package.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../utils/processUtils.js';
+import { containerTrustedDirectories } from '../utils/container-installation.js';
 import {
   CONTAINER_HOME,
   containerEnv,
@@ -24,7 +24,12 @@ export function agentExecutionFactory(
   fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): ExecutionEnvironmentFactory | undefined {
   // Sandbox and daemon handoffs do not preserve environment provenance.
-  if (env['SANDBOX'] || env['QWEN_CODE_SERVE'] === '1') return undefined;
+  if (
+    process.platform === 'win32' ||
+    env['SANDBOX'] ||
+    env['QWEN_CODE_SERVE'] === '1'
+  )
+    return undefined;
   if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) return undefined;
   const runtime = env[AGENT_EXECUTION_BACKEND_ENV]?.trim().toLowerCase();
   if (!runtime) return undefined;
@@ -43,28 +48,18 @@ export function agentExecutionFactory(
     const packageJson = await getPackageJson();
     const image = imageOverride || packageJson?.config?.sandboxImageUri;
     if (!image) throw new Error('No container execution image is configured.');
-    const moduleDirectory = resolveBundleDir(import.meta.url);
-    let bundleDirectory = moduleDirectory;
-    try {
-      await access(join(bundleDirectory, 'execution-worker.js'));
-    } catch {
-      // Source and tsc development layouts must use the matching local bundle.
-      const fromSource = resolve(moduleDirectory, '../../../../dist');
-      const fromCompiled = resolve(moduleDirectory, '../../../../../dist');
-      try {
-        await access(join(fromSource, 'execution-worker.js'));
-        bundleDirectory = fromSource;
-      } catch {
-        await access(join(fromCompiled, 'execution-worker.js'));
-        bundleDirectory = fromCompiled;
-      }
-    }
+    const bundleDirectory = resolveBundleDir(import.meta.url);
+    const trustedDirectories = await containerTrustedDirectories(
+      bundleDirectory,
+      signal,
+    );
     return ContainerExecutionEnvironment.create(
       config,
       {
         runtime,
         image,
         bundleDirectory,
+        trustedDirectories,
         runtimeEnv: clientEnv,
         containerHome: CONTAINER_HOME,
         environment: containerEnv(join(CONTAINER_HOME, '.npm-cache')),

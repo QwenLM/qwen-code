@@ -10,6 +10,8 @@ import {
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../utils/env-provenance.js';
+export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
@@ -17,8 +19,6 @@ export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
 export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
 export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
   'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
-export const PRIVATE_RELAUNCH_ENV_PROVENANCE =
-  'QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE';
 
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
 // credentials, installation IDs, etc.) is written. A project `.env` must never

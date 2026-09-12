@@ -117,7 +117,7 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
     signal: AbortSignal,
   ): Promise<PermissionDecision> {
     signal.throwIfAborted();
-    return this.pending(id).invocation.getDefaultPermission();
+    return this.pending(id).invocation.getDefaultPermission(signal);
   }
 
   async confirmation(

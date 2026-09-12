@@ -5,7 +5,14 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Config } from '../config/config.js';
@@ -21,6 +28,39 @@ import { ExecutionCleanupError } from './execution-environment.js';
 import type { ToolResult } from '../tools/tools.js';
 
 describe('container execution boundary', () => {
+  it('preserves preparation errors and cleanup ownership when release fails', async () => {
+    const failure = new Error('invalid working directory');
+    const cleanupFailure = new ExecutionCleanupError('removal failed');
+    const primary = {
+      request: vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockRejectedValue(cleanupFailure),
+      dispose: vi.fn().mockRejectedValue(cleanupFailure),
+    };
+    const environment: ContainerExecutionEnvironment = Object.assign(
+      Object.create(ContainerExecutionEnvironment.prototype),
+      {
+        primary,
+        workers: new Set([primary]),
+        invocations: new Map(),
+      },
+    );
+    await expect(
+      environment.prepare(
+        { id: 'read', toolName: 'Read', params: {} },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(
+        /invalid working directory.*removal failed/,
+      ),
+      cause: failure,
+    });
+    await expect(environment.dispose()).rejects.toBe(cleanupFailure);
+    expect(primary.dispose).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { llmContent: 'installed package', returnDisplay: 'installation complete' },
     {
@@ -117,6 +157,7 @@ describe('container execution boundary', () => {
     runtime: 'docker',
     image: 'trusted-image',
     bundleDirectory: '/trusted/cli',
+    trustedDirectories: [],
     runtimeEnv: { OPENAI_API_KEY: 'host-only' },
     environment: ['CI=1', 'HOME=/executor-home'],
     containerHome: '/executor-home',
@@ -130,7 +171,109 @@ describe('container execution boundary', () => {
     fileReadCacheDisabled: false,
   };
 
-  it.each(['getGlobalQwenDir', 'getRuntimeBaseDir'] as const)(
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['ancestor', 'equal', 'descendant'])(
+    'rejects a %s workspace of dependencies outside the bundle',
+    async (relationship) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), 'execution-dependency-')),
+      );
+      const bundle = join(root, 'bundle');
+      const dependencies = join(root, 'installation', 'node_modules');
+      await mkdir(bundle);
+      await mkdir(join(dependencies, 'sharp'), { recursive: true });
+      const workspace =
+        relationship === 'ancestor'
+          ? join(root, 'installation')
+          : relationship === 'equal'
+            ? dependencies
+            : join(dependencies, 'sharp');
+      try {
+        await expect(
+          ContainerExecutionEnvironment.create(
+            { getWorkingDir: () => workspace } as Config,
+            {
+              ...options,
+              bundleDirectory: bundle,
+              trustedDirectories: [dependencies],
+            },
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow('bundle or dependency directories');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each([
+      'ancestor',
+      'equal',
+      'descendant',
+      'symlink-ancestor',
+      'symlink-descendant',
+    ])(
+    'rejects a %s workspace alias of the trusted bundle before runtime access',
+    async (relationship) => {
+      const root = await mkdtemp(join(tmpdir(), 'execution-bundle-overlap-'));
+      const bundle = join(root, 'bundle');
+      const chunks = join(bundle, 'chunks');
+      await mkdir(chunks, { recursive: true });
+      let workspace = relationship.endsWith('ancestor')
+        ? root
+        : relationship === 'equal'
+          ? bundle
+          : chunks;
+      if (relationship.startsWith('symlink-')) {
+        const alias = join(root, 'workspace-alias');
+        await symlink(workspace, alias, 'dir');
+        workspace = alias;
+      }
+      try {
+        await expect(
+          ContainerExecutionEnvironment.create(
+            { getWorkingDir: () => workspace } as Config,
+            { ...options, bundleDirectory: bundle },
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow('workspace must not overlap the trusted CLI bundle');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'allows disjoint sibling names past the bundle overlap guard',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'execution-bundle-siblings-'));
+      const bundle = join(root, 'project');
+      const workspace = join(root, 'project-worktree');
+      await mkdir(bundle);
+      await mkdir(workspace);
+      try {
+        await expect(
+          ContainerExecutionEnvironment.create(
+            { getWorkingDir: () => workspace } as Config,
+            { ...options, bundleDirectory: bundle },
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({
+          code: 'ENOENT',
+          path: expect.stringContaining('execution-worker.js'),
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['getGlobalQwenDir', 'getRuntimeBaseDir'] as const)(
     'refuses to mount a workspace containing %s',
     async (getter) => {
       const workspace = await mkdtemp(
@@ -154,38 +297,75 @@ describe('container execution boundary', () => {
     },
   );
 
-  it('mounts only the workspace, trusted bundle and read-only Git mask, without host credentials', () => {
-    const args = workerContainerArguments(
-      options,
-      worker,
-      'agent-name',
-      false,
-      '/tmp/mask',
-    );
-    expect(args.slice(0, 6)).toEqual([
-      'create',
-      '--init',
-      '--interactive',
-      '--name',
-      'agent-name',
-      '--cap-drop',
-    ]);
-    expect(args).toContain('/workspace/project:/workspace/project');
-    expect(args).toContain('/tmp/executor/output:/tmp/executor/output');
-    expect(args).toContain('/trusted/cli:/opt/qwen-executor:ro');
-    expect(args).toContain('/tmp/mask:/workspace/project/.git:ro');
-    expect(
-      args.slice(args.indexOf('--network'), args.indexOf('--network') + 2),
-    ).toEqual(['--network', 'none']);
-    expect(args.join(' ')).not.toMatch(
-      /OPENAI_API_KEY|host-only|docker\.sock|--privileged/,
-    );
-    expect(args.slice(-3)).toEqual([
-      'trusted-image',
-      '/opt/qwen-executor/execution-worker.js',
-      JSON.stringify(worker),
-    ]);
-  });
+  it.skipIf(process.platform === 'win32').each(['inside', 'equal', 'symlink'])(
+    'rejects a temporary root %s the writable workspace',
+    async (relationship) => {
+      const root = await mkdtemp(join(tmpdir(), 'execution-temp-boundary-'));
+      const workspace = join(root, 'workspace');
+      const bundle = join(root, 'bundle');
+      await mkdir(workspace);
+      await mkdir(bundle);
+      let temporaryRoot = workspace;
+      if (relationship !== 'equal') {
+        temporaryRoot = join(workspace, 'temporary');
+        await mkdir(temporaryRoot);
+      }
+      if (relationship === 'symlink') {
+        const alias = join(root, 'temporary-alias');
+        await symlink(temporaryRoot, alias, 'dir');
+        temporaryRoot = alias;
+      }
+      vi.stubEnv('TMPDIR', temporaryRoot);
+      try {
+        await expect(
+          ContainerExecutionEnvironment.create(
+            { getWorkingDir: () => workspace } as Config,
+            { ...options, bundleDirectory: bundle },
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow('temporary directory');
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'mounts only the workspace, trusted bundle and read-only Git mask, without host credentials',
+    () => {
+      const args = workerContainerArguments(
+        options,
+        worker,
+        'agent-name',
+        false,
+        '/tmp/mask',
+      );
+      expect(args.slice(0, 6)).toEqual([
+        'create',
+        '--init',
+        '--interactive',
+        '--name',
+        'agent-name',
+        '--cap-drop',
+      ]);
+      expect(args).toContain('/workspace/project:/workspace/project');
+      expect(args).toContain('/tmp/executor/output:/tmp/executor/output');
+      expect(args).toContain('/trusted/cli:/opt/qwen-executor:ro');
+      expect(args).toContain('/tmp/mask:/workspace/project/.git:ro');
+      expect(
+        args.slice(args.indexOf('--network'), args.indexOf('--network') + 2),
+      ).toEqual(['--network', 'none']);
+      expect(args.join(' ')).not.toMatch(
+        /OPENAI_API_KEY|host-only|docker\.sock|--privileged/,
+      );
+      expect(args.slice(-3)).toEqual([
+        'trusted-image',
+        '/opt/qwen-executor/execution-worker.js',
+        JSON.stringify(worker),
+      ]);
+    },
+  );
 
   it('allows ordinary networking only for the install worker and preserves rootless ownership', () => {
     const args = workerContainerArguments(

@@ -46,6 +46,21 @@ const mockInvocation = (
   }) as unknown as AnyToolInvocation;
 
 describe('evaluatePermissionFlow', () => {
+  it('passes caller cancellation to intrinsic permission evaluation', async () => {
+    const invocation = mockInvocation();
+    const controller = new AbortController();
+    await evaluatePermissionFlow(
+      mockConfig(),
+      invocation,
+      'Read',
+      {},
+      controller.signal,
+    );
+    expect(invocation.getDefaultPermission).toHaveBeenCalledWith(
+      controller.signal,
+    );
+  });
+
   it('should return deny result with correct message when defaultPermission is deny', async () => {
     const invocation = mockInvocation({
       getDefaultPermission: vi.fn().mockResolvedValue('deny'),
