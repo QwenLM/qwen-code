@@ -3074,6 +3074,38 @@ describe('BranchPickerPopover remotes view', () => {
     expect(rowOf('\u{ba}')?.textContent).toContain('(hidden characters)');
   });
 
+  it('marks both rows of a non-ASCII-skeleton table-fold collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // The table prototypes Latin ö to Arabic ة, and ة is a fixed
+      // point: the prototype-script twin carries NO visible oddity, so
+      // the raw ≠ skeleton polarity would mark the Latin row and leave
+      // the confusable row plain — the exact inversion the marker
+      // exists to prevent. Both rows mark.
+      remotes: [remote('\u{f6}\u{f6}'), remote('\u{629}\u{629}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{f6}\u{f6}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{629}\u{629}')?.textContent).toContain(
+      '(hidden characters)',
+    );
+  });
+
   it('marks both rows of an all-ASCII expansion-prototype collision', async () => {
     const remote = (name: string) => ({
       name,

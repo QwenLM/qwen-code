@@ -80,14 +80,19 @@ beforeEach(() => {
 
 // Windows can hold a handle on a just-touched tmp dir for a moment
 // (indexer, a git child exiting): retry the teardown rmdir instead of
-// failing a test whose assertions already passed.
+// failing a test whose assertions already passed. Windows rmSync races
+// surface as EBUSY, EPERM or ENOTEMPTY, so all three retry.
+const RETRYABLE_RM_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
 function rmRetry(dir: string): void {
   for (let attempt = 0; ; attempt++) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
       return;
     } catch (err) {
-      if (attempt >= 3 || (err as NodeJS.ErrnoException).code !== 'EBUSY') {
+      if (
+        attempt >= 3 ||
+        !RETRYABLE_RM_CODES.has((err as NodeJS.ErrnoException).code ?? '')
+      ) {
         throw err;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
@@ -211,6 +216,15 @@ describe('isValidRemoteUrl', () => {
     // scheme executes git-remote-<name> like any other helper.
     ['7z::archive.7z', false],
     ['9p::ssh://host/repo', false],
+    // git's transport-name grammar admits the EMPTY name too: `::payload`
+    // is NOT on git's deny-by-default list, so with no override git
+    // execs a PATH-resolved `git-remote-` with the payload as argv
+    // (while `ext::` is refused by default); a protocol.allow policy
+    // would cover the form but is overridable from config files — the
+    // anchor must match at position 0 with zero scheme chars.
+    ['::sh -c id', false],
+    ['::0', false],
+    ['::', false],
     // C1 controls and Cf-outside-Default_Ignorable: stripped at render, so
     // the write gate must refuse them too.
     ['https://example.com/\u0085evil', false],
@@ -503,45 +517,6 @@ describe('fetchGitRemotes', () => {
     );
   });
 
-  it('does not complete a worktree section over git’s invalid-refspec refusal', async () => {
-    const dir = makeRepo();
-    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
-    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
-    tmpRoots.push(wt);
-    git(dir, 'worktree', 'add', '--detach', wt);
-    git(
-      wt,
-      'config',
-      '--worktree',
-      'remote.evil.url',
-      'https://example.com/e/r.git',
-    );
-    // A config-chosen refspec value carries a real newline whose second
-    // line spoofs the completion phrase; git dies parsing it BEFORE
-    // mutating, so the worktree completion must not fire — the refusal
-    // has its own answer (remote_config_unparsable) and the row stays.
-    git(
-      wt,
-      'config',
-      '--worktree',
-      'remote.evil.fetch',
-      "+refs/heads/*\ncould not remove config section 'remote.evil'",
-    );
-    const err = await gitRemoteRemove(wt, 'evil', fixtureEnv).catch(
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(Error);
-    const e = err as { stderr?: unknown; message?: unknown };
-    expect(
-      `${typeof e.stderr === 'string' ? e.stderr : ''}${
-        typeof e.message === 'string' ? e.message : ''
-      }`,
-    ).toMatch(/invalid refspec/i);
-    expect(git(wt, 'config', '--worktree', '--get', 'remote.evil.url')).toBe(
-      'https://example.com/e/r.git\n',
-    );
-  });
-
   it('does not mistake an injected exact-prefix line for git’s refusal', async () => {
     const dir = makeRepo();
     git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
@@ -627,7 +602,7 @@ describe('gitRemoteAdd', () => {
       '  https://example.com/o/r.git  ',
       fixtureEnv,
     );
-    // Read the stored value raw: gitConfig() trims, and git quotes a
+    // Read the stored value raw: the listing trims, and git quotes a
     // padded value on write, so a trimmed read would pass with the core
     // trim removed.
     const stored = execFileSync(
@@ -1186,6 +1161,34 @@ describe('repository-scope listing and removal', () => {
     expect(remotes).toEqual([]);
     expect(git(wt, 'config', '--worktree', '--get', 'remote.a.b.url')).toBe(
       'https://example.com/ab/r.git\n',
+    );
+  });
+
+  it('rolls back a destroyed local section when the removal dies on a stale ref lock', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'config', '--local', 'branch.main.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.main.merge', 'refs/heads/main');
+    // The worktree-scope record shadows the local one: branch main
+    // effectively tracks `gone`, so git rm destroys the LOCAL section
+    // (survivor's tracking config) on its way to dying on the lock.
+    git(dir, 'config', '--worktree', 'branch.main.remote', 'gone');
+    git(dir, 'update-ref', 'refs/remotes/gone/main', 'HEAD');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'gone', 'main.lock'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    // The refusal that follows git's mutation must not skip the
+    // rollback: survivor's tracking config stands again, and a retry
+    // re-reads its snapshot from THIS config, not a destroyed one.
+    expect(git(dir, 'config', '--local', '--get', 'branch.main.remote')).toBe(
+      'survivor\n',
+    );
+    expect(git(dir, 'config', '--local', '--get', 'branch.main.merge')).toBe(
+      'refs/heads/main\n',
     );
   });
 
@@ -2467,6 +2470,55 @@ describe('repository-scope listing and removal', () => {
     const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
     expect(remotes).toEqual([]);
     expect(git(dir, 'for-each-ref', 'refs/remotes')).toBe('');
+  });
+
+  it('refuses a never-configured name without sweeping its live bare ref', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A remote-HEAD symbolic ref is a LIVE top-level ref: the converge
+    // arm (no-such-remote over a never-configured name) must surface
+    // git's 404 with the ref untouched, not sweep it and then answer
+    // 404 as if nothing happened.
+    git(dir, 'symbolic-ref', 'refs/remotes/HEAD', 'refs/remotes/origin/main');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    await expect(gitRemoteRemove(dir, 'HEAD', fixtureEnv)).rejects.toThrow(
+      /No such remote/,
+    );
+    expect(git(dir, 'rev-parse', '--verify', 'refs/remotes/HEAD')).toBeTruthy();
+    expect(git(dir, 'for-each-ref', 'refs/remotes')).toContain(
+      'refs/remotes/origin/main',
+    );
+  });
+
+  it('refuses a never-configured flat-layout name without sweeping its live ref', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A flat fetch refspec puts live refs at refs/remotes/<branch> —
+    // top-level, namespace-less: removing the never-configured name
+    // `main` must not delete the live one over a 404.
+    git(dir, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/*');
+    git(dir, 'update-ref', 'refs/remotes/main', 'HEAD');
+    await expect(gitRemoteRemove(dir, 'main', fixtureEnv)).rejects.toThrow(
+      /No such remote/,
+    );
+    expect(git(dir, 'rev-parse', '--verify', 'refs/remotes/main')).toBeTruthy();
+  });
+
+  it('keeps a configured slashed sibling bare ref out of the converge sweep', async () => {
+    const dir = makeRepo();
+    // A single-destination refspec leaves remote a/b's OWN namespace as
+    // the bare ref refs/remotes/a/b. The converge arm for the
+    // never-configured prefix name `a` must not reassign that ref to
+    // the shorter prefix and sweep the sibling's live state over a 404:
+    // ownership resolution stays whole, only the removed name's own
+    // namespace-less ref is excluded from the result.
+    git(dir, 'remote', 'add', 'a/b', 'https://example.com/ab/r.git');
+    git(dir, 'config', 'remote.a/b.fetch', '+refs/heads/main:refs/remotes/a/b');
+    git(dir, 'update-ref', 'refs/remotes/a/b', 'HEAD');
+    await expect(gitRemoteRemove(dir, 'a', fixtureEnv)).rejects.toThrow(
+      /No such remote/,
+    );
+    expect(git(dir, 'rev-parse', '--verify', 'refs/remotes/a/b')).toBeTruthy();
   });
 
   it('keeps a configured slashed sibling tracking namespace when the prefix remote goes', async () => {

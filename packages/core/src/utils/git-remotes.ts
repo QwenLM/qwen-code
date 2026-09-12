@@ -52,10 +52,12 @@ const INVISIBLE_CHARS =
 // FILES and GIT_ALLOW_PROTOCOL, which no per-invocation env scrubbing can
 // remove — so the write path rejects the form. The scheme charset follows
 // git's transport-name form with no letter-first rule (`7z::archive` runs
-// `git-remote-7z` like any other helper). Anchored at the start so an IPv6
-// literal (`ssh://git@[::1]/repo.git`) or an scp-like path is unaffected:
-// only a scheme immediately followed by `::` matches.
-const EXECUTING_HELPER_URL = /^[A-Za-z0-9][A-Za-z0-9_.+-]*::/;
+// `git-remote-7z` like any other helper) AND admits the EMPTY name
+// (`::sh -c id` execs a PATH-resolved `git-remote-` with the payload as
+// argv — git's grammar accepts it, so the gate must too). Anchored at the
+// start so an IPv6 literal (`ssh://git@[::1]/repo.git`) or an scp-like
+// path is unaffected: only a scheme immediately followed by `::` matches.
+const EXECUTING_HELPER_URL = /^[A-Za-z0-9_.+-]*::/;
 
 /**
  * Whether `name` is acceptable for `git remote add`. Git applies its refname
@@ -458,6 +460,19 @@ export async function gitRemoteRemove(
   // upstream keys, so every retry would repeat the destruction. Complete
   // the removal in the scope git could not write.
   if (removeError !== null) {
+    // git can die AFTER deleting the tracking refs and unsetting the
+    // pointing branch keys (a stale ref lock, a worktree-section write
+    // failure): roll the local backups back HERE, above the !completed
+    // throw and the converge classification, so no refusal that follows
+    // a mutation can skip the rollback — a retry would re-read its
+    // snapshot from the already-destroyed config. The restore rewrites
+    // only MISSING keys, so it is a no-op where git mutated nothing
+    // (invalid refspec) and where the converge arm's keys still stand
+    // or the snapshot is empty. A wedged repo pays the restore read's
+    // timeout before the refusal surfaces — rollback outranks latency
+    // here, and a killed restore read rethrows rather than letting the
+    // original error surface un-rolled-back.
+    await restoreLocalUpstreamBackups(cwd, pointed, name, env);
     const detail = execDetail(removeError);
     // git echoes a config-chosen refspec value verbatim inside its fatal
     // line, and that value can carry a real newline — so the completion
@@ -515,13 +530,27 @@ export async function gitRemoteRemove(
         // removing it but before finishing the cleanup, so a retry
         // would otherwise dead-end here. Converge the cleanup (upstream
         // keys AND the orphaned tracking refs a refspec-less removal
-        // leaves), then surface git's answer.
-        await deleteRemoteTrackingRefs(cwd, name, env);
+        // leaves), then surface git's answer. The bare-ref exclusion: a
+        // namespace-less top-level `refs/remotes/<name>` can be live
+        // state of a name that was never configured (a remote-HEAD
+        // symbolic ref, a flat fetch layout's unslashed branch ref) —
+        // sweeping it would destroy it over a 404. Accepted residuals:
+        // a FORMERLY configured name's bare-ref residue is orphaned by
+        // the exclusion (an earlier attempt removed the section and
+        // died mid-cleanup; the two states are indistinguishable once
+        // the section is gone, and sweeping risks the live one — same
+        // trade as the sectionless-name residual below), and a flat
+        // layout's SLASHED branch refs (`refs/remotes/release/1.0`)
+        // stay namespace refs of the never-configured prefix, sweepable
+        // as before.
+        await deleteRemoteTrackingRefs(cwd, name, env, false);
         // Same re-verify the certify path runs: the sweep is
         // best-effort per ref, so a surviving ref (a stale lock) must
         // refuse, not converge to a 404 that abandons the phantom
-        // namespace with no remote left to prune it.
-        if ((await remoteTrackingRefs(cwd, name, env)).length > 0) {
+        // namespace with no remote left to prune it. The bare-ref
+        // exclusion applies here too, or the deliberately skipped live
+        // ref would read as a survivor and turn the 404 into a 409.
+        if ((await remoteTrackingRefs(cwd, name, env, false)).length > 0) {
           throw new Error('remote still configured after removal');
         }
         await unsetUpstreamKeys(cwd, pointed, name, env);
@@ -1192,13 +1221,22 @@ async function upstreamKeysToSweep(
 // at a '/' boundary — `refs/remotes/a/b/main` is remote `a/b`'s, not
 // `a`'s — so a string-prefix sweep would destroy a configured slashed
 // sibling's refs. The exact ref `refs/remotes/<name>` (a
-// single-destination fetch leaves it) is the remote's own. Ownership
-// resolves against the configured set PLUS the removed name: at sweep
-// time the section is gone, but its namespace is still being swept.
+// single-destination fetch leaves it) is the remote's own ON THE
+// CERTIFY PATH; the no-such-remote converge arm excludes it from the
+// RESULT (includeBareRef false): there a namespace-less top-level ref
+// can be live state (a remote-HEAD symbolic ref, a flat fetch layout's
+// `refs/remotes/main`), not rm residue. The exclusion never touches the
+// longest-prefix RESOLUTION — a bare ref exactly owned by a configured
+// slashed sibling must keep that owner, or it falls through to the
+// shorter prefix and is swept over a 404.
+// Ownership resolves against the configured set PLUS the removed name:
+// at sweep time the section is gone, but its namespace is still being
+// swept.
 async function remoteTrackingRefs(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
+  includeBareRef = true,
 ): Promise<string[]> {
   let refsRaw: string;
   let namesRaw: string;
@@ -1221,7 +1259,17 @@ async function remoteTrackingRefs(
   return refsRaw
     .split('\n')
     .filter((ref) => ref !== '')
-    .filter((ref) => owningRemote(ref, owners) === name);
+    .filter((ref) => {
+      if (owningRemote(ref, owners) !== name) return false;
+      // The converge arm excludes the removed name's own namespace-less
+      // top-level ref (live state for a never-configured name), but the
+      // ownership resolution above must stay WHOLE: suppressing the
+      // bare-ref candidate inside it would let a bare ref exactly owned
+      // by a CONFIGURED slashed sibling (`refs/remotes/a/b` is remote
+      // `a/b`'s) fall through to the shorter prefix and be swept over
+      // a 404.
+      return includeBareRef || ref !== `refs/remotes/${name}`;
+    });
 }
 
 function owningRemote(ref: string, names: string[]): string | undefined {
@@ -1242,8 +1290,9 @@ async function deleteRemoteTrackingRefs(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
+  includeBareRef = true,
 ): Promise<void> {
-  for (const ref of await remoteTrackingRefs(cwd, name, env)) {
+  for (const ref of await remoteTrackingRefs(cwd, name, env, includeBareRef)) {
     try {
       // --no-deref: a symbolic ref under the namespace is deleted as
       // itself — dereferencing would delete its TARGET (a local branch

@@ -60,12 +60,12 @@ function exit1WithStderr(): Error {
 }
 
 // git's own no-such-remote answer (a removal retry whose section is
-// already gone): exits 128, stderr carries the line.
+// already gone): exits 2 (probed on 2.50.1), stderr carries the line.
 function noSuchRemoteError(): Error {
-  return Object.assign(new Error('exit 128'), {
+  return Object.assign(new Error('exit 2'), {
     stdout: '',
     stderr: "error: No such remote: 'x'\n",
-    code: 128,
+    code: 2,
   });
 }
 
@@ -278,6 +278,39 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // The kill stops the chain: no sweep spawn (for-each-ref, config
     // --unset, worktree list) ever follows the blind probe.
     expect(runGit.mock.calls.length).toBe(calls + 9);
+  });
+
+  it('rethrows a killed restore read on the error path instead of answering the 404', async () => {
+    // The error-path restore runs BEFORE the converge classification:
+    // with a non-empty local backup its presence read spawns, and a
+    // killed read there masks git's original No-such-remote (the
+    // client's stale-row convergence key) with the kill — fail-closed:
+    // a rollback that cannot run must not surface as a plain 404.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // x pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce(
+        'local\u0000branch.main.remote\nsurvivor\u0000worktree\u0000branch.main.remote\nx\u0000',
+      ) // snapshot: main effectively tracks x, local copy names survivor
+      .mockRejectedValueOnce(noSuchRemoteError()) // git remote remove
+      .mockRejectedValueOnce(killError()); // restore presence read
+    const err = await gitRemoteRemove('/repo', 'x').catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    expect(runGit.mock.calls.length).toBe(calls + 7);
+    // The 7th spawn must be the error-path RESTORE's presence read, not
+    // the converge gate's scope read (on a module without the
+    // error-path restore the kill lands there instead and this
+    // assertion is what separates the two).
+    expect(runGit.mock.calls[calls + 6]?.[1]).toEqual([
+      'config',
+      '--local',
+      '--includes',
+      '--get-all',
+      'branch.main.remote',
+    ]);
   });
 
   it('refuses over an inherited record that races in after the pre-flight', async () => {

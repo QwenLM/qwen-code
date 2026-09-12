@@ -36,6 +36,7 @@ import { validateBranchName } from './GitModePopover';
 import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import { getShadowAwareActiveElement } from '../utils/dom';
 import { CONFUSABLE_PROTOTYPES } from '../utils/unicodeConfusables';
+import { remoteNameSkeleton } from '../utils/remote-name-skeleton';
 import styles from './BranchPickerPopover.module.css';
 
 // The daemon's stash/force pull flows chain git commands, each with its own
@@ -150,40 +151,6 @@ function escapeSkeletonNameChars(value: string): string {
         : ch;
   }
   return out;
-}
-
-// The Unicode TR39 confusables fold: two names whose per-code-point
-// prototypes match ink (nearly) identically through NO invisible
-// character — a ligature (`of\uFB01ce` vs `office`), a dotless `ı`, a
-// Kelvin sign, a cross-script twin — so the per-property arms alone
-// have no last corner. The TABLE answers first: its prototype is the
-// authoritative one (a Greek lunate sigma Ϲ folds to C — asking NFKC
-// first would route it through Σ to a different class, defeating the
-// entry the table carries for exactly this pair). NFKC is the fallback
-// for the compatibility shapes the table does not list (a name's own
-// precomposed é must still meet its decomposed twin). Rows
-// mark by COLLISION with a sibling's skeleton, never by a blanket
-// non-ASCII test: a lone `上游` (no table entry) keeps its own skeleton
-// and stays plain.
-function remoteNameSkeleton(name: string): string {
-  let out = '';
-  for (const ch of name) {
-    const direct = CONFUSABLE_PROTOTYPES.get(ch);
-    if (direct !== undefined) {
-      out += direct;
-      continue;
-    }
-    // Table-absent: fold the compatibility shapes (a ligature, a
-    // fullwidth form) and give each half its own table chance.
-    for (const folded of ch.normalize('NFKC')) {
-      out += CONFUSABLE_PROTOTYPES.get(folded) ?? folded;
-    }
-  }
-  // Canonical closure: a precomposed é and its decomposed twin fold
-  // per code point to the same decomposed string — NFC the skeleton so
-  // the comparison (and the raw ≠ skeleton polarity) works on canonical
-  // forms.
-  return out.normalize('NFC');
 }
 
 interface BranchPickerPopoverProps {
@@ -1270,12 +1237,30 @@ export function BranchPickerPopover({
   // (removing the unmarked twin would be the wrong-remote outcome the
   // marker exists to prevent).
   const remoteSkeletonGroups = useMemo(() => {
-    const groups = new Map<string, { count: number; allAscii: boolean }>();
+    const groups = new Map<
+      string,
+      {
+        count: number;
+        allAscii: boolean;
+        skeletonAscii: boolean;
+        allCanonical: boolean;
+      }
+    >();
     for (const r of remotes ?? []) {
       const skeleton = remoteNameSkeleton(r.name);
-      const group = groups.get(skeleton) ?? { count: 0, allAscii: true };
+      const group = groups.get(skeleton) ?? {
+        count: 0,
+        allAscii: true,
+        skeletonAscii: !/[^ -~]/.test(skeleton),
+        allCanonical: true,
+      };
       group.count += 1;
       if (/[^ -~]/.test(r.name)) group.allAscii = false;
+      // A member whose NFC form IS the skeleton varies only canonically
+      // (NFD/NFC twins); a table fold leaves the raw name different from
+      // its NFC form's skeleton, so allCanonical stays true only for
+      // pure canonical variance.
+      if (r.name.normalize('NFC') !== skeleton) group.allCanonical = false;
       groups.set(skeleton, group);
     }
     return groups;
@@ -1893,7 +1878,15 @@ function RemotesView({
   totalCount: number;
   /** TR39 skeleton → row count over the UNFILTERED list: a search that
    * isolates one twin must not strip the survivor's collision marker. */
-  skeletonGroups: ReadonlyMap<string, { count: number; allAscii: boolean }>;
+  skeletonGroups: ReadonlyMap<
+    string,
+    {
+      count: number;
+      allAscii: boolean;
+      skeletonAscii: boolean;
+      allCanonical: boolean;
+    }
+  >;
   loading: boolean;
   error: string | null;
   busyAction: string | null;
@@ -1991,10 +1984,20 @@ function RemotesView({
               // impostor (the table's `m → rn` expansion makes the
               // LEGITIMATE `main` the deviant-looking side), so both
               // rows mark; a group carrying a non-ASCII member keeps
-              // the odd-character polarity (the visible evidence).
+              // the odd-character polarity (the visible evidence) —
+              // EXCEPT when the group's skeleton is itself non-ASCII
+              // and the variance is a table fold, not canonical: there
+              // the fixed-point row (a prototype-script twin like
+              // Arabic ةة against Latin öö) carries no visible oddity
+              // either, so the same evidentiary failure applies and
+              // both rows mark. Pure canonical variance (NFD/NFC
+              // twins) keeps the single-row polarity.
               const skeletonCollision =
                 (group?.count ?? 0) > 1 &&
-                (skeleton !== r.name || (group?.allAscii ?? false));
+                (skeleton !== r.name ||
+                  (group?.allAscii ?? false) ||
+                  (!(group?.skeletonAscii ?? true) &&
+                    !(group?.allCanonical ?? false)));
               const nameUnusual =
                 displayName !== r.name ||
                 r.name.replace(/\s+/g, ' ').trim() !== r.name ||
