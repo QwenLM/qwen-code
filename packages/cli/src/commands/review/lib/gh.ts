@@ -9,6 +9,7 @@
 // and escaping is consistent across macOS, Linux, and Windows.
 
 import { execFileSync } from 'node:child_process';
+import stripAnsi from 'strip-ansi';
 
 // ---------------------------------------------------------------------------
 // Transient-error retry
@@ -288,7 +289,7 @@ export function ghWithInput(input: string, ...args: string[]): string {
 export function ghApi(path: string, jq?: string): unknown {
   const args = ['api', path];
   if (jq) args.push('--jq', jq);
-  const out = gh(...args);
+  const out = stripAnsi(gh(...args)).trim();
   return out ? JSON.parse(out) : null;
 }
 
@@ -315,7 +316,7 @@ export function ghApi(path: string, jq?: string): unknown {
  * error envelope).
  */
 export function ghApiAll(path: string): unknown[] {
-  const out = gh('api', '--paginate', path);
+  const out = stripAnsi(gh('api', '--paginate', path)).trim();
   if (!out) return [];
   const parsed = JSON.parse(out);
   return Array.isArray(parsed) ? parsed : [];
@@ -365,13 +366,14 @@ export function parseNdjson(
   if (!out) return [];
   const values: unknown[] = [];
   for (const line of out.split('\n')) {
-    if (line.trim().length === 0) continue;
+    const jsonLine = stripAnsi(line).trim();
+    if (jsonLine.length === 0) continue;
     if (strict) {
-      values.push(JSON.parse(line));
+      values.push(JSON.parse(jsonLine));
       continue;
     }
     try {
-      values.push(JSON.parse(line));
+      values.push(JSON.parse(jsonLine));
     } catch {
       // not a JSON record; ignore
     }
