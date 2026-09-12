@@ -5,6 +5,10 @@ import type {
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
 import {
+  isValidRotationBound,
+  isValidTurnCount,
+} from '@qwen-code/channel-base';
+import {
   APPROVAL_MODES,
   isInternalSecretEnvVar,
 } from '@qwen-code/qwen-code-core';
@@ -91,6 +95,7 @@ interface MultiSessionCompatibilityConfig {
   groupHistoryLimit?: unknown;
   groups?: Record<string, unknown>;
   webhooks?: unknown;
+  sessionRotation?: ChannelConfig['sessionRotation'];
 }
 
 export function multiSessionCompatibilityError(
@@ -118,6 +123,17 @@ export function multiSessionCompatibilityError(
   }
   if (config.webhooks !== undefined && config.webhooks !== null) {
     return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
+  }
+  // Named tasks resolve sessions through NamedSessionManager, never through
+  // SessionRouter.resolve where the rotation gate lives — the bound would be
+  // accepted but never fire.
+  const rotation = config.sessionRotation;
+  if (
+    rotation !== undefined &&
+    rotation !== null &&
+    (rotation.maxTurns !== undefined || rotation.maxAgeHours !== undefined)
+  ) {
+    return `Channel "${name}" cannot use sessionRotation when multiSession is enabled.`;
   }
   return undefined;
 }
@@ -227,6 +243,43 @@ function optionalBooleanField(
     );
   }
   return value;
+}
+
+function parseSessionRotationConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['sessionRotation'] {
+  const raw = rawConfig['sessionRotation'];
+  if (raw === undefined || raw === null) return undefined;
+  const parsed = requireObjectField(channelName, 'sessionRotation', raw);
+
+  // Reject unknown keys loudly: a typo'd bound (say "maxTurn") must not
+  // silently disable rotation — the exact failure mode rotation prevents.
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'maxTurns' && key !== 'maxAgeHours') {
+      throw new Error(
+        `Channel "${channelName}" field "sessionRotation.${key}" is not a valid sessionRotation key.`,
+      );
+    }
+  }
+
+  const maxTurns = parsed['maxTurns'];
+  if (maxTurns !== undefined && !isValidTurnCount(maxTurns)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxTurns" must be a positive integer.`,
+    );
+  }
+  const maxAgeHours = parsed['maxAgeHours'];
+  if (maxAgeHours !== undefined && !isValidRotationBound(maxAgeHours)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxAgeHours" must be a positive number.`,
+    );
+  }
+  if (maxTurns === undefined && maxAgeHours === undefined) return undefined;
+  return {
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(maxAgeHours !== undefined ? { maxAgeHours } : {}),
+  };
 }
 
 function requireObjectField(
@@ -515,6 +568,7 @@ export async function parseChannelConfig(
   );
   const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
   const webhooks = parseWebhookConfig(name, rawConfig);
+  const sessionRotation = parseSessionRotationConfig(name, rawConfig);
 
   const multiSessionError = multiSessionCompatibilityError(name, {
     multiSession,
@@ -522,6 +576,7 @@ export async function parseChannelConfig(
     groupHistoryLimit: rawConfig['groupHistoryLimit'],
     groups,
     webhooks,
+    sessionRotation,
   });
   if (multiSessionError) throw new Error(multiSessionError);
 
@@ -537,6 +592,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
+    sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

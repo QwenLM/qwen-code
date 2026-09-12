@@ -2764,6 +2764,9 @@ describe('ChannelBase', () => {
           chatId: 'chat1',
         })),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -11314,6 +11317,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11347,6 +11353,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11396,6 +11405,9 @@ describe('ChannelBase', () => {
           .mockReturnValue(undefined),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11427,6 +11439,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11459,6 +11474,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11503,6 +11521,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -11547,6 +11568,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -11570,6 +11594,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
       const newBridge = createBridge();
@@ -11611,6 +11638,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -15119,6 +15149,815 @@ describe('ChannelBase', () => {
       expect(promptText).not.toContain('\n');
       // only the tag's own [ ] survive — the crafted brackets are stripped
       expect((promptText.match(/[[\]]/g) ?? []).length).toBe(2);
+    });
+  });
+
+  describe('session rotation', () => {
+    it('registers rotation bounds on a supplied router', () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const spy = vi.spyOn(router, 'setChannelRotation');
+
+      createChannel({ sessionRotation: { maxTurns: 100 } }, { router });
+
+      expect(spy).toHaveBeenCalledWith('test-chan', { maxTurns: 100 });
+    });
+
+    it('registers rotation bounds on a self-created router', () => {
+      const spy = vi.spyOn(SessionRouter.prototype, 'setChannelRotation');
+
+      createChannel({ sessionRotation: { maxAgeHours: 24 } });
+
+      expect(spy).toHaveBeenCalledWith('test-chan', { maxAgeHours: 24 });
+      spy.mockRestore();
+    });
+
+    it('announces rotation and discards the retired session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      ch.sent = [];
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]!;
+      expect(secondPrompt[0]).not.toBe(retiredId);
+      expect(ch.sent.some((m) => m.text.includes('rotated'))).toBe(true);
+      expect(bridge.discardSession).toHaveBeenCalledWith(retiredId);
+    });
+
+    it("announces rotation in the rotated route's thread", async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      const threadMessages: Array<{
+        chatId: string;
+        threadId: string | undefined;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: 'first', threadId: 'topic-1' }));
+      await ch.handleInbound(envelope({ text: 'second', threadId: 'topic-1' }));
+
+      expect(
+        threadMessages.some(
+          (m) => m.threadId === 'topic-1' && m.text.includes('rotated'),
+        ),
+      ).toBe(true);
+    });
+
+    it('purges pending permissions of the rotated session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-rotated',
+        sessionId: retiredId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-rotated',
+            kind: 'shell',
+            title: 'Run req-rotated',
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Allow once',
+            },
+          ],
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          ch.sent.some((m) => m.text.includes('Permission required')),
+        ).toBe(true),
+      );
+
+      // Rotate: the retirement purges the stale permission, so a late
+      // approval must not reach the bridge against the discarded session.
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: '/approve req-rotated' }));
+
+      expect(
+        (bridge as unknown as { respondToPermission: ReturnType<typeof vi.fn> })
+          .respondToPermission,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('defers rotation while the outgoing turn is still running', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // Rotation is due, but the session is mid-turn: the second message
+      // queues behind it instead of retiring it.
+      const secondTurn = ch.handleInbound(envelope({ text: 'second' }));
+      // Let the second message resolve and queue behind the running turn;
+      // a rotation would have created a second session by now.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+
+      settleFirst('done');
+      await firstTurn;
+      await secondTurn;
+
+      // The deferred message reused the outgoing session ...
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      // ... and the next message rotates it.
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('does not rotate a session out from under a message between resolve and its turn', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      let releaseShell!: (result: { output: string; exitCode: number }) => void;
+      const shellCommand = vi.fn().mockReturnValue(
+        new Promise<{ output: string; exitCode: number }>((resolve) => {
+          releaseShell = resolve;
+        }),
+      );
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+
+      // The bang message resolves the session (rotating the spent one) and
+      // stays mid-shell-command: it holds the session without a tracked turn.
+      const bangTurn = ch.handleInbound(envelope({ text: '!hang' }));
+      await vi.waitFor(() => expect(shellCommand).toHaveBeenCalledTimes(1));
+      const shelledSessionId = shellCommand.mock.calls[0]![0] as string;
+      expect(shelledSessionId).not.toBe(retiredId);
+
+      // A message at the bound must not retire the shelled session.
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(shelledSessionId);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(shelledSessionId);
+
+      releaseShell({ output: 'ok', exitCode: 0 });
+      await bangTurn;
+
+      // The lease must be released once the shell settles: at the bound the
+      // next message must rotate the shelled session.
+      await ch.handleInbound(envelope({ text: 'after-shell' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(shelledSessionId);
+    });
+
+    it('reclaims the queue and generation of a rotated session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      const maps = ch as unknown as {
+        sessionQueues: Map<string, unknown>;
+        sessionGenerations: Map<string, number>;
+      };
+      expect(maps.sessionQueues.has(retiredId)).toBe(true);
+      maps.sessionGenerations.set(retiredId, 1);
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      // Rotation retires the ID permanently: without reclamation both
+      // entries leak for the gateway's lifetime.
+      expect(maps.sessionQueues.has(retiredId)).toBe(false);
+      expect(maps.sessionGenerations.has(retiredId)).toBe(false);
+    });
+
+    it('does not count shell commands against maxTurns', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      const shellCommand = vi.fn().mockResolvedValue({
+        output: 'ok',
+        exitCode: 0,
+      });
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The shell command routes but starts no turn: it must give its
+      // resolve-time count back like the buffered and loop-drop paths.
+      await ch.handleInbound(envelope({ text: '!status' }));
+      expect(shellCommand).toHaveBeenCalledWith(sessionId, 'status');
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('does not count /btw questions against maxTurns', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      (bridge as unknown as Record<string, unknown>)['btw'] = vi
+        .fn()
+        .mockImplementation((sessionId: string) =>
+          Promise.resolve({ sessionId, answer: 'side answer' }),
+        );
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The side question routes but starts no turn: it must give its
+      // resolve-time count and routing lease back like the bang-shell path.
+      await ch.handleInbound(envelope({ text: '/btw what is up?' }));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+
+      // Rotation still fires exactly at the bound: a leaked count or lease
+      // would shift or stall it.
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('does not rotate a session out from under an in-flight /btw question', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+      let settleBtw!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      const btw = vi.fn().mockImplementation(
+        (_sessionId: string) =>
+          new Promise<{ sessionId: string; answer: string | null }>(
+            (resolve) => {
+              settleBtw = resolve;
+            },
+          ),
+      );
+      (bridge as unknown as Record<string, unknown>)['btw'] = btw;
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The side question resolves the same session (rotation defers to
+      // the running turn) and stays in flight on it.
+      const btwTurn = ch.handleInbound(envelope({ text: '/btw what is up?' }));
+      await vi.waitFor(() => expect(btw).toHaveBeenCalledTimes(1));
+      expect(btw.mock.calls[0]![0]).toBe(sessionId);
+
+      // Once the turn drains, a message at the bound must still defer to
+      // the in-flight side question instead of retiring its session.
+      settleFirst('done');
+      await firstTurn;
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(sessionId);
+
+      // Releasing the side question settles it: the answer is delivered
+      // and the lease is given back, so the next message rotates the spent
+      // session.
+      settleBtw({ sessionId, answer: 'side answer' });
+      await btwTurn;
+      await vi.waitFor(() =>
+        expect(ch.sent.some((m) => m.text.includes('side answer'))).toBe(true),
+      );
+      // The deferred release rides the delivery's settle, a few microtasks
+      // behind the answer send: let it land before the next message.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('aborts an in-flight /btw question when its session is rotated', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const ch = createChannel({}, { router });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+      let btwSignal: AbortSignal | undefined;
+      const btw = vi
+        .fn()
+        .mockImplementation(
+          (_sessionId: string, _question: string, signal?: AbortSignal) => {
+            btwSignal = signal;
+            return new Promise<{ sessionId: string; answer: string | null }>(
+              (_resolve, reject) => {
+                signal?.addEventListener('abort', () =>
+                  reject(new Error('The operation was aborted')),
+                );
+              },
+            );
+          },
+        );
+      (bridge as unknown as Record<string, unknown>)['btw'] = btw;
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const btwTurn = ch.handleInbound(envelope({ text: '/btw what is up?' }));
+      await vi.waitFor(() => expect(btw).toHaveBeenCalledTimes(1));
+
+      // Force the retirement past the lease gate — the race the cancel
+      // guards: the in-flight side question must be aborted, not left
+      // running against the discarded session.
+      (
+        router as unknown as {
+          rotateRoute(
+            key: string,
+            sessionId: string,
+            channelName: string,
+            target: SessionTarget | undefined,
+          ): void;
+        }
+      ).rotateRoute('test-chan:user1:chat1', sessionId, 'test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+      });
+
+      expect(btwSignal?.aborted).toBe(true);
+
+      settleFirst('done');
+      await firstTurn;
+      await btwTurn;
+      // No late answer is delivered for the aborted side question.
+      expect(ch.sent.some((m) => m.text.includes('side answer'))).toBe(false);
+    });
+
+    it('fires the adapter retirement hook when a session is rotated', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const ch = createChannel({}, { router });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      (
+        router as unknown as {
+          rotateRoute(
+            key: string,
+            sessionId: string,
+            channelName: string,
+            target: SessionTarget | undefined,
+          ): void;
+        }
+      ).rotateRoute('test-chan:user1:chat1', sessionId, 'test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+      });
+
+      // Rotation retires the ID permanently, so it must fire the same
+      // retirement hook the loop-timeout, task-close and /clear paths fire —
+      // adapters park per-session state that only that hook reclaims.
+      expect(ch.retiringSessions).toContain(sessionId);
+    });
+
+    it('collect: buffered messages count once against maxTurns', async () => {
+      let settleFirst!: (value: string) => void;
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return new Promise<string>((resolve) => {
+            settleFirst = resolve;
+          });
+        }
+        return Promise.resolve('response');
+      });
+
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'collect' } },
+        sessionRotation: { maxTurns: 3 },
+      });
+
+      const groupMsg = (text: string): Envelope =>
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text,
+        });
+
+      const first = ch.handleInbound(groupMsg('first'));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // These buffer behind the running turn and must not consume the bound:
+      // the drain coalesces them into a single counted turn.
+      await ch.handleInbound(groupMsg('second'));
+      await ch.handleInbound(groupMsg('third'));
+
+      settleFirst('done');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      // The session has carried two turns (first + coalesced), not four:
+      // the third real turn still reuses it, and only the next rotates.
+      await ch.handleInbound(groupMsg('fourth'));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(groupMsg('fifth'));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[3]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('rotation on one channel does not notify another sharing the router', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const channelA = new TestChannel(
+        'chan-a',
+        defaultConfig({ sessionRotation: { maxTurns: 1 } }),
+        bridge,
+        { router },
+      );
+      const channelB = new TestChannel('chan-b', defaultConfig(), bridge, {
+        router,
+      });
+
+      await channelA.handleInbound(envelope({ text: 'first' }));
+      channelA.sent = [];
+      await channelA.handleInbound(envelope({ text: 'second' }));
+
+      expect(channelA.sent.some((m) => m.text.includes('rotated'))).toBe(true);
+      expect(channelB.sent).toEqual([]);
+    });
+
+    it('keeps the queue of a dead session so a lazy revival cannot split the chain', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        (id: string) => id,
+      );
+      const ch = createChannel({ dispatchMode: 'followup' }, { router });
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      let firstCall = true;
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        if (firstCall) {
+          firstCall = false;
+          return new Promise<string>((resolve) => {
+            settleFirst = (value: string) => {
+              inFlight--;
+              resolve(value);
+            };
+          });
+        }
+        inFlight--;
+        return Promise.resolve('done');
+      });
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // A second message queues behind the running turn.
+      const secondTurn = ch.handleInbound(envelope({ text: 'second' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // Stream-drop death: lazy recovery keeps the route, and the queue must
+      // survive too — the queued turn still holds the captured chain.
+      ch.onSessionDied(sessionId);
+      expect([
+        ...(
+          ch as unknown as { sessionQueues: Map<string, unknown> }
+        ).sessionQueues.keys(),
+      ]).toContain(sessionId);
+
+      // The next message revives the same session ID; it must chain behind
+      // the stale queued turn instead of seeding a concurrent chain.
+      const thirdTurn = ch.handleInbound(envelope({ text: 'third' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      settleFirst('done');
+      await firstTurn;
+      await secondTurn;
+      await thirdTurn;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(3);
+      expect(maxInFlight).toBe(1);
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.map(
+          (call) => call[0],
+        ),
+      ).toEqual([sessionId, sessionId, sessionId]);
+    });
+
+    it('defers rotation while a loop turn is still running', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 1 },
+        dispatchMode: 'followup',
+      });
+      ch.proactiveSupported = true;
+      let settleLoop!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleLoop = resolve;
+        }),
+      );
+
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+
+      const loopRun = ch.runLoopPrompt(job);
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // An inbound message on the loop's route is at the bound but must
+      // queue behind the running loop turn instead of retiring the session.
+      const inbound = ch.handleInbound(envelope({ text: 'while looping' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+
+      settleLoop('done');
+      await loopRun;
+      await inbound;
+
+      // The deferred message reused the loop's session ...
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      // ... and the next message rotates it.
+      await ch.handleInbound(envelope({ text: 'after' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('does not consume the bound when a queued loop firing is dropped', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 2 },
+        dispatchMode: 'followup',
+      });
+      ch.proactiveSupported = true;
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The firing queues behind the busy session; the loop is disabled
+      // while it waits, so the in-closure recheck drops it before any
+      // prompt runs on the session.
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const loopRun = ch.runLoopPrompt(job, {
+        shouldContinue: async () => false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+
+      settleFirst('done');
+      await firstTurn;
+      await expect(loopRun).rejects.toThrow(/no longer enabled/);
+
+      // The skipped firing gave its resolve-time count back: with maxTurns 2
+      // the next real message still reuses the session, and only the one
+      // after it rotates.
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('does not consume the bound when shouldContinue rejects before the prompt', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 2 },
+        dispatchMode: 'followup',
+      });
+      ch.proactiveSupported = true;
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The firing queues behind the busy session; the scheduler's job-store
+      // read then REJECTS in the in-closure recheck — a different failure
+      // from a false shouldContinue, but the firing still never prompts, so
+      // the resolve-time count must come back on this path too.
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const loopRun = ch.runLoopPrompt(job, {
+        shouldContinue: async () => {
+          throw new Error('job store read failed');
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      settleFirst('done');
+      await firstTurn;
+      await expect(loopRun).rejects.toThrow('job store read failed');
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('notifies only the triggering chat when a single-scope session rotates', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 1 },
+        sessionScope: 'single',
+      });
+
+      await ch.handleInbound(envelope({ chatId: 'chat-a', text: 'first' }));
+      await ch.handleInbound(envelope({ chatId: 'chat-b', text: 'second' }));
+
+      // The rotation notice documents a reset of EVERY chat sharing the
+      // session, but only the chat whose message tripped the bound is
+      // notified — the limitation documented for sessionScope: single.
+      const notices = ch.sent.filter((m) => m.text.includes('rotated'));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.chatId).toBe('chat-b');
+    });
+
+    it('defers rotation while a webhook turn is still running', async () => {
+      const webhooks: ChannelWebhookConfig = {
+        sources: {
+          'github-ci': {
+            targets: {
+              default: {
+                chatId: 'chat1',
+                senderId: 'user1',
+              },
+            },
+          },
+        },
+      };
+      const ch = createChannel({
+        approvalMode: 'yolo',
+        webhooks,
+        dispatchMode: 'followup',
+        sessionRotation: { maxTurns: 1 },
+      });
+      ch.proactiveSupported = true;
+
+      let settleWebhook!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleWebhook = resolve;
+        }),
+      );
+
+      const task: ChannelWebhookTask = {
+        channelName: 'test-chan',
+        source: 'github-ci',
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: { branch: 'main' },
+      };
+
+      const webhookRun = ch.runWebhookTask(task);
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // An inbound message on the webhook's route is at the bound but must
+      // queue behind the running webhook turn instead of retiring the
+      // session out from under it.
+      const inbound = ch.handleInbound(envelope({ text: 'while webhook' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+
+      settleWebhook('done');
+      await webhookRun;
+      await inbound;
+
+      // The deferred message reused the webhook's session ...
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      // ... and the next message rotates it.
+      await ch.handleInbound(envelope({ text: 'after' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
     });
   });
 

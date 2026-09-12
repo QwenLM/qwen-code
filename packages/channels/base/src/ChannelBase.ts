@@ -496,6 +496,8 @@ export abstract class ChannelBase {
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private queuedTurns: Map<string, number> = new Map();
   private namedTurnBindings = new WeakMap<Envelope, NamedTurnBinding>();
+  /** Sessions with a turn running or queued; rotation defers while non-zero. */
+  private sessionPendingTurns = new Map<string, number>();
   private readonly inboundErrorSourceLabels = new WeakMap<Envelope, string>();
   private readonly registerBridgeEvents: boolean;
   private readonly bridgeRecovery?: () => Promise<void> | undefined;
@@ -685,7 +687,7 @@ export abstract class ChannelBase {
     sessionId: string,
     question: string,
     sourceLabel?: string,
-  ): Promise<void> {
+  ): Promise<{ delivery: Promise<void> } | undefined> {
     const target = this.router.getTarget(sessionId);
     if (!target || target.channelName !== this.name) {
       await this.sendThreadMessage(
@@ -738,11 +740,16 @@ export abstract class ChannelBase {
       }
       return;
     }
-    void this.deliverBtw(sessionId, question, request).catch((error) => {
-      process.stderr.write(
-        `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
-      );
-    });
+    // Boxed so the async return cannot flatten it: the caller must be able
+    // to ride the delivery's settle without blocking the inbound handler
+    // on the answer.
+    return {
+      delivery: this.deliverBtw(sessionId, question, request).catch((error) => {
+        process.stderr.write(
+          `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+        );
+      }),
+    };
   }
 
   private async deliverBtw(
@@ -1426,6 +1433,16 @@ export abstract class ChannelBase {
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
       });
     }
+    // Registration is idempotent and name-keyed, so the channel owning the
+    // config is the single owner of this invariant — gateway callers pass the
+    // same parsed config and need not mirror it.
+    this.router.setChannelRotation(this.name, config.sessionRotation);
+    this.router.setSessionActivityChecker(this.name, (sessionId) =>
+      this.hasPendingTurns(sessionId),
+    );
+    this.router.onSessionRotated((sessionId, target) => {
+      this.handleSessionRotated(sessionId, target);
+    });
 
     this.registerSharedCommands();
     if (this.loopController) {
@@ -2116,10 +2133,25 @@ export abstract class ChannelBase {
           'loop dropped because session was cleared before it ran',
         );
       }
-      if (options.shouldContinue && !(await options.shouldContinue())) {
-        throw new ChannelLoopSkippedError(
-          'loop dropped because it is no longer enabled',
-        );
+      if (options.shouldContinue) {
+        try {
+          if (!(await options.shouldContinue())) {
+            // The firing was routed and counted but never prompted: give the
+            // count back so a dropped firing cannot consume the session's bound.
+            this.router.uncountTurn(this.name, sessionId);
+            throw new ChannelLoopSkippedError(
+              'loop dropped because it is no longer enabled',
+            );
+          }
+        } catch (error) {
+          // A rejecting shouldContinue (the scheduler's job-store read can
+          // throw) also aborts before any prompt — the resolve-time count
+          // must come back on that path too.
+          if (!(error instanceof ChannelLoopSkippedError)) {
+            this.router.uncountTurn(this.name, sessionId);
+          }
+          throw error;
+        }
       }
       let shouldClaimStaticContext = false;
       let staticContext: string[] = [];
@@ -2362,6 +2394,7 @@ export abstract class ChannelBase {
       sessionId,
       current.then(() => undefined).catch(() => {}),
     );
+    this.trackSessionTurn(sessionId, current);
     return current;
   }
 
@@ -2638,6 +2671,7 @@ export abstract class ChannelBase {
       sessionId,
       current.then(() => undefined).catch(() => undefined),
     );
+    this.trackSessionTurn(sessionId, current);
     return await current;
   }
 
@@ -2883,11 +2917,76 @@ export abstract class ChannelBase {
   onSessionDied(sessionId: string): void {
     this.cancelBtw(sessionId);
     this.router.handleSessionDied(sessionId);
+    this.purgeSessionState(sessionId);
+  }
+
+  private purgeSessionState(sessionId: string): void {
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
+    // sessionQueues is deliberately NOT purged here: a queued turn may still
+    // hold the captured chain, and deleting the entry would let the next
+    // message (which lazy recovery can re-attach to this same session ID)
+    // seed a fresh chain and run concurrently with the stale queued turn.
+    // Only paths that retire the ID permanently may delete it: /clear after
+    // the chain drains, and rotation (which defers until no turn is running
+    // or queued) — see handleSessionRotated.
     this.removePendingPermissionsForSession(sessionId);
   }
 
+  /**
+   * The router retired a session by rotation: purge the per-session state
+   * a death would clean up, and tell the chat its context is starting fresh —
+   * rotation is automatic, so participants get no other signal.
+   */
+  private handleSessionRotated(
+    sessionId: string,
+    target: SessionTarget | undefined,
+  ): void {
+    if (target?.channelName !== this.name) return;
+    // Mirror onSessionDied: a retirement racing an in-flight side question
+    // aborts it instead of leaving it running against the discarded session.
+    this.cancelBtw(sessionId);
+    this.onSessionRetiring(sessionId);
+    this.purgeSessionState(sessionId);
+    // Rotation retires the ID permanently and defers until no turn is
+    // running or queued, so it reclaims what the death path must keep: a
+    // dead ID can be re-attached by lazy recovery with a queued turn still
+    // holding the chain, a rotated one cannot.
+    this.sessionQueues.delete(sessionId);
+    this.sessionGenerations.delete(sessionId);
+    void this.sendThreadMessage(
+      target.chatId,
+      target.threadId,
+      'This conversation reached its configured limit and was rotated; starting a fresh session.',
+    ).catch((err: unknown) => {
+      process.stderr.write(
+        `[${this.name}] failed to announce session rotation in chat ${sanitizeLogText(target.chatId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    });
+  }
+
+  private hasPendingTurns(sessionId: string): boolean {
+    return (this.sessionPendingTurns.get(sessionId) ?? 0) > 0;
+  }
+
+  private trackSessionTurn(sessionId: string, turn: Promise<unknown>): void {
+    // The turn is now registered: release resolve()'s routing lease and let
+    // the pending-turn count carry the rotation deferral from here.
+    this.router.releaseRoutingLease(sessionId);
+    this.sessionPendingTurns.set(
+      sessionId,
+      (this.sessionPendingTurns.get(sessionId) ?? 0) + 1,
+    );
+    const finish = (): void => {
+      const remaining = (this.sessionPendingTurns.get(sessionId) ?? 1) - 1;
+      if (remaining <= 0) {
+        this.sessionPendingTurns.delete(sessionId);
+      } else {
+        this.sessionPendingTurns.set(sessionId, remaining);
+      }
+    };
+    void turn.then(finish, finish);
+  }
   /**
    * Called when the standalone ACP bridge process exits. Its in-flight turns
    * never settle, but crash recovery restores the sessions on a fresh bridge,
@@ -6714,7 +6813,33 @@ export abstract class ChannelBase {
     }
 
     if (btwQuestion !== undefined) {
-      await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
+      // A side question starts no turn: give the resolve-time count back
+      // and release the routing lease, like the bang-shell path below — but
+      // only once the delivery settles, so a rotation cannot discard the
+      // session while bridge.btw is still in flight on it. The release
+      // rides the delivery promise instead of being awaited here: the
+      // inbound handler must not block on the answer.
+      const releaseRoute = (): void => {
+        this.router.uncountTurn(this.name, sessionId);
+        this.router.releaseRoutingLease(sessionId);
+      };
+      let btw: { delivery: Promise<void> } | undefined;
+      try {
+        btw = await this.handleBtw(
+          envelope,
+          sessionId,
+          btwQuestion,
+          sourceLabel,
+        );
+      } catch (error) {
+        releaseRoute();
+        throw error;
+      }
+      if (btw === undefined) {
+        releaseRoute();
+      } else {
+        void btw.delivery.then(releaseRoute, releaseRoute);
+      }
       return;
     }
 
@@ -6725,6 +6850,9 @@ export abstract class ChannelBase {
       const cmd = bangText.slice(1).trim();
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
+        // No turn will start for this message, but the shell command still
+        // runs on the resolved session: hold resolve()'s routing lease until
+        // it settles so a rotation cannot discard the session mid-command.
         try {
           const result = await bridgeShellCommand(sessionId, cmd);
           const longestRun = Math.max(
@@ -6755,6 +6883,11 @@ export abstract class ChannelBase {
             `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
             sourceLabel,
           );
+        } finally {
+          // No turn started for this message: give the resolve-time count
+          // back like the other no-turn paths, then release the lease.
+          this.router.uncountTurn(this.name, sessionId);
+          this.router.releaseRoutingLease(sessionId);
         }
         return;
       }
@@ -6911,6 +7044,12 @@ export abstract class ChannelBase {
               `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
             );
           }
+          // The buffered message becomes part of the coalesced drain turn, not
+          // a turn of its own: undo the resolve-time count (the drain counts
+          // the coalesced message) and release the routing lease (no turn
+          // will register for this routing).
+          this.router.uncountTurn(this.name, sessionId);
+          this.router.releaseRoutingLease(sessionId);
           return;
         }
         case 'steer': {
@@ -7380,7 +7519,8 @@ export abstract class ChannelBase {
       sessionId,
       tracked.catch(() => {}),
     );
-    await tracked;
+    this.trackSessionTurn(sessionId, current);
+    await current;
   }
 
   private pairingRejectionMessage(

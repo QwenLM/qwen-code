@@ -331,6 +331,14 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
       message: 'group "group1" cannot use groupHistoryLimit',
     },
+    {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: {
+        sessionRotation: { maxTurns: 200 },
+      },
+      message: 'cannot use sessionRotation',
+    },
   ])('rejects multiSession with $label', async ({ type, extra, message }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
@@ -633,6 +641,72 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientSecret: { operation: 'replace', value: 'secret' } as const,
       },
     },
+    {
+      label: 'sessionRotation with a non-positive bound',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 0 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation with an unknown bound',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 10, maxMessages: 5 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation with a fractional maxTurns',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 2.5 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation not an object',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: 'daily',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation with a zero maxAgeHours',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxAgeHours: 0 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation with a non-numeric maxAgeHours',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxAgeHours: 'daily' },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
   ])('rejects $label without writing', async ({ config, secrets }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');
@@ -670,6 +744,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         },
         groupHistoryLimit: 25,
         identity: { id: 'ops', displayName: 'Ops' },
+        sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
       },
       secrets: {
         clientSecret: {
@@ -696,6 +771,45 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
       groupHistoryLimit: 25,
       identity: { id: 'ops', displayName: 'Ops' },
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+  });
+
+  it('accepts an explicit null sessionRotation as unset', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: null,
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    });
+
+    expect(next.channels['bot']!['sessionRotation']).toBeNull();
+  });
+
+  it('accepts a fractional maxAgeHours like the config parser', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxAgeHours: 0.5 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    });
+
+    expect(next.channels['bot']!['sessionRotation']).toEqual({
+      maxAgeHours: 0.5,
     });
   });
 
